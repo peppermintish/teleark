@@ -1,0 +1,17 @@
+[package]
+name = "teleark-i18n"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Project Fluent resources, locale negotiation, and UI formatting for TeleArk"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+fluent-bundle = "0.16.0"
+teleark-core = { version = "=0.1.0", path = "../teleark-core" }
+unic-langid = { version = "0.9.6", features = ["macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"
