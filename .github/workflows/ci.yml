@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Rust workspace quality
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify repository legal baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s LICENSE-MIT
+          test -s LICENSE-APACHE
+          test -s THIRD_PARTY_NOTICES.md
+          if grep -Eq '^name = "(ztracing|ztracing_macro|zlog)"$' Cargo.lock; then
+            echo "The locked graph contains a GUI dependency prohibited by ADR 0007." >&2
+            exit 1
+          fi
+
+      - name: Audit dependency licenses and advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Verify formatting
+        run: cargo fmt --all --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Prove Core is frontend-independent
+        run: cargo test -p teleark-core --locked
+
+      - name: Validate localization package
+        run: cargo test -p teleark-i18n --locked

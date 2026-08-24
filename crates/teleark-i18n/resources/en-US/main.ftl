@@ -403,6 +403,7 @@ index-state-indexing = Indexing
 index-range-progress = Range Progress
 index-job-range = Date Range
 index-job-checkpoint = Checkpoint
+index-job-checkpoint-value = Message { $id }
 index-job-files-found = Files Found
 index-job-errors = Errors
 index-job-updated = Last Updated

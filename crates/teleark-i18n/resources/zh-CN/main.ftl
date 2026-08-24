@@ -391,6 +391,7 @@ index-state-indexing = 索引中
 index-range-progress = 范围进度
 index-job-range = 日期范围
 index-job-checkpoint = 检查点
+index-job-checkpoint-value = 消息 { $id }
 index-job-files-found = 已发现文件
 index-job-errors = 错误
 index-job-updated = 最近更新

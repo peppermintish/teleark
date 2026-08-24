@@ -391,6 +391,7 @@ index-state-indexing = インデックス中
 index-range-progress = 範囲の進行状況
 index-job-range = 日付範囲
 index-job-checkpoint = チェックポイント
+index-job-checkpoint-value = メッセージ { $id }
 index-job-files-found = 検出ファイル数
 index-job-errors = エラー
 index-job-updated = 最終更新

@@ -2,6 +2,7 @@
 members = [
     "crates/teleark-core",
     "crates/teleark-i18n",
+    "crates/teleark-gui",
 ]
 resolver = "2"
 
@@ -12,6 +13,13 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/teleark/teleark"
 rust-version = "1.88"
 
+[workspace.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+gpui-component = "=0.5.1"
+gpui-component-assets = "=0.5.1"
+teleark-core = { version = "=0.1.0", path = "crates/teleark-core" }
+teleark-i18n = { version = "=0.1.0", path = "crates/teleark-i18n" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
@@ -19,3 +27,9 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
+
+[profile.dev.package]
+gpui = { opt-level = 3 }
+taffy = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }

@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify-and-package:
+    name: Verify and package unsigned macOS build
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify repository legal baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s LICENSE-MIT
+          test -s LICENSE-APACHE
+          test -s THIRD_PARTY_NOTICES.md
+          if grep -Eq '^name = "(ztracing|ztracing_macro|zlog)"$' Cargo.lock; then
+            echo "The locked graph contains a GUI dependency prohibited by ADR 0007." >&2
+            exit 1
+          fi
+
+      - name: Audit dependency licenses and advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Verify workspace
+        run: |
+          cargo fmt --all --check
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --all-targets --locked
+          cargo test -p teleark-core --locked
+          cargo test -p teleark-i18n --locked
+
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked
+
+      - name: Create unsigned archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          architecture="$(uname -m)"
+          version="${GITHUB_REF_NAME:-manual}"
+          version="${version//\//-}"
+          package="teleark-${version}-macos-${architecture}"
+          mkdir -p "dist/${package}"
+          cp target/release/teleark "dist/${package}/teleark"
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/${package}/"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          shasum -a 256 "dist/${package}.tar.gz" > dist/SHA256SUMS
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: teleark-unsigned-macos
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish tagged GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: verify-and-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: teleark-unsigned-macos
+          path: dist
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "TeleArk ${GITHUB_REF_NAME}"
+          fi

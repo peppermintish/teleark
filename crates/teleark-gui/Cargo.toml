@@ -1,0 +1,22 @@
+[package]
+name = "teleark-gui"
+description = "GPUI desktop frontend for TeleArk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "teleark"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+teleark-core.workspace = true
+teleark-i18n.workspace = true
+
+[lints]
+workspace = true
