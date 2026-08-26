@@ -1,6 +1,6 @@
 # Development Guide
 
-This guide describes the intended contributor workflow. TeleArk is currently at a foundation/mock-UI milestone; commands for future crates or fixtures are requirements to add as those components land, not evidence that they already exist.
+This guide describes the contributor workflow for the current persistent local-catalog alpha and its backend foundations. The workspace now contains Core, Storage, Runtime, Telegram, Index, Transfer, Crypto, i18n, and GPUI GUI crates; only `IMPLEMENTATION_STATUS.md` is authoritative about which combinations are end-to-end product capabilities.
 
 ## Start-of-work audit
 
@@ -27,15 +27,17 @@ Use the repository-selected toolchain. `rust-toolchain.toml` selects the stable 
 
 ```bash
 cargo fmt --all --check
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo deny check
 ```
 
 CI and local milestone checks also prove the frontend-independent `teleark-core` package independently:
 
 ```bash
-cargo test -p teleark-core
+cargo test -p teleark-core --locked
 ```
 
 Do not add a check to status documentation until it is actually runnable. The GitHub workflows use workspace-level commands so the repository can evolve from one package to multiple crates.
@@ -123,7 +125,13 @@ User/source content—filenames, captions, channel titles, paths, collection nam
 
 The supplied reference images are the visual source of truth. Implement against centralized design tokens and reusable controls, then run and capture the actual app at reference-like dimensions. Compare geometry, typography, spacing, borders, radii, tables, status colors, progress bars, and three-locale text expansion. Stock components may be replaced with custom GPUI components when necessary for fidelity or virtualization.
 
-Mock data must be clearly separated from Core contracts and must not be represented as backend integration. Heavy I/O, SQLite, hashing, crypto, and Telegram calls never run on the GPUI thread.
+Preview data must be clearly separated from Core contracts and must not be represented as backend integration. The Library route consumes the persistent Runtime/Core API; other routes remain Preview until their services are composed. Heavy I/O, SQLite, hashing, crypto, and Telegram calls never run on the GPUI thread.
+
+Use the reproducible desktop matrix from `UI_GUIDELINES.md`: all seven routes,
+all three locales, and compact/standard/spacious sizes. `--window-size=960x640`,
+`1360x760`, and `1920x1080` are the current smoke targets, with `900x600` as
+the hard supported minimum. A successful process launch is not a screenshot
+comparison; retain actual captured reference review as a separate required gate.
 
 ## Commits and handoff
 

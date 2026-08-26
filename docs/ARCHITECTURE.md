@@ -1,6 +1,6 @@
 # TeleArk Architecture
 
-Status: accepted target architecture; implementation is currently limited to repository foundations and a mock-data GUI milestone. See `IMPLEMENTATION_STATUS.md` for what actually exists.
+Status: accepted target architecture with a usable persistent local-catalog alpha and tested storage, Telegram-adapter, indexing, transfer, and provisional crypto foundations. End-to-end Telegram/Vault workflows are not yet wired into the desktop app. See `IMPLEMENTATION_STATUS.md` for exact current capability.
 
 ## Purpose
 
@@ -67,20 +67,25 @@ The Index Engine coordinates partial and incremental scans through a history-sou
 
 One Transfer Engine schedules upload and download tasks. It owns bounded concurrency, priority, retry/backoff, FloodWait handling, pause/resume/cancel, progress aggregation, verification, checkpoints, and restart reconciliation. A task represents one logical file; a transfer part represents one application part.
 
-## Intended workspace boundaries
+## Workspace boundaries
 
-The initial repository may remain smaller while contracts stabilize. The intended workspace is:
+The current workspace is:
 
 ```text
 teleark-core          domain and application services
 teleark-storage       SQLite adapter and migrations
 teleark-telegram      grammers adapter
 teleark-crypto        durable crypto/manifest codecs and crypto operations
+teleark-index         bounded historical indexing coordinator
+teleark-transfer      deterministic transfer scheduler and engine
+teleark-runtime       desktop adapter-worker composition
 teleark-i18n          locale negotiation, resources, formatters
 teleark-gui           GPUI application
-teleark-cli           future frontend
-teleark-test-support  fakes, fixtures, clocks, failure injection
 ```
+
+`teleark-cli` and a shared `teleark-test-support` crate remain future additions;
+the Index and Transfer crates currently keep their deterministic fake ports in
+their own test modules.
 
 Allowed dependencies are deliberately one-way:
 
@@ -90,6 +95,9 @@ Allowed dependencies are deliberately one-way:
 | Storage | Core contracts, SQLite crate | GUI, grammers |
 | Telegram | Core contracts, grammers | GUI, SQLite implementation |
 | Crypto | Core/domain contracts as needed, crypto crates | GUI, grammers, SQLite |
+| Index | Core contracts and project-owned history/repository ports | GUI, grammers, SQLite implementation |
+| Transfer | Core contracts and project-owned I/O/checkpoint ports | GUI, grammers, SQLite implementation |
+| Runtime | Core contracts and concrete adapters | GPUI types |
 | i18n | locale/resource libraries, structured error mapping | GPUI-specific types |
 | GUI | Core API, i18n, GPUI/gpui-component | raw SQL, grammers types |
 | CLI | Core API, i18n | GPUI |
