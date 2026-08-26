@@ -1,6 +1,6 @@
 # TeleArk Data Model
 
-Status: conceptual and provisional. No production schema or migrations exist in the current foundation milestone.
+Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, settings, collections, transfer checkpoints, and index job/range records. Remote-object/package/manifest/Vault persistence is still missing, and no schema has been released as a compatibility guarantee.
 
 ## Modeling rules
 
@@ -31,6 +31,8 @@ The item shown in the library and referenced by search, collections, and transfe
 | `verification_state` | Stable state, rendered by the frontend |
 
 A native Telegram media file resolves to one `RemoteObject`. A Vault file resolves to one `Package` and its parts.
+
+The SQLite adapter currently persists the Core projection plus relative path, MIME type, extension, caption, local availability, and an optional absolute local source path. Logical-file IDs allocated by storage use a transactional monotonic allocator so deleting the highest row does not cause its identity to be reused. Local paths use an explicitly tagged platform representation rather than assuming UTF-8; they remain local-machine metadata and are not a portable manifest field.
 
 ### RemoteObject
 
@@ -76,6 +78,8 @@ A `TransferTask` is one logical-file-level upload or download. It records direct
 
 Allowed task states are centrally defined. The current Core foundation includes `Queued`, `Running`, `Paused`, `WaitingRetry`, `Verifying`, `Completed`, `Failed`, and `Cancelled`; network/FloodWait detail is structured scheduler/error data unless a later synchronized state-model change promotes it. Completed is terminal. The exact transition table is in `TRANSFER_ENGINE.md`.
 
+SQLite now stores task state, totals, retry metadata, locale-neutral failure codes, and ordered per-part checkpoints transactionally. Repository validation rejects non-contiguous indices, offset gaps, mismatched totals/progress, malformed checkpoint version/data pairs, and a completed task whose parts are not fully verified. This is durable state storage, not a transfer worker or proof of remote reconciliation.
+
 ### IndexJob and IndexRange
 
 An `IndexJob` describes one requested scan/synchronization with account/chat, content policy, requested temporal scope, progress/checkpoint cursor, state, counters, and timing. An `IndexRange` records actual historical coverage rather than one last-message marker:
@@ -91,6 +95,8 @@ checkpoint/evidence
 
 Ranges may be non-contiguous. Only ranges with compatible content policy can merge. `INDEX_ENGINE.md` defines coverage semantics.
 
+The current SQLite rows persist account/chat scope, inclusive message-ID bounds, partial/complete coverage, checkpoint, counters, policy version/fingerprint, scan generation, and update time. Storage rejects overlapping ranges for the same scope and policy and can commit file upserts, job progress, and range evidence atomically. Date/source-order bounds, range compaction, and scanner-produced evidence beyond these fields remain target work.
+
 ### Collections
 
 A manual collection uses `CollectionItem` rows linking collections to logical files. A smart collection stores a versioned, locale-neutral rule AST over facets such as channel, type, size, date, and extension. It evaluates to logical files; it never contains multipart pieces.
@@ -99,23 +105,22 @@ A manual collection uses `CollectionItem` rows linking collections to logical fi
 
 `VaultMetadata` stores non-secret configuration and wrapped key material. It may reference password and recovery wrapping records, algorithm/format IDs, KDF parameters, and credential-store bindings. Raw passwords, unwrapped Vault Master Keys, File Keys, and derived KEKs must not be stored as ordinary database fields or logged.
 
-## Suggested SQLite areas
+## SQLite implementation and remaining areas
 
-The future storage schema is expected to contain tables equivalent to:
+The implemented pre-release schema currently contains:
 
 ```text
 accounts, chats
-files, remote_objects, file_parts
-packages, manifests
+logical_files, logical_files_fts
 index_jobs, index_ranges
 transfer_tasks, transfer_parts
-collections, collection_items, collection_rules
-encryption_profiles, vault_metadata
-settings
-files_fts (FTS5 external-content/contentless strategy to be benchmarked)
+collections, collection_items
+settings, id_allocators
 ```
 
-Table names and columns are not yet a compatibility promise. Every production schema change will use ordered, data-preserving migrations with empty-to-latest and previous-to-latest tests. Foreign keys and uniqueness constraints enforce invariants where practical.
+Four ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, and add tagged local paths plus the ID allocator. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
+
+Still absent are tables/repositories for `remote_objects`, Vault `file_parts`, `packages`, `manifests`, encryption profiles, and Vault metadata. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
 
 ## Relationships and deletion
 
@@ -132,6 +137,8 @@ Destructive behavior requires an explicit product flow and recoverability review
 Search projections return stable domain/view DTOs containing a keyset cursor. Ordering always includes a deterministic unique tie-breaker, commonly `(primary_sort_value, LogicalFileId)`. Deep `OFFSET` is not the million-record strategy. FTS indexes normalized searchable copies while preserving original Unicode metadata.
 
 Search facets include account/channel, media type, date, size, extension, local/remote state, encryption, multipart, and verification. Filters are structured query inputs, not concatenated raw SQL.
+
+The SQLite adapter implements these structured filters, phrase-based FTS5 over name/path/caption, and modified-time-descending keyset pages with `LogicalFileId` as the unique tie-breaker. Its versioned opaque cursor is bound to the query/facet fingerprint and is rejected after a query change. Tests cover tied traversal without duplicates, FTS insert/update/delete triggers, Chinese and Japanese content, case-insensitive extension filtering, and adversarial query text. Other sort orders and million-record performance remain unimplemented/unmeasured.
 
 ## Required invariants
 

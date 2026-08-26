@@ -1,0 +1,14 @@
+[package]
+name = "teleark-index"
+description = "Deterministic resumable indexing coordinator for TeleArk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+teleark-core = { version = "=0.1.0", path = "../teleark-core" }
+
+[lints]
+workspace = true

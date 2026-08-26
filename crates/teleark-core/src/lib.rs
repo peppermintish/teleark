@@ -3,6 +3,7 @@
 //! This crate deliberately has no GUI, persistence, networking, or localization
 //! dependencies. It is shared by every frontend and by infrastructure adapters.
 
+mod application;
 mod collection;
 mod error;
 mod event;
@@ -11,6 +12,11 @@ mod ids;
 mod index;
 mod transfer;
 
+pub use application::{
+    ApplicationError, ApplicationErrorKind, ImportLocalFile, LibraryFilter, LibraryItem,
+    LibraryPage, LibraryQuery, LibraryRepository, LibraryService, LibrarySort, LibraryStatistics,
+    MAX_LIBRARY_PAGE_SIZE,
+};
 pub use collection::{Collection, CollectionError, CollectionKind, CollectionRule};
 pub use error::{DomainValidationError, ErrorDisposition, TransferError};
 pub use event::{CoreEvent, VaultState};

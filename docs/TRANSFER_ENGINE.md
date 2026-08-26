@@ -1,6 +1,6 @@
 # Transfer Engine
 
-Status: target design. The current GUI may render synthetic transfer rows and interactions, but no real scheduler, Telegram transfer, checkpoint, multipart, verification, or resume path is implemented in the foundation milestone.
+Status: deterministic frontend-neutral engine, Core state machines, and SQLite checkpoint primitives are implemented and tested. `teleark-transfer` provides bounded scheduling, priority/FIFO ordering, pause/resume/cancel, structured retry/FloodWait handling, checkpoint and I/O ports, progress coalescing, source-change detection, ambiguous-success reconciliation, and safe `.partial` download finalization against fakes. Concrete Telegram/SQLite/crypto/filesystem adapters, async production workers, bandwidth control, and large-file streaming remain; GUI transfer values are still synthetic.
 
 ## Scope
 
@@ -20,6 +20,8 @@ A `TransferTask` represents one `LogicalFile`; a `TransferPart` represents one a
 
 The engine provides queueing, priority, pause, resume, retry, cancel, bounded concurrency, bandwidth policy, durable checkpoints, structured progress/errors, verification, and restart recovery. It never emits localized prose or GPUI types.
 
+The cooperative `TransferEngine` now owns this policy against project-owned ports and is fully deterministic under an injected clock/jitter source. Its shipped I/O implementation is test support using bounded in-memory fake parts and a non-cryptographic digest, so persisted queue/state data and passing fake tests are not evidence that production bytes were uploaded, downloaded, decrypted, or verified through Telegram.
+
 ## Ports and ownership
 
 The engine coordinates narrow project-owned ports for:
@@ -31,7 +33,9 @@ The engine coordinates narrow project-owned ports for:
 - monotonic/wall clock inputs where needed;
 - connectivity and cancellation signals.
 
-Long-running workers have an explicit owner and retained handles. Channels are bounded. Cancellation is cooperative and reaches a safe persistence boundary rather than relying on arbitrary task abort as normal behavior. Locks are never held across network or long file I/O awaits.
+Production long-running workers will require an explicit async owner and retained handles. The current engine is synchronous and cooperative: each bounded `step` admits only scheduler-approved parts, and cancellation/pause reaches a safe checkpoint boundary without spawning unbounded tasks or sleeping. Its port calls do not hold engine locks because the owner is single-threaded.
+
+The SQLite adapter is deliberately thread-confined for ownership by a bounded runtime worker. Its operations are synchronous and transactional and do not contain network awaits. Adapters connecting the transfer ports to that repository, the current Telegram adapter, production crypto streaming, and native filesystem operations remain unimplemented.
 
 ## Task state machine
 
@@ -63,6 +67,8 @@ Allowed transitions:
 
 Part state is separately modeled so verified parts survive task pause/restart. Invalid transitions such as `Completed -> Running` fail as domain errors; repositories cannot mutate states around the transition function. Network and FloodWait reasons remain structured retry/scheduler data rather than translated strings; introduce new first-class states only by updating Core, tests, and this table together. A remote RPC success is `RemoteUploaded`, not task completion.
 
+SQLite stores the task and part states as stable symbolic values. Before replacing a task and all checkpoints in one transaction, it validates contiguous zero-based indices, gap-free offsets, total/progress agreement, checkpoint version/data pairing, and the verified-part invariant for `Completed`. Core remains authoritative for transition legality; persistence does not replace the state machine.
+
 ## Scheduler and backpressure
 
 The scheduler enforces all active limits together:
@@ -78,7 +84,7 @@ The scheduler enforces all active limits together:
 
 Acquiring only one limit is insufficient: a work item starts when it owns every applicable permit. Permits are RAII/reliably released on all exit paths. The queue is bounded or durably paged; the engine never spawns one Tokio task per queued item. Priority changes reorder waiting work without interrupting verified critical sections.
 
-Initial numeric defaults are configuration, not durable format. Benchmark and test them on realistic networks. FloodWait uses structured retry duration from the Telegram adapter and blocks only the affected scope where API semantics permit.
+Initial numeric defaults are configuration, not durable format. The deterministic scheduler tests enforce global, direction, account, and per-file limits together, plus priority/FIFO ordering and account-scoped FloodWait deadlines. Benchmark and tune them on realistic production networks before release.
 
 ## Upload pipeline
 
@@ -128,6 +134,8 @@ Remote package ID, part index, generation, and recoverable opaque name form an i
 
 Durably persist state transitions/checkpoints in transactions. A checkpoint includes enough source identity, encoded length/digests, remote locator, attempts, and verification evidence to decide safely after restart. Crash injection tests exercise `AfterRemoteUpload`, `BeforeCheckpointCommit`, and `AfterCheckpointCommit`.
 
+The SQLite checkpoint row stores part offset/size/progress/state, attempts, optional remote-object ID, and opaque versioned non-secret checkpoint bytes. Save operations replace the task and its parts atomically, and a failed validation/write leaves the previous checkpoint set intact. Separately, the generic engine checkpoint port carries source identity, digest, remote-object, attempt, and verification evidence; fake crash-injection tests reconcile remote success before a missing local commit without duplicating a part. These two foundations are not yet adapted to each other or to real Telegram discovery, so production cross-system reconciliation remains incomplete.
+
 ## Download pipeline
 
 ```text
@@ -149,7 +157,7 @@ Use safe positional writes (`pwrite` or platform-equivalent adapter) so parts ca
 
 The final filename must not exist as a supposedly complete result until every required authentication/integrity check passes and output is flushed. Existing destination, filesystem permissions, disk-full behavior, cancellation, and cleanup/quarantine of `.partial` files require explicit tested policies.
 
-Resume skips already verified part output only when the checkpoint, destination identity/length, and persisted verification evidence still agree. An untrusted `.partial` file is never accepted based only on byte count.
+Resume skips already verified part output only when the checkpoint, destination identity/length, and persisted verification evidence still agree. The fake-backed engine tests this rule, exact whole-file verification, failure isolation, flush-before-finalize ordering, and atomic publication; a native large-file positional-write adapter is still required.
 
 ## Progress and frontend boundary
 
@@ -169,6 +177,8 @@ The target structured taxonomy includes network, FloodWait with duration, author
 Retry uses bounded attempts/backoff with jitter from an injectable source and respects server-provided FloodWait. Authentication, manifest corruption, source mutation, and integrity failures do not retry blindly.
 
 ## Testing requirements
+
+Implemented deterministic storage coverage verifies transactional checkpoint round trips, invalid-offset rollback without data loss, layout validation, and interrupted-state requeueing. Core separately tests valid and invalid task/part state transitions and completion invariants. `teleark-transfer` adds 22 deterministic tests covering all scheduler limits, FIFO/priority, cooperative controls, bounded retry and FloodWait, progress coalescing, restart skip/revalidation, source mutation, ambiguous remote success without duplicates, hash failure isolation, and atomic successful download publication.
 
 Use a fake Telegram transport, temporary checkpoint store, fake clock, controlled file adapter, deterministic test data, and failure injection. Required tests include:
 

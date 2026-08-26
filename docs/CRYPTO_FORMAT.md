@@ -1,6 +1,6 @@
 # TeleArk Crypto Format
 
-Status: **provisional, unimplemented v1 candidate**. No writer should claim stable `v1` output until the format is implemented with maintained crates, independently reviewed, fuzzed, and locked by golden vectors. Changes are currently allowed but must update this document and ADR 0004; after release, incompatible changes require a new format version.
+Status: **provisional, implemented v1 candidate**. `teleark-crypto` now contains explicit candidate writers/readers and fixed fixtures, but no writer may claim stable or production-ready `v1` output until independent cryptographic review, continuous fuzzing, cross-implementation vectors, and end-to-end recovery testing are complete. Changes are currently allowed but must update this document and ADR 0004; after release, incompatible changes require a new format version.
 
 ## Goals and boundaries
 
@@ -9,6 +9,8 @@ The format provides bounded-memory authenticated encryption for very large logic
 It does not hide ciphertext size, part count, upload timing, account/channel relationships, or traffic patterns. It does not encrypt native Telegram files outside Vault mode and does not replace secure endpoint/credential handling.
 
 Application parts (target default 1900 MiB plaintext) are distinct from crypto frames (proposed default 8 MiB plaintext) and MTProto upload parts. Implementations stream frames; they must not allocate an application part or create giant plaintext/ciphertext temporary part files.
+
+The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. It is a codec/cryptographic primitive crate, not yet an operational Vault service or transfer pipeline. The eventual service must retain one `AeadUsageRegistry`, hydrate it from every existing wrap/manifest/part identity after restart, and reject duplicate durable identities or derived encryption keys before writing new ciphertext.
 
 ## Primitive suite
 
@@ -148,7 +150,7 @@ ciphertext                ciphertext_length bytes
 authentication_tag        16 bytes
 ```
 
-All non-final frames have `plaintext_length == frame_plaintext_max`. The final frame is the only record with the final flag and may be shorter, including rules for an empty logical file/part that must be fixed by vectors before implementation. Records appear in strictly increasing zero-based order. Sum of frame plaintext lengths equals part plaintext length; the manifest's part layout covers the logical file exactly.
+All non-final frames have `plaintext_length == frame_plaintext_max`. The final frame is the only record with the final flag and may be shorter. An empty logical file is represented by exactly one zero-length part containing exactly one authenticated zero-length final frame. Records appear in strictly increasing zero-based order. Sum of frame plaintext lengths equals part plaintext length; the manifest's part layout covers the logical file exactly.
 
 Calculate `part_header_blake3` over the exact canonical bytes from `magic` through container `flags`, including any defined minor-version extension bytes. The AAD for each frame is the unambiguous concatenation:
 
@@ -212,10 +214,10 @@ Do not perform a separate full read merely to calculate these hashes. Update the
 - Keep the destination `.partial`; remove/quarantine it according to explicit recoverability policy and never rename on failure.
 - Redact secrets from logs/errors/`Debug` and zeroize sensitive buffers where practical.
 
-## Golden vectors and required tests
+## Candidate vectors and remaining stabilization tests
 
-Before v1 stabilization, add fixed cross-platform fixtures under `tests/vectors/crypto_v1/` covering key derivation, each wrap type, header/AAD encoding, multi-frame/multi-part content, manifest metadata, and expected BLAKE3 values. Use fixed test-only randomness and production-identical algorithms.
+Fixed deterministic fixtures now live under `crates/teleark-crypto/tests/vectors/crypto_v1/` and `manifest_v1/` for key wraps, a multi-frame part, and a Unicode multipart manifest. Tests use injected deterministic randomness with the production algorithms and assert the exact candidate bytes. The format is still pre-release, so these fixtures prevent accidental drift during this phase but are not yet a public compatibility promise.
 
-Tests must cover roundtrip, ciphertext/tag/header/AAD tamper, wrong keys/password/recovery key, reorder, duplication, omission, truncation, invalid final frame, overflow/oversized lengths, unsupported versions/suites, and exhaustive or property-based nonce uniqueness over broad supported index ranges. Fuzz part/manifest parsers for panic, hang, and allocation safety.
+The current deterministic suite covers roundtrip, ciphertext/tag/header/AAD tamper, wrong keys/password/recovery key, reorder, duplication, omission, truncation, invalid final-frame/layout claims, overflow/oversized lengths, unsupported versions/suites, nonce uniqueness over broad index ranges, duplicate encryption identities, canonical codec rejection, and hostile mutation/truncation corpora without panics. Before stabilization, add continuous coverage-guided fuzz targets, cross-implementation/cross-platform validation, larger streaming/recovery fixtures, and independent review.
 
-Only after these tests and independent review pass may this document lose its provisional status.
+Only after the remaining tests, integration work, and independent review pass may this document lose its provisional status.

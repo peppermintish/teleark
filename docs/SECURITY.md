@@ -1,6 +1,6 @@
 # Security Model
 
-Status: target threat model for an early prototype. The production crypto, key vault, manifests, and recovery path described here are not implemented in the foundation/mock-UI milestone. TeleArk must not yet be used to protect valuable data.
+Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, and tamper tests exist in `teleark-crypto`; a service-owned durable registry lifecycle, Key Vault service, credential storage, production transfer/filesystem integration, publication, and recovery path do not. TeleArk must not yet be used to protect valuable data.
 
 ## Security goals
 
@@ -43,7 +43,7 @@ Telegram can observe at least:
 
 Padding/traffic shaping is not currently designed. Multipart sizes and timing may reveal approximate logical size and activity.
 
-## Target cryptographic design
+## Candidate cryptographic design
 
 The provisional design uses:
 
@@ -56,7 +56,7 @@ The provisional design uses:
 
 No custom AES, GHASH, GCM, Argon2, or random-number generator implementation is permitted. Hardware acceleration may be used only when the chosen maintained crate, target, and CPU actually provide it; the product must not promise it universally.
 
-Exact proposed bytes and nonce invariants are in `CRYPTO_FORMAT.md`. The design remains provisional until implemented, independently reviewed, fuzzed, and locked by golden vectors. BLAKE3 is not a replacement for GCM authentication.
+Exact candidate bytes and nonce invariants are in `CRYPTO_FORMAT.md`. Explicit codecs and fixed candidate vectors now exercise those bytes, including tamper/wrong-key/layout rejection and duplicate key/nonce-identity prevention. The design remains provisional until independently reviewed, continuously fuzzed, integrated into a safe service/transfer lifecycle, and proven by database-loss recovery. BLAKE3 is not a replacement for GCM authentication.
 
 ## Key hierarchy and recovery
 
@@ -81,6 +81,8 @@ Loss of every valid password/recovery/keychain path makes encrypted data unrecov
 - Limit unlocked-key lifetime and define lock-on-sleep/logout behavior before release.
 - Do not hold secrets in GUI view models longer than needed.
 
+The candidate crate uses redacted secret and manifest metadata `Debug` implementations, zeroizing key/password/plaintext buffers where practical, OS randomness in production, and deterministic randomness only behind test support. Its mandatory in-memory AEAD-usage registry is a safety invariant, not durable storage: a future Vault service must own it and hydrate all existing identities before any post-restart encryption.
+
 ## Parser and output safety
 
 Manifests and frames are untrusted. Parse fixed headers and bounded lengths before allocation; reject unsupported required algorithms/versions; verify AAD/tag/digests; reject duplicate, reordered, missing, overlapping, or out-of-range parts/frames. Fuzz parsers against panics, hangs, and unbounded allocation.
@@ -91,13 +93,18 @@ Path metadata is untrusted: prevent traversal, absolute-path escape, reserved-na
 
 ## Local data and credentials
 
-The SQLite database may reveal indexed native filenames/captions, channel membership, collections, sizes, timestamps, and transfer history unless a future local-database encryption feature explicitly changes that threat model. Vault manifests protect remote original names, but local search necessarily stores useful metadata while the library is available. Document platform file permissions and backup behavior before release.
+The SQLite database may reveal indexed native filenames/captions, local source paths, channel membership, collections, sizes, timestamps, and transfer history unless a future local-database encryption feature explicitly changes that threat model. The current desktop alpha persistently imports this local metadata. Vault manifests protect remote original names, but local search necessarily stores useful metadata while the library is available. The default per-user database directory is restricted on Unix-like systems; platform permissions, auxiliary SQLite files, and backup behavior still require a release audit.
 
 Telegram sessions use adapter/platform protection and must never be committed. macOS Keychain support, when added, cannot replace recovery-key backup and must be isolated from durable crypto format definitions.
 
 ## Availability and crash consistency
 
 Telegram and SQLite cannot participate in one transaction. Idempotent package/part identity, recoverable opaque names, durable checkpoints, and reconciliation prevent blind duplicate upload after a crash. Recovery depends on Telegram account/channel availability, retained manifests/parts, supported format codecs, and valid key material; Telegram deletion/account loss remains an availability risk.
+
+The generic Transfer engine exercises ambiguous-success and checkpoint-failure
+reconciliation against deterministic fakes, including no-duplicate remote
+parts. It is not yet adapted to the real Telegram and SQLite implementations,
+so those tests establish policy behavior rather than production crash safety.
 
 ## Dependency and clean-room security
 

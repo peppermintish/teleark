@@ -1,0 +1,331 @@
+use rusqlite::{Connection, TransactionBehavior};
+
+use crate::{StorageError, StorageResult};
+
+pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 4;
+
+pub(crate) struct Migration {
+    pub version: u32,
+    pub sql: &'static str,
+}
+
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
+CREATE TABLE accounts (
+    id                  INTEGER PRIMARY KEY,
+    display_name        TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    created_at_unix_ms  INTEGER NOT NULL,
+    updated_at_unix_ms  INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE chats (
+    account_id          INTEGER NOT NULL,
+    id                  INTEGER NOT NULL,
+    title               TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    username            TEXT,
+    updated_at_unix_ms  INTEGER NOT NULL,
+    PRIMARY KEY (account_id, id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE logical_files (
+    id                      INTEGER PRIMARY KEY,
+    name                    TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    relative_path           TEXT,
+    size_bytes              INTEGER NOT NULL CHECK (size_bytes >= 0),
+    kind                    TEXT NOT NULL CHECK (kind IN (
+                                'video', 'document', 'archive', 'audio',
+                                'image', 'disk_image', 'other')),
+    mime_type               TEXT,
+    extension               TEXT,
+    caption                 TEXT,
+    source_account_id       INTEGER,
+    source_chat_id          INTEGER,
+    created_at_unix_ms      INTEGER,
+    modified_at_unix_ms     INTEGER,
+    remote_state            TEXT NOT NULL CHECK (remote_state IN (
+                                'local_only', 'uploading', 'uploaded', 'remote_missing')),
+    encryption_state        TEXT NOT NULL CHECK (encryption_state IN (
+                                'unencrypted', 'encrypted', 'locked')),
+    verification_state      TEXT NOT NULL CHECK (verification_state IN (
+                                'unverified', 'verifying', 'verified', 'failed')),
+    package_id              INTEGER,
+    locally_available       INTEGER NOT NULL DEFAULT 0 CHECK (locally_available IN (0, 1)),
+    CHECK ((source_account_id IS NULL) = (source_chat_id IS NULL)),
+    FOREIGN KEY (source_account_id, source_chat_id)
+        REFERENCES chats(account_id, id) ON DELETE SET NULL
+) STRICT;
+
+CREATE INDEX logical_files_modified_keyset
+    ON logical_files (modified_at_unix_ms DESC, id DESC);
+CREATE INDEX logical_files_source
+    ON logical_files (source_account_id, source_chat_id, modified_at_unix_ms DESC, id DESC);
+CREATE INDEX logical_files_kind
+    ON logical_files (kind, modified_at_unix_ms DESC, id DESC);
+CREATE INDEX logical_files_extension
+    ON logical_files (extension, modified_at_unix_ms DESC, id DESC);
+CREATE INDEX logical_files_size
+    ON logical_files (size_bytes, id);
+
+CREATE TABLE settings (
+    key                 TEXT PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 128),
+    value               TEXT NOT NULL CHECK (length(CAST(value AS BLOB)) <= 1048576),
+    updated_at_unix_ms  INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE collections (
+    id                  INTEGER PRIMARY KEY,
+    name                TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    kind                TEXT NOT NULL CHECK (kind IN ('manual', 'smart')),
+    rule_version        INTEGER,
+    rule_payload        TEXT,
+    created_at_unix_ms  INTEGER NOT NULL,
+    updated_at_unix_ms  INTEGER NOT NULL,
+    CHECK (
+        (kind = 'manual' AND rule_version IS NULL AND rule_payload IS NULL)
+        OR
+        (kind = 'smart' AND rule_version > 0 AND rule_payload IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE collection_items (
+    collection_id      INTEGER NOT NULL,
+    logical_file_id    INTEGER NOT NULL,
+    added_at_unix_ms   INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, logical_file_id),
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+    FOREIGN KEY (logical_file_id) REFERENCES logical_files(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX collection_items_file ON collection_items (logical_file_id, collection_id);
+"#,
+    },
+    Migration {
+        version: 2,
+        sql: r#"
+CREATE VIRTUAL TABLE logical_files_fts USING fts5(
+    name,
+    relative_path,
+    caption,
+    content='logical_files',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER logical_files_fts_insert AFTER INSERT ON logical_files BEGIN
+    INSERT INTO logical_files_fts(rowid, name, relative_path, caption)
+    VALUES (new.id, new.name, new.relative_path, new.caption);
+END;
+
+CREATE TRIGGER logical_files_fts_delete AFTER DELETE ON logical_files BEGIN
+    INSERT INTO logical_files_fts(logical_files_fts, rowid, name, relative_path, caption)
+    VALUES ('delete', old.id, old.name, old.relative_path, old.caption);
+END;
+
+CREATE TRIGGER logical_files_fts_update AFTER UPDATE ON logical_files BEGIN
+    INSERT INTO logical_files_fts(logical_files_fts, rowid, name, relative_path, caption)
+    VALUES ('delete', old.id, old.name, old.relative_path, old.caption);
+    INSERT INTO logical_files_fts(rowid, name, relative_path, caption)
+    VALUES (new.id, new.name, new.relative_path, new.caption);
+END;
+
+INSERT INTO logical_files_fts(logical_files_fts) VALUES ('rebuild');
+"#,
+    },
+    Migration {
+        version: 3,
+        sql: r#"
+CREATE TABLE transfer_tasks (
+    id                      INTEGER PRIMARY KEY,
+    logical_file_id         INTEGER NOT NULL,
+    account_id              INTEGER,
+    direction               TEXT NOT NULL CHECK (direction IN ('upload', 'download')),
+    priority                INTEGER NOT NULL,
+    state                   TEXT NOT NULL CHECK (state IN (
+                                'queued', 'running', 'paused', 'waiting_retry',
+                                'verifying', 'completed', 'failed', 'cancelled')),
+    total_bytes             INTEGER NOT NULL CHECK (total_bytes >= 0),
+    transferred_bytes       INTEGER NOT NULL CHECK (
+                                transferred_bytes >= 0 AND transferred_bytes <= total_bytes),
+    source_path             TEXT,
+    destination_path        TEXT,
+    retry_count             INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    next_retry_at_unix_ms   INTEGER,
+    last_error_code         TEXT,
+    created_at_unix_ms      INTEGER NOT NULL,
+    updated_at_unix_ms      INTEGER NOT NULL,
+    FOREIGN KEY (logical_file_id) REFERENCES logical_files(id) ON DELETE RESTRICT,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL
+) STRICT;
+
+CREATE INDEX transfer_tasks_queue
+    ON transfer_tasks (state, priority DESC, created_at_unix_ms, id);
+CREATE INDEX transfer_tasks_file
+    ON transfer_tasks (logical_file_id, updated_at_unix_ms DESC);
+
+CREATE TABLE transfer_parts (
+    transfer_id            INTEGER NOT NULL,
+    part_index             INTEGER NOT NULL CHECK (part_index >= 0),
+    offset_bytes           INTEGER NOT NULL CHECK (offset_bytes >= 0),
+    size_bytes             INTEGER NOT NULL CHECK (size_bytes > 0),
+    transferred_bytes      INTEGER NOT NULL CHECK (
+                               transferred_bytes >= 0 AND transferred_bytes <= size_bytes),
+    state                  TEXT NOT NULL CHECK (state IN (
+                               'queued', 'running', 'paused', 'waiting_retry',
+                               'transferred', 'verifying', 'verified', 'failed', 'cancelled')),
+    attempts               INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    remote_object_id       INTEGER,
+    checkpoint_version     INTEGER,
+    checkpoint_data        BLOB,
+    updated_at_unix_ms     INTEGER NOT NULL,
+    PRIMARY KEY (transfer_id, part_index),
+    CHECK ((checkpoint_version IS NULL) = (checkpoint_data IS NULL)),
+    FOREIGN KEY (transfer_id) REFERENCES transfer_tasks(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE index_jobs (
+    id                          INTEGER PRIMARY KEY,
+    account_id                  INTEGER NOT NULL,
+    chat_id                     INTEGER NOT NULL,
+    state                       TEXT NOT NULL CHECK (state IN (
+                                    'queued', 'running', 'paused', 'completed', 'failed', 'cancelled')),
+    policy_version              INTEGER NOT NULL CHECK (policy_version > 0),
+    policy_fingerprint          TEXT NOT NULL CHECK (length(policy_fingerprint) > 0),
+    requested_start_message_id  INTEGER,
+    requested_end_message_id    INTEGER,
+    checkpoint_message_id       INTEGER,
+    messages_scanned            INTEGER NOT NULL DEFAULT 0 CHECK (messages_scanned >= 0),
+    files_indexed               INTEGER NOT NULL DEFAULT 0 CHECK (files_indexed >= 0),
+    last_error_code             TEXT,
+    created_at_unix_ms          INTEGER NOT NULL,
+    updated_at_unix_ms          INTEGER NOT NULL,
+    CHECK (
+        requested_start_message_id IS NULL
+        OR requested_end_message_id IS NULL
+        OR requested_start_message_id <= requested_end_message_id
+    ),
+    CHECK (
+        checkpoint_message_id IS NULL
+        OR requested_start_message_id IS NULL
+        OR checkpoint_message_id >= requested_start_message_id
+    ),
+    CHECK (
+        checkpoint_message_id IS NULL
+        OR requested_end_message_id IS NULL
+        OR checkpoint_message_id <= requested_end_message_id
+    ),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX index_jobs_resume
+    ON index_jobs (state, account_id, chat_id, updated_at_unix_ms, id);
+
+CREATE TABLE index_ranges (
+    id                      INTEGER PRIMARY KEY,
+    account_id              INTEGER NOT NULL,
+    chat_id                 INTEGER NOT NULL,
+    start_message_id        INTEGER NOT NULL,
+    end_message_id          INTEGER NOT NULL,
+    coverage                TEXT NOT NULL CHECK (coverage IN ('partial', 'complete')),
+    checkpoint_message_id   INTEGER,
+    messages_scanned        INTEGER NOT NULL DEFAULT 0 CHECK (messages_scanned >= 0),
+    files_indexed           INTEGER NOT NULL DEFAULT 0 CHECK (files_indexed >= 0),
+    policy_version          INTEGER NOT NULL CHECK (policy_version > 0),
+    policy_fingerprint      TEXT NOT NULL CHECK (length(policy_fingerprint) > 0),
+    scan_generation         INTEGER NOT NULL CHECK (scan_generation >= 0),
+    updated_at_unix_ms      INTEGER NOT NULL,
+    CHECK (start_message_id <= end_message_id),
+    CHECK (
+        checkpoint_message_id IS NULL
+        OR checkpoint_message_id BETWEEN start_message_id AND end_message_id
+    ),
+    UNIQUE (
+        account_id, chat_id, policy_version, policy_fingerprint,
+        start_message_id, end_message_id
+    ),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX index_ranges_coverage
+    ON index_ranges (
+        account_id, chat_id, policy_version, policy_fingerprint,
+        start_message_id, end_message_id
+    );
+"#,
+    },
+    Migration {
+        version: 4,
+        sql: r#"
+ALTER TABLE logical_files ADD COLUMN local_source_path_encoding TEXT;
+ALTER TABLE logical_files ADD COLUMN local_source_path BLOB;
+
+CREATE TRIGGER logical_files_local_path_insert
+BEFORE INSERT ON logical_files
+WHEN (new.local_source_path_encoding IS NULL) != (new.local_source_path IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'incomplete local source path');
+END;
+
+CREATE TRIGGER logical_files_local_path_update
+BEFORE UPDATE OF local_source_path_encoding, local_source_path ON logical_files
+WHEN (new.local_source_path_encoding IS NULL) != (new.local_source_path IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'incomplete local source path');
+END;
+
+CREATE TABLE id_allocators (
+    entity      TEXT PRIMARY KEY,
+    next_id     INTEGER NOT NULL CHECK (next_id > 0)
+) STRICT, WITHOUT ROWID;
+
+INSERT INTO id_allocators (entity, next_id)
+SELECT 'logical_file', COALESCE(max(id), 0) + 1 FROM logical_files;
+"#,
+    },
+];
+
+pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<()> {
+    let application_id = read_pragma_u32(connection, "application_id")?;
+    let current_version = read_pragma_u32(connection, "user_version")?;
+
+    if current_version > LATEST_SCHEMA_VERSION {
+        return Err(StorageError::UnsupportedSchema {
+            found: current_version,
+            latest: LATEST_SCHEMA_VERSION,
+        });
+    }
+    if application_id != 0 && application_id != APPLICATION_ID {
+        return Err(StorageError::WrongApplication {
+            found: application_id,
+        });
+    }
+    if current_version != 0 && application_id == 0 {
+        return Err(StorageError::WrongApplication { found: 0 });
+    }
+
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version > current_version)
+    {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if migration.version == 1 {
+            transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+        }
+        transaction.execute_batch(migration.sql)?;
+        transaction.pragma_update(None, "user_version", migration.version)?;
+        transaction.commit()?;
+    }
+    Ok(())
+}
+
+fn read_pragma_u32(connection: &Connection, pragma: &str) -> StorageResult<u32> {
+    let value: i64 = connection.pragma_query_value(None, pragma, |row| row.get(0))?;
+    u32::try_from(value).map_err(|_| StorageError::CorruptData {
+        entity: "database",
+        field: "pragma",
+        value: value.to_string(),
+    })
+}

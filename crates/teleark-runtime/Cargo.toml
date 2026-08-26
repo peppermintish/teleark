@@ -1,0 +1,18 @@
+[package]
+name = "teleark-runtime"
+description = "Frontend-neutral desktop composition and worker ownership for TeleArk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+teleark-core.workspace = true
+teleark-storage = { version = "=0.1.0", path = "../teleark-storage" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

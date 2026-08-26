@@ -1,0 +1,20 @@
+[package]
+name = "teleark-telegram"
+description = "Telegram transport adapter for TeleArk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grammers-client = "=0.10.0"
+grammers-mtsender = "=0.10.0"
+grammers-session = { version = "=0.10.0", features = ["sqlite-storage"] }
+tokio = { version = "1.52.3", default-features = false, features = ["fs", "rt", "sync"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+[lints]
+workspace = true

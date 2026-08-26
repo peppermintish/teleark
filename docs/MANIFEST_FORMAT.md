@@ -1,12 +1,14 @@
 # TeleArk Manifest Format
 
-Status: **provisional, unimplemented v1 candidate**. This is the intended recovery contract, not a shipped format. Exact bytes may change before v1 stabilization; after release, incompatible changes require a new major version and old fixtures remain readable.
+Status: **provisional, implemented v1 codec candidate**. `teleark-crypto` can deterministically seal/open and strictly validate the candidate manifest, but it is not yet connected to publication, remote reconciliation, SQLite rebuild, or a complete recovery workflow. Exact bytes may change before v1 stabilization; after release, incompatible changes require a new major version and old fixtures remain readable.
 
 ## Role
 
 The manifest is the recovery backbone for a completed Vault package. SQLite is a cache/index/checkpoint store; losing it must not make a completed remote package unintelligible. With Telegram account/channel access and a valid password or Recovery Key, TeleArk should be able to scan manifest objects, validate/decrypt them, discover parts, rebuild logical files, and restore the local library.
 
 Only completed packages have this disaster-recovery guarantee. Parts uploaded before a verified authoritative manifest are incomplete/orphan candidates and may require surviving local checkpoint/key state for reconciliation.
+
+The current codec authenticates the envelope/public header, decrypts only after File Key resolution, validates bounded canonical metadata and exact part/container bindings, derives opaque remote names, and redacts filenames, paths, locators, source metadata, hashes, and keys from `Debug`. This establishes candidate bytes and parser behavior only; no package produced by the desktop app currently receives the recovery guarantee described above.
 
 ## Design properties
 
@@ -46,7 +48,7 @@ encrypted_metadata          encrypted_metadata_length bytes
 authentication_tag          16 bytes
 ```
 
-CBOR must follow RFC 8949 deterministic encoding: definite lengths, shortest integer forms, canonical map-key order, no duplicate keys, and no unsupported tags/floats. A chosen Rust codec's real canonical behavior and license must be verified. If no maintained implementation can enforce the profile, select and document another explicit codec before implementation rather than accepting noncanonical Serde output.
+CBOR follows the required RFC 8949 deterministic subset: definite lengths, shortest integer forms, canonical numeric map-key order, no duplicate keys, and no unsupported tags/floats. The candidate uses a small explicit bounded encoder/decoder rather than binding persistence to Serde or an in-memory Rust layout. Tests reject non-shortest integers, indefinite values, reordered/duplicate keys, unsupported types, trailing bytes, and excessive claims.
 
 The exact envelope prefix plus exact canonical `public_header` bytes are AAD for metadata encryption. Authentication therefore covers magic/version/lengths and every public field.
 
@@ -166,8 +168,8 @@ authenticate Telegram account
 
 Do not trust remote filenames alone. Duplicate package IDs/generations, conflicting manifests, missing parts, cross-account locators, and unexpected objects require deterministic conflict handling and user-visible structured status. Recovery never deletes remote objects automatically.
 
-## Required fixtures and tests
+## Candidate fixtures and remaining recovery tests
 
-Before v1 is stable, add fixed fixtures under `tests/vectors/manifest_v1/` for empty/small/multipart/Unicode metadata and a complete fake-remote recovery set. Tests must cover deterministic encode/decode, older fixture reads, wrong keys, all envelope/header/metadata tamper classes, duplicate keys, noncanonical CBOR, unknown versions/suites/flags, length/offset overflow, excessive allocation claims, invalid UTF-8, path traversal metadata, duplicate/reordered/missing/overlapping parts, locator mismatch, and conflicting generations.
+A fixed Unicode multipart fixture now lives under `crates/teleark-crypto/tests/vectors/manifest_v1/`; deterministic tests also cover empty manifests. The suite covers encode/decode, wrong keys, envelope/header/metadata tamper, duplicate/noncanonical keys, unknown versions/suites/flags, length/offset overflow, excessive allocation claims, invalid UTF-8, unsafe relative paths, duplicate/reordered/missing/overlapping parts, locator/name mismatch, part-container binding, duplicate manifest-generation identity, and hostile mutation/truncation corpora.
 
-Fuzz the envelope and both CBOR layers. The full acceptance test deletes local SQLite state, recovers through manifests and a fake remote, downloads/decrypts, and proves the recovered BLAKE3/plaintext exactly matches the original.
+Before stabilization, add released-version compatibility fixtures, continuous fuzzing for the envelope and both CBOR layers, conflict/generation recovery policy tests, and a complete fake-remote recovery set. The full acceptance test must delete local SQLite state, recover through manifests and a fake remote, download/decrypt, and prove the recovered BLAKE3/plaintext exactly matches the original.

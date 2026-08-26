@@ -1,0 +1,32 @@
+[package]
+name = "teleark-crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Versioned cryptographic containers and recovery manifests for TeleArk"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+blake3 = "=1.8.7"
+getrandom = "=0.4.3"
+hkdf = "=0.13.0"
+sha2 = { version = "=0.11.0", default-features = false }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
