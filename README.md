@@ -1,103 +1,110 @@
 # TeleArk
 
-TeleArk is a desktop file library, media indexer, transfer manager, and client-side encrypted storage application backed by Telegram. Its user-facing abstraction is a **Logical File**: multipart objects, Telegram messages, and MTProto details remain implementation details.
+TeleArk is a desktop file library for people who keep large media and document
+collections in Telegram. It is being built to make those collections feel like
+ordinary files: searchable, organized, resumable, verifiable, and recoverable
+without asking you to manage Telegram message IDs or multipart pieces.
+
+The central object in TeleArk is always one **logical file**. A movie may
+eventually be stored as dozens of encrypted Telegram objects, but the library
+will still present one name, one size, one transfer, and one recovery record.
 
 > [!IMPORTANT]
-> TeleArk is an early engineering prototype. This milestone establishes repository policy, architecture contracts, localization foundations, and a GPUI mock-data interface. Telegram login, persistent SQLite storage, production indexing, real transfers, encryption, manifests, and disaster recovery are not implemented yet. Do not entrust data to this prototype.
+> TeleArk is an early alpha. The local library described below is functional,
+> while Telegram account setup, channel indexing, uploads, downloads, Vault,
+> and recovery are not yet connected to the desktop interface. Do not rely on
+> this build as the only copy of important data or secrets.
 
-## Product direction
+## What works today
 
-TeleArk is designed to provide:
+The current desktop build provides a useful local catalog:
 
-- a local SQLite/FTS5 index for million-message Telegram channels;
-- global file search, facets, collections, and cursor-paginated virtual lists;
-- resumable upload and download with explicit verification;
-- free-account-compatible application multipart storage (target default: 1900 MiB);
-- bounded, framed AES-256-GCM content encryption with BLAKE3 integrity checks;
-- versioned manifests that allow recovery when the local database is lost;
-- reusable Core APIs for the GPUI app and a future CLI;
-- `en-US`, `zh-CN`, and `ja-JP` localization from the first release.
+- import one or more files with the macOS file picker;
+- retain the catalog between launches in a local SQLite database;
+- search imported filenames with a local full-text index;
+- filter the library by common file types;
+- load additional result pages for larger catalogs;
+- inspect real names, sizes, types, dates, paths, and local status;
+- open an imported file or reveal its original location in Finder;
+- switch live between English, Simplified Chinese, and Japanese, remember an
+  explicit choice, or follow the system language;
+- use compact, standard, and large desktop window layouts.
 
-The architecture and on-disk/on-remote formats in `docs/` are design contracts. Fields marked **provisional** must not be treated as a released format until implementation, security review, fixtures, and compatibility tests are complete.
+Importing records file metadata only. TeleArk does not copy, move, alter, or
+upload the selected file in this alpha. The Transfer, Channel Index, Upload,
+Key Vault, and most Settings content is visibly marked **Preview** because it
+still uses demonstration data.
 
-## Architecture at a glance
+## Run TeleArk
 
-```text
-GPUI frontend        Future CLI / frontend
-        \                 /
-         frontend-neutral Core API
-          /       |       \
-  Index Engine  Transfer  Vault/Crypto
-          \       |       /
-         SQLite ports   Telegram ports
-                          |
-                       grammers
-```
-
-GPUI types may not enter Core. The GUI may not execute SQL, call `grammers`, encrypt data, or own transfer checkpoints. Infrastructure adapters map external types and errors into TeleArk-owned domain types.
-
-Read [the architecture guide](docs/ARCHITECTURE.md) and [implementation status](docs/IMPLEMENTATION_STATUS.md) before interpreting the roadmap as implemented behavior.
-
-## Development
-
-The repository is a Rust workspace with separate Core, i18n, and GPUI frontend foundations. Additional Storage, Telegram, Crypto, Index, Transfer, CLI, and test-support crates will be introduced without weakening dependency direction.
+There is no signed installer yet. On macOS, install the stable Rust toolchain,
+open this repository in Terminal, and run:
 
 ```bash
 cargo run -p teleark-gui --bin teleark
-cargo fmt --all --check
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check
 ```
 
-The current executable is an interactive mock-data shell. Its header always
-shows a localized **Mock data** badge. For deterministic UI review, launch a
-specific route and locale:
+Open **Library**, choose **Import files**, and select the files you want to add
+to the catalog. Search and file-type filters operate on the persistent local
+index.
+
+The default catalog is stored at:
+
+```text
+~/Library/Application Support/TeleArk/library.sqlite3
+```
+
+For a particular screen, language, or test window size:
 
 ```bash
-cargo run -p teleark-gui -- --screen=transfers --locale=zh-CN
+cargo run -p teleark-gui -- --screen=library --locale=ja-JP --window-size=960x640
 ```
 
-Supported screen values are `library`, `transfers`, `file`, `vault`, `channel`,
-`settings`, and `upload`; supported locale values negotiate to `en-US`,
-`zh-CN`, or `ja-JP`. Search, sidebar facets, queue insertion, pause/resume,
-vault lock/reveal, locale switching, keyboard route activation, and closing the
-upload overlay with Escape are presentation-only interactions over deterministic fixtures.
+Available screen values are `library`, `transfers`, `file`, `vault`, `channel`,
+`settings`, and `upload`. Locale values are `en-US`, `zh-CN`, and `ja-JP`.
+Window sizes below `900x600` are raised to the supported compact minimum.
 
-See [development guidance](docs/DEVELOPMENT.md) and [agent/contributor rules](AGENTS.md). Normal CI must remain deterministic and must never require a real Telegram account, phone number, 2FA secret, or session file.
+## Where TeleArk is heading
 
-## Security and recovery
+The intended complete workflow is:
 
-The target design uses envelope encryption: an Argon2id-derived password key unwraps a random Vault Master Key, which unwraps random per-file keys. Content is split into authenticated AES-256-GCM frames and described by an encrypted, versioned manifest. These are **design goals, not current capabilities**.
+1. Connect one or more Telegram accounts and choose private storage channels.
+2. Index existing channel media into a fast local library.
+3. Search and organize logical files without browsing message history.
+4. Queue resumable uploads and downloads with integrity verification.
+5. Optionally protect content, filenames, and metadata with a personal Vault.
+6. Rebuild the local library from remote manifests after losing the computer or
+   database.
 
-Telegram can still observe account/channel relationships, ciphertext sizes, message counts, timing, and traffic patterns. TeleArk does not promise anonymity or zero metadata leakage. Read [the security model](docs/SECURITY.md), [crypto format](docs/CRYPTO_FORMAT.md), and [manifest format](docs/MANIFEST_FORMAT.md).
+TeleArk is designed around ordinary Telegram account limits. Large files use a
+compatibility-oriented multipart layout rather than depending on Premium-only
+upload limits.
 
-## Clean-room policy
+## Data and safety
 
-TeleArk is independently engineered from permissively licensed documentation and public specifications. **Do not inspect, copy, translate, adapt, or derive implementation details from the GPL-licensed `tdl` project.** Do not ask another person or agent to inspect it on TeleArk's behalf. The same caution applies to other incompatible or unclear sources. See [ADR 0007](docs/adr/0007-permissive-license-clean-room-policy.md).
+- The local catalog contains filenames, source paths, sizes, and timestamps.
+  Protect your macOS account and backups accordingly.
+- Preview transfer and channel rows are fictional and do not contact Telegram.
+- The current encryption and manifest implementation is still provisional and
+  is not wired into desktop storage workflows.
+- A future encrypted Vault cannot hide all metadata from Telegram; account and
+  channel relationships, timing, ciphertext sizes, and message counts may
+  remain observable.
 
-## Documentation
+See the [security model](docs/SECURITY.md) and
+[implementation status](docs/IMPLEMENTATION_STATUS.md) for precise current
+limitations.
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Development](docs/DEVELOPMENT.md)
-- [Data model](docs/DATA_MODEL.md)
-- [Crypto format](docs/CRYPTO_FORMAT.md)
-- [Manifest format](docs/MANIFEST_FORMAT.md)
-- [Transfer engine](docs/TRANSFER_ENGINE.md)
-- [Index engine](docs/INDEX_ENGINE.md)
-- [UI guidelines](docs/UI_GUIDELINES.md)
-- [Internationalization](docs/I18N.md)
-- [Security](docs/SECURITY.md)
+## More information
+
 - [Implementation status](docs/IMPLEMENTATION_STATUS.md)
-- [Architecture decisions](docs/adr/)
+- [Security model](docs/SECURITY.md)
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either of Apache License, Version 2.0 or MIT license at your
+option.
 
 - [Apache-2.0](LICENSE-APACHE)
 - [MIT](LICENSE-MIT)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-
-Contributions are understood to be offered under the same dual-license terms unless explicitly stated otherwise.

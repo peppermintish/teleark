@@ -10,7 +10,7 @@ use gpui_component::{
 
 use crate::theme;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tone {
     Blue,
     Green,
@@ -81,6 +81,7 @@ pub fn icon_button(
 
 pub fn badge(label: impl Into<SharedString>, tone: Tone) -> Div {
     div()
+        .flex_none()
         .h(px(22.0))
         .px_2()
         .flex()

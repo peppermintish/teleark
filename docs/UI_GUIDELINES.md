@@ -1,6 +1,6 @@
 # UI Guidelines
 
-Status: design contract for the GPUI mock/interface milestone. The two supplied reference images are the visual source of truth; mock screens do not imply functioning Telegram, storage, transfer, index, or crypto backends.
+Status: design contract for a persistent local-Library alpha plus clearly marked preview routes. The two supplied reference images are the visual source of truth. Library import/search/filter/detail/pagination and local open/reveal actions use real persisted data; preview screens do not imply functioning end-to-end Telegram, transfer, index, recovery, or Vault workflows.
 
 ## Product abstraction and branding
 
@@ -102,7 +102,11 @@ Use GPUI/gpui-component virtualization if its actual supported API is verified; 
 
 ### Library
 
-Sidebar + toolbar/search + sortable virtual file table + footer/storage summary. Search filters appear as compact removable facets. Empty/loading/error/partial-index states must not masquerade as “zero files.”
+Sidebar + toolbar/search + file table + footer/storage summary. The current alpha imports local metadata, searches SQLite/FTS5, filters every Core file kind, follows opaque cursors through Load More, and opens or reveals retained source paths through native platform actions. Empty/loading/error/preview states must not masquerade as “zero files.” Large-catalog virtualization and sortable columns remain required before claiming million-record UI readiness.
+
+### Settings
+
+Language is the one connected settings area in the alpha: all three explicit locales switch live and persist, while System Default removes the override and renegotiates. Other settings controls remain visibly Preview until they have real application/runtime backing.
 
 ### Upload dialog
 
@@ -163,3 +167,10 @@ x en-US, zh-CN, ja-JP
 ```
 
 Check clipped primary controls, overlaps, broken rows, missing focus, and misleading state. If automated GPUI snapshots are not practical, retain a documented manual capture checklist and attach comparison artifacts to review. Functional similarity without visual verification is not completion.
+
+The current reproducible launch matrix uses `960x640`, `1360x760`, and
+`1920x1080` for each of the seven routes and three locales (63 launches). Unit
+tests additionally exercise the `900x600` supported minimum and breakpoint
+budgets. Passing these checks establishes startup and layout-policy coverage,
+not pixel fidelity; a locked/privacy-restricted macOS desktop still blocks the
+required captured comparison against the references.

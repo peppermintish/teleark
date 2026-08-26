@@ -5,8 +5,6 @@
 
 use gpui::{Pixels, Rgba, px, rgb};
 
-pub const SIDEBAR_WIDTH: Pixels = px(226.0);
-pub const DETAIL_WIDTH: Pixels = px(320.0);
 pub const HEADER_HEIGHT: Pixels = px(58.0);
 pub const ROW_HEIGHT: Pixels = px(42.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);

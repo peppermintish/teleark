@@ -2,11 +2,13 @@
 
 mod app;
 mod components;
+mod layout;
+mod library_state;
 mod mock;
 mod screens;
 mod theme;
 
-use app::{Page, TeleArkApp};
+use app::{LocaleStartup, Page, TeleArkApp};
 use gpui::{
     App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
@@ -14,11 +16,20 @@ use gpui::{
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use teleark_i18n::{Localizer, SupportedLocale};
+use teleark_runtime::DesktopLibrary;
 
 gpui::actions!(teleark, [DismissOverlay]);
 
 fn main() {
-    let launch = LaunchOptions::from_env();
+    let system_locale = detect_system_locale();
+    let library = DesktopLibrary::open_default();
+    let mut launch = LaunchOptions::from_env(system_locale);
+    let persisted_locale = library
+        .as_ref()
+        .ok()
+        .and_then(|library| library.locale_override().ok())
+        .flatten();
+    let follows_system_locale = apply_persisted_locale(&mut launch, persisted_locale.as_deref());
 
     Application::new()
         .with_assets(Assets)
@@ -35,7 +46,14 @@ fn main() {
                 }
             };
 
-            let bounds = Bounds::centered(None, size(px(1360.0), px(760.0)), cx);
+            let bounds = Bounds::centered(
+                None,
+                size(
+                    px(launch.window_width as f32),
+                    px(launch.window_height as f32),
+                ),
+                cx,
+            );
             let window = cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
@@ -44,13 +62,24 @@ fn main() {
                         ..Default::default()
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(1120.0), px(720.0))),
+                    window_min_size: Some(size(px(900.0), px(600.0))),
                     app_id: Some("com.teleark.desktop".to_owned()),
                     ..Default::default()
                 },
                 move |window, cx| {
                     let view = cx.new(|cx| {
-                        TeleArkApp::new(window, cx, localizer, launch.page, launch.show_upload)
+                        TeleArkApp::new(
+                            window,
+                            cx,
+                            localizer,
+                            library,
+                            launch.page,
+                            launch.show_upload,
+                            LocaleStartup {
+                                system_locale,
+                                follows_system_locale,
+                            },
+                        )
                     });
                     cx.new(|cx| Root::new(view, window, cx))
                 },
@@ -73,11 +102,14 @@ struct LaunchOptions {
     page: Page,
     locale: SupportedLocale,
     show_upload: bool,
+    window_width: u32,
+    window_height: u32,
+    locale_from_command_line: bool,
 }
 
 impl LaunchOptions {
-    fn from_env() -> Self {
-        Self::from_args(std::env::args().skip(1), detect_system_locale())
+    fn from_env(fallback_locale: SupportedLocale) -> Self {
+        Self::from_args(std::env::args().skip(1), fallback_locale)
     }
 
     fn from_args<I, S>(arguments: I, fallback_locale: SupportedLocale) -> Self
@@ -88,6 +120,7 @@ impl LaunchOptions {
         let mut page = Page::Library;
         let mut show_upload = false;
         let mut explicit_locale = None;
+        let mut window_size = (1360, 760);
 
         for argument in arguments {
             let argument = argument.as_ref();
@@ -110,6 +143,13 @@ impl LaunchOptions {
             if let Some(locale) = argument.strip_prefix("--locale=").and_then(parse_locale) {
                 explicit_locale = Some(locale);
             }
+
+            if let Some(size) = argument
+                .strip_prefix("--window-size=")
+                .and_then(parse_window_size)
+            {
+                window_size = size;
+            }
         }
 
         let locale = explicit_locale.unwrap_or(fallback_locale);
@@ -117,8 +157,18 @@ impl LaunchOptions {
             page,
             locale,
             show_upload,
+            window_width: window_size.0,
+            window_height: window_size.1,
+            locale_from_command_line: explicit_locale.is_some(),
         }
     }
+}
+
+fn parse_window_size(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value.split_once('x').or_else(|| value.split_once('X'))?;
+    let width = width.parse::<u32>().ok()?;
+    let height = height.parse::<u32>().ok()?;
+    Some((width.max(900), height.max(600)))
 }
 
 fn parse_locale(value: &str) -> Option<SupportedLocale> {
@@ -145,6 +195,17 @@ fn detect_system_locale() -> SupportedLocale {
         .filter_map(|name| std::env::var(name).ok())
         .find_map(|value| parse_locale(value.split('.').next().unwrap_or(&value)))
         .unwrap_or(SupportedLocale::EnUs)
+}
+
+fn apply_persisted_locale(launch: &mut LaunchOptions, persisted: Option<&str>) -> bool {
+    if launch.locale_from_command_line {
+        return false;
+    }
+    if let Some(locale) = persisted.and_then(parse_locale) {
+        launch.locale = locale;
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -174,6 +235,9 @@ mod tests {
                 page: Page::Transfers,
                 locale: SupportedLocale::ZhCn,
                 show_upload: false,
+                window_width: 1360,
+                window_height: 760,
+                locale_from_command_line: true,
             }
         );
     }
@@ -185,6 +249,8 @@ mod tests {
         assert_eq!(options.page, Page::Library);
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.show_upload);
+        assert!(!options.locale_from_command_line);
+        assert_eq!((options.window_width, options.window_height), (1360, 760));
     }
 
     #[test]
@@ -201,6 +267,46 @@ mod tests {
 
         assert_eq!(options.page, Page::Vault);
         assert_eq!(options.locale, SupportedLocale::JaJp);
+        assert!(options.locale_from_command_line);
         assert!(!options.show_upload);
+    }
+
+    #[test]
+    fn window_size_argument_supports_the_visual_test_matrix() {
+        let compact = LaunchOptions::from_args(["--window-size=960x640"], SupportedLocale::EnUs);
+        let spacious = LaunchOptions::from_args(["--window-size=1920X1080"], SupportedLocale::EnUs);
+
+        assert_eq!((compact.window_width, compact.window_height), (960, 640));
+        assert_eq!(
+            (spacious.window_width, spacious.window_height),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn requested_window_size_is_clamped_to_the_supported_minimum() {
+        let options = LaunchOptions::from_args(
+            ["--window-size=320x200", "--window-size=invalid"],
+            SupportedLocale::EnUs,
+        );
+
+        assert_eq!((options.window_width, options.window_height), (900, 600));
+    }
+
+    #[test]
+    fn persisted_locale_applies_only_without_a_command_line_override() {
+        let mut persisted =
+            LaunchOptions::from_args(std::iter::empty::<&str>(), SupportedLocale::EnUs);
+        assert!(!apply_persisted_locale(&mut persisted, Some("ja-JP")));
+        assert_eq!(persisted.locale, SupportedLocale::JaJp);
+
+        let mut explicit = LaunchOptions::from_args(["--locale=zh-CN"], SupportedLocale::EnUs);
+        assert!(!apply_persisted_locale(&mut explicit, Some("ja-JP")));
+        assert_eq!(explicit.locale, SupportedLocale::ZhCn);
+
+        let mut system =
+            LaunchOptions::from_args(std::iter::empty::<&str>(), SupportedLocale::JaJp);
+        assert!(apply_persisted_locale(&mut system, None));
+        assert_eq!(system.locale, SupportedLocale::JaJp);
     }
 }

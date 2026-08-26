@@ -38,6 +38,7 @@ library-documents = Documents
 library-archives = Archives
 library-audio = Audio
 library-images = Images
+library-disk-images = Disk Images
 library-other = Other
 library-channels = Channels
 library-collections = Collections
@@ -60,6 +61,65 @@ library-telegram-storage = Telegram Storage
 library-storage-used = { $used } of { $total } used
 library-empty-title = No files yet
 library-empty-description = Index a channel or upload a file to start your library.
+library-empty-description-local = Import files from this computer to start your persistent local library.
+library-collection-preview-title = Collection preview
+library-collection-preview-description = This preview collection is not connected to your saved library yet. Choose a library category to browse real files.
+library-loading-title = Loading your library
+library-loading-description = TeleArk is reading the local library index.
+library-error-title = The library could not be loaded
+library-result-count-dynamic =
+    { $count ->
+        [one] { $count } result
+       *[other] { $count } results
+    }
+library-total-files-dynamic =
+    { $count ->
+        [one] { $count } file
+       *[other] { $count } files
+    }
+library-local-index-size = { $size } indexed locally
+library-first-page-note = Showing the first page
+library-load-more = Load More
+library-loading-more = Loading…
+library-load-more-failed = Couldn’t load more files. Try again.
+library-source-local = This computer
+library-source-telegram-chat = Telegram chat { $chat_id }
+library-file-picker-prompt = Import
+library-choosing-files = Choosing files…
+library-importing-files = Importing files…
+library-import-success =
+    { $count ->
+        [one] Imported { $count } file.
+       *[other] Imported { $count } files.
+    }
+library-import-partial = Imported { $imported } files; { $failed } could not be imported.
+library-import-failed =
+    { $count ->
+        [one] { $count } file could not be imported.
+       *[other] { $count } files could not be imported.
+    }
+library-import-empty = No files were selected.
+library-picker-failed = The system file picker could not be opened.
+
+action-import-files = Import Files
+
+error-library-invalid-request = This library request is not valid.
+error-library-not-found = The requested library item no longer exists.
+error-library-conflict = This file is already present or conflicts with an existing item.
+error-library-persistence = TeleArk could not read or save the local library.
+error-library-source-missing = A selected source file can no longer be found.
+error-library-source-changed = A selected source file changed while it was being imported.
+error-library-permission-denied = TeleArk does not have permission to access this location.
+error-library-capacity = The library cannot accept more data for this operation.
+error-library-authorization = Authorization is required to complete this operation.
+error-library-network = The network connection was interrupted.
+error-library-cancelled = The operation was cancelled.
+error-library-unknown = The library operation failed unexpectedly.
+
+file-detail-empty-title = Select a file from the library
+file-detail-empty-description = Import a file, then select it to view its saved details.
+file-detail-modified-at = Modified At
+file-detail-verification-unavailable = Verification details are not available for this local item.
 
 upload-dialog-title = Upload to Telegram
 upload-target-account = Target Account
@@ -259,6 +319,7 @@ action-resume = { common-resume }
 action-retry = { common-retry }
 action-open-file = { common-open-file }
 action-open-location = Open Location
+file-detail-local-path = Local path
 collection-new = { common-new-collection }
 
 nav-library = Library
@@ -303,11 +364,18 @@ file-type-document = Document
 file-type-archive = Archive
 file-type-image = Image
 file-type-audio = Audio
+file-type-other = Other
 file-state-remote = Remote
 file-state-downloaded = Downloaded
 file-state-uploaded = Uploaded
 file-state-verified = Verified
 file-state-encrypted = Encrypted
+file-state-local = Local
+file-state-uploading = Uploading
+file-state-verifying = Verifying
+file-state-verification-failed = Verification failed
+file-state-remote-missing = Remote file missing
+file-state-locked = Locked
 
 transfer-state-waiting = Waiting
 transfer-summary-downloading = Downloading
@@ -412,6 +480,10 @@ index-coverage-missing = Not Scanned
 settings-saved = Saved
 settings-indexing = Indexing
 settings-language-runtime-note = Language changes apply immediately to every open TeleArk screen.
+settings-language-persistence-ready = Language preference is stored on this Mac.
+settings-language-persistence-saving = Saving language preference…
+settings-language-persistence-saved = Language preference saved
+settings-language-persistence-failed = Language preference could not be saved
 settings-theme-system-description = Use the current operating-system appearance.
 settings-theme-light-description = Always use the light appearance.
 settings-theme-dark-description = Always use the dark appearance.
@@ -447,7 +519,7 @@ vault-option-keychain-description = Store the wrapping secret in the operating-s
 vault-key-loss-warning = If both the password and recovery key are lost, encrypted Telegram files cannot be recovered.
 vault-unlock-to-view = Unlock vault to view
 
-prototype-demo-badge = Mock data
+prototype-demo-badge = Preview build
 common-not-applicable = Not applicable
 file-detail-not-encrypted = Not encrypted
 file-detail-parts-pending = Part verification pending
@@ -459,6 +531,7 @@ detail-verification-passed = BLAKE3 verified
 detail-verification-pending = Verification pending
 detail-verification-failed = Verification failed
 settings-session-only = Session only
+settings-preview-controls = Other settings are Preview
 action-view-options = View options
 action-back = Back
 action-more = More actions

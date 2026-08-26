@@ -4,11 +4,19 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
+use teleark_core::{
+    ApplicationErrorKind, EncryptionState, FileKind, RemoteState, VerificationState,
+};
+use teleark_i18n::{
+    MessageArgs,
+    format::{format_bytes, format_integer, format_unix_millis},
+};
 
 use crate::{
-    app::{Page, TeleArkApp},
+    app::{Page, TeleArkApp, is_preview_library_selection},
     components::{self, Tone},
-    mock::{FileKind, FileRow, FileState, library_files},
+    layout::LayoutPolicy,
+    library_state::{ImportActivity, ImportFeedback, LibraryContent, LibraryRowView},
     theme,
 };
 
@@ -16,17 +24,45 @@ impl TeleArkApp {
     pub(crate) fn render_library(
         &self,
         _window: &mut Window,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let padding = layout.content_padding();
+        let preview_collection = is_preview_library_selection(self.nav_selection);
+        let result_count = if preview_collection {
+            0
+        } else {
+            self.library_content
+                .snapshot()
+                .map_or(0, |snapshot| snapshot.total_matching)
+        };
+        let result_label = self.tr_with(
+            "library-result-count-dynamic",
+            MessageArgs::new().with("count", result_count),
+        );
+        let import_label = match self.import_activity {
+            ImportActivity::Idle => self.tr("action-import-files"),
+            ImportActivity::Picking => self.tr("library-choosing-files"),
+            ImportActivity::Importing => self.tr("library-importing-files"),
+        };
+        let import_icon = if self.import_activity == ImportActivity::Idle {
+            IconName::FolderOpen
+        } else {
+            IconName::LoaderCircle
+        };
+
         let toolbar = div()
-            .h(px(58.0))
-            .px_5()
+            .min_h(px(58.0))
+            .px(px(padding))
+            .py_2()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_3()
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(220.0))
                     .flex()
                     .items_baseline()
                     .gap_3()
@@ -35,54 +71,13 @@ impl TeleArkApp {
                         div()
                             .text_xs()
                             .text_color(theme::text_muted())
-                            .child(self.tr("library-result-count")),
+                            .child(result_label),
                     ),
             )
             .child(
-                components::button(
-                    "library-upload",
-                    self.tr("action-upload"),
-                    Some(IconName::ArrowUp),
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_upload = true;
-                    cx.notify();
-                })),
-            )
-            .child(components::button(
-                "library-new-collection",
-                self.tr("collection-new"),
-                Some(IconName::Folder),
-                false,
-            ))
-            .child(components::button(
-                "library-filter",
-                self.tr("action-filter"),
-                Some(IconName::Settings2),
-                false,
-            ))
-            .child(components::icon_button(
-                "library-view",
-                IconName::LayoutDashboard,
-                self.tr("action-view-options"),
-            ));
-
-        let facets = div()
-            .h(px(42.0))
-            .px_5()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_t_1()
-            .border_color(theme::border_subtle())
-            .children([
-                components::badge(self.tr("filter-all-channels"), Tone::Blue),
-                components::badge(self.tr("filter-video"), Tone::Neutral),
-                components::badge(self.tr("filter-large-files"), Tone::Neutral),
-                components::badge("2025–2026", Tone::Neutral),
-                components::badge("mkv", Tone::Neutral),
-            ]);
+                components::button("library-import", import_label, Some(import_icon), true)
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_library_files(cx))),
+            );
 
         let header = div()
             .h(px(36.0))
@@ -97,63 +92,101 @@ impl TeleArkApp {
             .child(table_header(self.tr("table-type"), Some(110.0)))
             .child(table_header(self.tr("table-source"), Some(140.0)))
             .child(table_header(self.tr("table-modified"), Some(154.0)))
-            .child(table_header(self.tr("table-status"), Some(108.0)))
-            .child(table_header(self.tr("table-encrypted"), Some(72.0)))
-            .child(table_header(self.tr("table-parts"), Some(54.0)));
+            .child(table_header(
+                self.tr("table-status"),
+                Some(layout.library_status_width()),
+            ))
+            .when(layout.shows_library_encryption_parts(), |header| {
+                header
+                    .child(table_header(self.tr("table-encrypted"), Some(72.0)))
+                    .child(table_header(self.tr("table-parts"), Some(54.0)))
+            });
 
-        let query = self.search_input.read(cx).value().to_lowercase();
-        let visible_files: Vec<_> = library_files()
-            .into_iter()
-            .enumerate()
-            .filter(|(index, file)| library_matches_nav(self.nav_selection, *index, file))
-            .filter(|(_, file)| {
-                query.is_empty()
-                    || file.name.to_lowercase().contains(&query)
-                    || file.source.to_lowercase().contains(&query)
-            })
-            .collect();
-        let rows = visible_files
-            .into_iter()
-            .map(|(index, file)| self.render_library_row(index, file, cx));
-
-        let footer = div()
-            .h(px(46.0))
-            .px_4()
+        let categories = div()
+            .min_h(px(42.0))
+            .px(px(padding))
+            .py_1()
             .flex()
             .items_center()
-            .gap_5()
+            .gap_2()
             .border_t_1()
-            .border_color(theme::border())
-            .text_xs()
-            .text_color(theme::text_secondary())
-            .child(self.tr("library-total-files"))
-            .child(
-                div()
-                    .w(px(250.0))
-                    .child(components::progress(43.0, Tone::Blue)),
+            .border_color(theme::border_subtle())
+            .overflow_x_scrollbar()
+            .children([
+                self.library_category_button("nav-all", "nav-all-files", cx),
+                self.library_category_button("nav-recent", "nav-recent", cx),
+                self.library_category_button("nav-videos", "nav-videos", cx),
+                self.library_category_button("nav-docs", "nav-documents", cx),
+                self.library_category_button("nav-archives", "nav-archives", cx),
+                self.library_category_button("nav-images", "library-images", cx),
+                self.library_category_button("nav-audio", "library-audio", cx),
+                self.library_category_button("nav-disk-images", "library-disk-images", cx),
+                self.library_category_button("nav-other", "library-other", cx),
+            ]);
+
+        let body = if preview_collection {
+            self.render_library_state(
+                IconName::FolderOpen,
+                "library-collection-preview-title",
+                "library-collection-preview-description",
+                None,
+                cx,
             )
-            .child("2.34 TB")
-            .child(div().flex_1())
-            .child(self.tr("storage-telegram"))
-            .child("18.76 TB");
+        } else {
+            match &self.library_content {
+                LibraryContent::Loading => self.render_library_state(
+                    IconName::LoaderCircle,
+                    "library-loading-title",
+                    "library-loading-description",
+                    None,
+                    cx,
+                ),
+                LibraryContent::Failed(kind) => self.render_library_state(
+                    IconName::TriangleAlert,
+                    "library-error-title",
+                    application_error_message_id(*kind),
+                    Some("common-retry"),
+                    cx,
+                ),
+                LibraryContent::Empty(_) => self.render_library_state(
+                    IconName::FolderOpen,
+                    "library-empty-title",
+                    "library-empty-description-local",
+                    Some("action-import-files"),
+                    cx,
+                ),
+                LibraryContent::Ready(snapshot) => {
+                    let rows = snapshot
+                        .rows
+                        .clone()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, file)| self.render_library_row(index, file, layout, cx));
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .children(rows)
+                        .into_any_element()
+                }
+            }
+        };
 
         let table = components::card()
-            .mx_5()
-            .mb_5()
+            .mx(px(padding))
+            .mb(px(padding))
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
             .overflow_hidden()
             .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .children(rows),
-            )
-            .child(footer);
+            .child(body)
+            .when(!preview_collection, |table| {
+                table.when_some(self.library_content.snapshot(), |table, snapshot| {
+                    table.child(self.render_library_footer(snapshot, layout, cx))
+                })
+            });
 
         div()
             .flex_1()
@@ -163,15 +196,248 @@ impl TeleArkApp {
             .flex_col()
             .bg(theme::canvas())
             .child(toolbar)
-            .child(facets)
+            .child(categories)
+            .when_some(self.import_feedback, |page, feedback| {
+                page.child(self.render_import_feedback(feedback, padding))
+            })
             .child(table)
+            .into_any_element()
+    }
+
+    fn library_category_button(
+        &self,
+        selection: &'static str,
+        label_id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        components::button(
+            category_element_id(selection),
+            self.tr(label_id),
+            None,
+            self.nav_selection == selection,
+        )
+        .flex_none()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.nav_selection = selection;
+            this.refresh_library(cx);
+        }))
+        .into_any_element()
+    }
+
+    fn render_library_state(
+        &self,
+        icon: IconName,
+        title_id: &'static str,
+        description_id: &'static str,
+        action_id: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h(px(180.0))
+            .p_6()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .child(
+                div()
+                    .size(px(44.0))
+                    .rounded_full()
+                    .bg(theme::blue_soft())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(icon).text_color(theme::blue())),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr(title_id)),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .max_w(px(440.0))
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr(description_id)),
+            )
+            .when_some(action_id, |state, action_id| {
+                state.child(
+                    components::button(
+                        "library-state-action",
+                        self.tr(action_id),
+                        Some(IconName::Redo2),
+                        true,
+                    )
+                    .mt_4()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if action_id == "action-import-files" {
+                            this.choose_library_files(cx);
+                        } else {
+                            this.refresh_library(cx);
+                        }
+                    })),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_import_feedback(&self, feedback: ImportFeedback, padding: f32) -> AnyElement {
+        let (tone, icon, title, detail) = match feedback {
+            ImportFeedback::Succeeded { imported } => (
+                Tone::Green,
+                IconName::CircleCheck,
+                self.tr_with(
+                    "library-import-success",
+                    MessageArgs::new().with("count", imported),
+                ),
+                None,
+            ),
+            ImportFeedback::PartiallySucceeded { imported, failed } => (
+                Tone::Amber,
+                IconName::TriangleAlert,
+                self.tr_with(
+                    "library-import-partial",
+                    MessageArgs::new()
+                        .with("imported", imported)
+                        .with("failed", failed),
+                ),
+                None,
+            ),
+            ImportFeedback::Failed { failed, reason } => (
+                Tone::Red,
+                IconName::TriangleAlert,
+                self.tr_with(
+                    "library-import-failed",
+                    MessageArgs::new().with("count", failed),
+                ),
+                Some(self.tr(application_error_message_id(reason))),
+            ),
+            ImportFeedback::NoFilesSelected => (
+                Tone::Neutral,
+                IconName::FolderOpen,
+                self.tr("library-import-empty"),
+                None,
+            ),
+            ImportFeedback::PickerFailed => (
+                Tone::Red,
+                IconName::TriangleAlert,
+                self.tr("library-picker-failed"),
+                None,
+            ),
+        };
+        let color = match tone {
+            Tone::Green => theme::green(),
+            Tone::Amber => theme::amber(),
+            Tone::Red => theme::red(),
+            Tone::Blue => theme::blue(),
+            Tone::Purple => theme::purple(),
+            Tone::Neutral => theme::text_secondary(),
+        };
+
+        div()
+            .mx(px(padding))
+            .mb_3()
+            .px_4()
+            .py_3()
+            .rounded(theme::RADIUS_MEDIUM)
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::surface())
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(Icon::new(icon).text_color(color))
+            .child(div().min_w_0().flex_1().text_sm().child(title).when_some(
+                detail,
+                |message, detail| {
+                    message.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(detail),
+                    )
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn render_library_footer(
+        &self,
+        snapshot: &crate::library_state::LibrarySnapshot,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let total_files = self.tr_with(
+            "library-total-files-dynamic",
+            MessageArgs::new().with("count", snapshot.statistics.logical_file_count),
+        );
+        let total_size = self.tr_with(
+            "library-local-index-size",
+            MessageArgs::new().with(
+                "size",
+                format_bytes(self.locale(), snapshot.statistics.logical_bytes),
+            ),
+        );
+
+        div()
+            .min_h(px(if layout.is_compact() { 58.0 } else { 46.0 }))
+            .px_4()
+            .py_2()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(if layout.is_compact() {
+                px(8.0)
+            } else {
+                px(20.0)
+            })
+            .border_t_1()
+            .border_color(theme::border())
+            .text_xs()
+            .text_color(theme::text_secondary())
+            .child(total_files)
+            .child(total_size)
+            .when(!layout.is_compact(), |footer| footer.child(div().flex_1()))
+            .when(self.library_load_more_error.is_some(), |footer| {
+                footer.child(
+                    div()
+                        .text_color(theme::red())
+                        .child(self.tr("library-load-more-failed")),
+                )
+            })
+            .when(snapshot.next_cursor.is_some(), |footer| {
+                footer.child(
+                    components::button(
+                        "library-load-more",
+                        if self.library_loading_more {
+                            self.tr("library-loading-more")
+                        } else {
+                            self.tr("library-load-more")
+                        },
+                        Some(if self.library_loading_more {
+                            IconName::LoaderCircle
+                        } else {
+                            IconName::ArrowDown
+                        }),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more_library(cx))),
+                )
+            })
             .into_any_element()
     }
 
     fn render_library_row(
         &self,
         index: usize,
-        file: FileRow,
+        file: LibraryRowView,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.selected_file == index;
@@ -188,16 +454,30 @@ impl TeleArkApp {
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::text_primary())
-                    .child(file.name),
+                    .child(file.name.clone()),
             );
-
-        let state_tone = match file.state {
-            FileState::Remote | FileState::Downloaded => Tone::Green,
-            FileState::Uploading | FileState::Verifying => Tone::Blue,
-        };
+        let (state_id, state_tone) = file_status(file.remote_state, file.verification_state);
+        let source = file.source_name.clone().map_or_else(
+            || {
+                file.source_chat_id.map_or_else(
+                    || self.tr("library-source-local"),
+                    |chat_id| {
+                        self.tr_with(
+                            "library-source-telegram-chat",
+                            MessageArgs::new().with("chat_id", chat_id),
+                        )
+                    },
+                )
+            },
+            SharedString::from,
+        );
+        let modified = file.modified_at_unix_ms.map_or_else(
+            || self.tr("common-not-applicable"),
+            |timestamp| SharedString::from(format_unix_millis(self.locale(), timestamp)),
+        );
 
         div()
-            .id(("library-row", index))
+            .id(("library-row", file.id.get()))
             .h(theme::ROW_HEIGHT)
             .px_4()
             .flex()
@@ -221,35 +501,65 @@ impl TeleArkApp {
                 }
             }))
             .child(name)
-            .child(table_value(file.size, 90.0))
-            .child(table_value(self.tr(file.kind.message_id()), 110.0))
-            .child(table_value(file.source, 140.0))
-            .child(table_value(file.modified, 154.0))
-            .child(div().w(px(108.0)).child(components::badge(
-                self.tr(file.state.message_id()),
-                state_tone,
-            )))
-            .child(
-                div().w(px(72.0)).flex().items_center().child(
-                    Icon::new(if file.encrypted {
-                        IconName::Asterisk
-                    } else {
-                        IconName::Dash
-                    })
-                    .text_color(if file.encrypted {
-                        theme::text_secondary()
-                    } else {
-                        theme::text_muted()
-                    }),
-                ),
-            )
+            .child(table_value(
+                format_bytes(self.locale(), file.size_bytes),
+                90.0,
+            ))
+            .child(table_value(self.tr(file_kind_message_id(file.kind)), 110.0))
+            .child(table_value(source, 140.0))
+            .child(table_value(modified, 154.0))
             .child(
                 div()
-                    .w(px(54.0))
-                    .text_color(theme::text_secondary())
-                    .child(file.parts.to_string()),
+                    .w(px(layout.library_status_width()))
+                    .child(components::badge(self.tr(state_id), state_tone)),
             )
+            .when(layout.shows_library_encryption_parts(), |row| {
+                row.child(
+                    div().w(px(72.0)).flex().items_center().child(
+                        Icon::new(
+                            if matches!(
+                                file.encryption_state,
+                                EncryptionState::Encrypted | EncryptionState::Locked
+                            ) {
+                                IconName::Asterisk
+                            } else {
+                                IconName::Dash
+                            },
+                        )
+                        .text_color(
+                            if matches!(
+                                file.encryption_state,
+                                EncryptionState::Encrypted | EncryptionState::Locked
+                            ) {
+                                theme::text_secondary()
+                            } else {
+                                theme::text_muted()
+                            },
+                        ),
+                    ),
+                )
+                .child(
+                    div()
+                        .w(px(54.0))
+                        .text_color(theme::text_secondary())
+                        .child(format_integer(self.locale(), u64::from(file.part_count))),
+                )
+            })
             .into_any_element()
+    }
+}
+
+fn category_element_id(selection: &str) -> &'static str {
+    match selection {
+        "nav-all" => "library-category-all",
+        "nav-recent" => "library-category-recent",
+        "nav-videos" => "library-category-videos",
+        "nav-docs" => "library-category-documents",
+        "nav-archives" => "library-category-archives",
+        "nav-images" => "library-category-images",
+        "nav-audio" => "library-category-audio",
+        "nav-disk-images" => "library-category-disk-images",
+        _ => "library-category-other",
     }
 }
 
@@ -261,6 +571,8 @@ fn file_icon(kind: FileKind) -> AnyElement {
         FileKind::Archive => (theme::amber(), theme::amber_soft()),
         FileKind::Image => (theme::purple(), theme::purple_soft()),
         FileKind::Audio => (theme::green(), theme::green_soft()),
+        FileKind::Other => (theme::text_secondary(), theme::border_subtle()),
+        _ => (theme::text_secondary(), theme::border_subtle()),
     };
 
     div()
@@ -272,10 +584,70 @@ fn file_icon(kind: FileKind) -> AnyElement {
         .rounded(theme::RADIUS_SMALL)
         .bg(background)
         .text_color(foreground)
-        .text_xs()
-        .font_weight(FontWeight::BOLD)
-        .child(kind.glyph())
+        .child(Icon::new(file_kind_icon(kind)).text_color(foreground))
         .into_any_element()
+}
+
+fn file_kind_icon(kind: FileKind) -> IconName {
+    match kind {
+        FileKind::Video => IconName::GalleryVerticalEnd,
+        FileKind::Document => IconName::File,
+        FileKind::Archive => IconName::Inbox,
+        FileKind::Audio => IconName::File,
+        FileKind::Image => IconName::File,
+        FileKind::DiskImage => IconName::File,
+        FileKind::Other => IconName::File,
+        _ => IconName::File,
+    }
+}
+
+pub(crate) fn file_kind_message_id(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Video => "file-type-video",
+        FileKind::Document => "file-type-document",
+        FileKind::Archive => "file-type-archive",
+        FileKind::Audio => "file-type-audio",
+        FileKind::Image => "file-type-image",
+        FileKind::DiskImage => "file-type-disk-image",
+        FileKind::Other => "file-type-other",
+        _ => "file-type-other",
+    }
+}
+
+pub(crate) fn file_status(
+    remote_state: RemoteState,
+    verification_state: VerificationState,
+) -> (&'static str, Tone) {
+    match verification_state {
+        VerificationState::Verified => ("file-state-verified", Tone::Green),
+        VerificationState::Verifying => ("file-state-verifying", Tone::Blue),
+        VerificationState::Failed => ("file-state-verification-failed", Tone::Red),
+        VerificationState::Unverified => match remote_state {
+            RemoteState::LocalOnly => ("file-state-local", Tone::Neutral),
+            RemoteState::Uploading => ("file-state-uploading", Tone::Blue),
+            RemoteState::Uploaded => ("file-state-uploaded", Tone::Green),
+            RemoteState::RemoteMissing => ("file-state-remote-missing", Tone::Red),
+            _ => ("file-state-local", Tone::Neutral),
+        },
+        _ => ("file-state-local", Tone::Neutral),
+    }
+}
+
+pub(crate) fn application_error_message_id(kind: ApplicationErrorKind) -> &'static str {
+    match kind {
+        ApplicationErrorKind::InvalidRequest => "error-library-invalid-request",
+        ApplicationErrorKind::NotFound => "error-library-not-found",
+        ApplicationErrorKind::Conflict => "error-library-conflict",
+        ApplicationErrorKind::Persistence => "error-library-persistence",
+        ApplicationErrorKind::SourceMissing => "error-library-source-missing",
+        ApplicationErrorKind::SourceChanged => "error-library-source-changed",
+        ApplicationErrorKind::PermissionDenied => "error-library-permission-denied",
+        ApplicationErrorKind::Capacity => "error-library-capacity",
+        ApplicationErrorKind::Authorization => "error-library-authorization",
+        ApplicationErrorKind::Network => "error-library-network",
+        ApplicationErrorKind::Cancelled => "error-library-cancelled",
+        _ => "error-library-unknown",
+    }
 }
 
 fn table_header(label: impl Into<SharedString>, width: Option<f32>) -> AnyElement {
@@ -299,32 +671,38 @@ fn table_value(value: impl Into<SharedString>, width: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn library_matches_nav(selection: &str, index: usize, file: &FileRow) -> bool {
-    match selection {
-        "nav-recent" => index < 3,
-        "nav-videos" => file.kind == FileKind::Video,
-        "nav-docs" => file.kind == FileKind::Document,
-        "nav-archives" => file.kind == FileKind::Archive,
-        "channel-saved" => file.source == "Saved Messages",
-        "channel-design" => file.source == "Design Assets",
-        "channel-software" => file.source == "Software",
-        "collection-mac" => file.source == "Work Backup",
-        "collection-course" => file.source == "Course Materials",
-        _ => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_facets_filter_the_mock_library_without_reindexing_rows() {
-        let files = library_files();
-        assert!(library_matches_nav("nav-videos", 0, &files[0]));
-        assert!(!library_matches_nav("nav-videos", 1, &files[1]));
-        assert!(library_matches_nav("nav-recent", 2, &files[2]));
-        assert!(!library_matches_nav("nav-recent", 3, &files[3]));
-        assert!(library_matches_nav("collection-course", 7, &files[7]));
+    fn real_file_states_map_to_semantic_localized_statuses() {
+        assert_eq!(
+            file_status(RemoteState::LocalOnly, VerificationState::Unverified),
+            ("file-state-local", Tone::Neutral)
+        );
+        assert_eq!(
+            file_status(RemoteState::Uploaded, VerificationState::Verified),
+            ("file-state-verified", Tone::Green)
+        );
+        assert_eq!(
+            file_status(RemoteState::RemoteMissing, VerificationState::Unverified),
+            ("file-state-remote-missing", Tone::Red)
+        );
+    }
+
+    #[test]
+    fn every_current_core_file_kind_has_a_presentation_message() {
+        for kind in [
+            FileKind::Video,
+            FileKind::Document,
+            FileKind::Archive,
+            FileKind::Audio,
+            FileKind::Image,
+            FileKind::DiskImage,
+            FileKind::Other,
+        ] {
+            assert!(file_kind_message_id(kind).starts_with("file-type-"));
+        }
     }
 }

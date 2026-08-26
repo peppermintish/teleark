@@ -5,6 +5,7 @@
 //! explicit IEC values such as `1900 MiB`; this module must not relabel them.
 
 use crate::SupportedLocale;
+use chrono::{DateTime, Local};
 
 const DECIMAL_BASE: f64 = 1_000.0;
 const DECIMAL_UNITS: [&str; 7] = ["B", "kB", "MB", "GB", "TB", "PB", "EB"];
@@ -70,6 +71,21 @@ pub fn format_bytes(locale: SupportedLocale, bytes: u64) -> String {
 
 pub fn format_speed(locale: SupportedLocale, bytes_per_second: u64) -> String {
     format!("{}/s", format_bytes(locale, bytes_per_second))
+}
+
+/// Formats a Unix millisecond timestamp in the user's local time zone.
+///
+/// The first-release locales share 24-hour time but use different conventional
+/// date orderings. Invalid/out-of-range instants remain visibly unavailable.
+pub fn format_unix_millis(locale: SupportedLocale, unix_millis: i64) -> String {
+    let Some(utc) = DateTime::from_timestamp_millis(unix_millis) else {
+        return "—".to_owned();
+    };
+    let local = utc.with_timezone(&Local);
+    match locale {
+        SupportedLocale::EnUs => local.format("%m/%d/%Y %H:%M").to_string(),
+        SupportedLocale::ZhCn | SupportedLocale::JaJp => local.format("%Y/%m/%d %H:%M").to_string(),
+    }
 }
 
 /// Formats a ratio where `1.0` equals 100 percent.
@@ -142,5 +158,11 @@ mod tests {
             "12,345.6"
         );
         assert_eq!(format_decimal(SupportedLocale::EnUs, f64::NAN, 1), "—");
+    }
+
+    #[test]
+    fn invalid_timestamps_are_rendered_as_unavailable() {
+        assert_eq!(format_unix_millis(SupportedLocale::EnUs, i64::MAX), "—");
+        assert_eq!(format_unix_millis(SupportedLocale::JaJp, i64::MIN), "—");
     }
 }

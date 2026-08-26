@@ -7,14 +7,21 @@ use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 use crate::{
     app::TeleArkApp,
     components::{self, Tone},
+    layout::LayoutPolicy,
     theme,
 };
 
 impl TeleArkApp {
-    pub(crate) fn render_vault(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_vault(
+        &self,
+        _window: &mut Window,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let padding = layout.content_padding();
         let toolbar = div()
             .h(px(58.0))
-            .px_5()
+            .px(px(padding))
             .flex()
             .items_center()
             .child(components::section_title(self.tr("vault-title")))
@@ -33,7 +40,7 @@ impl TeleArkApp {
             ));
 
         let settings_nav = components::card()
-            .w(px(205.0))
+            .w(px(layout.local_navigation_width()))
             .h_full()
             .flex_none()
             .p_2()
@@ -54,6 +61,7 @@ impl TeleArkApp {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_start()
                     .gap_4()
                     .child(
@@ -80,9 +88,11 @@ impl TeleArkApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_3()
                                     .child(components::section_title(self.tr("vault-master-key")))
@@ -118,6 +128,7 @@ impl TeleArkApp {
                     .border_t_1()
                     .border_color(theme::border())
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(components::button(
                         "vault-change-password",
@@ -156,10 +167,12 @@ impl TeleArkApp {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .child(components::section_title(self.tr("vault-recovery-title")))
                             .child(
                                 div()
@@ -185,6 +198,7 @@ impl TeleArkApp {
                     .border_t_1()
                     .border_color(theme::border())
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         components::button(
@@ -291,8 +305,8 @@ impl TeleArkApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_5()
-                    .pb_5()
+                    .px(px(padding))
+                    .pb(px(padding))
                     .flex()
                     .gap_4()
                     .child(settings_nav)
@@ -326,12 +340,13 @@ fn settings_item(icon: IconName, label: SharedString, selected: bool) -> AnyElem
         } else {
             theme::text_secondary()
         }))
-        .child(label)
+        .child(div().min_w_0().truncate().child(label))
         .into_any_element()
 }
 
 fn key_metric(label: SharedString, value: &'static str) -> AnyElement {
     div()
+        .min_w_0()
         .child(div().text_xs().text_color(theme::text_muted()).child(label))
         .child(
             div()
@@ -355,6 +370,7 @@ fn option_row(title: SharedString, description: SharedString, enabled: bool) -> 
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
                     div()
@@ -367,6 +383,7 @@ fn option_row(title: SharedString, description: SharedString, enabled: bool) -> 
         .child(
             div()
                 .w(px(34.0))
+                .flex_none()
                 .h(px(19.0))
                 .p(px(2.0))
                 .flex()

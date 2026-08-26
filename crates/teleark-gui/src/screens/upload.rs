@@ -6,15 +6,21 @@ use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 
 use crate::{
     app::{Page, TeleArkApp},
-    components, theme,
+    components,
+    layout::LayoutPolicy,
+    theme,
 };
 
-pub fn render_upload_overlay(app: &TeleArkApp, cx: &mut Context<TeleArkApp>) -> AnyElement {
+pub fn render_upload_overlay(
+    app: &TeleArkApp,
+    layout: LayoutPolicy,
+    cx: &mut Context<TeleArkApp>,
+) -> AnyElement {
     let file_preview = div()
-        .w(px(210.0))
+        .w(px(layout.upload_preview_width()))
         .h_full()
         .flex_none()
-        .p_5()
+        .p(px(if layout.is_compact() { 16.0 } else { 20.0 }))
         .flex()
         .flex_col()
         .items_center()
@@ -203,10 +209,12 @@ pub fn render_upload_overlay(app: &TeleArkApp, cx: &mut Context<TeleArkApp>) -> 
         );
 
     let form_footer = div()
-        .h(px(58.0))
+        .min_h(px(58.0))
         .px_5()
+        .py_2()
         .flex_none()
         .flex()
+        .flex_wrap()
         .items_center()
         .justify_end()
         .gap_2()
@@ -246,8 +254,8 @@ pub fn render_upload_overlay(app: &TeleArkApp, cx: &mut Context<TeleArkApp>) -> 
         .child(form_footer);
 
     let dialog = div()
-        .w(px(820.0))
-        .h(px(660.0))
+        .w(px(layout.upload_dialog_width()))
+        .h(px(layout.upload_dialog_height()))
         .rounded(theme::RADIUS_LARGE)
         .border_1()
         .border_color(theme::border())
@@ -281,6 +289,7 @@ pub fn render_upload_overlay(app: &TeleArkApp, cx: &mut Context<TeleArkApp>) -> 
         .absolute()
         .inset_0()
         .bg(rgba(0x18203366))
+        .p_4()
         .flex()
         .items_center()
         .justify_center()
@@ -316,8 +325,23 @@ fn select_field(value: &'static str, hint: SharedString) -> AnyElement {
                 .bg(theme::blue_soft())
                 .child(Icon::new(IconName::CircleUser).text_color(theme::blue())),
         )
-        .child(div().ml_2().flex_1().text_sm().child(value))
-        .child(div().text_xs().text_color(theme::text_muted()).child(hint))
+        .child(
+            div()
+                .ml_2()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .child(value),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .text_color(theme::text_muted())
+                .child(hint),
+        )
         .child(Icon::new(IconName::ChevronDown).text_color(theme::text_muted()))
         .into_any_element()
 }
@@ -353,13 +377,17 @@ fn check_row(title: SharedString, description: SharedString, checked: bool) -> A
                 .when(checked, |box_| box_.child("✓")),
         )
         .child(
-            div().flex_1().child(div().text_sm().child(title)).child(
-                div()
-                    .mt_1()
-                    .text_xs()
-                    .text_color(theme::text_muted())
-                    .child(description),
-            ),
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(title))
+                .child(
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(description),
+                ),
         )
         .into_any_element()
 }
@@ -395,7 +423,14 @@ fn estimate_row(label: SharedString, value: &'static str) -> AnyElement {
         .mt_3()
         .flex()
         .text_xs()
-        .child(div().flex_1().text_color(theme::text_muted()).child(label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme::text_muted())
+                .child(label),
+        )
         .child(
             div()
                 .font_weight(FontWeight::MEDIUM)

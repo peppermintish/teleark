@@ -8,6 +8,7 @@ use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 use crate::{
     app::TeleArkApp,
     components::{self, Tone},
+    layout::LayoutPolicy,
     mock::{
         ActivityLog, ConnectionRow, TransferRow, TransferState, activity_logs, connections,
         transfers,
@@ -15,12 +16,18 @@ use crate::{
     theme,
 };
 
+const CONNECTION_CARD_WIDTH: f32 = 440.0;
+const CONNECTION_CLIENT_WIDTH: f32 = 82.0;
+const CONNECTION_LATENCY_WIDTH: f32 = 72.0;
+
 impl TeleArkApp {
     pub(crate) fn render_transfers(
         &self,
         _window: &mut Window,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let padding = layout.content_padding();
         let query = self.search_input.read(cx).value().to_lowercase();
         let transfer_rows: Vec<_> = transfers(self.upload_queued)
             .into_iter()
@@ -36,13 +43,86 @@ impl TeleArkApp {
             .selected_file
             .min(transfer_rows.len().saturating_sub(1));
         let selected = transfer_rows.get(selected_index).cloned();
+        let retry_action = if layout.is_compact() {
+            components::icon_button(
+                "transfers-retry",
+                IconName::Redo2,
+                self.tr("action-retry-failed"),
+            )
+            .into_any_element()
+        } else {
+            components::button(
+                "transfers-retry",
+                self.tr("action-retry-failed"),
+                Some(IconName::Redo2),
+                false,
+            )
+            .into_any_element()
+        };
+        let clear_action = if layout.is_compact() {
+            components::icon_button(
+                "transfers-clear",
+                IconName::Delete,
+                self.tr("action-clear-completed"),
+            )
+            .into_any_element()
+        } else {
+            components::button(
+                "transfers-clear",
+                self.tr("action-clear-completed"),
+                Some(IconName::Delete),
+                false,
+            )
+            .into_any_element()
+        };
+        let new_queue_action = if layout.is_compact() {
+            components::icon_button(
+                "transfers-new-queue",
+                IconName::Plus,
+                self.tr("action-new-queue"),
+            )
+            .into_any_element()
+        } else {
+            components::button(
+                "transfers-new-queue",
+                self.tr("action-new-queue"),
+                Some(IconName::Plus),
+                false,
+            )
+            .into_any_element()
+        };
+        let status_filter = if layout.is_compact() {
+            components::icon_button(
+                "transfers-status-filter",
+                IconName::Settings2,
+                self.tr("filter-all-statuses"),
+            )
+            .into_any_element()
+        } else {
+            components::button(
+                "transfers-status-filter",
+                self.tr("filter-all-statuses"),
+                Some(IconName::Settings2),
+                false,
+            )
+            .into_any_element()
+        };
 
         let summary = div()
-            .h(px(120.0))
-            .px_4()
-            .py_3()
-            .flex()
-            .gap_3()
+            .h(px(if layout.is_spacious() { 120.0 } else { 170.0 }))
+            .px(px(padding))
+            .py(if layout.is_spacious() {
+                px(12.0)
+            } else {
+                px(8.0)
+            })
+            .when(layout.is_spacious(), |summary| summary.flex())
+            .when(!layout.is_spacious(), |summary| summary.grid().grid_cols(3))
+            .gap(if layout.is_spacious() {
+                px(12.0)
+            } else {
+                px(8.0)
+            })
             .child(summary_card(
                 IconName::ArrowDown,
                 self.tr("transfer-summary-downloading"),
@@ -87,9 +167,11 @@ impl TeleArkApp {
             ));
 
         let toolbar = div()
-            .h(px(46.0))
-            .px_4()
+            .min_h(px(46.0))
+            .px(px(padding))
+            .py_2()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_2()
             .child(components::button(
@@ -118,31 +200,13 @@ impl TeleArkApp {
                     cx.notify();
                 })),
             )
-            .child(components::button(
-                "transfers-retry",
-                self.tr("action-retry-failed"),
-                Some(IconName::Redo2),
-                false,
-            ))
-            .child(components::button(
-                "transfers-clear",
-                self.tr("action-clear-completed"),
-                Some(IconName::Delete),
-                false,
-            ))
-            .child(components::button(
-                "transfers-new-queue",
-                self.tr("action-new-queue"),
-                Some(IconName::Plus),
-                false,
-            ))
-            .child(div().flex_1())
-            .child(components::button(
-                "transfers-status-filter",
-                self.tr("filter-all-statuses"),
-                Some(IconName::Settings2),
-                false,
-            ))
+            .child(retry_action)
+            .child(clear_action)
+            .child(new_queue_action)
+            .when(!layout.is_compact(), |toolbar| {
+                toolbar.child(div().flex_1())
+            })
+            .child(status_filter)
             .child(components::icon_button(
                 "transfers-view",
                 IconName::LayoutDashboard,
@@ -159,25 +223,41 @@ impl TeleArkApp {
             .border_color(theme::border())
             .child(transfer_header("", Some(28.0)))
             .child(transfer_header(self.tr("table-name"), None))
-            .child(transfer_header(self.tr("table-source"), Some(108.0)))
+            .when(layout.shows_transfer_source(), |header| {
+                header.child(transfer_header(self.tr("table-source"), Some(108.0)))
+            })
             .child(transfer_header(self.tr("table-size"), Some(76.0)))
             .child(transfer_header(self.tr("table-progress"), Some(112.0)))
-            .child(transfer_header(self.tr("table-speed"), Some(82.0)))
-            .child(transfer_header(self.tr("table-eta"), Some(64.0)))
-            .child(transfer_header(self.tr("table-status"), Some(94.0)))
-            .child(transfer_header(self.tr("table-destination"), Some(118.0)));
+            .when(layout.shows_transfer_speed(), |header| {
+                header
+                    .child(transfer_header(self.tr("table-speed"), Some(82.0)))
+                    .child(transfer_header(self.tr("table-eta"), Some(64.0)))
+            })
+            .child(transfer_header(
+                self.tr("table-status"),
+                Some(layout.transfer_status_width()),
+            ))
+            .when(layout.shows_transfer_destination(), |header| {
+                header.child(transfer_header(self.tr("table-destination"), Some(118.0)))
+            });
 
         let rows = transfer_rows
             .into_iter()
             .enumerate()
-            .map(|(index, transfer)| self.render_transfer_row(index, transfer, cx));
+            .map(|(index, transfer)| self.render_transfer_row(index, transfer, layout, cx));
 
         let table_footer = div()
-            .h(px(38.0))
+            .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
             .px_3()
+            .py_2()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap_4()
+            .gap(if layout.is_compact() {
+                px(8.0)
+            } else {
+                px(16.0)
+            })
             .border_t_1()
             .border_color(theme::border())
             .text_xs()
@@ -185,7 +265,7 @@ impl TeleArkApp {
             .child(self.tr("transfer-footer-total"))
             .child(self.tr("transfer-footer-downloading"))
             .child(self.tr("transfer-footer-waiting"))
-            .child(div().flex_1())
+            .when(!layout.is_compact(), |footer| footer.child(div().flex_1()))
             .child(div().text_color(theme::blue()).child("↓ 23.6 MB/s"))
             .child(div().text_color(theme::blue()).child("↑ 14.6 MB/s"))
             .child(self.tr("transfer-footer-unlimited"));
@@ -193,7 +273,7 @@ impl TeleArkApp {
         let table = div()
             .flex_1()
             .min_h_0()
-            .mx_4()
+            .mx(px(padding))
             .rounded(theme::RADIUS_MEDIUM)
             .border_1()
             .border_color(theme::border())
@@ -212,13 +292,14 @@ impl TeleArkApp {
             .child(table_footer);
 
         let bottom = div()
-            .h(px(184.0))
-            .px_4()
+            .h(px(if layout.is_compact() { 132.0 } else { 184.0 }))
+            .px(px(padding))
             .py_2()
             .flex()
             .gap_3()
-            .child(self.render_activity_log())
-            .child(self.render_connections());
+            .child(self.render_activity_log(layout.is_compact()))
+            .child(self.render_connections(layout))
+            .overflow_x_scrollbar();
 
         let main = div()
             .flex_1()
@@ -238,8 +319,8 @@ impl TeleArkApp {
             .flex()
             .bg(theme::canvas())
             .child(main)
-            .when_some(selected, |layout, selected| {
-                layout.child(self.render_transfer_detail(selected, cx))
+            .when_some(selected, |page, selected| {
+                page.child(self.render_transfer_detail(selected, layout, cx))
             })
             .into_any_element()
     }
@@ -248,6 +329,7 @@ impl TeleArkApp {
         &self,
         index: usize,
         transfer: TransferRow,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.selected_file == index;
@@ -305,7 +387,9 @@ impl TeleArkApp {
                     .font_weight(FontWeight::MEDIUM)
                     .child(transfer.name),
             )
-            .child(transfer_cell(transfer.source, 108.0))
+            .when(layout.shows_transfer_source(), |row| {
+                row.child(transfer_cell(transfer.source, 108.0))
+            })
             .child(transfer_cell(transfer.size, 76.0))
             .child(
                 div()
@@ -320,31 +404,50 @@ impl TeleArkApp {
                     )
                     .child(components::progress(transfer.progress, tone)),
             )
-            .child(transfer_cell(transfer.speed, 82.0))
-            .child(transfer_cell(transfer.eta, 64.0))
-            .child(div().w(px(94.0)).child(components::badge(
-                self.tr(transfer.state.message_id()),
-                tone,
-            )))
-            .child(transfer_cell(transfer.destination, 118.0))
+            .when(layout.shows_transfer_speed(), |row| {
+                row.child(transfer_cell(transfer.speed, 82.0))
+                    .child(transfer_cell(transfer.eta, 64.0))
+            })
+            .child(
+                div()
+                    .w(px(layout.transfer_status_width()))
+                    .child(components::badge(
+                        self.tr(transfer.state.message_id()),
+                        tone,
+                    )),
+            )
+            .when(layout.shows_transfer_destination(), |row| {
+                row.child(transfer_cell(transfer.destination, 118.0))
+            })
             .into_any_element()
     }
 
-    fn render_activity_log(&self) -> AnyElement {
+    fn render_activity_log(&self, compact: bool) -> AnyElement {
         let rows = activity_logs().into_iter().map(|log| {
             let message = self.tr(log.message_id);
             render_log_row(log, message)
         });
         components::card()
-            .flex_1()
+            .when(compact, |card| card.w(px(420.0)).flex_none())
+            .when(!compact, |card| card.flex_1())
             .h_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(bottom_header(self.tr("transfer-tab-log")))
-            .child(div().px_3().py_1().children(rows))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .px_3()
+                    .py_1()
+                    .children(rows),
+            )
             .into_any_element()
     }
 
-    fn render_connections(&self) -> AnyElement {
+    fn render_connections(&self, layout: LayoutPolicy) -> AnyElement {
         let header = div()
             .h(px(30.0))
             .px_3()
@@ -357,21 +460,43 @@ impl TeleArkApp {
             .child(connection_cell(self.tr("connection-address"), None))
             .child(connection_cell(self.tr("table-progress"), Some(70.0)))
             .child(connection_cell(self.tr("table-speed"), Some(70.0)))
-            .child(connection_cell(self.tr("connection-client"), Some(56.0)))
-            .child(connection_cell(self.tr("connection-latency"), Some(52.0)));
+            .child(connection_cell(
+                self.tr("connection-client"),
+                Some(CONNECTION_CLIENT_WIDTH),
+            ))
+            .child(connection_cell(
+                self.tr("connection-latency"),
+                Some(CONNECTION_LATENCY_WIDTH),
+            ));
         let rows = connections().into_iter().map(render_connection_row);
 
         components::card()
-            .flex_1()
+            .when(!layout.is_spacious(), |card| {
+                card.w(px(CONNECTION_CARD_WIDTH)).flex_none()
+            })
+            .when(layout.is_spacious(), |card| card.flex_1())
             .h_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(bottom_header(self.tr("connection-title")))
             .child(header)
-            .child(div().children(rows))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .children(rows),
+            )
             .into_any_element()
     }
 
-    fn render_transfer_detail(&self, transfer: TransferRow, cx: &mut Context<Self>) -> AnyElement {
+    fn render_transfer_detail(
+        &self,
+        transfer: TransferRow,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tone = transfer_tone(transfer.state);
         let active = matches!(
             transfer.state,
@@ -490,7 +615,7 @@ impl TeleArkApp {
         };
 
         div()
-            .w(theme::DETAIL_WIDTH)
+            .w(px(layout.transfer_inspector_width()))
             .h_full()
             .flex_none()
             .flex()
@@ -609,12 +734,14 @@ impl TeleArkApp {
                         div()
                             .mt_1()
                             .flex()
-                            .justify_between()
+                            .flex_col()
+                            .gap_2()
                             .text_xs()
                             .child(self.tr("detail-verification"))
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap_2()
                                     .text_color(verification_tone.foreground())
                                     .child(
@@ -647,14 +774,13 @@ fn summary_card(
     components::card()
         .flex_1()
         .min_w(px(0.0))
-        .h_full()
-        .p_3()
+        .p_2()
         .flex()
         .items_start()
-        .gap_3()
+        .gap_2()
         .child(
             div()
-                .size(px(34.0))
+                .size(px(30.0))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -776,8 +902,14 @@ fn render_connection_row(connection: ConnectionRow) -> AnyElement {
                 .child(connection.progress),
         )
         .child(connection_cell(connection.speed, Some(70.0)))
-        .child(connection_cell(connection.client, Some(56.0)))
-        .child(connection_cell(connection.latency, Some(52.0)))
+        .child(connection_cell(
+            connection.client,
+            Some(CONNECTION_CLIENT_WIDTH),
+        ))
+        .child(connection_cell(
+            connection.latency,
+            Some(CONNECTION_LATENCY_WIDTH),
+        ))
         .into_any_element()
 }
 
@@ -822,7 +954,7 @@ fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
         .text_xs()
         .child(
             div()
-                .w(px(98.0))
+                .w(px(128.0))
                 .flex_none()
                 .text_color(theme::text_muted())
                 .child(label),

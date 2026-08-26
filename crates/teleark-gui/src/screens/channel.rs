@@ -1,8 +1,9 @@
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, px,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::IconName;
+use gpui_component::scroll::ScrollableElement as _;
 use teleark_i18n::{
     MessageArgs,
     format::{format_integer, format_percent},
@@ -11,6 +12,7 @@ use teleark_i18n::{
 use crate::{
     app::TeleArkApp,
     components::{self, Tone},
+    layout::LayoutPolicy,
     theme,
 };
 
@@ -18,8 +20,10 @@ impl TeleArkApp {
     pub(crate) fn render_channel(
         &self,
         _window: &mut Window,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let padding = layout.content_padding();
         let range_progress = format_percent(self.locale(), 0.62, 0);
         let checkpoint = self.tr_with(
             "index-job-checkpoint-value",
@@ -27,7 +31,7 @@ impl TeleArkApp {
         );
         let toolbar = div()
             .h(px(58.0))
-            .px_5()
+            .px(px(padding))
             .flex()
             .items_center()
             .child(components::section_title(self.tr("index-channel-title")))
@@ -40,9 +44,10 @@ impl TeleArkApp {
             ));
 
         let channel_header = components::card()
-            .mx_5()
-            .p_5()
+            .mx(px(padding))
+            .p(px(padding))
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_4()
             .child(
@@ -61,10 +66,12 @@ impl TeleArkApp {
             )
             .child(
                 div()
+                    .min_w_0()
                     .flex_1()
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_3()
                             .child(
@@ -96,9 +103,10 @@ impl TeleArkApp {
 
         let overview = div()
             .mt_4()
-            .mx_5()
+            .mx(px(padding))
             .grid()
-            .grid_cols(4)
+            .when(layout.is_compact(), |overview| overview.grid_cols(2))
+            .when(!layout.is_compact(), |overview| overview.grid_cols(4))
             .gap_3()
             .child(index_summary(
                 self.tr("index-new-files"),
@@ -128,14 +136,17 @@ impl TeleArkApp {
         let coverage = components::card()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .when(!layout.is_compact(), |coverage| coverage.h_full())
+            .when(layout.is_compact(), |coverage| coverage.flex_none())
             .p_5()
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .child(
                         div()
+                            .min_w_0()
                             .flex_1()
                             .child(components::section_title(self.tr("index-coverage-title")))
                             .child(
@@ -194,8 +205,9 @@ impl TeleArkApp {
             );
 
         let job = components::card()
-            .w(px(330.0))
-            .h_full()
+            .w(px(layout.channel_job_width()))
+            .when(layout.is_compact(), |job| job.w_full())
+            .when(!layout.is_compact(), |job| job.h_full())
             .flex_none()
             .p_5()
             .child(
@@ -291,6 +303,11 @@ impl TeleArkApp {
                 .w_full()
                 .mt_2(),
             );
+        let job = if layout.is_compact() {
+            job.into_any_element()
+        } else {
+            job.overflow_y_scrollbar().into_any_element()
+        };
 
         div()
             .flex_1()
@@ -299,6 +316,7 @@ impl TeleArkApp {
             .flex()
             .flex_col()
             .bg(theme::canvas())
+            .overflow_y_scrollbar()
             .child(toolbar)
             .child(channel_header)
             .child(overview)
@@ -306,9 +324,10 @@ impl TeleArkApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p_5()
+                    .p(px(padding))
                     .pt_4()
                     .flex()
+                    .when(layout.is_compact(), |content| content.flex_col())
                     .gap_4()
                     .child(coverage)
                     .child(job),
@@ -471,7 +490,13 @@ fn job_row(label: SharedString, value: impl Into<SharedString>) -> AnyElement {
     div()
         .flex()
         .text_xs()
-        .child(div().flex_1().text_color(theme::text_muted()).child(label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(theme::text_muted())
+                .child(label),
+        )
         .child(
             div()
                 .text_color(theme::text_secondary())

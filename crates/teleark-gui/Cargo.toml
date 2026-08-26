@@ -17,6 +17,7 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 teleark-core.workspace = true
 teleark-i18n.workspace = true
+teleark-runtime.workspace = true
 
 [lints]
 workspace = true

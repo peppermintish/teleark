@@ -7,8 +7,9 @@ use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 use teleark_i18n::SupportedLocale;
 
 use crate::{
-    app::TeleArkApp,
+    app::{LocalePersistence, TeleArkApp},
     components::{self, Tone},
+    layout::LayoutPolicy,
     theme,
 };
 
@@ -16,22 +17,24 @@ impl TeleArkApp {
     pub(crate) fn render_settings(
         &self,
         _window: &mut Window,
+        layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let padding = layout.content_padding();
         let toolbar = div()
             .h(px(58.0))
-            .px_5()
+            .px(px(padding))
             .flex()
             .items_center()
             .child(components::section_title(self.tr("settings-title")))
             .child(div().flex_1())
             .child(components::badge(
-                self.tr("settings-session-only"),
+                self.tr("settings-preview-controls"),
                 Tone::Amber,
             ));
 
         let settings_nav = components::card()
-            .w(px(220.0))
+            .w(px(layout.local_navigation_width()))
             .h_full()
             .flex_none()
             .p_2()
@@ -105,8 +108,9 @@ impl TeleArkApp {
                 div()
                     .mt_5()
                     .grid()
-                    .grid_cols(3)
+                    .grid_cols(if layout.is_compact() { 2 } else { 4 })
                     .gap_3()
+                    .child(self.system_locale_card(cx))
                     .child(self.locale_card(
                         "settings-locale-en",
                         SupportedLocale::EnUs,
@@ -142,7 +146,20 @@ impl TeleArkApp {
                     .text_color(theme::text_secondary())
                     .child(Icon::new(IconName::Info).text_color(theme::blue()))
                     .child(self.tr("settings-language-runtime-note")),
-            );
+            )
+            .child(div().mt_3().child(components::badge(
+                self.tr(match self.locale_persistence {
+                    LocalePersistence::Idle => "settings-language-persistence-ready",
+                    LocalePersistence::Saving => "settings-language-persistence-saving",
+                    LocalePersistence::Saved => "settings-language-persistence-saved",
+                    LocalePersistence::Failed => "settings-language-persistence-failed",
+                }),
+                match self.locale_persistence {
+                    LocalePersistence::Failed => Tone::Red,
+                    LocalePersistence::Saving => Tone::Amber,
+                    LocalePersistence::Idle | LocalePersistence::Saved => Tone::Green,
+                },
+            )));
 
         let appearance = components::card()
             .mt_4()
@@ -226,8 +243,8 @@ impl TeleArkApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_5()
-                    .pb_5()
+                    .px(px(padding))
+                    .pb(px(padding))
                     .flex()
                     .gap_4()
                     .child(settings_nav)
@@ -244,7 +261,7 @@ impl TeleArkApp {
         code: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.locale() == locale;
+        let selected = !self.follows_system_locale && self.locale() == locale;
         div()
             .id(id)
             .p_4()
@@ -305,6 +322,7 @@ impl TeleArkApp {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
                     .child(
                         div()
@@ -312,6 +330,84 @@ impl TeleArkApp {
                             .text_xs()
                             .text_color(theme::text_muted())
                             .child(code),
+                    ),
+            )
+            .when(selected, |card| {
+                card.child(Icon::new(IconName::CircleCheck).text_color(theme::blue()))
+            })
+            .into_any_element()
+    }
+
+    fn system_locale_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.follows_system_locale;
+        div()
+            .id("settings-locale-system")
+            .p_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded(theme::RADIUS_MEDIUM)
+            .border_1()
+            .border_color(if selected {
+                theme::blue()
+            } else {
+                theme::border()
+            })
+            .bg(if selected {
+                theme::blue_pale()
+            } else {
+                theme::surface()
+            })
+            .cursor_pointer()
+            .focusable()
+            .tab_index(0)
+            .hover(|card| card.bg(theme::blue_pale()))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.use_system_locale(window, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.use_system_locale(window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .size(px(34.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if selected {
+                        theme::blue()
+                    } else {
+                        theme::border_subtle()
+                    })
+                    .text_color(if selected {
+                        theme::surface()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .child("OS"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(self.tr("settings-language-system-default")),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(self.system_locale.as_str()),
                     ),
             )
             .when(selected, |card| {
@@ -345,13 +441,14 @@ fn settings_nav_item(icon: IconName, label: SharedString, selected: bool) -> Any
         } else {
             theme::text_secondary()
         }))
-        .child(label)
+        .child(div().min_w_0().truncate().child(label))
         .into_any_element()
 }
 
 fn theme_option(title: SharedString, description: SharedString, selected: bool) -> AnyElement {
     div()
         .flex_1()
+        .min_w_0()
         .p_4()
         .rounded(theme::RADIUS_MEDIUM)
         .border_1()
@@ -430,6 +527,7 @@ fn preference_row(title: SharedString, description: SharedString, enabled: bool)
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
                     div()
@@ -442,6 +540,7 @@ fn preference_row(title: SharedString, description: SharedString, enabled: bool)
         .child(
             div()
                 .w(px(36.0))
+                .flex_none()
                 .h(px(20.0))
                 .p(px(2.0))
                 .flex()
