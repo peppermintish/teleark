@@ -9,6 +9,7 @@
 
 mod engine;
 mod error;
+mod native;
 mod ports;
 mod progress;
 mod retry;
@@ -24,6 +25,7 @@ pub use engine::{
 pub use error::{ConfigurationError, TransferEngineError};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::{FakeClock, FakeEnvironment, FakeUploadBehavior, SequenceJitter};
+pub use native::{Blake3Digest, NativeFileSystem};
 pub use ports::{
     CheckpointPort, Clock, DigestPort, FileSystemPort, JitterSource, RemoteTransport, SourcePort,
     TransferIo, UploadError,

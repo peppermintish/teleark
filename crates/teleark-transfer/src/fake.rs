@@ -166,6 +166,7 @@ impl FakeEnvironment {
         let object = RemoteObject {
             object_id: self.next_remote_id,
             key,
+            plaintext_size: bytes.len() as u64,
             encoded_size: bytes.len() as u64,
             digest: self.digest(&bytes),
         };
@@ -235,6 +236,13 @@ impl SourcePort for FakeEnvironment {
         }
         Ok(bytes)
     }
+
+    fn digest_source(&mut self, source_id: SourceId) -> Result<ContentDigest, TransferError> {
+        self.sources
+            .get(&source_id)
+            .map(|source| self.digest(&source.bytes))
+            .ok_or(TransferError::SourceMissing)
+    }
 }
 
 impl RemoteTransport for FakeEnvironment {
@@ -295,7 +303,7 @@ impl RemoteTransport for FakeEnvironment {
                     .find(|stored| stored.object.object_id == object.object_id)
             })
             .ok_or(TransferError::RemoteMissing)?;
-        if stored.object.encoded_size != expected_size
+        if stored.object.plaintext_size != expected_size
             || stored.object.digest != expected_digest
             || stored.bytes.len() as u64 != expected_size
             || self.digest(&stored.bytes) != expected_digest
@@ -396,6 +404,17 @@ impl FileSystemPort for FakeEnvironment {
             .and_then(|destination| destination.partial.as_ref())
             .and_then(|partial| partial.get(range))
             .map(ToOwned::to_owned)
+            .ok_or(TransferError::HashMismatch)
+    }
+
+    fn digest_partial(
+        &mut self,
+        destination_id: DestinationId,
+    ) -> Result<ContentDigest, TransferError> {
+        self.destinations
+            .get(&destination_id)
+            .and_then(|destination| destination.partial.as_ref())
+            .map(|bytes| self.digest(bytes))
             .ok_or(TransferError::HashMismatch)
     }
 

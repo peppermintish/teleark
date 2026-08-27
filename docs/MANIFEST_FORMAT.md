@@ -1,6 +1,12 @@
 # TeleArk Manifest Format
 
-Status: **provisional, implemented v1 codec candidate**. `teleark-crypto` can deterministically seal/open and strictly validate the candidate manifest, but it is not yet connected to publication, remote reconciliation, SQLite rebuild, or a complete recovery workflow. Exact bytes may change before v1 stabilization; after release, incompatible changes require a new major version and old fixtures remain readable.
+Status: **provisional, integrated v1 codec candidate**. `teleark-crypto` can
+deterministically seal/open and strictly validate the candidate manifest, and
+`teleark-runtime` now publishes it after verified parts, discovers it by a
+common remote caption, recovers the File Key/layout/locators, and completes an
+exact download with a fresh SQLite database in deterministic integration tests.
+Exact bytes may change before v1 stabilization; after release, incompatible
+changes require a new major version and old fixtures remain readable.
 
 ## Role
 
@@ -8,7 +14,12 @@ The manifest is the recovery backbone for a completed Vault package. SQLite is a
 
 Only completed packages have this disaster-recovery guarantee. Parts uploaded before a verified authoritative manifest are incomplete/orphan candidates and may require surviving local checkpoint/key state for reconciliation.
 
-The current codec authenticates the envelope/public header, decrypts only after File Key resolution, validates bounded canonical metadata and exact part/container bindings, derives opaque remote names, and redacts filenames, paths, locators, source metadata, hashes, and keys from `Debug`. This establishes candidate bytes and parser behavior only; no package produced by the desktop app currently receives the recovery guarantee described above.
+The current codec authenticates the envelope/public header, decrypts only after
+File Key resolution, validates bounded canonical metadata and exact
+part/container bindings, derives opaque remote names, and redacts sensitive
+fields from `Debug`. Runtime integration establishes the recovery mechanics;
+the desktop app still lacks the transfer/key-unlock owner and therefore does not
+yet present this as a user-facing recovery guarantee.
 
 ## Design properties
 
@@ -172,4 +183,10 @@ Do not trust remote filenames alone. Duplicate package IDs/generations, conflict
 
 A fixed Unicode multipart fixture now lives under `crates/teleark-crypto/tests/vectors/manifest_v1/`; deterministic tests also cover empty manifests. The suite covers encode/decode, wrong keys, envelope/header/metadata tamper, duplicate/noncanonical keys, unknown versions/suites/flags, length/offset overflow, excessive allocation claims, invalid UTF-8, unsafe relative paths, duplicate/reordered/missing/overlapping parts, locator/name mismatch, part-container binding, duplicate manifest-generation identity, and hostile mutation/truncation corpora.
 
-Before stabilization, add released-version compatibility fixtures, continuous fuzzing for the envelope and both CBOR layers, conflict/generation recovery policy tests, and a complete fake-remote recovery set. The full acceptance test must delete local SQLite state, recover through manifests and a fake remote, download/decrypt, and prove the recovered BLAKE3/plaintext exactly matches the original.
+Before stabilization, add released-version compatibility fixtures, longer
+recorded fuzz campaigns, conflict/generation recovery policy tests, credentialed
+Telegram system recovery, and independent security review. The deterministic
+acceptance test now creates a fresh SQLite database, recovers through the
+authenticated remote Manifest without a caller-supplied File Key/layout,
+downloads/decrypts, and proves the recovered BLAKE3/plaintext exactly matches
+the original.

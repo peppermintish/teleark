@@ -26,6 +26,8 @@ use session::FileSession;
 
 const MAX_DIALOGS_PER_REQUEST: usize = 10_000;
 const MAX_MESSAGES_PER_SCAN: usize = 10_000;
+const MAX_SEARCH_RESULTS: usize = 1_000;
+pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Configuration that is safe to persist as ordinary application settings.
 ///
@@ -459,6 +461,36 @@ impl TelegramConnection {
         file_from_message(message)
     }
 
+    /// Searches a bounded set of document messages and retains only exact
+    /// caption matches. The exact comparison turns Telegram's fuzzy text
+    /// search into a safe reconciliation lookup for opaque transfer keys.
+    pub async fn search_files_exact_caption(
+        &self,
+        chat: &TelegramChat,
+        caption: &str,
+        limit: usize,
+    ) -> Result<Vec<TelegramFile>, TelegramError> {
+        validate_limit(limit, MAX_SEARCH_RESULTS)?;
+        if caption.is_empty() {
+            return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
+        }
+        let mut messages = self
+            .client
+            .search_messages(chat.peer_ref)
+            .query(caption)
+            .limit(limit);
+        let mut files = Vec::new();
+        while let Some(message) = messages.next().await.map_err(map_invocation)? {
+            if message.text() != caption {
+                continue;
+            }
+            if let Some(file) = file_from_message(message)? {
+                files.push(file);
+            }
+        }
+        Ok(files)
+    }
+
     /// Downloads a previously indexed document to an explicit caller-selected path.
     pub async fn download_file(
         &self,
@@ -469,6 +501,32 @@ impl TelegramConnection {
             .download_media(&file.document, destination)
             .await
             .map_err(map_invocation)
+    }
+
+    /// Downloads one bounded transfer object without creating a temporary
+    /// ciphertext file. Application-part policy keeps this buffer bounded.
+    pub async fn download_bytes(&self, file: &TelegramFile) -> Result<Vec<u8>, TelegramError> {
+        let expected = usize::try_from(file.size_bytes)
+            .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+        if expected > MAX_TRANSFER_OBJECT_BYTES {
+            return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
+        }
+        let mut bytes = Vec::with_capacity(expected);
+        let mut download = self.client.iter_download(&file.document);
+        while let Some(chunk) = download.next().await.map_err(map_invocation)? {
+            let next = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+            if next > MAX_TRANSFER_OBJECT_BYTES || next > expected {
+                return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() != expected {
+            return Err(TelegramError::new(TelegramErrorKind::Network));
+        }
+        Ok(bytes)
     }
 
     /// Uploads and sends one Telegram-native document.
@@ -495,6 +553,39 @@ impl TelegramConnection {
         let uploaded = self
             .client
             .upload_stream(&mut stream, size, name)
+            .await
+            .map_err(map_io)?;
+        let message = InputMessage::new().text(caption).document(uploaded);
+        let sent = self
+            .client
+            .send_message(chat.peer_ref, message)
+            .await
+            .map_err(map_invocation)?;
+        Ok(SentDocument {
+            message_id: i64::from(sent.id()),
+        })
+    }
+
+    /// Uploads one already encoded, bounded application object and sends it as
+    /// a document. The opaque caption is used for crash reconciliation.
+    pub async fn upload_bytes(
+        &self,
+        chat: &TelegramChat,
+        bytes: &[u8],
+        file_name: &str,
+        caption: &str,
+    ) -> Result<SentDocument, TelegramError> {
+        if bytes.is_empty()
+            || bytes.len() > MAX_TRANSFER_OBJECT_BYTES
+            || file_name.is_empty()
+            || caption.is_empty()
+        {
+            return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
+        }
+        let mut stream = std::io::Cursor::new(bytes);
+        let uploaded = self
+            .client
+            .upload_stream(&mut stream, bytes.len(), file_name.to_owned())
             .await
             .map_err(map_io)?;
         let message = InputMessage::new().text(caption).document(uploaded);
@@ -675,6 +766,8 @@ mod tests {
         assert!(validate_limit(1, MAX_DIALOGS_PER_REQUEST).is_ok());
         assert!(validate_limit(MAX_MESSAGES_PER_SCAN, MAX_MESSAGES_PER_SCAN).is_ok());
         assert!(validate_limit(MAX_MESSAGES_PER_SCAN + 1, MAX_MESSAGES_PER_SCAN).is_err());
+        assert!(validate_limit(MAX_SEARCH_RESULTS, MAX_SEARCH_RESULTS).is_ok());
+        assert!(validate_limit(MAX_SEARCH_RESULTS + 1, MAX_SEARCH_RESULTS).is_err());
     }
 
     #[test]

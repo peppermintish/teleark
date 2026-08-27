@@ -35,6 +35,9 @@ pub struct RemotePartKey {
 pub struct RemoteObject {
     pub object_id: u64,
     pub key: RemotePartKey,
+    /// Plaintext bytes represented by this application object.
+    pub plaintext_size: u64,
+    /// Actual bytes stored by the remote transport (ciphertext in Vault mode).
     pub encoded_size: u64,
     pub digest: ContentDigest,
 }

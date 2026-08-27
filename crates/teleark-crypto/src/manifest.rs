@@ -314,6 +314,13 @@ impl OpenedManifest {
     pub const fn file_key(&self) -> &FileKey {
         &self.file_key
     }
+
+    /// Consume an authenticated manifest and transfer ownership of its File
+    /// Key to the recovery runtime without exposing the key bytes.
+    #[must_use]
+    pub fn into_parts(self) -> (ManifestPublicHeader, ManifestMetadata, FileKey) {
+        (self.public_header, self.metadata, self.file_key)
+    }
 }
 
 /// Opaque manifest remote name derived only from package identity and version.

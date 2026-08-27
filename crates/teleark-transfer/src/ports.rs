@@ -1,4 +1,4 @@
-use teleark_core::{TransferError, TransferId};
+use teleark_core::{TransferError, TransferId, TransferTask};
 
 use crate::{
     ContentDigest, DestinationId, RemoteObject, RemotePartKey, SourceId, SourceIdentity,
@@ -32,6 +32,8 @@ pub trait SourcePort {
         offset: u64,
         length: u64,
     ) -> Result<Vec<u8>, TransferError>;
+
+    fn digest_source(&mut self, source_id: SourceId) -> Result<ContentDigest, TransferError>;
 }
 
 /// Result used when a remote write may have succeeded despite a lost response.
@@ -61,6 +63,17 @@ pub trait RemoteTransport {
     ) -> Result<(), TransferError>;
 
     fn download_remote(&mut self, object: &RemoteObject) -> Result<Vec<u8>, TransferError>;
+
+    /// Publish/verify any package-level recovery object after every part and
+    /// the source whole-file digest have been verified.
+    fn finalize_upload(
+        &mut self,
+        _account_id: teleark_core::AccountId,
+        _package_id: teleark_core::PackageId,
+        _whole_digest: ContentDigest,
+    ) -> Result<(), TransferError> {
+        Ok(())
+    }
 }
 
 /// Durable checkpoint replacement port.
@@ -71,6 +84,12 @@ pub trait CheckpointPort {
     ) -> Result<Option<TransferCheckpoint>, TransferError>;
 
     fn save_checkpoint(&mut self, checkpoint: &TransferCheckpoint) -> Result<(), TransferError>;
+
+    /// Persist the Core task/part state projection after lifecycle transitions
+    /// that do not alter immutable checkpoint evidence.
+    fn save_task_state(&mut self, _task: &TransferTask) -> Result<(), TransferError> {
+        Ok(())
+    }
 }
 
 /// Safe positional `.partial` output and atomic-finalization boundary.
@@ -94,6 +113,11 @@ pub trait FileSystemPort {
         offset: u64,
         length: u64,
     ) -> Result<Vec<u8>, TransferError>;
+
+    fn digest_partial(
+        &mut self,
+        destination_id: DestinationId,
+    ) -> Result<ContentDigest, TransferError>;
 
     fn flush_partial(&mut self, destination_id: DestinationId) -> Result<(), TransferError>;
 

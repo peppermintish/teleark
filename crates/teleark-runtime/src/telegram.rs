@@ -98,6 +98,24 @@ enum TelegramRequest {
         destination: PathBuf,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
+    DownloadBytes {
+        chat_id: i64,
+        message_id: i64,
+        reply: mpsc::SyncSender<Result<Vec<u8>, ApplicationError>>,
+    },
+    SearchFiles {
+        chat_id: i64,
+        caption: String,
+        limit: usize,
+        reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
+    },
+    UploadBytes {
+        chat_id: i64,
+        file_name: String,
+        caption: String,
+        bytes: Vec<u8>,
+        reply: mpsc::SyncSender<Result<i64, ApplicationError>>,
+    },
     SignOut {
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
@@ -250,6 +268,48 @@ impl DesktopTelegram {
         })
     }
 
+    pub fn download_bytes(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<Vec<u8>, ApplicationError> {
+        self.request(|reply| TelegramRequest::DownloadBytes {
+            chat_id,
+            message_id,
+            reply,
+        })
+    }
+
+    pub fn search_files_exact_caption(
+        &self,
+        chat_id: i64,
+        caption: impl Into<String>,
+        limit: usize,
+    ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+        self.request(|reply| TelegramRequest::SearchFiles {
+            chat_id,
+            caption: caption.into(),
+            limit,
+            reply,
+        })
+    }
+
+    pub fn upload_bytes(
+        &self,
+        chat_id: i64,
+        file_name: impl Into<String>,
+        caption: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<i64, ApplicationError> {
+        self.request(|reply| TelegramRequest::UploadBytes {
+            chat_id,
+            file_name: file_name.into(),
+            caption: caption.into(),
+            bytes,
+            reply,
+        })
+    }
+
     pub fn sign_out(&self) -> Result<(), ApplicationError> {
         self.request(|reply| TelegramRequest::SignOut { reply })
     }
@@ -328,6 +388,33 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 reply,
             } => {
                 let result = download(&state, chat_id, message_id, destination).await;
+                let _ = reply.send(result);
+            }
+            TelegramRequest::DownloadBytes {
+                chat_id,
+                message_id,
+                reply,
+            } => {
+                let result = download_bytes(&state, chat_id, message_id).await;
+                let _ = reply.send(result);
+            }
+            TelegramRequest::SearchFiles {
+                chat_id,
+                caption,
+                limit,
+                reply,
+            } => {
+                let result = search_files(&state, chat_id, &caption, limit).await;
+                let _ = reply.send(result);
+            }
+            TelegramRequest::UploadBytes {
+                chat_id,
+                file_name,
+                caption,
+                bytes,
+                reply,
+            } => {
+                let result = upload_bytes(&state, chat_id, &file_name, &caption, &bytes).await;
                 let _ = reply.send(result);
             }
             TelegramRequest::SignOut { reply } => {
@@ -504,6 +591,82 @@ async fn download(
         .download_file(&file, destination)
         .await
         .map_err(map_telegram_error)
+}
+
+async fn download_bytes(
+    state: &WorkerState,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<Vec<u8>, ApplicationError> {
+    let (connection, file) = fetch_file(state, chat_id, message_id).await?;
+    connection
+        .download_bytes(&file)
+        .await
+        .map_err(map_telegram_error)
+}
+
+async fn search_files(
+    state: &WorkerState,
+    chat_id: i64,
+    caption: &str,
+    limit: usize,
+) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+    let chat = state
+        .chats
+        .get(&chat_id)
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    connection_ref(state)?
+        .search_files_exact_caption(chat, caption, limit)
+        .await
+        .map_err(map_telegram_error)
+        .map(|files| files.iter().map(file_summary).collect())
+}
+
+async fn upload_bytes(
+    state: &WorkerState,
+    chat_id: i64,
+    file_name: &str,
+    caption: &str,
+    bytes: &[u8],
+) -> Result<i64, ApplicationError> {
+    let chat = state
+        .chats
+        .get(&chat_id)
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    connection_ref(state)?
+        .upload_bytes(chat, bytes, file_name, caption)
+        .await
+        .map(|sent| sent.message_id)
+        .map_err(map_telegram_error)
+}
+
+async fn fetch_file(
+    state: &WorkerState,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<(&TelegramConnection, teleark_telegram::TelegramFile), ApplicationError> {
+    let chat = state
+        .chats
+        .get(&chat_id)
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    let connection = connection_ref(state)?;
+    let file = connection
+        .fetch_file(chat, message_id)
+        .await
+        .map_err(map_telegram_error)?
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    Ok((connection, file))
+}
+
+fn file_summary(file: &teleark_telegram::TelegramFile) -> TelegramFileSummary {
+    TelegramFileSummary {
+        message_id: file.message_id(),
+        modified_at_unix_ms: file.modified_at_unix_ms(),
+        file_name: file.file_name().to_owned(),
+        caption: file.caption().to_owned(),
+        mime_type: file.mime_type().map(str::to_owned),
+        size_bytes: file.size_bytes(),
+    }
 }
 
 async fn sign_out(state: &mut WorkerState) -> Result<(), ApplicationError> {

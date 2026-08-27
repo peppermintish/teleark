@@ -6641,8 +6641,10 @@ name = "teleark-runtime"
 version = "0.1.0"
 dependencies = [
  "teleark-core",
+ "teleark-crypto",
  "teleark-storage",
  "teleark-telegram",
+ "teleark-transfer",
  "tempfile",
  "tokio",
 ]
@@ -6673,7 +6675,9 @@ dependencies = [
 name = "teleark-transfer"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "teleark-core",
+ "tempfile",
 ]
 
 [[package]]

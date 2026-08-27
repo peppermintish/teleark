@@ -396,6 +396,7 @@ impl TransferEngine {
                     .transition_part(item.part_index, PartState::Failed)?;
                 job.task.fail(error.clone())?;
                 job.last_error = Some(error);
+                io.save_task_state(&job.task)?;
                 self.scheduler.remove_transfer(item.transfer_id);
                 report.failed_tasks += 1;
             }
@@ -444,6 +445,7 @@ impl TransferEngine {
                         .ok_or(TransferEngineError::UnknownTransfer { transfer_id })?;
                     job.task.transition_to(TransferState::Completed)?;
                     job.last_error = None;
+                    io.save_task_state(&job.task)?;
                     self.scheduler.remove_transfer(transfer_id);
                     report.completed_tasks += 1;
                 }
@@ -454,6 +456,7 @@ impl TransferEngine {
                         .ok_or(TransferEngineError::UnknownTransfer { transfer_id })?;
                     job.task.fail(error.clone())?;
                     job.last_error = Some(error);
+                    io.save_task_state(&job.task)?;
                     self.scheduler.remove_transfer(transfer_id);
                     report.failed_tasks += 1;
                 }
@@ -470,6 +473,7 @@ impl TransferEngine {
 
     pub fn pause(
         &mut self,
+        io: &mut impl CheckpointPort,
         transfer_id: TransferId,
         clock: &impl Clock,
     ) -> Result<(), TransferEngineError> {
@@ -483,6 +487,7 @@ impl TransferEngine {
                 job.task.transition_part(part.index(), PartState::Paused)?;
             }
         }
+        io.save_task_state(&job.task)?;
         self.scheduler.set_suspended(transfer_id, true);
         self.progress
             .observe(&job.task, job.last_error.as_ref(), clock.now_millis())
@@ -490,6 +495,7 @@ impl TransferEngine {
 
     pub fn resume(
         &mut self,
+        io: &mut impl CheckpointPort,
         transfer_id: TransferId,
         clock: &impl Clock,
     ) -> Result<(), TransferEngineError> {
@@ -498,6 +504,7 @@ impl TransferEngine {
             .get_mut(&transfer_id)
             .ok_or(TransferEngineError::UnknownTransfer { transfer_id })?;
         job.task.transition_to(TransferState::Running)?;
+        io.save_task_state(&job.task)?;
         self.scheduler.set_suspended(transfer_id, false);
         self.progress
             .observe(&job.task, job.last_error.as_ref(), clock.now_millis())
@@ -505,6 +512,7 @@ impl TransferEngine {
 
     pub fn cancel(
         &mut self,
+        io: &mut impl CheckpointPort,
         transfer_id: TransferId,
         clock: &impl Clock,
     ) -> Result<(), TransferEngineError> {
@@ -520,6 +528,7 @@ impl TransferEngine {
             }
         }
         job.last_error = Some(TransferError::Cancelled);
+        io.save_task_state(&job.task)?;
         self.scheduler.remove_transfer(transfer_id);
         self.progress
             .observe(&job.task, job.last_error.as_ref(), clock.now_millis())
@@ -633,7 +642,7 @@ fn validate_checkpoint(
             };
             let remote_matches = verified.remote_object.as_ref().is_some_and(|remote| {
                 remote.key == expected_key
-                    && remote.encoded_size == part.size_bytes()
+                    && remote.plaintext_size == part.size_bytes()
                     && remote.digest == verified.digest
             });
             if verified.size_bytes != part.size_bytes()
@@ -958,18 +967,15 @@ fn finalize_job(job: &mut ManagedTransfer, io: &mut impl TransferIo) -> Result<(
             if io.source_identity(spec.source_id)? != spec.source_identity {
                 return Err(TransferError::SourceChanged);
             }
-            let bytes = io.read_source_range(spec.source_id, 0, spec.source_identity.size_bytes)?;
             if io.source_identity(spec.source_id)? != spec.source_identity
-                || io.digest(&bytes) != spec.whole_digest
+                || io.digest_source(spec.source_id)? != spec.whole_digest
             {
                 return Err(TransferError::SourceChanged);
             }
-            Ok(())
+            io.finalize_upload(spec.account_id, spec.package_id, spec.whole_digest)
         }
         JobKind::Download(spec) => {
-            let total = task_total_bytes(&job.task).map_err(|_| TransferError::HashMismatch)?;
-            let bytes = io.read_partial(spec.destination_id, 0, total)?;
-            if io.digest(&bytes) != spec.whole_digest {
+            if io.digest_partial(spec.destination_id)? != spec.whole_digest {
                 return Err(TransferError::HashMismatch);
             }
             io.flush_partial(spec.destination_id)?;
@@ -1154,7 +1160,11 @@ mod tests {
                 .enqueue_upload(&mut environment, task, spec, &clock)
                 .is_ok()
         );
-        assert!(engine.pause(TransferId::new(1), &clock).is_ok());
+        assert!(
+            engine
+                .pause(&mut environment, TransferId::new(1), &clock)
+                .is_ok()
+        );
         assert_eq!(
             engine.task(TransferId::new(1)).map(TransferTask::state),
             Some(TransferState::Paused)
@@ -1163,10 +1173,22 @@ mod tests {
             engine.step(&mut environment, &clock, &mut jitter),
             Ok(StepReport::default())
         );
-        assert!(engine.resume(TransferId::new(1), &clock).is_ok());
+        assert!(
+            engine
+                .resume(&mut environment, TransferId::new(1), &clock)
+                .is_ok()
+        );
         assert!(engine.step(&mut environment, &clock, &mut jitter).is_ok());
-        assert!(engine.pause(TransferId::new(1), &clock).is_ok());
-        assert!(engine.resume(TransferId::new(1), &clock).is_ok());
+        assert!(
+            engine
+                .pause(&mut environment, TransferId::new(1), &clock)
+                .is_ok()
+        );
+        assert!(
+            engine
+                .resume(&mut environment, TransferId::new(1), &clock)
+                .is_ok()
+        );
         assert!(engine.step(&mut environment, &clock, &mut jitter).is_ok());
         assert_eq!(
             engine.task(TransferId::new(1)).map(TransferTask::state),
@@ -1179,7 +1201,11 @@ mod tests {
                 .enqueue_upload(&mut environment, task, spec, &clock)
                 .is_ok()
         );
-        assert!(engine.cancel(TransferId::new(2), &clock).is_ok());
+        assert!(
+            engine
+                .cancel(&mut environment, TransferId::new(2), &clock)
+                .is_ok()
+        );
         assert!(engine.step(&mut environment, &clock, &mut jitter).is_ok());
         assert_eq!(
             engine.task(TransferId::new(2)).map(TransferTask::state),

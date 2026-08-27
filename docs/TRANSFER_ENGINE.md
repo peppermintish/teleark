@@ -1,6 +1,12 @@
 # Transfer Engine
 
-Status: deterministic frontend-neutral engine, Core state machines, and SQLite checkpoint primitives are implemented and tested. `teleark-transfer` provides bounded scheduling, priority/FIFO ordering, pause/resume/cancel, structured retry/FloodWait handling, checkpoint and I/O ports, progress coalescing, source-change detection, ambiguous-success reconciliation, and safe `.partial` download finalization against fakes. Concrete Telegram/SQLite/crypto/filesystem adapters, async production workers, bandwidth control, and large-file streaming remain; GUI transfer values are still synthetic.
+Status: deterministic frontend-neutral engine and concrete native-file, SQLite,
+crypto, and Telegram byte-object adapters are implemented and tested. Runtime
+integration covers encrypted upload, checkpoint restart, Manifest publication,
+fresh-database File Key/layout recovery, authenticated download, whole-file
+equality, and atomic finalization against a deterministic fake remote. Retained
+async desktop ownership, credentialed Telegram system tests, bandwidth control,
+and large-file streaming remain; GUI transfer values are still synthetic.
 
 ## Scope
 
@@ -20,7 +26,12 @@ A `TransferTask` represents one `LogicalFile`; a `TransferPart` represents one a
 
 The engine provides queueing, priority, pause, resume, retry, cancel, bounded concurrency, bandwidth policy, durable checkpoints, structured progress/errors, verification, and restart recovery. It never emits localized prose or GPUI types.
 
-The cooperative `TransferEngine` now owns this policy against project-owned ports and is fully deterministic under an injected clock/jitter source. Its shipped I/O implementation is test support using bounded in-memory fake parts and a non-cryptographic digest, so persisted queue/state data and passing fake tests are not evidence that production bytes were uploaded, downloaded, decrypted, or verified through Telegram.
+The cooperative `TransferEngine` owns this policy against project-owned ports
+and is deterministic under an injected clock/jitter source. `teleark-runtime`
+now supplies a production composition using native files, BLAKE3, SQLite,
+`teleark-crypto`, and the Telegram adapter. Ordinary CI substitutes only the
+remote object store, so it validates real local persistence/crypto/filesystem
+behavior without claiming a credentialed Telegram network run.
 
 ## Ports and ownership
 
@@ -35,7 +46,11 @@ The engine coordinates narrow project-owned ports for:
 
 Production long-running workers will require an explicit async owner and retained handles. The current engine is synchronous and cooperative: each bounded `step` admits only scheduler-approved parts, and cancellation/pause reaches a safe checkpoint boundary without spawning unbounded tasks or sleeping. Its port calls do not hold engine locks because the owner is single-threaded.
 
-The SQLite adapter is deliberately thread-confined for ownership by a bounded runtime worker. Its operations are synchronous and transactional and do not contain network awaits. Adapters connecting the transfer ports to that repository, the current Telegram adapter, production crypto streaming, and native filesystem operations remain unimplemented.
+The SQLite and native-file adapters are deliberately thread-confined for
+ownership by a bounded runtime worker. Their operations are synchronous and do
+not contain network awaits. The Telegram byte-object adapter uses the retained
+Telegram worker, but a retained transfer worker/event boundary has not yet been
+connected to the GUI.
 
 ## Task state machine
 
@@ -108,7 +123,12 @@ inspect source and capture identity
  -> Completed
 ```
 
-The target application part size is 1900 MiB and independent of Telegram Premium. Frame size is smaller and bounded as specified in `CRYPTO_FORMAT.md`. The engine does not create `/tmp/file.part001` or read a whole part into memory. It avoids a separate full-file hash pass by updating hashes while streaming the source in a deterministic plan; if concurrent part reads make whole-file order difficult, the implementation must preserve ordered whole-file hashing without unbounded buffering or justify a measured alternative.
+The compatibility target application part size remains 1900 MiB and independent
+of Telegram Premium. The current production-alpha adapter deliberately caps
+plaintext parts at 60 MiB so each encoded object fits a 64 MiB in-memory safety
+bound; it therefore still allocates one bounded application-part buffer. Frame
+size is 8 MiB. Reaching the compatibility target requires a streaming
+native-file ↔ crypto-frame ↔ Telegram pipeline before release.
 
 ### Source mutation
 
@@ -134,7 +154,13 @@ Remote package ID, part index, generation, and recoverable opaque name form an i
 
 Durably persist state transitions/checkpoints in transactions. A checkpoint includes enough source identity, encoded length/digests, remote locator, attempts, and verification evidence to decide safely after restart. Crash injection tests exercise `AfterRemoteUpload`, `BeforeCheckpointCommit`, and `AfterCheckpointCommit`.
 
-The SQLite checkpoint row stores part offset/size/progress/state, attempts, optional remote-object ID, and opaque versioned non-secret checkpoint bytes. Save operations replace the task and its parts atomically, and a failed validation/write leaves the previous checkpoint set intact. Separately, the generic engine checkpoint port carries source identity, digest, remote-object, attempt, and verification evidence; fake crash-injection tests reconcile remote success before a missing local commit without duplicating a part. These two foundations are not yet adapted to each other or to real Telegram discovery, so production cross-system reconciliation remains incomplete.
+The SQLite checkpoint row stores part offset/size/progress/state, attempts,
+optional remote-object ID, and opaque versioned non-secret checkpoint bytes.
+Save operations replace the task and its parts atomically. The runtime now
+adapts this repository to deterministic Telegram package/part discovery;
+authenticated re-download repairs missing local evidence, and normal lifecycle
+transitions are persisted. Final-output rename versus final database-commit
+crash recovery still needs a dedicated failure-injection policy.
 
 ## Download pipeline
 
@@ -157,7 +183,12 @@ Use safe positional writes (`pwrite` or platform-equivalent adapter) so parts ca
 
 The final filename must not exist as a supposedly complete result until every required authentication/integrity check passes and output is flushed. Existing destination, filesystem permissions, disk-full behavior, cancellation, and cleanup/quarantine of `.partial` files require explicit tested policies.
 
-Resume skips already verified part output only when the checkpoint, destination identity/length, and persisted verification evidence still agree. The fake-backed engine tests this rule, exact whole-file verification, failure isolation, flush-before-finalize ordering, and atomic publication; a native large-file positional-write adapter is still required.
+Resume skips already verified part output only when the checkpoint, destination
+identity/length, and persisted verification evidence agree. Tests cover this
+rule, exact whole-file verification, failure isolation, flush-before-finalize,
+and atomic publication. The native adapter performs positional writes to one
+`.partial` file, incrementally hashes source/final partial files with a fixed
+1 MiB buffer, and uses same-directory atomic rename.
 
 ## Progress and frontend boundary
 
@@ -178,7 +209,14 @@ Retry uses bounded attempts/backoff with jitter from an injectable source and re
 
 ## Testing requirements
 
-Implemented deterministic storage coverage verifies transactional checkpoint round trips, invalid-offset rollback without data loss, layout validation, and interrupted-state requeueing. Core separately tests valid and invalid task/part state transitions and completion invariants. `teleark-transfer` adds 22 deterministic tests covering all scheduler limits, FIFO/priority, cooperative controls, bounded retry and FloodWait, progress coalescing, restart skip/revalidation, source mutation, ambiguous remote success without duplicates, hash failure isolation, and atomic successful download publication.
+Implemented deterministic storage coverage verifies transactional checkpoint
+round trips, invalid-offset rollback without data loss, layout validation, and
+interrupted-state requeueing. `teleark-transfer` adds 25 deterministic tests
+covering scheduler limits, FIFO/priority, cooperative controls, bounded retry,
+FloodWait, restart, source mutation, ambiguous remote success, native file
+identity/positional writes, hash isolation, and atomic download publication.
+Runtime integration adds real SQLite, BLAKE3, encrypted parts, authenticated
+Manifest recovery, and exact download equality over a deterministic remote.
 
 Use a fake Telegram transport, temporary checkpoint store, fake clock, controlled file adapter, deterministic test data, and failure injection. Required tests include:
 

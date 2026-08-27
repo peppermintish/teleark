@@ -24,10 +24,16 @@ use teleark_storage::{
 use teleark_telegram::TelegramAccount;
 
 mod telegram;
+mod transfer;
 
 pub use telegram::{
     DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFilePage, TelegramFileSummary,
     default_telegram_session_path,
+};
+pub use transfer::{
+    EncryptedRemoteTransport, ManifestPublishRequest, ManifestRecoveryReport, ProductionTransferIo,
+    RecoveredManifest, RejectedManifest, RemoteByteObject, RemoteObjectStore,
+    SqliteCheckpointStore, TelegramObjectStore, encrypted_part_sizes, recover_remote_manifests,
 };
 
 const STORAGE_QUEUE_CAPACITY: usize = 64;
