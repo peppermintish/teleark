@@ -1,6 +1,6 @@
 # Index Engine
 
-Status: bounded historical-scan coordinator and SQLite storage foundations are implemented and deterministically tested. The engine owns validated jobs, batch limits, pause/cancel boundaries, CAS checkpoints, idempotent batch identities, content policy, progress publication, and structured FloodWait/failure handling through project-owned ports. Concrete Telegram/storage adapters, incremental updates, compatible-range compaction, retry timing execution, and real GUI coverage integration remain; displayed channel coverage is still synthetic.
+Status: the desktop now performs real Telegram authorization, source selection, bounded 1,000-message document scans, idempotent remote-object projection, and SQLite-backed restart cursors. The richer generic coordinator remains separately tested with CAS batches, pause/cancel, range evidence, and structured retry; its complete repository-model mapping, incremental updates, compatible-range compaction, and retry timing owner remain.
 
 ## Purpose
 

@@ -124,14 +124,6 @@ impl LayoutPolicy {
         }
     }
 
-    pub(crate) fn channel_job_width(self) -> f32 {
-        match self.class {
-            WindowClass::Compact => 280.0,
-            WindowClass::Standard => 320.0,
-            WindowClass::Spacious => 360.0,
-        }
-    }
-
     pub(crate) fn upload_dialog_width(self) -> f32 {
         (self.width - 32.0).clamp(720.0, 920.0)
     }

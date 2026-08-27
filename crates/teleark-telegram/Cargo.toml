@@ -10,7 +10,9 @@ rust-version.workspace = true
 [dependencies]
 grammers-client = "=0.10.0"
 grammers-mtsender = "=0.10.0"
-grammers-session = { version = "=0.10.0", features = ["sqlite-storage"] }
+grammers-session = { version = "=0.10.0", default-features = false, features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
 tokio = { version = "1.52.3", default-features = false, features = ["fs", "rt", "sync"] }
 
 [dev-dependencies]

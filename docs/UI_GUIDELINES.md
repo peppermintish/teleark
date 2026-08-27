@@ -1,6 +1,6 @@
 # UI Guidelines
 
-Status: design contract for a persistent local-Library alpha plus clearly marked preview routes. The two supplied reference images are the visual source of truth. Library import/search/filter/detail/pagination and local open/reveal actions use real persisted data; preview screens do not imply functioning end-to-end Telegram, transfer, index, recovery, or Vault workflows.
+Status: design contract for a persistent local Library plus real Telegram login/source selection/bounded indexing. The two supplied reference images are the visual source of truth. Transfer, encrypted recovery, and Vault routes remain preview-only and must not imply an end-to-end workflow that is not implemented.
 
 ## Product abstraction and branding
 
@@ -172,5 +172,6 @@ The current reproducible launch matrix uses `960x640`, `1360x760`, and
 `1920x1080` for each of the seven routes and three locales (63 launches). Unit
 tests additionally exercise the `900x600` supported minimum and breakpoint
 budgets. Passing these checks establishes startup and layout-policy coverage,
-not pixel fidelity; a locked/privacy-restricted macOS desktop still blocks the
-required captured comparison against the references.
+not pixel fidelity. The window launcher fits oversized requests to the active
+display before centering; the remaining captured comparison work covers the
+full route/locale matrix and authenticated Telegram states.

@@ -1,0 +1,29 @@
+[package]
+name = "teleark-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+teleark-crypto = { path = "../crates/teleark-crypto" }
+
+[[bin]]
+name = "part_decode"
+path = "fuzz_targets/part_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_decode"
+path = "fuzz_targets/manifest_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

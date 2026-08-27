@@ -1,34 +1,32 @@
 # Implementation Status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## Current milestone
 
-TeleArk is a **usable persistent local-catalog alpha with tested backend
-foundations**. A user can import local file metadata, keep it between launches,
-search and filter it, page through results, inspect a real file, open it with
-the system application, reveal it in Finder, and persist an interface language
-or follow System Default.
+TeleArk is a **persistent local-catalog alpha with a real Telegram indexing
+entry path**. In addition to local import/search/open/reveal, the desktop now
+accepts Telegram API credentials, performs code and 2FA authorization, lists
+real dialogs, and scans a selected source in bounded pages into SQLite/FTS5.
 
-Telegram authentication/transport, historical indexing, transfer scheduling,
-and provisional crypto formats now have frontend-neutral implementations and
-deterministic tests. They are not yet composed into an end-to-end desktop
-Telegram/Vault workflow. Transfers, Channel Index, Upload, Key Vault, and most
-Settings content therefore remain visibly marked Preview.
+The native Telegram indexing entry path is real, but it is not yet the complete
+CAS/range coordinator and does not include live-update ingestion. Transfer,
+encrypted package recovery, Key Vault, and most Settings content remain
+preview-only.
 
 ## Implemented capability
 
 | Area | Current evidence | Deliberate limit |
 | --- | --- | --- |
 | Core application API | Typed Library queries, imports, pages, statistics, repository port, structured errors; 25 Core tests total | Transfer/Index/Vault services are separate foundations, not one application command bus |
-| Persistent Library | SQLite migrations v1-v4, strict tables, FTS5, facets, exact result counts, keyset cursors, settings, collections, index rows, transfer checkpoints; 15 temporary-database tests | No automatic source watching, deduplication policy, collection editor, or million-row benchmark yet |
-| Desktop runtime | Bounded storage-worker lifecycle, default per-user DB, import inspection, path fidelity, locale override persistence; 4 tests | Runtime currently composes only the local Library/settings path |
-| GPUI desktop | Real Library import/search/filter/detail/pagination/open/reveal; compact/standard/spacious layouts; explicit Preview states; 26 GUI tests after this milestone | Other product routes still use deterministic fixtures; large lists are bounded by pages but not yet virtualized |
+| Persistent Library | SQLite migrations v1-v5, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, transfer checkpoints; 17 temporary-database tests | Vault package/manifest tables, collection editor, and million-row benchmark remain |
+| Desktop runtime | Bounded storage and Tokio Telegram workers, login/2FA, dialog discovery, idempotent document projection, restart cursor persistence, local import and locale persistence; 6 tests | Telegram credentials are entered per connection; OS credential-store integration remains |
+| GPUI desktop | Real Library and Telegram connection/source scan routes; compact/standard/spacious layouts; 26 GUI tests | Transfer/Vault routes still use fixtures; large lists are bounded but not virtualized |
 | Localization | Complete synchronized Fluent catalogs for `en-US`, `zh-CN`, and `ja-JP`; live switching, persistent explicit override, System Default; 20 tests | Native-speaker, assistive-technology, and pixel-level locale review remain |
-| Telegram adapter | `grammers` 0.10 session connection, authorization/2FA flow, dialogs, bounded history scan, native upload/download, sign-out/shutdown, structured FloodWait/errors; 4 adapter tests | Not connected to GUI/runtime; ordinary tests use no live credentials; production session/keychain UX remains |
-| Historical Index Engine | Bounded coordinator, content policy, redacted cursors, CAS checkpoints, deterministic idempotent batches, pause/cancel/retry/FloodWait; 12 tests including 10,000-record resume | Concrete Telegram/SQLite adapters, incremental updates, retry timing owner, range compaction, and real coverage UI remain |
+| Telegram adapter | `grammers` 0.10 connection, code/2FA, dialogs, refetch by message identity, bounded cursor scans, upload/download, structured errors, and a versioned atomic `0600` session cache; 6 tests | Ordinary tests use no live credentials; OS credential-store UX remains |
+| Historical Index Engine | Desktop Telegram-to-SQLite bounded scan with durable cursor plus the separate CAS/range coordinator and its 12 deterministic tests | Full coordinator repository mapping, live updates, retry owner, pause/cancel UI, and range compaction remain |
 | Transfer Engine | Bounded scheduler, global/direction/account/file limits, priority/FIFO, controls, retry/FloodWait, progress coalescing, checkpoint/I/O ports, reconciliation and safe `.partial` finalization; 22 tests | Execution is cooperative/synchronous against fakes; real async Telegram/SQLite/crypto/filesystem streaming and bandwidth control remain |
-| Crypto/manifest candidate | Explicit bounded codecs, AES-256-GCM framing, HKDF/BLAKE3/Argon2id, key wrapping, redacted secrets/metadata, mandatory AEAD-usage registry and candidate fixtures; 35 tests | Formats remain provisional: no independent security review, production key vault, integrated recovery, fuzz campaign, or shipped compatibility promise |
+| Crypto/manifest candidate | Explicit bounded codecs, 35 deterministic tests, two build-checked libFuzzer targets, daily bounded fuzz workflow, and an external audit package | Formats remain provisional: no independent review, production key vault, integrated recovery, long campaign evidence, or compatibility promise |
 | Packaging | Local macOS development build and baseline release workflow | No signed/notarized installer or production platform-support claim |
 
 ## Architecture and data truth
@@ -64,10 +62,11 @@ x 960x640, 1360x760, 1920x1080
 ```
 
 All 63 configurations started and remained alive for the bounded smoke period.
-This verifies startup and gross layout-policy selection, not actual pixels. The
-macOS desktop remained locked/privacy-restricted during automated capture, so
-reference-image overlay comparison and exhaustive real text-clipping inspection
-must still be completed on an unlocked desktop.
+This verifies startup and gross layout-policy selection, not actual pixels.
+Unlocked macOS captures additionally verify the Telegram login route at
+`900x600` in English, `1360x760` in Simplified Chinese, and a requested
+`1920x1080` in Japanese. Oversized requests are now fitted to the current
+display before centering, preventing off-screen content.
 
 ## Verification evidence
 
@@ -95,13 +94,16 @@ policy exceptions remain governed by `deny.toml` and third-party notices.
 
 ## Known gaps and risks
 
-- No desktop flow yet logs into Telegram, selects a real storage channel,
-  invokes the Index coordinator, or runs the Transfer engine.
+- Desktop login, source selection, and bounded document indexing are real. The
+  richer generic Index coordinator is not yet the production desktop owner.
 - The current Index and Transfer engines have strong fake-backed behavior but
   still need concrete adapters, async lifecycle ownership, crash/restart
   integration, and end-to-end failure injection.
 - Crypto/manifest candidate vectors are not a stable released format and must
   not be treated as a recovery guarantee.
+- Scheduled fuzzing is continuous regression pressure, not proof of security.
+  An independent reviewer must still sign the exact release candidate, and the
+  format cannot be frozen until encrypted database-loss recovery is integrated.
 - Library rows are paged but not virtualized; million-record performance and UI
   memory behavior are unmeasured.
 - Existing imported source files can move or disappear; open/reveal uses the
@@ -114,13 +116,15 @@ policy exceptions remain governed by `deny.toml` and third-party notices.
   preview-only states rather than leaking unfiltered real Library rows.
 - Accessibility, focus trapping, reduced motion, screen-reader labels, and
   native-speaker wording still need dedicated product review.
-- Actual pixel comparison at multiple window sizes remains blocked until the
-  macOS desktop is unlocked for capture.
+- Actual screenshots now verify the Telegram login route at `900x600` in
+  English, `1360x760` in Simplified Chinese, and display-fitted `1920x1080` in
+  Japanese. The full route/locale pixel matrix and authenticated channel-list
+  states still need capture.
 
 ## Next implementation sequence
 
-1. Compose the Telegram adapter, Index coordinator, and SQLite repositories
-   behind Runtime services, then replace Channel Index fixtures.
+1. Map the generic Index coordinator repository and retry/cancellation policy
+   onto the working bounded Telegram-to-SQLite desktop scan path.
 2. Adapt Transfer ports to Telegram, Storage, Crypto, and a streaming native
    filesystem implementation with retained async ownership and bounded queues.
 3. Complete fake-remote upload, database-loss recovery, authenticated manifest

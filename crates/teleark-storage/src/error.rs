@@ -42,6 +42,7 @@ pub enum InvariantViolation {
     TransferProgress,
     IndexCheckpointOutsideRange,
     OverlappingIndexRange,
+    RemoteRevisionConflict,
     SmartCollectionMembership,
 }
 

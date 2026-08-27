@@ -10,14 +10,14 @@ eventually be stored as dozens of encrypted Telegram objects, but the library
 will still present one name, one size, one transfer, and one recovery record.
 
 > [!IMPORTANT]
-> TeleArk is an early alpha. The local library described below is functional,
-> while Telegram account setup, channel indexing, uploads, downloads, Vault,
-> and recovery are not yet connected to the desktop interface. Do not rely on
-> this build as the only copy of important data or secrets.
+> TeleArk is an early alpha. The local library and bounded Telegram channel
+> indexing described below are functional. Uploads, encrypted downloads, Vault,
+> and recovery are not complete. Do not rely on this build as the only copy of
+> important data or secrets.
 
 ## What works today
 
-The current desktop build provides a useful local catalog:
+The current desktop build provides a useful local catalog and Telegram index:
 
 - import one or more files with the macOS file picker;
 - retain the catalog between launches in a local SQLite database;
@@ -29,11 +29,14 @@ The current desktop build provides a useful local catalog:
 - switch live between English, Simplified Chinese, and Japanese, remember an
   explicit choice, or follow the system language;
 - use compact, standard, and large desktop window layouts.
+- sign in to Telegram with a login code and optional two-step verification;
+- choose a real Telegram source and scan its history in bounded pages;
+- retain Telegram file identities and scan progress in SQLite so later scans
+  continue from the last committed page.
 
-Importing records file metadata only. TeleArk does not copy, move, alter, or
-upload the selected file in this alpha. The Transfer, Channel Index, Upload,
-Key Vault, and most Settings content is visibly marked **Preview** because it
-still uses demonstration data.
+Importing local files records metadata only. TeleArk does not copy, move, alter,
+or upload those selected files. Transfer, Upload, Key Vault, and most Settings
+content is visibly marked **Preview** because it still uses demonstration data.
 
 ## Run TeleArk
 
@@ -44,9 +47,9 @@ open this repository in Terminal, and run:
 cargo run -p teleark-gui --bin teleark
 ```
 
-Open **Library**, choose **Import files**, and select the files you want to add
-to the catalog. Search and file-type filters operate on the persistent local
-index.
+Open **Library** to import local files, or open **Telegram Sources** to connect
+an account and index channel documents. Search and file-type filters operate on
+the persistent local index.
 
 The default catalog is stored at:
 
@@ -63,6 +66,7 @@ cargo run -p teleark-gui -- --screen=library --locale=ja-JP --window-size=960x64
 Available screen values are `library`, `transfers`, `file`, `vault`, `channel`,
 `settings`, and `upload`. Locale values are `en-US`, `zh-CN`, and `ja-JP`.
 Window sizes below `900x600` are raised to the supported compact minimum.
+Requests larger than the active display are fitted to its visible bounds.
 
 ## Where TeleArk is heading
 
@@ -84,7 +88,9 @@ upload limits.
 
 - The local catalog contains filenames, source paths, sizes, and timestamps.
   Protect your macOS account and backups accordingly.
-- Preview transfer and channel rows are fictional and do not contact Telegram.
+- The Telegram Sources route contacts Telegram only after you provide
+  credentials and choose an action. Transfer and Vault preview data remains
+  fictional.
 - The current encryption and manifest implementation is still provisional and
   is not wired into desktop storage workflows.
 - A future encrypted Vault cannot hide all metadata from Telegram; account and

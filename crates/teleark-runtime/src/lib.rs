@@ -17,8 +17,17 @@ use teleark_core::{
     LogicalFileId,
 };
 use teleark_storage::{
-    Database, FileSearchFacets, LogicalFileRecord, NewLogicalFileRecord, PageCursor, SearchQuery,
-    SettingRecord, StorageError,
+    AccountRecord, ChatRecord, Database, FileSearchFacets, LogicalFileRecord, NewLogicalFileRecord,
+    PageCursor, RemoteFileUpsert, SearchQuery, SettingRecord, StorageError,
+    TelegramIndexStateRecord,
+};
+use teleark_telegram::TelegramAccount;
+
+mod telegram;
+
+pub use telegram::{
+    DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFilePage, TelegramFileSummary,
+    default_telegram_session_path,
 };
 
 const STORAGE_QUEUE_CAPACITY: usize = 64;
@@ -77,6 +86,14 @@ pub struct DesktopLibrary {
     worker: StorageWorker,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelegramIndexPage {
+    pub files_indexed: u64,
+    pub messages_scanned: u64,
+    pub next_before_message_id: Option<i64>,
+    pub exhausted: bool,
+}
+
 impl DesktopLibrary {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let path = path.as_ref();
@@ -133,6 +150,98 @@ impl DesktopLibrary {
         }
         self.worker.set_locale_override(locale)
     }
+
+    /// Persists the authorized account and its currently visible dialogs.
+    pub fn save_telegram_sources(
+        &self,
+        account: &TelegramAccount,
+        chats: &[TelegramChatSummary],
+    ) -> Result<(), ApplicationError> {
+        self.worker.save_telegram_sources(account, chats)
+    }
+
+    /// Fetches one bounded Telegram history page and atomically projects every
+    /// document into SQLite. The returned cursor advances over non-file
+    /// messages too, so restart cannot stall on a text-only history region.
+    pub fn index_telegram_page(
+        &self,
+        telegram: &DesktopTelegram,
+        account_id: i64,
+        chat_id: i64,
+        before_message_id: Option<i64>,
+        limit: usize,
+    ) -> Result<TelegramIndexPage, ApplicationError> {
+        let account_id = teleark_core::AccountId::new(account_id);
+        let chat_id = teleark_core::ChatId::new(chat_id);
+        let previous = self.worker.telegram_index_state(account_id, chat_id)?;
+        if previous.as_ref().is_some_and(|state| state.exhausted) {
+            let previous =
+                previous.ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            return Ok(TelegramIndexPage {
+                files_indexed: previous.files_indexed,
+                messages_scanned: previous.messages_scanned,
+                next_before_message_id: None,
+                exhausted: true,
+            });
+        }
+        let durable_before = previous
+            .as_ref()
+            .and_then(|state| state.before_message_id)
+            .map(teleark_core::MessageId::get)
+            .or(before_message_id);
+        let page = telegram.scan_file_page(chat_id.get(), durable_before, limit)?;
+        let files = page
+            .files
+            .iter()
+            .map(|file| RemoteFileUpsert {
+                account_id,
+                chat_id,
+                message_id: teleark_core::MessageId::new(file.message_id),
+                revision: u64::try_from(file.modified_at_unix_ms.max(0)).unwrap_or_default(),
+                remote_key: file.message_id.to_be_bytes().to_vec(),
+                name: if file.file_name.trim().is_empty() {
+                    format!("telegram-document-{}", file.message_id)
+                } else {
+                    file.file_name.clone()
+                },
+                size_bytes: file.size_bytes,
+                kind: classify_file(Path::new(&file.file_name)),
+                mime_type: file.mime_type.clone(),
+                caption: (!file.caption.is_empty()).then(|| file.caption.clone()),
+                modified_at_unix_ms: file.modified_at_unix_ms,
+            })
+            .collect();
+        let page_files = self.worker.upsert_remote_files(files)?;
+        let files_indexed = previous
+            .as_ref()
+            .map_or(0, |state| state.files_indexed)
+            .checked_add(page_files)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        let messages_scanned = previous
+            .as_ref()
+            .map_or(0, |state| state.messages_scanned)
+            .checked_add(page.examined_messages)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        let state = TelegramIndexStateRecord {
+            account_id,
+            chat_id,
+            before_message_id: page
+                .next_before_message_id
+                .map(teleark_core::MessageId::new),
+            exhausted: page.exhausted,
+            messages_scanned,
+            files_indexed,
+            updated_at_unix_ms: system_time_unix_ms(SystemTime::now())
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+        };
+        self.worker.save_telegram_index_state(state)?;
+        Ok(TelegramIndexPage {
+            files_indexed,
+            messages_scanned,
+            next_before_message_id: page.next_before_message_id,
+            exhausted: page.exhausted,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -170,6 +279,24 @@ enum StorageRequest {
     },
     SetLocaleOverride {
         locale: Option<String>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    SaveTelegramSources {
+        account: AccountRecord,
+        chats: Vec<ChatRecord>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    UpsertRemoteFiles {
+        files: Vec<RemoteFileUpsert>,
+        reply: SyncSender<Result<u64, ApplicationError>>,
+    },
+    TelegramIndexState {
+        account_id: teleark_core::AccountId,
+        chat_id: teleark_core::ChatId,
+        reply: SyncSender<Result<Option<TelegramIndexStateRecord>, ApplicationError>>,
+    },
+    SaveTelegramIndexState {
+        state: TelegramIndexStateRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     Shutdown,
@@ -233,6 +360,63 @@ impl StorageWorker {
             locale: locale.map(str::to_owned),
             reply,
         })
+    }
+
+    fn save_telegram_sources(
+        &self,
+        account: &TelegramAccount,
+        chats: &[TelegramChatSummary],
+    ) -> Result<(), ApplicationError> {
+        let now = system_time_unix_ms(SystemTime::now())
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let account = AccountRecord {
+            id: teleark_core::AccountId::new(account.id),
+            display_name: account.display_name.clone(),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+        let chats = chats
+            .iter()
+            .map(|chat| ChatRecord {
+                account_id: account.id,
+                id: teleark_core::ChatId::new(chat.id),
+                title: if chat.name.trim().is_empty() {
+                    chat.username.clone().unwrap_or_else(|| chat.id.to_string())
+                } else {
+                    chat.name.clone()
+                },
+                username: chat.username.clone(),
+                updated_at_unix_ms: now,
+            })
+            .collect();
+        self.request(|reply| StorageRequest::SaveTelegramSources {
+            account,
+            chats,
+            reply,
+        })
+    }
+
+    fn upsert_remote_files(&self, files: Vec<RemoteFileUpsert>) -> Result<u64, ApplicationError> {
+        self.request(|reply| StorageRequest::UpsertRemoteFiles { files, reply })
+    }
+
+    fn telegram_index_state(
+        &self,
+        account_id: teleark_core::AccountId,
+        chat_id: teleark_core::ChatId,
+    ) -> Result<Option<TelegramIndexStateRecord>, ApplicationError> {
+        self.request(|reply| StorageRequest::TelegramIndexState {
+            account_id,
+            chat_id,
+            reply,
+        })
+    }
+
+    fn save_telegram_index_state(
+        &self,
+        state: TelegramIndexStateRecord,
+    ) -> Result<(), ApplicationError> {
+        self.request(|reply| StorageRequest::SaveTelegramIndexState { state, reply })
     }
 }
 
@@ -321,9 +505,63 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let result = set_locale_override(&mut database, locale.as_deref());
                 let _ = reply.send(result);
             }
+            StorageRequest::SaveTelegramSources {
+                account,
+                chats,
+                reply,
+            } => {
+                let result = save_telegram_sources(&mut database, &account, &chats);
+                let _ = reply.send(result);
+            }
+            StorageRequest::UpsertRemoteFiles { files, reply } => {
+                let result = upsert_remote_files(&mut database, &files);
+                let _ = reply.send(result);
+            }
+            StorageRequest::TelegramIndexState {
+                account_id,
+                chat_id,
+                reply,
+            } => {
+                let result = database
+                    .telegram_index_state(account_id, chat_id)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::SaveTelegramIndexState { state, reply } => {
+                let result = database
+                    .save_telegram_index_state(&state)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
             StorageRequest::Shutdown => break,
         }
     }
+}
+
+fn save_telegram_sources(
+    database: &mut Database,
+    account: &AccountRecord,
+    chats: &[ChatRecord],
+) -> Result<(), ApplicationError> {
+    database
+        .upsert_account(account)
+        .map_err(map_storage_error)?;
+    for chat in chats {
+        database.upsert_chat(chat).map_err(map_storage_error)?;
+    }
+    Ok(())
+}
+
+fn upsert_remote_files(
+    database: &mut Database,
+    files: &[RemoteFileUpsert],
+) -> Result<u64, ApplicationError> {
+    for file in files {
+        database
+            .upsert_remote_file(file)
+            .map_err(map_storage_error)?;
+    }
+    u64::try_from(files.len()).map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))
 }
 
 fn search_database(

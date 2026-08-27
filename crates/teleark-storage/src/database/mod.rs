@@ -1,6 +1,8 @@
 mod collections;
 mod index;
+mod remote;
 mod search;
+mod telegram_index;
 mod transfers;
 
 use std::ffi::OsString;
@@ -24,7 +26,7 @@ use crate::{StorageError, StorageResult};
 pub const LATEST_SCHEMA_VERSION: u32 = migration::LATEST_SCHEMA_VERSION;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const LOGICAL_FILE_COLUMNS: &str = r#"
+pub(super) const LOGICAL_FILE_COLUMNS: &str = r#"
     id, name, relative_path, size_bytes, kind, mime_type, extension, caption,
     source_account_id, source_chat_id, created_at_unix_ms, modified_at_unix_ms,
     remote_state, encryption_state, verification_state, package_id, locally_available,
@@ -381,7 +383,7 @@ WHERE entity = 'logical_file'
     Ok(())
 }
 
-fn row_to_logical_file(row: &Row<'_>) -> StorageResult<LogicalFileRecord> {
+pub(super) fn row_to_logical_file(row: &Row<'_>) -> StorageResult<LogicalFileRecord> {
     let raw_id: i64 = row.get(0)?;
     let raw_size: i64 = row.get(3)?;
     let raw_kind: String = row.get(4)?;

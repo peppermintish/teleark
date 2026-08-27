@@ -17,11 +17,12 @@ use grammers_client::{
     message::InputMessage,
 };
 use grammers_mtsender::{InvocationError, SenderPool};
-use grammers_session::{
-    storages::SqliteSession,
-    types::{PeerKind, PeerRef},
-};
+use grammers_session::types::{PeerKind, PeerRef};
 use tokio::task::JoinHandle;
+
+mod session;
+
+use session::FileSession;
 
 const MAX_DIALOGS_PER_REQUEST: usize = 10_000;
 const MAX_MESSAGES_PER_SCAN: usize = 10_000;
@@ -184,6 +185,25 @@ pub struct TelegramFile {
     document: Document,
 }
 
+#[derive(Clone, Debug)]
+pub struct TelegramFilePage {
+    files: Vec<TelegramFile>,
+    next_before_message_id: Option<i64>,
+    exhausted: bool,
+    examined_messages: usize,
+}
+
+impl TelegramFilePage {
+    pub fn into_parts(self) -> (Vec<TelegramFile>, Option<i64>, bool, usize) {
+        (
+            self.files,
+            self.next_before_message_id,
+            self.exhausted,
+            self.examined_messages,
+        )
+    }
+}
+
 impl TelegramFile {
     pub const fn message_id(&self) -> i64 {
         self.message_id
@@ -229,8 +249,7 @@ impl TelegramConnection {
         prepare_session_parent(&config.session_path).await?;
 
         let session = Arc::new(
-            SqliteSession::open(&config.session_path)
-                .await
+            FileSession::open(&config.session_path)
                 .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?,
         );
         restrict_session_permissions(&config.session_path).await?;
@@ -255,6 +274,15 @@ impl TelegramConnection {
 
     pub async fn is_authorized(&self) -> Result<bool, TelegramError> {
         self.client.is_authorized().await.map_err(map_invocation)
+    }
+
+    pub async fn current_account(&self) -> Result<TelegramAccount, TelegramError> {
+        require_authorized(&self.client).await?;
+        self.client
+            .get_me()
+            .await
+            .map(|user| account_from_user(&user))
+            .map_err(map_invocation)
     }
 
     pub async fn request_login_code(
@@ -368,6 +396,19 @@ impl TelegramConnection {
         before_message_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<TelegramFile>, TelegramError> {
+        self.scan_file_page(chat, before_message_id, limit)
+            .await
+            .map(|page| page.files)
+    }
+
+    /// Scans a bounded history page while preserving the last examined
+    /// message as a durable cursor even when the page contains non-documents.
+    pub async fn scan_file_page(
+        &self,
+        chat: &TelegramChat,
+        before_message_id: Option<i64>,
+        limit: usize,
+    ) -> Result<TelegramFilePage, TelegramError> {
         validate_limit(limit, MAX_MESSAGES_PER_SCAN)?;
         let offset = before_message_id
             .map(i32::try_from)
@@ -381,26 +422,41 @@ impl TelegramConnection {
             .offset_id(offset)
             .limit(limit);
         let mut files = Vec::new();
+        let mut examined = 0_usize;
+        let mut last_message_id = None;
         while let Some(message) = messages.next().await.map_err(map_invocation)? {
-            let Some(Media::Document(document)) = message.media() else {
-                continue;
-            };
-            let Some(size) = document.size() else {
-                continue;
-            };
-            let size_bytes = u64::try_from(size)
-                .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-            files.push(TelegramFile {
-                message_id: i64::from(message.id()),
-                modified_at_unix_ms: message.date().timestamp_millis(),
-                file_name: document.name().unwrap_or_default().to_owned(),
-                caption: message.text().to_owned(),
-                mime_type: document.mime_type().map(ToOwned::to_owned),
-                size_bytes,
-                document,
-            });
+            examined = examined.saturating_add(1);
+            last_message_id = Some(i64::from(message.id()));
+            if let Some(file) = file_from_message(message)? {
+                files.push(file);
+            }
         }
-        Ok(files)
+        let exhausted = examined < limit;
+        Ok(TelegramFilePage {
+            files,
+            next_before_message_id: (!exhausted).then_some(last_message_id).flatten(),
+            exhausted,
+            examined_messages: examined,
+        })
+    }
+
+    /// Refetches one indexed document by its source message identity.
+    pub async fn fetch_file(
+        &self,
+        chat: &TelegramChat,
+        message_id: i64,
+    ) -> Result<Option<TelegramFile>, TelegramError> {
+        let message_id = i32::try_from(message_id)
+            .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+        let mut messages = self
+            .client
+            .get_messages_by_id(chat.peer_ref, &[message_id])
+            .await
+            .map_err(map_invocation)?;
+        let Some(message) = messages.pop().flatten() else {
+            return Ok(None);
+        };
+        file_from_message(message)
     }
 
     /// Downloads a previously indexed document to an explicit caller-selected path.
@@ -542,6 +598,32 @@ fn account_from_user(user: &grammers_client::peer::User) -> TelegramAccount {
         display_name: user.full_name(),
         username: user.username().map(ToOwned::to_owned),
     }
+}
+
+fn file_from_message(
+    message: grammers_client::message::Message,
+) -> Result<Option<TelegramFile>, TelegramError> {
+    let Some(Media::Document(document)) = message.media() else {
+        return Ok(None);
+    };
+    let Some(size) = document.size() else {
+        return Ok(None);
+    };
+    let size_bytes =
+        u64::try_from(size).map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+    let modified_at_unix_ms = message
+        .edit_date()
+        .unwrap_or_else(|| message.date())
+        .timestamp_millis();
+    Ok(Some(TelegramFile {
+        message_id: i64::from(message.id()),
+        modified_at_unix_ms,
+        file_name: document.name().unwrap_or_default().to_owned(),
+        caption: message.text().to_owned(),
+        mime_type: document.mime_type().map(ToOwned::to_owned),
+        size_bytes,
+        document,
+    }))
 }
 
 fn map_invocation(error: InvocationError) -> TelegramError {

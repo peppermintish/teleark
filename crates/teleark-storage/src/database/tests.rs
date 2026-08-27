@@ -13,9 +13,10 @@ use crate::error::{CursorError, InvariantViolation};
 use crate::migration::{APPLICATION_ID, LATEST_SCHEMA_VERSION, MIGRATIONS};
 use crate::model::{
     AccountRecord, ChatRecord, CollectionKind, CollectionRecord, FileSearchFacets, IndexBatch,
-    IndexJobRecord, IndexRangeRecord, NewLogicalFileRecord, SearchQuery, SettingRecord,
-    StoredIndexCoverage, StoredIndexJobState, StoredPartState, StoredTransferDirection,
-    StoredTransferState, TransferPartCheckpoint, TransferTaskRecord,
+    IndexJobRecord, IndexRangeRecord, NewLogicalFileRecord, RemoteFileUpsert, SearchQuery,
+    SettingRecord, StoredIndexCoverage, StoredIndexJobState, StoredPartState,
+    StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord, TransferPartCheckpoint,
+    TransferTaskRecord,
 };
 
 fn account(id: i64) -> AccountRecord {
@@ -537,5 +538,77 @@ fn foreign_keys_reject_unscoped_source_rows() -> Result<(), Box<dyn Error>> {
         database.upsert_logical_file(&file),
         Err(StorageError::Sqlite(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    seed_account_chat(&mut database)?;
+    let mut incoming = RemoteFileUpsert {
+        account_id: AccountId::new(1),
+        chat_id: ChatId::new(2),
+        message_id: MessageId::new(77),
+        revision: 1,
+        remote_key: 77_i64.to_be_bytes().to_vec(),
+        name: "remote.pdf".to_owned(),
+        size_bytes: 42,
+        kind: FileKind::Document,
+        mime_type: Some("application/pdf".to_owned()),
+        caption: Some("source caption".to_owned()),
+        modified_at_unix_ms: 1_000,
+    };
+
+    let (first_file, first_remote) = database.upsert_remote_file(&incoming)?;
+    let (same_file, same_remote) = database.upsert_remote_file(&incoming)?;
+    assert_eq!(same_file, first_file);
+    assert_eq!(same_remote, first_remote);
+    assert_eq!(
+        database.remote_object_by_source(
+            incoming.account_id,
+            incoming.chat_id,
+            incoming.message_id
+        )?,
+        Some(first_remote.clone())
+    );
+
+    incoming.revision = 2;
+    incoming.name = "renamed.pdf".to_owned();
+    incoming.modified_at_unix_ms = 2_000;
+    let (updated_file, updated_remote) = database.upsert_remote_file(&incoming)?;
+    assert_eq!(updated_file.id, first_file.id);
+    assert_eq!(updated_remote.id, first_remote.id);
+    assert_eq!(updated_file.name, "renamed.pdf");
+
+    let mut conflicting = incoming.clone();
+    conflicting.remote_key = b"different".to_vec();
+    assert!(matches!(
+        database.upsert_remote_file(&conflicting),
+        Err(StorageError::Invariant(
+            InvariantViolation::RemoteRevisionConflict
+        ))
+    ));
+    assert_eq!(database.logical_file(first_file.id)?, Some(updated_file));
+    Ok(())
+}
+
+#[test]
+fn telegram_index_cursor_round_trips_for_restart_resume() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    seed_account_chat(&mut database)?;
+    let state = TelegramIndexStateRecord {
+        account_id: AccountId::new(1),
+        chat_id: ChatId::new(2),
+        before_message_id: Some(MessageId::new(900)),
+        exhausted: false,
+        messages_scanned: 1_000,
+        files_indexed: 73,
+        updated_at_unix_ms: 44,
+    };
+    database.save_telegram_index_state(&state)?;
+    assert_eq!(
+        database.telegram_index_state(state.account_id, state.chat_id)?,
+        Some(state)
+    );
     Ok(())
 }

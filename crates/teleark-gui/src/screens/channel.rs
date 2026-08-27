@@ -1,16 +1,13 @@
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::IconName;
-use gpui_component::scroll::ScrollableElement as _;
-use teleark_i18n::{
-    MessageArgs,
-    format::{format_integer, format_percent},
-};
+use gpui_component::{Icon, IconName, input::Input, scroll::ScrollableElement as _};
+use teleark_i18n::{MessageArgs, format::format_integer};
+use teleark_runtime::TelegramAuthState;
 
 use crate::{
-    app::TeleArkApp,
+    app::{TeleArkApp, TelegramActivity},
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
@@ -24,291 +21,16 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let padding = layout.content_padding();
-        let range_progress = format_percent(self.locale(), 0.62, 0);
-        let checkpoint = self.tr_with(
-            "index-job-checkpoint-value",
-            MessageArgs::new().with("id", format_integer(self.locale(), 653_820)),
-        );
-        let toolbar = div()
-            .h(px(58.0))
-            .px(px(padding))
-            .flex()
-            .items_center()
-            .child(components::section_title(self.tr("index-channel-title")))
-            .child(div().flex_1())
-            .child(components::button(
-                "channel-options",
-                self.tr("index-options"),
-                Some(IconName::Settings2),
-                false,
-            ));
-
-        let channel_header = components::card()
-            .mx(px(padding))
-            .p(px(padding))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_4()
-            .child(
-                div()
-                    .size(px(58.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(theme::purple_soft())
-                    .text_color(theme::purple())
-                    .text_lg()
-                    .font_weight(FontWeight::BOLD)
-                    .child("4K"),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.selected_source),
-                            )
-                            .child(components::badge(
-                                self.tr("index-status-synced"),
-                                Tone::Green,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr("index-channel-description")),
-                    ),
-            )
-            .child(channel_metric(
-                self.tr("index-messages-scanned"),
-                "1,284,921",
-            ))
-            .child(channel_metric(self.tr("index-files-indexed"), "392,104"))
-            .child(channel_metric(self.tr("index-indexed-size"), "18.76 TB"))
-            .child(channel_metric(self.tr("index-latest-sync"), "4m"));
-
-        let overview = div()
-            .mt_4()
-            .mx(px(padding))
-            .grid()
-            .when(layout.is_compact(), |overview| overview.grid_cols(2))
-            .when(!layout.is_compact(), |overview| overview.grid_cols(4))
-            .gap_3()
-            .child(index_summary(
-                self.tr("index-new-files"),
-                "+128",
-                self.tr("index-since-last-sync"),
-                Tone::Green,
-            ))
-            .child(index_summary(
-                self.tr("index-current-date"),
-                "2020-11-18",
-                self.tr("index-history-scan"),
-                Tone::Blue,
-            ))
-            .child(index_summary(
-                self.tr("index-scan-speed"),
-                "2,430 msg/s",
-                self.tr("index-batch-size"),
-                Tone::Purple,
-            ))
-            .child(index_summary(
-                self.tr("index-estimated-time"),
-                "1h 42m",
-                self.tr("index-until-complete"),
-                Tone::Amber,
-            ));
-
-        let coverage = components::card()
-            .flex_1()
-            .min_w_0()
-            .when(!layout.is_compact(), |coverage| coverage.h_full())
-            .when(layout.is_compact(), |coverage| coverage.flex_none())
-            .p_5()
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(components::section_title(self.tr("index-coverage-title")))
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child(self.tr("index-coverage-description")),
-                            ),
-                    )
-                    .child(coverage_legend(self)),
-            )
-            .child(
-                div()
-                    .mt_5()
-                    .h(px(185.0))
-                    .flex()
-                    .items_end()
-                    .gap_3()
-                    .children([
-                        coverage_year("2018", 100.0, Coverage::Complete),
-                        coverage_year("2019", 100.0, Coverage::Complete),
-                        coverage_year("2020", 62.0, Coverage::Partial),
-                        coverage_year("2021", 0.0, Coverage::Missing),
-                        coverage_year("2022", 100.0, Coverage::Complete),
-                        coverage_year("2023", 100.0, Coverage::Complete),
-                        coverage_year("2024", 100.0, Coverage::Complete),
-                        coverage_year("2025", 100.0, Coverage::Complete),
-                        coverage_year("2026", 84.0, Coverage::Partial),
-                    ]),
-            )
-            .child(
-                div()
-                    .mt_5()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .grid()
-                    .grid_cols(3)
-                    .gap_3()
-                    .child(range_card(
-                        self.tr("index-range-complete"),
-                        "2018-01-01 — 2019-12-31",
-                        Tone::Green,
-                    ))
-                    .child(range_card(
-                        self.tr("index-range-active"),
-                        "2020-01-01 — 2020-11-18",
-                        Tone::Blue,
-                    ))
-                    .child(range_card(
-                        self.tr("index-range-unscanned"),
-                        "2021-01-01 — 2021-12-31",
-                        Tone::Neutral,
-                    )),
-            );
-
-        let job = components::card()
-            .w(px(layout.channel_job_width()))
-            .when(layout.is_compact(), |job| job.w_full())
-            .when(!layout.is_compact(), |job| job.h_full())
-            .flex_none()
-            .p_5()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(components::section_title(self.tr("index-current-job")))
-                    .child(div().flex_1())
-                    .child(components::badge(
-                        if self.index_paused {
-                            self.tr("index-state-paused")
-                        } else {
-                            self.tr("index-state-indexing")
-                        },
-                        if self.index_paused {
-                            Tone::Amber
-                        } else {
-                            Tone::Blue
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .mt_5()
-                    .size(px(136.0))
-                    .mx_auto()
-                    .rounded_full()
-                    .border(px(13.0))
-                    .border_color(theme::blue_soft())
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::blue())
-                            .child(range_progress),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(self.tr("index-range-progress")),
-                    ),
-            )
-            .child(
-                div()
-                    .mt_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(job_row(
-                        self.tr("index-job-range"),
-                        "2020-01-01 — 2020-12-31",
-                    ))
-                    .child(job_row(self.tr("index-job-checkpoint"), checkpoint))
-                    .child(job_row(self.tr("index-job-files-found"), "72,481"))
-                    .child(job_row(self.tr("index-job-errors"), "3"))
-                    .child(job_row(self.tr("index-job-updated"), "2s")),
-            )
-            .child(div().flex_1())
-            .child(
-                components::button(
-                    "index-toggle",
-                    if self.index_paused {
-                        self.tr("action-resume")
-                    } else {
-                        self.tr("action-pause")
-                    },
-                    Some(if self.index_paused {
-                        IconName::ArrowRight
-                    } else {
-                        IconName::Dash
-                    }),
-                    true,
-                )
-                .w_full()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.index_paused = !this.index_paused;
-                    cx.notify();
-                })),
-            )
-            .child(
-                components::button(
-                    "index-cancel",
-                    self.tr("action-cancel"),
-                    Some(IconName::Close),
-                    false,
-                )
-                .w_full()
-                .mt_2(),
-            );
-        let job = if layout.is_compact() {
-            job.into_any_element()
-        } else {
-            job.overflow_y_scrollbar().into_any_element()
+        let body = match &self.telegram_auth {
+            TelegramAuthState::Disconnected | TelegramAuthState::Unauthorized => {
+                self.render_telegram_credentials(layout, cx)
+            }
+            TelegramAuthState::CodeSent => self.render_telegram_code(cx),
+            TelegramAuthState::PasswordRequired { hint } => {
+                self.render_telegram_password(hint.as_deref(), cx)
+            }
+            TelegramAuthState::Authorized(_) => self.render_telegram_channels(layout, cx),
         };
-
         div()
             .flex_1()
             .min_w_0()
@@ -316,191 +38,323 @@ impl TeleArkApp {
             .flex()
             .flex_col()
             .bg(theme::canvas())
-            .overflow_y_scrollbar()
-            .child(toolbar)
-            .child(channel_header)
-            .child(overview)
+            .child(
+                div()
+                    .h(px(58.0))
+                    .px(px(padding))
+                    .flex()
+                    .items_center()
+                    .child(components::section_title(self.tr("telegram-library-title")))
+                    .child(div().flex_1())
+                    .child(self.telegram_status_badge()),
+            )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p(px(padding))
-                    .pt_4()
-                    .flex()
-                    .when(layout.is_compact(), |content| content.flex_col())
-                    .gap_4()
-                    .child(coverage)
-                    .child(job),
+                    .px(px(padding))
+                    .pb(px(padding))
+                    .overflow_y_scrollbar()
+                    .child(body),
             )
             .into_any_element()
     }
+
+    fn telegram_status_badge(&self) -> AnyElement {
+        let (label, tone) = match self.telegram_activity {
+            TelegramActivity::Working => (self.tr("telegram-status-working"), Tone::Blue),
+            TelegramActivity::Failed(_) => (self.tr("telegram-status-failed"), Tone::Red),
+            TelegramActivity::Idle => match self.telegram_auth {
+                TelegramAuthState::Authorized(_) => {
+                    (self.tr("telegram-status-connected"), Tone::Green)
+                }
+                _ => (self.tr("telegram-status-not-connected"), Tone::Neutral),
+            },
+        };
+        components::badge(label, tone).into_any_element()
+    }
+
+    fn render_telegram_credentials(
+        &self,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        components::card()
+            .max_w(px(760.0))
+            .mx_auto()
+            .p(px(layout.content_padding().max(20.0)))
+            .child(components::section_title(self.tr("telegram-login-title")))
+            .child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("telegram-login-description")),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .grid()
+                    .grid_cols(if layout.is_compact() { 1 } else { 2 })
+                    .gap_3()
+                    .child(labeled_input(
+                        self.tr("telegram-api-id-label"),
+                        &self.telegram_api_id,
+                    ))
+                    .child(labeled_input(
+                        self.tr("telegram-api-hash-label"),
+                        &self.telegram_api_hash,
+                    ))
+                    .child(labeled_input(
+                        self.tr("telegram-phone-label"),
+                        &self.telegram_phone,
+                    )),
+            )
+            .when_some(self.telegram_error_message(), |card, message| {
+                card.child(error_banner(message))
+            })
+            .child(primary_action(
+                "telegram-connect",
+                self.tr("telegram-connect-action"),
+                IconName::ArrowRight,
+                cx.listener(|this, _, _, cx| this.begin_telegram_login(cx)),
+            ))
+            .into_any_element()
+    }
+
+    fn render_telegram_code(&self, cx: &mut Context<Self>) -> AnyElement {
+        components::card()
+            .max_w(px(560.0))
+            .mx_auto()
+            .p_6()
+            .child(components::section_title(self.tr("telegram-code-title")))
+            .child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("telegram-code-description")),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .child(Input::new(&self.telegram_code).h(px(38.0))),
+            )
+            .when_some(self.telegram_error_message(), |card, message| {
+                card.child(error_banner(message))
+            })
+            .child(primary_action(
+                "telegram-submit-code",
+                self.tr("telegram-code-action"),
+                IconName::Check,
+                cx.listener(|this, _, _, cx| this.submit_telegram_code(cx)),
+            ))
+            .into_any_element()
+    }
+
+    fn render_telegram_password(&self, hint: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let description = hint.map_or_else(
+            || self.tr("telegram-password-description"),
+            |hint| {
+                self.tr_with(
+                    "telegram-password-hint",
+                    MessageArgs::new().with("hint", hint),
+                )
+            },
+        );
+        components::card()
+            .max_w(px(560.0))
+            .mx_auto()
+            .p_6()
+            .child(components::section_title(
+                self.tr("telegram-password-title"),
+            ))
+            .child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(description),
+            )
+            .child(
+                div().mt_5().child(
+                    Input::new(&self.telegram_password)
+                        .mask_toggle()
+                        .h(px(38.0)),
+                ),
+            )
+            .when_some(self.telegram_error_message(), |card, message| {
+                card.child(error_banner(message))
+            })
+            .child(primary_action(
+                "telegram-submit-password",
+                self.tr("telegram-password-action"),
+                IconName::Asterisk,
+                cx.listener(|this, _, _, cx| this.submit_telegram_password(cx)),
+            ))
+            .into_any_element()
+    }
+
+    fn render_telegram_channels(&self, layout: LayoutPolicy, cx: &mut Context<Self>) -> AnyElement {
+        let list = components::card()
+            .when(layout.is_compact(), |list| list.w_full())
+            .when(!layout.is_compact(), |list| list.w(px(330.0)).flex_none())
+            .p_2()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(self.tr("telegram-channel-select-title")),
+            )
+            .children(self.telegram_chats.iter().map(|chat| {
+                let id = chat.id;
+                let selected = self.selected_chat_id == Some(id);
+                let name = if chat.name.is_empty() {
+                    chat.username.clone().unwrap_or_else(|| chat.id.to_string())
+                } else {
+                    chat.name.clone()
+                };
+                div()
+                    .id(("telegram-chat", id.unsigned_abs()))
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme::blue_soft()))
+                    .hover(|row| row.bg(theme::blue_pale()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_telegram_chat(id, cx);
+                    }))
+                    .child(Icon::new(IconName::Inbox).text_color(theme::purple()))
+                    .child(div().min_w_0().flex_1().truncate().text_sm().child(name))
+            }));
+
+        let selected_name = self
+            .selected_chat_id
+            .and_then(|id| self.telegram_chats.iter().find(|chat| chat.id == id))
+            .map(|chat| chat.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.tr("telegram-no-channel-selected").to_string());
+        let detail = components::card()
+            .flex_1()
+            .min_w_0()
+            .p_5()
+            .child(components::section_title(selected_name))
+            .child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("telegram-index-description")),
+            )
+            .when_some(self.telegram_index.as_ref(), |detail, progress| {
+                detail.child(
+                    div()
+                        .mt_4()
+                        .p_3()
+                        .rounded(theme::RADIUS_SMALL)
+                        .bg(theme::blue_pale())
+                        .text_sm()
+                        .child(self.tr_with(
+                            if progress.exhausted {
+                                "telegram-index-complete"
+                            } else {
+                                "telegram-index-page-complete"
+                            },
+                            MessageArgs::new().with(
+                                "count",
+                                format_integer(self.locale(), progress.files_indexed),
+                            ),
+                        )),
+                )
+            })
+            .when_some(self.telegram_error_message(), |detail, message| {
+                detail.child(error_banner(message))
+            })
+            .child(primary_action(
+                "telegram-index-next",
+                self.tr("telegram-index-next-action"),
+                IconName::Search,
+                cx.listener(|this, _, _, cx| this.index_selected_telegram_chat(cx)),
+            ));
+
+        div()
+            .flex()
+            .when(layout.is_compact(), |body| body.flex_col())
+            .gap_4()
+            .child(list)
+            .child(detail)
+            .into_any_element()
+    }
+
+    fn telegram_error_message(&self) -> Option<gpui::SharedString> {
+        let TelegramActivity::Failed(kind) = self.telegram_activity else {
+            return None;
+        };
+        Some(self.tr(match kind {
+            teleark_core::ApplicationErrorKind::InvalidRequest => "telegram-error-invalid-request",
+            teleark_core::ApplicationErrorKind::Authorization => "telegram-error-authorization",
+            teleark_core::ApplicationErrorKind::Network => "telegram-error-network",
+            teleark_core::ApplicationErrorKind::Persistence => "telegram-error-persistence",
+            _ => "telegram-error-generic",
+        }))
+    }
 }
 
-#[derive(Clone, Copy)]
-enum Coverage {
-    Complete,
-    Partial,
-    Missing,
-}
-
-fn channel_metric(label: SharedString, value: impl Into<SharedString>) -> AnyElement {
-    div()
-        .min_w(px(130.0))
-        .pl_5()
-        .border_l_1()
-        .border_color(theme::border())
-        .child(div().text_xs().text_color(theme::text_muted()).child(label))
-        .child(
-            div()
-                .mt_2()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(value.into()),
-        )
-        .into_any_element()
-}
-
-fn index_summary(
-    label: SharedString,
-    value: &'static str,
-    hint: SharedString,
-    tone: Tone,
+fn labeled_input(
+    label: gpui::SharedString,
+    state: &gpui::Entity<gpui_component::input::InputState>,
 ) -> AnyElement {
-    components::card()
-        .p_4()
+    div()
         .child(
             div()
+                .mb_2()
                 .text_xs()
                 .text_color(theme::text_secondary())
                 .child(label),
         )
-        .child(
-            div()
-                .mt_2()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tone.foreground())
-                .child(value),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_xs()
-                .text_color(theme::text_muted())
-                .child(hint),
-        )
+        .child(Input::new(state).h(px(38.0)))
         .into_any_element()
 }
 
-fn coverage_legend(app: &TeleArkApp) -> AnyElement {
+fn primary_action(
+    id: &'static str,
+    label: gpui::SharedString,
+    icon: IconName,
+    listener: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
     div()
-        .flex()
-        .gap_4()
-        .child(legend_item(
-            app.tr("index-coverage-complete"),
-            theme::green(),
-        ))
-        .child(legend_item(app.tr("index-coverage-partial"), theme::blue()))
-        .child(legend_item(
-            app.tr("index-coverage-missing"),
-            theme::border(),
-        ))
-        .into_any_element()
-}
-
-fn legend_item(label: SharedString, color: gpui::Rgba) -> AnyElement {
-    div()
+        .id(id)
+        .mt_5()
+        .h(px(36.0))
+        .px_5()
         .flex()
         .items_center()
+        .justify_center()
         .gap_2()
-        .text_xs()
-        .text_color(theme::text_secondary())
-        .child(div().size_2().rounded_full().bg(color))
+        .rounded(theme::RADIUS_SMALL)
+        .bg(theme::blue())
+        .text_color(theme::surface())
+        .cursor_pointer()
+        .on_click(listener)
+        .child(Icon::new(icon))
         .child(label)
         .into_any_element()
 }
 
-fn coverage_year(year: &'static str, percent: f32, coverage: Coverage) -> AnyElement {
-    let color = match coverage {
-        Coverage::Complete => theme::green(),
-        Coverage::Partial => theme::blue(),
-        Coverage::Missing => theme::border(),
-    };
+fn error_banner(message: gpui::SharedString) -> AnyElement {
     div()
-        .flex_1()
-        .h_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_end()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if matches!(coverage, Coverage::Missing) {
-                    theme::text_muted()
-                } else {
-                    color
-                })
-                .child(format!("{percent:.0}%")),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(118.0))
-                .flex()
-                .items_end()
-                .rounded(theme::RADIUS_SMALL)
-                .bg(theme::border_subtle())
-                .overflow_hidden()
-                .child(div().w_full().h(px(118.0 * percent / 100.0)).bg(color)),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::text_secondary())
-                .child(year),
-        )
-        .into_any_element()
-}
-
-fn range_card(label: SharedString, range: &'static str, tone: Tone) -> AnyElement {
-    div()
+        .mt_4()
         .p_3()
         .rounded(theme::RADIUS_SMALL)
-        .bg(tone.background())
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tone.foreground())
-                .child(label),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_xs()
-                .text_color(theme::text_secondary())
-                .child(range),
-        )
-        .into_any_element()
-}
-
-fn job_row(label: SharedString, value: impl Into<SharedString>) -> AnyElement {
-    div()
-        .flex()
-        .text_xs()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(theme::text_muted())
-                .child(label),
-        )
-        .child(
-            div()
-                .text_color(theme::text_secondary())
-                .child(value.into()),
-        )
+        .bg(theme::red_soft())
+        .text_sm()
+        .text_color(theme::red())
+        .child(message)
         .into_any_element()
 }

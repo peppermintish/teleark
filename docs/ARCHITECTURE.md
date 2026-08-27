@@ -1,6 +1,6 @@
 # TeleArk Architecture
 
-Status: accepted target architecture with a usable persistent local-catalog alpha and tested storage, Telegram-adapter, indexing, transfer, and provisional crypto foundations. End-to-end Telegram/Vault workflows are not yet wired into the desktop app. See `IMPLEMENTATION_STATUS.md` for exact current capability.
+Status: accepted target architecture with a persistent local catalog and a desktop-connected Telegram login, source discovery, and bounded resumable document scan. Encrypted transfer and recovery workflows remain incomplete. See `IMPLEMENTATION_STATUS.md` for exact current capability.
 
 ## Purpose
 
@@ -53,7 +53,7 @@ The SQLite adapter owns migrations, repositories, FTS5, transaction boundaries, 
 
 ### Telegram adapter
 
-The Telegram adapter contains all `grammers` and MTProto types. It owns authentication/session integration, account and chat discovery, history/update access, media upload/download, FloodWait mapping, and remote locator resolution. It maps results into TeleArk-owned DTOs and structured errors.
+The Telegram adapter contains all `grammers` and MTProto types. It owns authentication/session integration, account and chat discovery, history/update access, media upload/download, FloodWait mapping, and remote locator resolution. It maps results into TeleArk-owned DTOs and structured errors. Its session cache uses a bounded, explicitly versioned file replaced atomically with owner-only permissions; session secrets never enter the Library database or GUI diagnostics.
 
 ### Crypto and Vault adapter
 

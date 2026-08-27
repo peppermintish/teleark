@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 4;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 5;
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -283,6 +283,43 @@ CREATE TABLE id_allocators (
 
 INSERT INTO id_allocators (entity, next_id)
 SELECT 'logical_file', COALESCE(max(id), 0) + 1 FROM logical_files;
+"#,
+    },
+    Migration {
+        version: 5,
+        sql: r#"
+CREATE TABLE remote_objects (
+    id                      INTEGER PRIMARY KEY,
+    logical_file_id         INTEGER NOT NULL,
+    account_id              INTEGER NOT NULL,
+    chat_id                 INTEGER NOT NULL,
+    message_id              INTEGER NOT NULL,
+    revision                INTEGER NOT NULL CHECK (revision >= 0),
+    remote_key              BLOB NOT NULL CHECK (length(remote_key) BETWEEN 1 AND 16384),
+    encoded_size_bytes      INTEGER NOT NULL CHECK (encoded_size_bytes >= 0),
+    modified_at_unix_ms     INTEGER NOT NULL,
+    UNIQUE (account_id, chat_id, message_id),
+    FOREIGN KEY (logical_file_id) REFERENCES logical_files(id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX remote_objects_file ON remote_objects (logical_file_id, id);
+CREATE INDEX remote_objects_source_revision
+    ON remote_objects (account_id, chat_id, message_id, revision);
+
+CREATE TABLE telegram_index_state (
+    account_id              INTEGER NOT NULL,
+    chat_id                 INTEGER NOT NULL,
+    before_message_id       INTEGER,
+    exhausted               INTEGER NOT NULL CHECK (exhausted IN (0, 1)),
+    messages_scanned        INTEGER NOT NULL CHECK (messages_scanned >= 0),
+    files_indexed           INTEGER NOT NULL CHECK (files_indexed >= 0),
+    updated_at_unix_ms      INTEGER NOT NULL,
+    PRIMARY KEY (account_id, chat_id),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+INSERT INTO id_allocators (entity, next_id) VALUES ('remote_object', 1);
 "#,
     },
 ];

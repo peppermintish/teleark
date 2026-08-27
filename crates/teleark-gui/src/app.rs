@@ -16,7 +16,10 @@ use teleark_i18n::{
     Localizer, MessageArgs, MessageId, SupportedLocale,
     format::{format_bytes, format_integer},
 };
-use teleark_runtime::DesktopLibrary;
+use teleark_runtime::{
+    DesktopLibrary, DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramIndexPage,
+};
+use teleark_telegram::TelegramAccount;
 
 use crate::{
     DismissOverlay,
@@ -45,6 +48,13 @@ pub(crate) enum LocalePersistence {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TelegramActivity {
+    Idle,
+    Working,
+    Failed(teleark_core::ApplicationErrorKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocaleOverrideChoice {
     SystemDefault,
     Explicit(SupportedLocale),
@@ -54,6 +64,11 @@ enum LocaleOverrideChoice {
 pub struct LocaleStartup {
     pub system_locale: SupportedLocale,
     pub follows_system_locale: bool,
+}
+
+pub struct RuntimeStartup {
+    pub library: Result<DesktopLibrary, ApplicationError>,
+    pub telegram: Result<DesktopTelegram, ApplicationError>,
 }
 
 struct CompactNavItem {
@@ -74,7 +89,6 @@ pub struct TeleArkApp {
     pub(crate) selected_file: usize,
     pub(crate) vault_locked: bool,
     pub(crate) recovery_visible: bool,
-    pub(crate) index_paused: bool,
     pub(crate) nav_selection: &'static str,
     pub(crate) selected_source: &'static str,
     pub(crate) library_content: LibraryContent,
@@ -85,13 +99,26 @@ pub struct TeleArkApp {
     pub(crate) follows_system_locale: bool,
     pub(crate) system_locale: SupportedLocale,
     pub(crate) locale_persistence: LocalePersistence,
+    pub(crate) telegram_auth: TelegramAuthState,
+    pub(crate) telegram_activity: TelegramActivity,
+    pub(crate) telegram_account: Option<TelegramAccount>,
+    pub(crate) telegram_chats: Vec<TelegramChatSummary>,
+    pub(crate) selected_chat_id: Option<i64>,
+    pub(crate) telegram_index: Option<TelegramIndexPage>,
+    pub(crate) telegram_api_id: Entity<InputState>,
+    pub(crate) telegram_api_hash: Entity<InputState>,
+    pub(crate) telegram_phone: Entity<InputState>,
+    pub(crate) telegram_code: Entity<InputState>,
+    pub(crate) telegram_password: Entity<InputState>,
     library: Option<DesktopLibrary>,
+    telegram: Option<DesktopTelegram>,
     library_query_generation: u64,
     pending_locale_override: Option<LocaleOverrideChoice>,
     library_task: Option<Task<()>>,
     library_more_task: Option<Task<()>>,
     import_task: Option<Task<()>>,
     locale_task: Option<Task<()>>,
+    telegram_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -100,13 +127,41 @@ impl TeleArkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         localizer: Localizer,
-        library: Result<DesktopLibrary, ApplicationError>,
+        runtime: RuntimeStartup,
         page: Page,
         show_upload: bool,
         locale_startup: LocaleStartup,
     ) -> Self {
         let placeholder = localizer.translate_or_id(MessageId::new("search-placeholder"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let telegram_api_id = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                localizer.translate_or_id(MessageId::new("telegram-api-id-placeholder")),
+            )
+        });
+        let telegram_api_hash = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(
+                    localizer.translate_or_id(MessageId::new("telegram-api-hash-placeholder")),
+                )
+                .masked(true)
+        });
+        let telegram_phone = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                localizer.translate_or_id(MessageId::new("telegram-phone-placeholder")),
+            )
+        });
+        let telegram_code = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(localizer.translate_or_id(MessageId::new("telegram-code-placeholder")))
+        });
+        let telegram_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(
+                    localizer.translate_or_id(MessageId::new("telegram-password-placeholder")),
+                )
+                .masked(true)
+        });
         let search_subscription = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) && this.page == Page::Library {
                 this.refresh_library(cx);
@@ -118,9 +173,10 @@ impl TeleArkApp {
             Page::Library | Page::FileDetail => "nav-all",
             Page::Transfers => "nav-transfers-all",
             Page::Vault => "nav-vault",
-            Page::Channel => "channel-cinema",
+            Page::Channel => "nav-telegram-sources",
             Page::Settings => "nav-settings",
         };
+        let RuntimeStartup { library, telegram } = runtime;
         let (library, library_content, locale_persistence) = match library {
             Ok(library) => (
                 Some(library),
@@ -144,7 +200,6 @@ impl TeleArkApp {
             selected_file: 0,
             vault_locked: true,
             recovery_visible: false,
-            index_paused: false,
             nav_selection,
             selected_source: "Cinema 4K",
             library_content,
@@ -155,19 +210,207 @@ impl TeleArkApp {
             follows_system_locale: locale_startup.follows_system_locale,
             system_locale: locale_startup.system_locale,
             locale_persistence,
+            telegram_auth: TelegramAuthState::Disconnected,
+            telegram_activity: if telegram.is_ok() {
+                TelegramActivity::Idle
+            } else {
+                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
+            },
+            telegram_account: None,
+            telegram_chats: Vec::new(),
+            selected_chat_id: None,
+            telegram_index: None,
+            telegram_api_id,
+            telegram_api_hash,
+            telegram_phone,
+            telegram_code,
+            telegram_password,
             library,
+            telegram: telegram.ok(),
             library_query_generation: 0,
             pending_locale_override: None,
             library_task: None,
             library_more_task: None,
             import_task: None,
             locale_task: None,
+            telegram_task: None,
             _subscriptions: vec![search_subscription],
         };
         if app.library.is_some() {
             app.refresh_library(cx);
         }
         app
+    }
+
+    pub(crate) fn begin_telegram_login(&mut self, cx: &mut Context<Self>) {
+        if self.telegram_activity == TelegramActivity::Working {
+            return;
+        }
+        let Some(telegram) = self.telegram.clone() else {
+            self.telegram_activity =
+                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
+            cx.notify();
+            return;
+        };
+        let api_id = self.telegram_api_id.read(cx).value().parse::<i32>();
+        let api_hash = self.telegram_api_hash.read(cx).value().to_string();
+        let phone = self.telegram_phone.read(cx).value().to_string();
+        let Ok(api_id) = api_id else {
+            self.telegram_activity =
+                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        };
+        self.telegram_activity = TelegramActivity::Working;
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            match telegram.connect(api_id)? {
+                TelegramAuthState::Authorized(account) => {
+                    Ok::<_, ApplicationError>(TelegramAuthState::Authorized(account))
+                }
+                TelegramAuthState::Unauthorized => telegram.request_login_code(phone, api_hash),
+                _ => Err(ApplicationError::new(
+                    teleark_core::ApplicationErrorKind::Conflict,
+                )),
+            }
+        });
+        self.telegram_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| this.apply_telegram_auth_result(result, cx))
+                .ok();
+        }));
+    }
+
+    pub(crate) fn submit_telegram_code(&mut self, cx: &mut Context<Self>) {
+        let code = self.telegram_code.read(cx).value().to_string();
+        self.submit_telegram_secret(code.into_bytes(), false, cx);
+    }
+
+    pub(crate) fn submit_telegram_password(&mut self, cx: &mut Context<Self>) {
+        let password = self.telegram_password.read(cx).value().to_string();
+        self.submit_telegram_secret(password.into_bytes(), true, cx);
+    }
+
+    fn submit_telegram_secret(&mut self, secret: Vec<u8>, password: bool, cx: &mut Context<Self>) {
+        if self.telegram_activity == TelegramActivity::Working {
+            return;
+        }
+        let Some(telegram) = self.telegram.clone() else {
+            return;
+        };
+        self.telegram_activity = TelegramActivity::Working;
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            if password {
+                telegram.submit_password(secret)
+            } else {
+                telegram.submit_code(String::from_utf8_lossy(&secret).into_owned())
+            }
+        });
+        self.telegram_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| this.apply_telegram_auth_result(result, cx))
+                .ok();
+        }));
+    }
+
+    fn apply_telegram_auth_result(
+        &mut self,
+        result: Result<TelegramAuthState, ApplicationError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(state) => {
+                self.telegram_activity = TelegramActivity::Idle;
+                if let TelegramAuthState::Authorized(account) = &state {
+                    self.telegram_account = Some(account.clone());
+                }
+                self.telegram_auth = state;
+                if matches!(self.telegram_auth, TelegramAuthState::Authorized(_)) {
+                    self.load_telegram_dialogs(cx);
+                }
+            }
+            Err(error) => self.telegram_activity = TelegramActivity::Failed(error.kind()),
+        }
+        cx.notify();
+    }
+
+    fn load_telegram_dialogs(&mut self, cx: &mut Context<Self>) {
+        let (Some(telegram), Some(library), Some(account)) = (
+            self.telegram.clone(),
+            self.library.clone(),
+            self.telegram_account.clone(),
+        ) else {
+            return;
+        };
+        self.telegram_activity = TelegramActivity::Working;
+        let work = cx.background_spawn(async move {
+            let chats = telegram.list_dialogs()?;
+            library.save_telegram_sources(&account, &chats)?;
+            Ok::<_, ApplicationError>(chats)
+        });
+        self.telegram_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(chats) => {
+                        this.selected_chat_id = chats.first().map(|chat| chat.id);
+                        this.telegram_chats = chats;
+                        this.telegram_activity = TelegramActivity::Idle;
+                    }
+                    Err(error) => this.telegram_activity = TelegramActivity::Failed(error.kind()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn select_telegram_chat(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.selected_chat_id = Some(chat_id);
+        self.telegram_index = None;
+        cx.notify();
+    }
+
+    pub(crate) fn index_selected_telegram_chat(&mut self, cx: &mut Context<Self>) {
+        if self.telegram_activity == TelegramActivity::Working {
+            return;
+        }
+        let (Some(telegram), Some(library), Some(account), Some(chat_id)) = (
+            self.telegram.clone(),
+            self.library.clone(),
+            self.telegram_account.clone(),
+            self.selected_chat_id,
+        ) else {
+            return;
+        };
+        let before = self
+            .telegram_index
+            .as_ref()
+            .and_then(|page| page.next_before_message_id);
+        self.telegram_activity = TelegramActivity::Working;
+        let work = cx.background_spawn(async move {
+            library.index_telegram_page(&telegram, account.id, chat_id, before, 1_000)
+        });
+        self.telegram_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| match result {
+                Ok(page) => {
+                    this.telegram_index = Some(page);
+                    this.telegram_activity = TelegramActivity::Idle;
+                    this.refresh_library(cx);
+                }
+                Err(error) => {
+                    this.telegram_activity = TelegramActivity::Failed(error.kind());
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     pub(crate) fn tr(&self, id: &'static str) -> SharedString {
@@ -455,10 +698,7 @@ impl TeleArkApp {
 
     fn render_header(&self, layout: LayoutPolicy, cx: &mut Context<Self>) -> AnyElement {
         let preview_backed = self.show_upload
-            || matches!(
-                self.page,
-                Page::Transfers | Page::Vault | Page::Channel | Page::Settings
-            )
+            || matches!(self.page, Page::Transfers | Page::Vault | Page::Settings)
             || (self.page == Page::Library && is_preview_library_selection(self.nav_selection));
         let brand = div()
             .h_full()
@@ -523,13 +763,22 @@ impl TeleArkApp {
                 ))
             })
             .when(layout.shows_full_header_status(), |status| {
+                let connected = matches!(self.telegram_auth, TelegramAuthState::Authorized(_));
                 status.child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(div().size_2().rounded_full().bg(theme::green()))
-                        .child(self.tr("connection-connected")),
+                        .child(div().size_2().rounded_full().bg(if connected {
+                            theme::green()
+                        } else {
+                            theme::amber()
+                        }))
+                        .child(self.tr(if connected {
+                            "telegram-status-connected"
+                        } else {
+                            "telegram-status-not-connected"
+                        })),
                 )
             })
             .when(layout.shows_full_header_status(), |status| {
@@ -546,7 +795,10 @@ impl TeleArkApp {
                             this.set_page(Page::Settings, cx);
                         }))
                         .child(Icon::new(IconName::CircleUser).text_color(theme::text_secondary()))
-                        .child(self.tr("accounts-count")),
+                        .child(self.telegram_account.as_ref().map_or_else(
+                            || self.tr("settings-accounts"),
+                            |account| SharedString::from(account.display_name.clone()),
+                        )),
                 )
             })
             .child(
@@ -859,38 +1111,20 @@ impl TeleArkApp {
                 cx,
             ))
             .child(self.group_label("nav-channels"))
-            .child(self.source_item(
-                "channel-saved",
-                "S",
-                "Saved Messages",
-                "184,521",
-                Page::Channel,
-                cx,
-            ))
-            .child(self.source_item(
-                "channel-cinema",
-                "4K",
-                "Cinema 4K",
-                "392,104",
-                Page::Channel,
-                cx,
-            ))
-            .child(self.source_item(
-                "channel-design",
-                "D",
-                "Design Assets",
-                "262,341",
-                Page::Channel,
-                cx,
-            ))
-            .child(self.source_item(
-                "channel-software",
-                "S",
-                "Software",
-                "53,221",
-                Page::Channel,
-                cx,
-            ))
+            .child(
+                self.nav_item(
+                    "nav-telegram-sources",
+                    "telegram-library-title",
+                    IconName::Inbox,
+                    self.telegram_chats
+                        .len()
+                        .try_into()
+                        .ok()
+                        .map(|count: u64| SharedString::from(format_integer(self.locale(), count))),
+                    Page::Channel,
+                    cx,
+                ),
+            )
             .child(self.group_label("nav-collections"))
             .child(self.source_item(
                 "collection-mac",
@@ -1020,7 +1254,7 @@ impl TeleArkApp {
                     label_id: "nav-channels",
                     icon: IconName::Search,
                     target: Page::Channel,
-                    nav_selection: "channel-cinema",
+                    nav_selection: "nav-telegram-sources",
                 },
                 self.page == Page::Channel,
                 cx,

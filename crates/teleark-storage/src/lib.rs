@@ -17,7 +17,8 @@ pub use error::{
 pub use model::{
     AccountRecord, ChatRecord, CollectionKind, CollectionRecord, FileSearchFacets, IndexBatch,
     IndexJobRecord, IndexRangeRecord, LibraryStatisticsRecord, LogicalFileRecord,
-    NewLogicalFileRecord, PageCursor, SearchPage, SearchQuery, SettingRecord, StoredIndexCoverage,
-    StoredIndexJobState, StoredPartState, StoredTransferDirection, StoredTransferState,
-    TransferPartCheckpoint, TransferTaskRecord,
+    NewLogicalFileRecord, PageCursor, RemoteFileUpsert, RemoteObjectRecord, SearchPage,
+    SearchQuery, SettingRecord, StoredIndexCoverage, StoredIndexJobState, StoredPartState,
+    StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord, TransferPartCheckpoint,
+    TransferTaskRecord,
 };

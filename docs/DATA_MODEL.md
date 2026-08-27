@@ -1,6 +1,6 @@
 # TeleArk Data Model
 
-Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, settings, collections, transfer checkpoints, and index job/range records. Remote-object/package/manifest/Vault persistence is still missing, and no schema has been released as a compatibility guarantee.
+Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, Telegram remote-object identity and scan cursors, settings, collections, transfer checkpoints, and index job/range records. Package/manifest/Vault persistence is still missing, and no schema has been released as a compatibility guarantee.
 
 ## Modeling rules
 
@@ -118,9 +118,9 @@ collections, collection_items
 settings, id_allocators
 ```
 
-Four ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, and add tagged local paths plus the ID allocator. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
+Five ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, and add Telegram remote-object identities plus per-source scan cursors. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
 
-Still absent are tables/repositories for `remote_objects`, Vault `file_parts`, `packages`, `manifests`, encryption profiles, and Vault metadata. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
+Still absent are tables/repositories for Vault `file_parts`, `packages`, `manifests`, encryption profiles, and Vault metadata. Native Telegram documents now use `remote_objects` keyed by account/chat/message with monotonic revision checks and an opaque bounded transport key. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
 
 ## Relationships and deletion
 

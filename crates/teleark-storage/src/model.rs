@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use teleark_core::{
     AccountId, ChatId, CollectionId, EncryptionState, FileKind, IndexCoverage, IndexJob,
     IndexJobId, IndexJobState, IndexRange, LogicalFile, LogicalFileId, MessageId, PackageId,
-    PartIndex, PartState, RemoteState, TransferDirection, TransferId, TransferState, TransferTask,
-    VerificationState,
+    PartIndex, PartState, RemoteObjectId, RemoteState, TransferDirection, TransferId,
+    TransferState, TransferTask, VerificationState,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +23,49 @@ pub struct ChatRecord {
     /// A Telegram/source title, stored verbatim and never localized by storage.
     pub title: String,
     pub username: Option<String>,
+    pub updated_at_unix_ms: i64,
+}
+
+/// Telegram-backed identity and metadata used to rediscover a logical file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteObjectRecord {
+    pub id: RemoteObjectId,
+    pub logical_file_id: LogicalFileId,
+    pub account_id: AccountId,
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+    pub revision: u64,
+    /// Adapter-owned opaque data; storage bounds but never interprets it.
+    pub remote_key: Vec<u8>,
+    pub encoded_size_bytes: u64,
+    pub modified_at_unix_ms: i64,
+}
+
+/// One normalized Telegram document awaiting an atomic logical-file/remote
+/// object upsert. Identity is `(account_id, chat_id, message_id)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteFileUpsert {
+    pub account_id: AccountId,
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+    pub revision: u64,
+    pub remote_key: Vec<u8>,
+    pub name: String,
+    pub size_bytes: u64,
+    pub kind: FileKind,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+    pub modified_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelegramIndexStateRecord {
+    pub account_id: AccountId,
+    pub chat_id: ChatId,
+    pub before_message_id: Option<MessageId>,
+    pub exhausted: bool,
+    pub messages_scanned: u64,
+    pub files_indexed: u64,
     pub updated_at_unix_ms: i64,
 }
 

@@ -8,7 +8,7 @@ mod mock;
 mod screens;
 mod theme;
 
-use app::{LocaleStartup, Page, TeleArkApp};
+use app::{LocaleStartup, Page, RuntimeStartup, TeleArkApp};
 use gpui::{
     App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
@@ -16,13 +16,14 @@ use gpui::{
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use teleark_i18n::{Localizer, SupportedLocale};
-use teleark_runtime::DesktopLibrary;
+use teleark_runtime::{DesktopLibrary, DesktopTelegram};
 
 gpui::actions!(teleark, [DismissOverlay]);
 
 fn main() {
     let system_locale = detect_system_locale();
     let library = DesktopLibrary::open_default();
+    let telegram = DesktopTelegram::open_default();
     let mut launch = LaunchOptions::from_env(system_locale);
     let persisted_locale = library
         .as_ref()
@@ -46,14 +47,15 @@ fn main() {
                 }
             };
 
-            let bounds = Bounds::centered(
-                None,
-                size(
-                    px(launch.window_width as f32),
-                    px(launch.window_height as f32),
-                ),
-                cx,
+            let requested_size = size(
+                px(launch.window_width as f32),
+                px(launch.window_height as f32),
             );
+            let window_size = cx
+                .primary_display()
+                .map(|display| requested_size.min(&display.bounds().size))
+                .unwrap_or(requested_size);
+            let bounds = Bounds::centered(None, window_size, cx);
             let window = cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
@@ -72,7 +74,7 @@ fn main() {
                             window,
                             cx,
                             localizer,
-                            library,
+                            RuntimeStartup { library, telegram },
                             launch.page,
                             launch.show_upload,
                             LocaleStartup {
