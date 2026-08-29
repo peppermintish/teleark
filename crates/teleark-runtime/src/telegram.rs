@@ -3,12 +3,20 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_telegram::{
-    PasswordChallenge, PasswordOutcome, PendingLogin, SignInOutcome, TelegramAccount, TelegramChat,
-    TelegramChatKind, TelegramConfig, TelegramConnection, TelegramError, TelegramErrorKind,
+    PasswordChallenge, PasswordOutcome, PendingLogin, QrLoginOutcome, SignInOutcome,
+    TelegramAccount, TelegramChat, TelegramChatKind, TelegramConfig, TelegramConnection,
+    TelegramError, TelegramErrorKind,
+};
+use zeroize::Zeroizing;
+
+use crate::{
+    DesktopLibrary, TelegramCredentialSource, TelegramCredentialsStatus,
+    credentials::{ActiveTelegramCredentials, distribution_credentials},
 };
 
 const TELEGRAM_QUEUE_CAPACITY: usize = 32;
@@ -44,13 +52,44 @@ pub struct TelegramFilePage {
     pub examined_messages: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum TelegramAuthState {
     Disconnected,
     Unauthorized,
+    QrCode {
+        deep_link: String,
+        expires_at_unix_seconds: i64,
+    },
     CodeSent,
-    PasswordRequired { hint: Option<String> },
+    PasswordRequired {
+        hint: Option<String>,
+    },
     Authorized(TelegramAccount),
+}
+
+impl std::fmt::Debug for TelegramAuthState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected => formatter.write_str("Disconnected"),
+            Self::Unauthorized => formatter.write_str("Unauthorized"),
+            Self::QrCode {
+                expires_at_unix_seconds,
+                ..
+            } => formatter
+                .debug_struct("QrCode")
+                .field("deep_link", &"[REDACTED]")
+                .field("expires_at_unix_seconds", expires_at_unix_seconds)
+                .finish(),
+            Self::CodeSent => formatter.write_str("CodeSent"),
+            Self::PasswordRequired { hint } => formatter
+                .debug_struct("PasswordRequired")
+                .field("hint", hint)
+                .finish(),
+            Self::Authorized(account) => {
+                formatter.debug_tuple("Authorized").field(account).finish()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -72,7 +111,14 @@ enum TelegramRequest {
     },
     RequestCode {
         phone: String,
-        api_hash: String,
+        api_hash: Zeroizing<String>,
+        reply: mpsc::SyncSender<Result<TelegramAuthState, ApplicationError>>,
+    },
+    BeginQrLogin {
+        api_hash: Zeroizing<String>,
+        reply: mpsc::SyncSender<Result<TelegramAuthState, ApplicationError>>,
+    },
+    PollQrLogin {
         reply: mpsc::SyncSender<Result<TelegramAuthState, ApplicationError>>,
     },
     SubmitCode {
@@ -124,12 +170,18 @@ enum TelegramRequest {
 
 enum LoginState {
     None,
+    Qr {
+        api_hash: Zeroizing<String>,
+        deep_link: String,
+        expires_at_unix_seconds: i64,
+    },
     Code(PendingLogin),
     Password(Box<PasswordChallenge>),
 }
 
 struct WorkerState {
     connection: Option<TelegramConnection>,
+    api_id: Option<i32>,
     login: LoginState,
     chats: BTreeMap<i64, TelegramChat>,
 }
@@ -138,6 +190,7 @@ impl Default for WorkerState {
     fn default() -> Self {
         Self {
             connection: None,
+            api_id: None,
             login: LoginState::None,
             chats: BTreeMap::new(),
         }
@@ -204,16 +257,96 @@ impl DesktopTelegram {
         })
     }
 
+    pub fn connect_configured(
+        &self,
+        library: &DesktopLibrary,
+    ) -> Result<TelegramAuthState, ApplicationError> {
+        let credentials = self.active_credentials(library)?;
+        self.connect(credentials.api_id)
+    }
+
+    /// Reports the credential pair that would be used for authentication.
+    /// User-saved credentials take precedence over distributor-provided
+    /// TeleArk release credentials.
+    pub fn effective_credentials_status(
+        &self,
+        library: &DesktopLibrary,
+    ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
+        if let Some(status) = library.telegram_credentials_status()? {
+            return Ok(Some(status));
+        }
+        distribution_credentials().map(|credentials| {
+            credentials.map(|credentials| TelegramCredentialsStatus {
+                api_id: credentials.api_id,
+                source: TelegramCredentialSource::Distribution,
+            })
+        })
+    }
+
+    pub fn request_login_code_configured(
+        &self,
+        library: &DesktopLibrary,
+        phone: impl Into<String>,
+    ) -> Result<TelegramAuthState, ApplicationError> {
+        let credentials = self.active_credentials(library)?;
+        self.request_login_code_secret(phone.into(), credentials.api_hash)
+    }
+
+    pub fn begin_qr_login_configured(
+        &self,
+        library: &DesktopLibrary,
+    ) -> Result<TelegramAuthState, ApplicationError> {
+        let credentials = self.active_credentials(library)?;
+        self.begin_qr_login_secret(credentials.api_hash)
+    }
+
+    fn active_credentials(
+        &self,
+        library: &DesktopLibrary,
+    ) -> Result<ActiveTelegramCredentials, ApplicationError> {
+        if let Some(credentials) = library.stored_telegram_credentials()? {
+            return Ok(credentials);
+        }
+        distribution_credentials()?
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))
+    }
+
     pub fn request_login_code(
         &self,
         phone: impl Into<String>,
         api_hash: impl Into<String>,
     ) -> Result<TelegramAuthState, ApplicationError> {
+        self.request_login_code_secret(phone.into(), Zeroizing::new(api_hash.into()))
+    }
+
+    fn request_login_code_secret(
+        &self,
+        phone: String,
+        api_hash: Zeroizing<String>,
+    ) -> Result<TelegramAuthState, ApplicationError> {
         self.request(|reply| TelegramRequest::RequestCode {
-            phone: phone.into(),
-            api_hash: api_hash.into(),
+            phone,
+            api_hash,
             reply,
         })
+    }
+
+    pub fn begin_qr_login(
+        &self,
+        api_hash: impl Into<String>,
+    ) -> Result<TelegramAuthState, ApplicationError> {
+        self.begin_qr_login_secret(Zeroizing::new(api_hash.into()))
+    }
+
+    fn begin_qr_login_secret(
+        &self,
+        api_hash: Zeroizing<String>,
+    ) -> Result<TelegramAuthState, ApplicationError> {
+        self.request(|reply| TelegramRequest::BeginQrLogin { api_hash, reply })
+    }
+
+    pub fn poll_qr_login(&self) -> Result<TelegramAuthState, ApplicationError> {
+        self.request(|reply| TelegramRequest::PollQrLogin { reply })
     }
 
     pub fn submit_code(
@@ -360,6 +493,14 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 let result = request_code(&mut state, &phone, &api_hash).await;
                 let _ = reply.send(result);
             }
+            TelegramRequest::BeginQrLogin { api_hash, reply } => {
+                let result = begin_qr_login(&mut state, api_hash).await;
+                let _ = reply.send(result);
+            }
+            TelegramRequest::PollQrLogin { reply } => {
+                let result = poll_qr_login(&mut state).await;
+                let _ = reply.send(result);
+            }
             TelegramRequest::SubmitCode { code, reply } => {
                 let result = submit_code(&mut state, &code).await;
                 let _ = reply.send(result);
@@ -436,8 +577,24 @@ async fn connect(
     api_id: i32,
     session_path: PathBuf,
 ) -> Result<TelegramAuthState, ApplicationError> {
-    if state.connection.is_some() {
-        return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+    if let Some(connection) = state.connection.as_ref() {
+        if state.api_id != Some(api_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        return if connection
+            .is_authorized()
+            .await
+            .map_err(map_telegram_error)?
+        {
+            Ok(TelegramAuthState::Authorized(
+                connection
+                    .current_account()
+                    .await
+                    .map_err(map_telegram_error)?,
+            ))
+        } else {
+            Ok(TelegramAuthState::Unauthorized)
+        };
     }
     let connection = TelegramConnection::connect(TelegramConfig {
         api_id,
@@ -460,6 +617,7 @@ async fn connect(
         TelegramAuthState::Unauthorized
     };
     state.connection = Some(connection);
+    state.api_id = Some(api_id);
     Ok(result)
 }
 
@@ -475,6 +633,84 @@ async fn request_code(
         .map_err(map_telegram_error)?;
     state.login = LoginState::Code(pending);
     Ok(TelegramAuthState::CodeSent)
+}
+
+async fn begin_qr_login(
+    state: &mut WorkerState,
+    api_hash: Zeroizing<String>,
+) -> Result<TelegramAuthState, ApplicationError> {
+    if api_hash.trim().is_empty() {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    let outcome = connection(state)?
+        .export_qr_login(&api_hash, &[])
+        .await
+        .map_err(map_telegram_error)?;
+    apply_qr_outcome(state, outcome, Some(api_hash))
+}
+
+async fn poll_qr_login(state: &mut WorkerState) -> Result<TelegramAuthState, ApplicationError> {
+    let LoginState::Qr {
+        api_hash,
+        deep_link,
+        expires_at_unix_seconds,
+    } = &state.login
+    else {
+        return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+    };
+    let api_hash = api_hash.clone();
+    let existing = TelegramAuthState::QrCode {
+        deep_link: deep_link.clone(),
+        expires_at_unix_seconds: *expires_at_unix_seconds,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
+        .as_secs();
+    let now =
+        i64::try_from(now).map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+    let update_received = connection_ref(state)?.take_qr_login_update();
+    if !should_refresh_qr(now, *expires_at_unix_seconds, update_received) {
+        return Ok(existing);
+    }
+    let outcome = connection(state)?
+        .export_qr_login(&api_hash, &[])
+        .await
+        .map_err(map_telegram_error)?;
+    apply_qr_outcome(state, outcome, Some(api_hash))
+}
+
+fn should_refresh_qr(now: i64, expires_at: i64, update_received: bool) -> bool {
+    update_received || now >= expires_at
+}
+
+fn apply_qr_outcome(
+    state: &mut WorkerState,
+    outcome: QrLoginOutcome,
+    api_hash: Option<Zeroizing<String>>,
+) -> Result<TelegramAuthState, ApplicationError> {
+    match outcome {
+        QrLoginOutcome::Pending(code) => {
+            let api_hash = api_hash
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+            let deep_link = code.deep_link().to_owned();
+            let expires_at_unix_seconds = code.expires_at_unix_seconds();
+            state.login = LoginState::Qr {
+                api_hash,
+                deep_link: deep_link.clone(),
+                expires_at_unix_seconds,
+            };
+            Ok(TelegramAuthState::QrCode {
+                deep_link,
+                expires_at_unix_seconds,
+            })
+        }
+        QrLoginOutcome::Authorized(account) => {
+            state.login = LoginState::None;
+            Ok(TelegramAuthState::Authorized(account))
+        }
+    }
 }
 
 async fn submit_code(
@@ -733,5 +969,102 @@ mod tests {
             _ => ApplicationErrorKind::Network,
         };
         assert_eq!(mapped, ApplicationErrorKind::Authorization);
+    }
+
+    #[test]
+    fn qr_auth_debug_output_never_contains_the_login_secret() {
+        let state = TelegramAuthState::QrCode {
+            deep_link: "tg://login?token=highly-secret".to_owned(),
+            expires_at_unix_seconds: 1_900_000_000,
+        };
+        let debug = format!("{state:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("highly-secret"));
+    }
+
+    #[test]
+    fn qr_poll_refreshes_only_for_acceptance_updates_or_expiry() {
+        assert!(!should_refresh_qr(99, 100, false));
+        assert!(should_refresh_qr(99, 100, true));
+        assert!(should_refresh_qr(100, 100, false));
+        assert!(should_refresh_qr(101, 100, false));
+    }
+
+    #[test]
+    fn configured_login_fails_before_network_when_credentials_are_missing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("open library");
+        assert!(
+            library
+                .stored_telegram_credentials()
+                .expect("read stored credentials")
+                .is_none()
+        );
+        if distribution_credentials()
+            .expect("read distribution credentials")
+            .is_some()
+        {
+            return;
+        }
+        let telegram = DesktopTelegram::open(directory.path().join("telegram.session"))
+            .expect("open Telegram worker");
+        assert_eq!(
+            telegram
+                .connect_configured(&library)
+                .expect_err("missing credentials must fail closed")
+                .kind(),
+            ApplicationErrorKind::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn effective_credentials_prefer_the_user_pair() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("open library");
+        library
+            .set_telegram_credentials(54_321, "fedcba9876543210fedcba9876543210")
+            .expect("save user credentials");
+        let telegram = DesktopTelegram::open(directory.path().join("telegram.session"))
+            .expect("open Telegram worker");
+
+        assert_eq!(
+            telegram
+                .effective_credentials_status(&library)
+                .expect("resolve effective credentials"),
+            Some(TelegramCredentialsStatus {
+                api_id: 54_321,
+                source: TelegramCredentialSource::User,
+            })
+        );
+    }
+
+    #[test]
+    fn clearing_the_user_pair_reveals_the_build_pair_when_present() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("open library");
+        library
+            .set_telegram_credentials(54_321, "fedcba9876543210fedcba9876543210")
+            .expect("save user credentials");
+        library
+            .clear_telegram_credentials()
+            .expect("clear user credentials");
+        let telegram = DesktopTelegram::open(directory.path().join("telegram.session"))
+            .expect("open Telegram worker");
+        let expected = distribution_credentials()
+            .expect("read distribution credentials")
+            .map(|credentials| TelegramCredentialsStatus {
+                api_id: credentials.api_id,
+                source: TelegramCredentialSource::Distribution,
+            });
+
+        assert_eq!(
+            telegram
+                .effective_credentials_status(&library)
+                .expect("resolve effective credentials"),
+            expected
+        );
     }
 }

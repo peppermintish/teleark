@@ -334,6 +334,30 @@ fn settings_and_manual_collection_membership_persist() -> Result<(), Box<dyn Err
             .map(|value| value.value),
         Some("ja-JP".to_owned())
     );
+    database.set_settings(&[
+        SettingRecord {
+            key: "telegram.api_id".to_owned(),
+            value: "12345".to_owned(),
+            updated_at_unix_ms: 11,
+        },
+        SettingRecord {
+            key: "telegram.api_hash".to_owned(),
+            value: "0123456789abcdef0123456789abcdef".to_owned(),
+            updated_at_unix_ms: 11,
+        },
+    ])?;
+    assert_eq!(
+        database
+            .setting("telegram.api_hash")?
+            .map(|value| value.value),
+        Some("0123456789abcdef0123456789abcdef".to_owned())
+    );
+    assert_eq!(
+        database.delete_settings(&["telegram.api_id", "telegram.api_hash"])?,
+        2
+    );
+    assert!(database.setting("telegram.api_id")?.is_none());
+    assert!(database.setting("telegram.api_hash")?.is_none());
 
     let file = local_file(1, "manual.pdf", 10);
     database.upsert_logical_file(&file)?;
@@ -367,6 +391,28 @@ fn settings_and_manual_collection_membership_persist() -> Result<(), Box<dyn Err
             InvariantViolation::SmartCollectionMembership
         ))
     ));
+    Ok(())
+}
+
+#[test]
+fn settings_batch_validates_before_writing_any_row() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    let oversized = "x".repeat(1_048_577);
+    let result = database.set_settings(&[
+        SettingRecord {
+            key: "telegram.api_id".to_owned(),
+            value: "12345".to_owned(),
+            updated_at_unix_ms: 1,
+        },
+        SettingRecord {
+            key: "telegram.api_hash".to_owned(),
+            value: oversized,
+            updated_at_unix_ms: 1,
+        },
+    ]);
+    assert!(matches!(result, Err(StorageError::InvalidInput { .. })));
+    assert!(database.setting("telegram.api_id")?.is_none());
+    assert!(database.setting("telegram.api_hash")?.is_none());
     Ok(())
 }
 

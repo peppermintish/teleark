@@ -1,6 +1,6 @@
 # TeleArk Architecture
 
-Status: accepted target architecture with a persistent local catalog and a desktop-connected Telegram login, source discovery, and bounded resumable document scan. Encrypted transfer and recovery workflows remain incomplete. See `IMPLEMENTATION_STATUS.md` for exact current capability.
+Status: accepted target architecture with a persistent local catalog, persisted Telegram API ID onboarding, desktop-connected Telegram QR/code login, source discovery, bounded document browsing/indexing, and a retained native-download worker. The encrypted transfer/recovery composition exists below the GUI, while its desktop Vault/upload workflow remains incomplete. See `IMPLEMENTATION_STATUS.md` for exact current capability.
 
 ## Purpose
 
@@ -139,6 +139,17 @@ Collections, search results, and transfer history reference `LogicalFile`. Appli
 ## Persistence and recovery authority
 
 SQLite is a local index, cache, checkpoint store, settings store, and search engine. It is not the sole authority for encrypted packages. A versioned manifest stored with opaque remote parts must be sufficient, together with valid account access and the required key, to rediscover and reconstruct the package after local database loss.
+
+The Telegram application API ID and API Hash are resolved by the
+frontend-neutral runtime worker. An atomically managed personal pair persists
+in SQLite and takes precedence over an optional distributor pair compiled into
+an official TeleArk build. Frontends can inspect only the numeric API ID and a
+`User`/`Distribution` source marker; the runtime loads the hash directly for
+authentication and redacts it from debug output. Telegram authorization
+sessions remain owned by the Telegram adapter's separately protected session
+cache. A source build without either complete pair fails closed. TeleArk never
+embeds or falls back to Telegram Desktop credentials: distributor builds must
+use credentials registered for their own TeleArk application.
 
 Cross-system operations cannot be atomic. If a remote upload succeeds and local checkpoint persistence fails, restart reconciliation uses package ID, part index, deterministic/recoverable opaque naming, and remote discovery to repair state without blind duplicate upload.
 

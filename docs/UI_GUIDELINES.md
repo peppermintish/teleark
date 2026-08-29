@@ -106,7 +106,18 @@ Sidebar + toolbar/search + file table + footer/storage summary. The current alph
 
 ### Settings
 
-Language is the one connected settings area in the alpha: all three explicit locales switch live and persist, while System Default removes the override and renegotiates. Other settings controls remain visibly Preview until they have real application/runtime backing.
+Language and Telegram API credentials are connected settings areas in the
+alpha. All three explicit locales switch live—including every input
+placeholder—and persist, while System Default removes the override and
+renegotiates. A build with neither a personal nor distributor API ID/API Hash
+pair triggers a startup prompt that can be completed or skipped. The Settings
+route identifies which source is active, can save or explicitly remove the
+personal pair, and links through a real action to Telegram's official API
+development panel. Personal values persist in the local SQLite Library
+database with a visible local-data warning; distributor values are build-time
+configuration. Long localized notices wrap inside their card at the supported
+minimum width. Other settings controls remain visibly Preview until they have
+real application/runtime backing.
 
 ### Upload dialog
 
@@ -127,6 +138,23 @@ Clearly distinguishes password unlock, OS credential convenience, Recovery Key b
 ### Channel index detail
 
 Shows examined messages, files/bytes indexed, latest sync, job progress/current date/rate/ETA, content policy, controls, and an `IndexRange`-backed coverage map with gaps/partial/complete intervals. Never derive “all indexed” from a single last-message ID.
+
+Before authorization, the Telegram route presents phone/code/two-step login and
+QR login together in one two-column composition at every supported width,
+including the 900 px minimum. Fields within the phone panel use responsive
+widths, but neither login method moves behind a tab or mode switch.
+A primary Telegram sign-in action remains visible in the global header until an
+account is authorized. When no complete personal or distributor credential pair is configured,
+both login methods are visibly dimmed and non-interactive, the QR region shows
+an on-brand non-scannable placeholder, and a prominent localized notice links
+to the connected credential setting. A distributor build may provide
+credentials registered for its own TeleArk application; the app never presents
+shared Telegram Desktop credentials as an available fallback.
+
+Normal macOS windows retain the native titlebar and traffic-light controls.
+Full-screen mode must remain reversible through the top-edge AppKit controls,
+the platform `Control-Command-F` shortcut, Escape, and an in-app exit control.
+Custom titlebar styling must not replace those recovery paths.
 
 ## Internationalization and flexible layout
 

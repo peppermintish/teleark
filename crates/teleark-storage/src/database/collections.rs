@@ -8,20 +8,52 @@ use crate::{StorageError, StorageResult};
 
 const MAX_SETTING_VALUE_BYTES: usize = 1_048_576;
 
-impl Database {
-    pub fn set_setting(&mut self, setting: &SettingRecord) -> StorageResult<()> {
-        validate_setting(setting)?;
-        self.connection.execute(
-            r#"
+fn upsert_setting(connection: &rusqlite::Connection, setting: &SettingRecord) -> StorageResult<()> {
+    connection.execute(
+        r#"
 INSERT INTO settings (key, value, updated_at_unix_ms)
 VALUES (?1, ?2, ?3)
 ON CONFLICT(key) DO UPDATE SET
     value = excluded.value,
     updated_at_unix_ms = excluded.updated_at_unix_ms
 "#,
-            params![setting.key, setting.value, setting.updated_at_unix_ms],
-        )?;
+        params![setting.key, setting.value, setting.updated_at_unix_ms],
+    )?;
+    Ok(())
+}
+
+impl Database {
+    pub fn set_setting(&mut self, setting: &SettingRecord) -> StorageResult<()> {
+        validate_setting(setting)?;
+        upsert_setting(&self.connection, setting)?;
         Ok(())
+    }
+
+    /// Saves a group of settings atomically after validating the entire batch.
+    pub fn set_settings(&mut self, settings: &[SettingRecord]) -> StorageResult<()> {
+        for setting in settings {
+            validate_setting(setting)?;
+        }
+        let transaction = transaction(&mut self.connection)?;
+        for setting in settings {
+            upsert_setting(&transaction, setting)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Deletes a group of settings atomically.
+    pub fn delete_settings(&mut self, keys: &[&str]) -> StorageResult<usize> {
+        for key in keys {
+            validate_setting_key(key)?;
+        }
+        let transaction = transaction(&mut self.connection)?;
+        let mut deleted = 0_usize;
+        for key in keys {
+            deleted += transaction.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        }
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     pub fn setting(&self, key: &str) -> StorageResult<Option<SettingRecord>> {

@@ -72,6 +72,16 @@ Manifest 1 --- 1 RemoteObject
 
 An account represents a Telegram authorization identity and references adapter-managed session/credential locations, never raw secrets in ordinary database/debug output. A chat belongs to an account. Index jobs, remote objects, and storage-channel settings always identify both.
 
+The settings table contains a user's Telegram application API ID and API Hash
+as an atomically updated pair. The runtime validates the pair, exposes only the
+numeric API ID and credential-source marker to frontends, and redacts the hash
+from ordinary debug output. This alpha-stage persistence choice means a copy of
+the Library database also contains the personal API Hash and must be protected
+accordingly. An optional distributor pair is compile-time application
+configuration, not a database row; a complete personal pair takes precedence.
+Telegram login/session secrets remain outside this table in the adapter-owned
+session cache.
+
 ### TransferTask and TransferPart
 
 A `TransferTask` is one logical-file-level upload or download. It records direction, priority, state, requested source/destination, totals, progress, retry policy state, account, timestamps, and structured failure category. A `TransferPart` records per-application-part state, attempts, verified byte counts, remote association, and durable checkpoint data.

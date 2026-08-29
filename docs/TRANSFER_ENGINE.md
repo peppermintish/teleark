@@ -1,12 +1,14 @@
 # Transfer Engine
 
-Status: deterministic frontend-neutral engine and concrete native-file, SQLite,
-crypto, and Telegram byte-object adapters are implemented and tested. Runtime
-integration covers encrypted upload, checkpoint restart, Manifest publication,
-fresh-database File Key/layout recovery, authenticated download, whole-file
-equality, and atomic finalization against a deterministic fake remote. Retained
-async desktop ownership, credentialed Telegram system tests, bandwidth control,
-and large-file streaming remain; GUI transfer values are still synthetic.
+Status: deterministic frontend-neutral encrypted engine and concrete native-file,
+SQLite, crypto, and Telegram byte-object adapters are implemented and tested.
+Runtime integration covers encrypted upload, checkpoint restart, Manifest
+publication, fresh-database File Key/layout recovery, authenticated download,
+whole-file equality, and atomic finalization against a deterministic fake
+remote. The desktop additionally owns a bounded real Telegram-native download
+queue and renders its task snapshots. Encrypted desktop ownership, credentialed
+Telegram system tests, bandwidth control, pause/retry, and large-file encrypted
+streaming remain.
 
 ## Scope
 
@@ -49,8 +51,26 @@ Production long-running workers will require an explicit async owner and retaine
 The SQLite and native-file adapters are deliberately thread-confined for
 ownership by a bounded runtime worker. Their operations are synchronous and do
 not contain network awaits. The Telegram byte-object adapter uses the retained
-Telegram worker, but a retained transfer worker/event boundary has not yet been
-connected to the GUI.
+Telegram worker. Native channel downloads use a separate retained worker with a
+bounded queue and locked snapshots; it never holds the snapshot lock during a
+network operation. This native path is intentionally distinct from encrypted
+`LogicalFile` package transfer until the desktop Vault service can supply keys
+and manifests.
+
+## Native channel-download path
+
+The Telegram Sources screen queries the selected dialog in exclusive-cursor
+pages and keeps source/message identity on every row. A user-selected save path
+becomes a bounded runtime request. The adapter refetches the document by chat
+and message identity, streams it into a private `.teleark-partial` sibling,
+checks the declared byte count, flushes, and atomically publishes the final
+path. Existing destinations are never silently overwritten.
+
+The task snapshots exposed to GPUI are `Queued`, `Running`, `Completed`, or a
+structured `Failed` kind. This first native path is intentionally sequential and
+in-memory: byte-level progress, restart resume, pause/cancel/retry, durable task
+history, and content hashes remain required before it can replace the encrypted
+engine for managed TeleArk files.
 
 ## Task state machine
 

@@ -227,8 +227,9 @@ impl LayoutPolicy {
 
     #[cfg(test)]
     pub(crate) fn transfer_visible_rows_height(self) -> f32 {
-        let summary = if self.is_spacious() { 120.0 } else { 170.0 };
-        let bottom = if self.is_compact() { 132.0 } else { 184.0 };
+        let summary = if self.is_spacious() { 120.0 } else { 202.0 };
+        // The production transfer runtime omits preview-only diagnostics.
+        let bottom = 0.0;
         let toolbar = 50.0;
         let table_chrome = 34.0 + if self.is_compact() { 58.0 } else { 38.0 };
         self.route_height() - summary - bottom - toolbar - table_chrome

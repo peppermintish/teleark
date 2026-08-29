@@ -1,6 +1,6 @@
 # Security Model
 
-Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, and tamper tests exist in `teleark-crypto`; a service-owned durable registry lifecycle, Key Vault service, credential storage, production transfer/filesystem integration, publication, and recovery path do not. TeleArk must not yet be used to protect valuable data.
+Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, authenticated Manifest publication, production filesystem/Telegram adapters, and fake-remote database-loss recovery exist. A production Key Vault/unlock service, credential storage, independent review, and the encrypted desktop workflow do not. TeleArk must not yet be used to protect valuable data.
 
 ## Security goals
 
@@ -22,7 +22,7 @@ The product also aims to prevent accidental exposure through final filenames, lo
 
 - a party able to inspect or modify objects stored in Telegram;
 - network and storage corruption (transport security remains a Telegram/MTProto responsibility);
-- an attacker who copies the local database but not an unlocked process/keychain;
+- an attacker who copies the local database but not the separately protected Telegram session cache;
 - malformed or malicious manifest/frame bytes presented to parsers;
 - accidental process termination between remote success and local persistence;
 - dependency/supply-chain mistakes and accidental secret logging;
@@ -81,6 +81,11 @@ Loss of every valid password/recovery/keychain path makes encrypted data unrecov
 - Limit unlocked-key lifetime and define lock-on-sleep/logout behavior before release.
 - Do not hold secrets in GUI view models longer than needed.
 
+Telegram QR login links contain short-lived authorization secrets. TeleArk keeps
+them only in memory, redacts them from adapter/runtime `Debug` output, refreshes
+them on Telegram's login-token update or expiry, and never writes them to the
+Library database, session file, ordinary logs, or fixtures.
+
 The candidate crate uses redacted secret and manifest metadata `Debug` implementations, zeroizing key/password/plaintext buffers where practical, OS randomness in production, and deterministic randomness only behind test support. Its mandatory in-memory AEAD-usage registry is a safety invariant, not durable storage: a future Vault service must own it and hydrate all existing identities before any post-restart encryption.
 
 ## Parser and output safety
@@ -88,6 +93,12 @@ The candidate crate uses redacted secret and manifest metadata `Debug` implement
 Manifests and frames are untrusted. Parse fixed headers and bounded lengths before allocation; reject unsupported required algorithms/versions; verify AAD/tag/digests; reject duplicate, reordered, missing, overlapping, or out-of-range parts/frames. Fuzz parsers against panics, hangs, and unbounded allocation.
 
 Downloads write only to a controlled `.partial` destination. Authentication failure, wrong key, cancellation, disk failure, missing part, or hash mismatch must never expose the final target path as a valid complete file. Flush verified output and atomically rename only after whole-file verification.
+
+Native, non-Vault Telegram downloads use the same publication rule but currently
+verify only the exact byte count declared by Telegram. They create a private
+collision-resistant application partial name, reject an existing final path,
+flush before atomic no-replace publication, and remove the partial on an observed failure. This
+is truncation/finalization safety, not cryptographic content authentication.
 
 Path metadata is untrusted: prevent traversal, absolute-path escape, reserved-name abuse, separator confusion, and overwrite without explicit policy.
 
@@ -97,14 +108,35 @@ The SQLite database may reveal indexed native filenames/captions, local source p
 
 Telegram sessions use adapter/platform protection and must never be committed. macOS Keychain support, when added, cannot replace recovery-key backup and must be isolated from durable crypto format definitions.
 
+The desktop persists the Telegram application API ID and API Hash together in
+the local SQLite settings table so authentication can resume after restart.
+The pair is transactionally saved/removed, validated before use, loaded by the
+runtime rather than returned to the GUI, and redacted from ordinary debug
+output. SQLite is not encrypted, so anyone who obtains a readable Library
+database or backup can obtain the API Hash. The Settings and onboarding UI make
+this tradeoff explicit. Telegram login/session secrets remain in the separately
+protected adapter session cache and are not stored in the Library database.
+
+An official distributor may compile credentials registered for its own TeleArk
+application into its build. Embedded API credentials are extractable from the
+binary and are therefore application identifiers, not secret authorization or
+an account session; distributors must monitor and rotate them when necessary.
+A personal SQLite pair overrides the distributor pair and can be removed
+explicitly. TeleArk does not embed or reuse Telegram Desktop's published
+credentials. Telegram's official documentation states that sample IDs are
+limited to testing and that third-party applications must obtain their own API
+ID.
+
 ## Availability and crash consistency
 
 Telegram and SQLite cannot participate in one transaction. Idempotent package/part identity, recoverable opaque names, durable checkpoints, and reconciliation prevent blind duplicate upload after a crash. Recovery depends on Telegram account/channel availability, retained manifests/parts, supported format codecs, and valid key material; Telegram deletion/account loss remains an availability risk.
 
 The generic Transfer engine exercises ambiguous-success and checkpoint-failure
 reconciliation against deterministic fakes, including no-duplicate remote
-parts. It is not yet adapted to the real Telegram and SQLite implementations,
-so those tests establish policy behavior rather than production crash safety.
+parts, and the runtime composes it with real Telegram and SQLite adapters. A
+separate bounded native-download worker is connected to the desktop. Native
+download queue entries are currently in-memory and do not resume after restart;
+credentialed Telegram crash/system testing still remains.
 
 ## Dependency and clean-room security
 

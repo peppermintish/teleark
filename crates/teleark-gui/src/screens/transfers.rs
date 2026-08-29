@@ -3,7 +3,12 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
+use teleark_i18n::{
+    MessageArgs,
+    format::{format_bytes, format_integer},
+};
+use teleark_runtime::ChannelDownloadState;
 
 use crate::{
     app::TeleArkApp,
@@ -21,6 +26,74 @@ const CONNECTION_CLIENT_WIDTH: f32 = 82.0;
 const CONNECTION_LATENCY_WIDTH: f32 = 72.0;
 
 impl TeleArkApp {
+    fn transfer_rows(&self) -> Vec<TransferRow> {
+        let Some(transfers_runtime) = self.transfers.as_ref() else {
+            return transfers(self.upload_queued);
+        };
+        let Ok(snapshots) = transfers_runtime.snapshots() else {
+            return Vec::new();
+        };
+        snapshots
+            .into_iter()
+            .rev()
+            .map(|snapshot| {
+                let state = match snapshot.state {
+                    ChannelDownloadState::Queued => TransferState::Waiting,
+                    ChannelDownloadState::Running => TransferState::Downloading,
+                    ChannelDownloadState::Completed => TransferState::Completed,
+                    ChannelDownloadState::Failed(_) => TransferState::Failed,
+                };
+                let size = format_bytes(self.locale(), snapshot.size_bytes);
+                let transferred = if state == TransferState::Completed {
+                    size.clone()
+                } else {
+                    format_bytes(self.locale(), 0)
+                };
+                let source = self
+                    .telegram_chats
+                    .iter()
+                    .find(|chat| chat.id == snapshot.chat_id)
+                    .map(|chat| chat.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| {
+                        self.tr_with(
+                            "library-source-telegram-chat",
+                            MessageArgs::new().with("chat_id", snapshot.chat_id.to_string()),
+                        )
+                        .to_string()
+                    });
+                TransferRow {
+                    runtime_task_id: Some(snapshot.id),
+                    message_id: Some(snapshot.message_id),
+                    name: snapshot.file_name.into(),
+                    source: source.into(),
+                    size: size.into(),
+                    transferred: transferred.into(),
+                    progress: if state == TransferState::Completed {
+                        100.0
+                    } else {
+                        0.0
+                    },
+                    speed: self.tr("transfer-value-unavailable"),
+                    eta: self.tr("transfer-value-unavailable"),
+                    connections: self.tr("transfer-value-unavailable"),
+                    state,
+                    destination: snapshot.destination.to_string_lossy().into_owned().into(),
+                }
+            })
+            .collect()
+    }
+
+    fn runtime_transfer_size(&self, id: u64) -> Option<u64> {
+        self.transfers
+            .as_ref()?
+            .snapshots()
+            .ok()?
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .map(|snapshot| snapshot.size_bytes)
+    }
+
     pub(crate) fn render_transfers(
         &self,
         _window: &mut Window,
@@ -29,7 +102,34 @@ impl TeleArkApp {
     ) -> AnyElement {
         let padding = layout.content_padding();
         let query = self.search_input.read(cx).value().to_lowercase();
-        let transfer_rows: Vec<_> = transfers(self.upload_queued)
+        let runtime_backed = self.transfers.is_some();
+        let all_transfer_rows = self.transfer_rows();
+        let downloading = all_transfer_rows
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Downloading)
+            .count();
+        let waiting = all_transfer_rows
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Waiting)
+            .count();
+        let completed = all_transfer_rows
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Completed)
+            .count();
+        let failed = all_transfer_rows
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Failed)
+            .count();
+        let completed_bytes = all_transfer_rows
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Completed)
+            .filter_map(|transfer| {
+                transfer
+                    .runtime_task_id
+                    .and_then(|id| self.runtime_transfer_size(id))
+            })
+            .sum();
+        let transfer_rows: Vec<_> = all_transfer_rows
             .into_iter()
             .filter(|transfer| transfer_matches_nav(self.nav_selection, transfer.state))
             .filter(|transfer| {
@@ -109,7 +209,13 @@ impl TeleArkApp {
         };
 
         let summary = div()
-            .h(px(if layout.is_spacious() { 120.0 } else { 170.0 }))
+            .h(px(if layout.is_spacious() {
+                120.0
+            } else if runtime_backed {
+                202.0
+            } else {
+                170.0
+            }))
             .px(px(padding))
             .py(if layout.is_spacious() {
                 px(12.0)
@@ -126,43 +232,47 @@ impl TeleArkApp {
             .child(summary_card(
                 IconName::ArrowDown,
                 self.tr("transfer-summary-downloading"),
-                "8",
-                self.tr("transfer-summary-tasks"),
+                format_integer(self.locale(), downloading as u64),
+                self.tr_with(
+                    "transfer-summary-task-count",
+                    MessageArgs::new()
+                        .with("count", format_integer(self.locale(), downloading as u64)),
+                ),
                 Tone::Blue,
             ))
             .child(summary_card(
                 IconName::Calendar,
                 self.tr("transfer-summary-waiting"),
-                "156",
+                format_integer(self.locale(), waiting as u64),
                 self.tr("transfer-summary-ready"),
                 Tone::Amber,
             ))
             .child(summary_card(
                 IconName::CircleCheck,
                 self.tr("transfer-summary-completed"),
-                "3,842",
-                self.tr("transfer-summary-today"),
+                format_integer(self.locale(), completed as u64),
+                self.tr("transfer-summary-completed-note"),
                 Tone::Green,
             ))
             .child(summary_card(
                 IconName::CircleX,
                 self.tr("transfer-summary-failed"),
-                "12",
+                format_integer(self.locale(), failed as u64),
                 self.tr("transfer-summary-retry"),
                 Tone::Red,
             ))
             .child(summary_card(
                 IconName::ArrowDown,
                 self.tr("transfer-summary-total-speed"),
-                "38.2 MB/s",
-                "↓ 23.6   ↑ 14.6".into(),
+                self.tr("transfer-value-unavailable"),
+                self.tr("transfer-summary-live-runtime"),
                 Tone::Blue,
             ))
             .child(summary_card(
                 IconName::Inbox,
                 self.tr("transfer-summary-today-data"),
-                "186 GB",
-                self.tr("transfer-summary-month-change"),
+                format_bytes(self.locale(), completed_bytes),
+                self.tr("transfer-summary-completed-data"),
                 Tone::Purple,
             ));
 
@@ -174,35 +284,39 @@ impl TeleArkApp {
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(components::button(
-                "transfers-start-all",
-                self.tr("action-start-all"),
-                Some(IconName::ArrowRight),
-                true,
-            ))
-            .child(
-                components::button(
-                    "transfers-pause-all",
-                    if self.transfer_paused {
-                        self.tr("action-resume-all")
-                    } else {
-                        self.tr("action-pause-all")
-                    },
-                    Some(if self.transfer_paused {
-                        IconName::ArrowRight
-                    } else {
-                        IconName::Dash
-                    }),
-                    false,
+            .when(!runtime_backed, |toolbar| {
+                toolbar.child(components::button(
+                    "transfers-start-all",
+                    self.tr("action-start-all"),
+                    Some(IconName::ArrowRight),
+                    true,
+                ))
+            })
+            .when(!runtime_backed, |toolbar| {
+                toolbar.child(
+                    components::button(
+                        "transfers-pause-all",
+                        if self.transfer_paused {
+                            self.tr("action-resume-all")
+                        } else {
+                            self.tr("action-pause-all")
+                        },
+                        Some(if self.transfer_paused {
+                            IconName::ArrowRight
+                        } else {
+                            IconName::Dash
+                        }),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transfer_paused = !this.transfer_paused;
+                        cx.notify();
+                    })),
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transfer_paused = !this.transfer_paused;
-                    cx.notify();
-                })),
-            )
-            .child(retry_action)
-            .child(clear_action)
-            .child(new_queue_action)
+            })
+            .when(!runtime_backed, |toolbar| toolbar.child(retry_action))
+            .when(!runtime_backed, |toolbar| toolbar.child(clear_action))
+            .when(!runtime_backed, |toolbar| toolbar.child(new_queue_action))
             .when(!layout.is_compact(), |toolbar| {
                 toolbar.child(div().flex_1())
             })
@@ -245,6 +359,7 @@ impl TeleArkApp {
             .into_iter()
             .enumerate()
             .map(|(index, transfer)| self.render_transfer_row(index, transfer, layout, cx));
+        let has_rows = selected.is_some();
 
         let table_footer = div()
             .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
@@ -262,13 +377,31 @@ impl TeleArkApp {
             .border_color(theme::border())
             .text_xs()
             .text_color(theme::text_secondary())
-            .child(self.tr("transfer-footer-total"))
-            .child(self.tr("transfer-footer-downloading"))
-            .child(self.tr("transfer-footer-waiting"))
+            .child(self.tr_with(
+                "transfer-footer-total-live",
+                MessageArgs::new().with(
+                    "count",
+                    format_integer(
+                        self.locale(),
+                        (downloading + waiting + completed + failed) as u64,
+                    ),
+                ),
+            ))
+            .child(self.tr_with(
+                "transfer-footer-downloading-live",
+                MessageArgs::new().with("count", format_integer(self.locale(), downloading as u64)),
+            ))
+            .child(self.tr_with(
+                "transfer-footer-waiting-live",
+                MessageArgs::new().with("count", format_integer(self.locale(), waiting as u64)),
+            ))
             .when(!layout.is_compact(), |footer| footer.child(div().flex_1()))
-            .child(div().text_color(theme::blue()).child("↓ 23.6 MB/s"))
-            .child(div().text_color(theme::blue()).child("↑ 14.6 MB/s"))
-            .child(self.tr("transfer-footer-unlimited"));
+            .when(!runtime_backed, |footer| {
+                footer
+                    .child(div().text_color(theme::blue()).child("↓ 23.6 MB/s"))
+                    .child(div().text_color(theme::blue()).child("↑ 14.6 MB/s"))
+                    .child(self.tr("transfer-footer-unlimited"))
+            });
 
         let table = div()
             .flex_1()
@@ -287,7 +420,19 @@ impl TeleArkApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .children(rows),
+                    .children(rows)
+                    .when(!has_rows, |body| {
+                        body.child(
+                            div()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_sm()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("transfer-empty")),
+                        )
+                    }),
             )
             .child(table_footer);
 
@@ -310,7 +455,7 @@ impl TeleArkApp {
             .child(summary)
             .child(toolbar)
             .child(table)
-            .child(bottom);
+            .when(!runtime_backed, |main| main.child(bottom));
 
         div()
             .flex_1()
@@ -505,11 +650,19 @@ impl TeleArkApp {
         let waiting = transfer.state == TransferState::Waiting;
         let completed = transfer.state == TransferState::Completed;
         let failed = transfer.state == TransferState::Failed;
-        let remote_message_id = if waiting { "—" } else { "1876543210897" };
-        let started_at = if waiting {
-            "—"
+        let runtime_backed = transfer.runtime_task_id.is_some();
+        let unavailable = self.tr("transfer-value-unavailable");
+        let remote_message_id = if let Some(message_id) = transfer.message_id {
+            message_id.to_string().into()
+        } else if waiting {
+            unavailable.clone()
         } else {
-            "2026-08-23 20:49:02"
+            SharedString::from("1876543210897")
+        };
+        let started_at = if runtime_backed || waiting {
+            unavailable.clone()
+        } else {
+            SharedString::from("2026-08-23 20:49:02")
         };
         let transfer_icon = match transfer.state {
             TransferState::Downloading => IconName::ArrowDown,
@@ -519,43 +672,52 @@ impl TeleArkApp {
             TransferState::Failed => IconName::CircleX,
         };
         let details = [
-            (
-                self.tr("detail-source-channel"),
-                SharedString::from(transfer.source),
-            ),
-            (
-                self.tr("detail-message-id"),
-                SharedString::from(remote_message_id),
-            ),
-            (
-                self.tr("detail-local-path"),
-                SharedString::from(transfer.destination),
-            ),
-            (self.tr("detail-speed"), SharedString::from(transfer.speed)),
+            (self.tr("detail-source-channel"), transfer.source.clone()),
+            (self.tr("detail-message-id"), remote_message_id),
+            (self.tr("detail-local-path"), transfer.destination.clone()),
+            (self.tr("detail-speed"), transfer.speed.clone()),
             (
                 self.tr("detail-transferred"),
                 SharedString::from(format!("{} / {}", transfer.transferred, transfer.size)),
             ),
             (
                 self.tr("detail-active-connections"),
-                SharedString::from(transfer.connections),
+                transfer.connections.clone(),
             ),
             (
                 self.tr("detail-workers"),
-                SharedString::from(if active { "16" } else { "—" }),
+                if runtime_backed {
+                    unavailable.clone()
+                } else {
+                    SharedString::from(if active { "16" } else { "—" })
+                },
             ),
             (
                 self.tr("detail-retries"),
-                SharedString::from(if failed { "3" } else { "0" }),
+                if runtime_backed {
+                    unavailable.clone()
+                } else {
+                    SharedString::from(if failed { "3" } else { "0" })
+                },
             ),
             (
                 self.tr("detail-created"),
-                SharedString::from("2026-08-23 20:48:31"),
+                if runtime_backed {
+                    unavailable.clone()
+                } else {
+                    SharedString::from("2026-08-23 20:48:31")
+                },
             ),
-            (self.tr("detail-started"), SharedString::from(started_at)),
+            (self.tr("detail-started"), started_at),
         ];
 
-        let (verification, verification_tone, verification_icon) = if completed {
+        let (verification, verification_tone, verification_icon) = if completed && runtime_backed {
+            (
+                self.tr("detail-verification-size-checked"),
+                Tone::Green,
+                IconName::CircleCheck,
+            )
+        } else if completed {
             (
                 self.tr("detail-verification-passed"),
                 Tone::Green,
@@ -575,43 +737,62 @@ impl TeleArkApp {
             )
         };
 
-        let primary_action = match transfer.state {
-            TransferState::Downloading | TransferState::Uploading => components::button(
-                "detail-pause",
-                if self.transfer_paused {
-                    self.tr("action-resume")
-                } else {
-                    self.tr("action-pause")
-                },
-                Some(if self.transfer_paused {
-                    IconName::ArrowRight
-                } else {
-                    IconName::Dash
-                }),
-                true,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.transfer_paused = !this.transfer_paused;
-                cx.notify();
-            })),
-            TransferState::Waiting => components::button(
-                "detail-start",
-                self.tr("action-start"),
-                Some(IconName::ArrowRight),
-                true,
-            ),
-            TransferState::Completed => components::button(
+        let primary_action = if runtime_backed && completed {
+            let destination = std::path::PathBuf::from(transfer.destination.as_ref());
+            components::button(
                 "detail-open",
                 self.tr("action-open-file"),
                 Some(IconName::FolderOpen),
                 true,
-            ),
-            TransferState::Failed => components::button(
-                "detail-retry",
-                self.tr("action-retry"),
-                Some(IconName::Redo2),
+            )
+            .on_click(move |_, _, cx| cx.open_with_system(&destination))
+        } else if runtime_backed {
+            components::button(
+                "detail-runtime-state",
+                self.tr(transfer.state.message_id()),
+                Some(transfer_icon.clone()),
                 true,
-            ),
+            )
+            .disabled(true)
+        } else {
+            match transfer.state {
+                TransferState::Downloading | TransferState::Uploading => components::button(
+                    "detail-pause",
+                    if self.transfer_paused {
+                        self.tr("action-resume")
+                    } else {
+                        self.tr("action-pause")
+                    },
+                    Some(if self.transfer_paused {
+                        IconName::ArrowRight
+                    } else {
+                        IconName::Dash
+                    }),
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.transfer_paused = !this.transfer_paused;
+                    cx.notify();
+                })),
+                TransferState::Waiting => components::button(
+                    "detail-start",
+                    self.tr("action-start"),
+                    Some(IconName::ArrowRight),
+                    true,
+                ),
+                TransferState::Completed => components::button(
+                    "detail-open",
+                    self.tr("action-open-file"),
+                    Some(IconName::FolderOpen),
+                    true,
+                ),
+                TransferState::Failed => components::button(
+                    "detail-retry",
+                    self.tr("action-retry"),
+                    Some(IconName::Redo2),
+                    true,
+                ),
+            }
         };
 
         div()
@@ -767,7 +948,7 @@ impl TeleArkApp {
 fn summary_card(
     icon: IconName,
     label: SharedString,
-    value: &'static str,
+    value: impl Into<SharedString>,
     hint: SharedString,
     tone: Tone,
 ) -> AnyElement {
@@ -804,7 +985,7 @@ fn summary_card(
                         .mt_1()
                         .text_lg()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(value),
+                        .child(value.into()),
                 )
                 .child(
                     div()

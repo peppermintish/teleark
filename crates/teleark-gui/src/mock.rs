@@ -3,6 +3,8 @@
 //! The real adapters deliberately do not live in this crate. These records let
 //! the reference screens be exercised while the Core ports are implemented.
 
+use gpui::SharedString;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferState {
     Downloading,
@@ -26,21 +28,53 @@ impl TransferState {
 
 #[derive(Clone, Debug)]
 pub struct TransferRow {
-    pub name: &'static str,
-    pub source: &'static str,
-    pub size: &'static str,
-    pub transferred: &'static str,
+    pub runtime_task_id: Option<u64>,
+    pub message_id: Option<i64>,
+    pub name: SharedString,
+    pub source: SharedString,
+    pub size: SharedString,
+    pub transferred: SharedString,
     pub progress: f32,
-    pub speed: &'static str,
-    pub eta: &'static str,
-    pub connections: &'static str,
+    pub speed: SharedString,
+    pub eta: SharedString,
+    pub connections: SharedString,
     pub state: TransferState,
-    pub destination: &'static str,
+    pub destination: SharedString,
+}
+
+macro_rules! transfer_row {
+    (
+        name: $name:expr,
+        source: $source:expr,
+        size: $size:expr,
+        transferred: $transferred:expr,
+        progress: $progress:expr,
+        speed: $speed:expr,
+        eta: $eta:expr,
+        connections: $connections:expr,
+        state: $state:expr,
+        destination: $destination:expr $(,)?
+    ) => {
+        TransferRow {
+            runtime_task_id: None,
+            message_id: None,
+            name: $name.into(),
+            source: $source.into(),
+            size: $size.into(),
+            transferred: $transferred.into(),
+            progress: $progress,
+            speed: $speed.into(),
+            eta: $eta.into(),
+            connections: $connections.into(),
+            state: $state,
+            destination: $destination.into(),
+        }
+    };
 }
 
 pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
     let mut rows = vec![
-        TransferRow {
+        transfer_row! {
             name: "Product_Demo_4K.mkv",
             source: "Product Demos",
             size: "14.61 GB",
@@ -52,7 +86,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Downloading,
             destination: "/Downloads/Videos",
         },
-        TransferRow {
+        transfer_row! {
             name: "Cinema_4K_Collection.zip",
             source: "Cinema 4K",
             size: "52.48 GB",
@@ -64,7 +98,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Downloading,
             destination: "/Downloads/Archives",
         },
-        TransferRow {
+        transfer_row! {
             name: "AI_Course_Lesson_06.zip",
             source: "Learning Library",
             size: "3.28 GB",
@@ -76,7 +110,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Downloading,
             destination: "/Downloads/Archives",
         },
-        TransferRow {
+        transfer_row! {
             name: "Presentation_Final.mov",
             source: "My Storage",
             size: "9.74 GB",
@@ -88,7 +122,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Uploading,
             destination: "Telegram / My Storage",
         },
-        TransferRow {
+        transfer_row! {
             name: "Design_System.pdf",
             source: "Design Assets",
             size: "45.6 MB",
@@ -100,7 +134,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Completed,
             destination: "/Downloads/Documents",
         },
-        TransferRow {
+        transfer_row! {
             name: "Assets_2026.rar",
             source: "Design Assets",
             size: "8.73 GB",
@@ -112,7 +146,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Completed,
             destination: "/Downloads/Archives",
         },
-        TransferRow {
+        transfer_row! {
             name: "Linux_Ubuntu_24.04.iso",
             source: "Software",
             size: "5.28 GB",
@@ -124,7 +158,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Waiting,
             destination: "/Downloads/Images",
         },
-        TransferRow {
+        transfer_row! {
             name: "AE_Plugins_2025.zip",
             source: "Software",
             size: "3.91 GB",
@@ -136,7 +170,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Waiting,
             destination: "/Downloads/Archives",
         },
-        TransferRow {
+        transfer_row! {
             name: "PostgreSQL_16.3.dmg",
             source: "Software",
             size: "1.23 GB",
@@ -148,7 +182,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Waiting,
             destination: "/Downloads/Images",
         },
-        TransferRow {
+        transfer_row! {
             name: "Dataset_Project.tar.gz",
             source: "Learning Library",
             size: "19.82 GB",
@@ -160,7 +194,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             state: TransferState::Waiting,
             destination: "/Downloads/Archives",
         },
-        TransferRow {
+        transfer_row! {
             name: "movie_source_2160p.mkv",
             source: "Cinema 4K",
             size: "22.14 GB",
@@ -177,7 +211,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
     if include_queued_upload {
         rows.insert(
             0,
-            TransferRow {
+            transfer_row! {
                 name: "Movie_Archive.mkv",
                 source: "My Storage",
                 size: "73.6 GB",

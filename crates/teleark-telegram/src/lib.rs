@@ -7,17 +7,27 @@ use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use grammers_client::{
     Client, SignInError,
     media::{Document, Media},
     message::InputMessage,
+    tl,
 };
 use grammers_mtsender::{InvocationError, SenderPool};
-use grammers_session::types::{PeerKind, PeerRef};
+use grammers_session::{
+    Session as _,
+    types::{PeerKind, PeerRef},
+    updates::UpdatesLike,
+};
+use tokio::io::AsyncWriteExt as _;
 use tokio::task::JoinHandle;
 
 mod session;
@@ -139,6 +149,41 @@ pub enum PasswordOutcome {
     InvalidPassword(Box<PasswordChallenge>),
 }
 
+/// A short-lived Telegram QR authorization link.
+///
+/// The link contains an authorization secret. Its debug representation is
+/// intentionally redacted and callers must never persist it.
+#[derive(Clone, Eq, PartialEq)]
+pub struct QrLoginCode {
+    deep_link: String,
+    expires_at_unix_seconds: i64,
+}
+
+impl QrLoginCode {
+    pub fn deep_link(&self) -> &str {
+        &self.deep_link
+    }
+
+    pub const fn expires_at_unix_seconds(&self) -> i64 {
+        self.expires_at_unix_seconds
+    }
+}
+
+impl fmt::Debug for QrLoginCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QrLoginCode")
+            .field("deep_link", &"[REDACTED]")
+            .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
+            .finish()
+    }
+}
+
+pub enum QrLoginOutcome {
+    Pending(QrLoginCode),
+    Authorized(TelegramAccount),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TelegramChatKind {
@@ -240,6 +285,9 @@ pub struct SentDocument {
 /// Connected Telegram adapter with explicit ownership of all background work.
 pub struct TelegramConnection {
     client: Client,
+    session: Arc<FileSession>,
+    api_id: i32,
+    qr_login_update: Arc<AtomicBool>,
     runner: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
 }
@@ -260,15 +308,26 @@ impl TelegramConnection {
             runner,
             handle,
             mut updates,
-        } = SenderPool::new(session, config.api_id);
+        } = SenderPool::new(Arc::clone(&session), config.api_id);
         let client = Client::new(handle);
         let runner = tokio::spawn(runner.run());
         // Grammers receives updates through an unbounded transport channel. Drain
         // it continuously until a bounded Core update stream is connected.
-        let update_drain = tokio::spawn(async move { while updates.recv().await.is_some() {} });
+        let qr_login_update = Arc::new(AtomicBool::new(false));
+        let drain_signal = Arc::clone(&qr_login_update);
+        let update_drain = tokio::spawn(async move {
+            while let Some(update) = updates.recv().await {
+                if contains_qr_login_update(&update) {
+                    drain_signal.store(true, Ordering::Release);
+                }
+            }
+        });
 
         Ok(Self {
             client,
+            session,
+            api_id: config.api_id,
+            qr_login_update,
             runner: Some(runner),
             update_drain: Some(update_drain),
         })
@@ -299,6 +358,80 @@ impl TelegramConnection {
             .request_login_code(phone, api_hash)
             .await
             .map(|token| PendingLogin { token })
+            .map_err(map_invocation)
+    }
+
+    /// Exports or refreshes a short-lived QR login token.
+    ///
+    /// Calling this method again is also how Telegram reports that a QR code
+    /// scanned in an authorized mobile application has been accepted.
+    pub async fn export_qr_login(
+        &self,
+        api_hash: &str,
+        except_user_ids: &[i64],
+    ) -> Result<QrLoginOutcome, TelegramError> {
+        if api_hash.trim().is_empty() {
+            return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
+        }
+        self.qr_login_update.store(false, Ordering::Release);
+        let request = tl::functions::auth::ExportLoginToken {
+            api_id: self.api_id,
+            api_hash: api_hash.to_owned(),
+            except_ids: except_user_ids.to_vec(),
+        };
+        let response = self.client.invoke(&request).await.map_err(map_invocation)?;
+        self.resolve_qr_response(response).await
+    }
+
+    /// Returns whether Telegram announced that the active QR token changed or
+    /// was accepted. Reading consumes the signal.
+    pub fn take_qr_login_update(&self) -> bool {
+        self.qr_login_update.swap(false, Ordering::AcqRel)
+    }
+
+    async fn resolve_qr_response(
+        &self,
+        response: tl::enums::auth::LoginToken,
+    ) -> Result<QrLoginOutcome, TelegramError> {
+        match response {
+            tl::enums::auth::LoginToken::Token(token) => Ok(QrLoginOutcome::Pending(
+                qr_login_code(token.token, token.expires)?,
+            )),
+            tl::enums::auth::LoginToken::Success(_) => self.qr_account().await,
+            tl::enums::auth::LoginToken::MigrateTo(migration) => {
+                validate_qr_migration(migration.dc_id, &migration.token)?;
+                let imported = self
+                    .client
+                    .invoke_in_dc(
+                        migration.dc_id,
+                        &tl::functions::auth::ImportLoginToken {
+                            token: migration.token,
+                        },
+                    )
+                    .await
+                    .map_err(map_invocation)?;
+                self.session
+                    .set_home_dc_id(migration.dc_id)
+                    .await
+                    .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?;
+                match imported {
+                    tl::enums::auth::LoginToken::Success(_) => self.qr_account().await,
+                    tl::enums::auth::LoginToken::Token(token) => Ok(QrLoginOutcome::Pending(
+                        qr_login_code(token.token, token.expires)?,
+                    )),
+                    tl::enums::auth::LoginToken::MigrateTo(_) => {
+                        Err(TelegramError::new(TelegramErrorKind::Network))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn qr_account(&self) -> Result<QrLoginOutcome, TelegramError> {
+        self.client
+            .get_me()
+            .await
+            .map(|user| QrLoginOutcome::Authorized(account_from_user(&user)))
             .map_err(map_invocation)
     }
 
@@ -497,10 +630,44 @@ impl TelegramConnection {
         file: &TelegramFile,
         destination: impl AsRef<Path>,
     ) -> Result<(), TelegramError> {
-        self.client
-            .download_media(&file.document, destination)
+        let destination = destination.as_ref();
+        validate_download_destination(destination)?;
+        let partial = partial_download_path(destination)?;
+        let mut output = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
             .await
-            .map_err(map_invocation)
+            .map_err(map_io)?;
+        let result = async {
+            let mut received = 0_u64;
+            let mut download = self.client.iter_download(&file.document);
+            while let Some(chunk) = download.next().await.map_err(map_invocation)? {
+                received = received
+                    .checked_add(
+                        u64::try_from(chunk.len())
+                            .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?,
+                    )
+                    .ok_or_else(|| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+                if received > file.size_bytes {
+                    return Err(TelegramError::new(TelegramErrorKind::Network));
+                }
+                output.write_all(&chunk).await.map_err(map_io)?;
+            }
+            if received != file.size_bytes {
+                return Err(TelegramError::new(TelegramErrorKind::Network));
+            }
+            output.flush().await.map_err(map_io)?;
+            output.sync_all().await.map_err(map_io)?;
+            drop(output);
+            publish_partial(&partial, destination).await?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&partial).await;
+        }
+        result
     }
 
     /// Downloads one bounded transfer object without creating a temporary
@@ -638,6 +805,71 @@ fn validate_config(config: &TelegramConfig) -> Result<(), TelegramError> {
     Ok(())
 }
 
+fn qr_login_code(token: Vec<u8>, expires: i32) -> Result<QrLoginCode, TelegramError> {
+    if token.is_empty() || expires <= 0 {
+        return Err(TelegramError::new(TelegramErrorKind::Network));
+    }
+    Ok(QrLoginCode {
+        deep_link: format!("tg://login?token={}", URL_SAFE_NO_PAD.encode(token)),
+        expires_at_unix_seconds: i64::from(expires),
+    })
+}
+
+fn contains_qr_login_update(update: &UpdatesLike) -> bool {
+    let contains = |updates: &[tl::enums::Update]| {
+        updates
+            .iter()
+            .any(|update| matches!(update, tl::enums::Update::LoginToken))
+    };
+    match update {
+        UpdatesLike::Updates(tl::enums::Updates::UpdateShort(update)) => {
+            matches!(update.update, tl::enums::Update::LoginToken)
+        }
+        UpdatesLike::Updates(tl::enums::Updates::Combined(updates)) => contains(&updates.updates),
+        UpdatesLike::Updates(tl::enums::Updates::Updates(updates)) => contains(&updates.updates),
+        _ => false,
+    }
+}
+
+fn validate_qr_migration(dc_id: i32, token: &[u8]) -> Result<(), TelegramError> {
+    if dc_id <= 0 || token.is_empty() {
+        Err(TelegramError::new(TelegramErrorKind::Network))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_download_destination(destination: &Path) -> Result<(), TelegramError> {
+    if destination.as_os_str().is_empty() || destination.file_name().is_none() {
+        return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
+    }
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => Err(TelegramError::new(TelegramErrorKind::PermissionDenied)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(map_io(error)),
+    }
+}
+
+fn partial_download_path(destination: &Path) -> Result<PathBuf, TelegramError> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| TelegramError::new(TelegramErrorKind::InvalidConfiguration))?;
+    Ok(destination.with_file_name(format!(".{file_name}.teleark-partial")))
+}
+
+async fn publish_partial(partial: &Path, destination: &Path) -> Result<(), TelegramError> {
+    // Both paths are siblings, so a hard link provides atomic no-replace
+    // publication on supported desktop filesystems. Unlike rename, it cannot
+    // overwrite a destination created after the initial collision check.
+    tokio::fs::hard_link(partial, destination)
+        .await
+        .map_err(map_io)?;
+    let _ = tokio::fs::remove_file(partial).await;
+    Ok(())
+}
+
 fn validate_limit(limit: usize, maximum: usize) -> Result<(), TelegramError> {
     if limit == 0 || limit > maximum {
         Err(TelegramError::new(TelegramErrorKind::LimitExceeded))
@@ -742,6 +974,9 @@ fn map_io(error: std::io::Error) -> TelegramError {
         std::io::ErrorKind::PermissionDenied => {
             TelegramError::new(TelegramErrorKind::PermissionDenied)
         }
+        std::io::ErrorKind::AlreadyExists => {
+            TelegramError::new(TelegramErrorKind::PermissionDenied)
+        }
         _ => TelegramError::new(TelegramErrorKind::Network),
     }
 }
@@ -791,5 +1026,108 @@ mod tests {
             caused_by: None,
         }));
         assert_eq!(error.kind(), TelegramErrorKind::Authorization);
+    }
+
+    #[test]
+    fn qr_login_link_uses_unpadded_url_safe_base64_and_redacts_debug() {
+        let code = qr_login_code(vec![0xfb, 0xff, 0x00], 1_900_000_000)
+            .expect("valid token should become a login link");
+        assert_eq!(code.deep_link(), "tg://login?token=-_8A");
+        assert_eq!(code.expires_at_unix_seconds(), 1_900_000_000);
+        let debug = format!("{code:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("-_8A"));
+    }
+
+    #[test]
+    fn malformed_qr_token_responses_are_rejected() {
+        assert_eq!(
+            qr_login_code(Vec::new(), 1)
+                .expect_err("empty token must fail")
+                .kind(),
+            TelegramErrorKind::Network
+        );
+        assert_eq!(
+            qr_login_code(vec![1], 0)
+                .expect_err("non-positive expiry must fail")
+                .kind(),
+            TelegramErrorKind::Network
+        );
+    }
+
+    #[test]
+    fn qr_login_update_is_detected_without_consuming_other_updates() {
+        let login = UpdatesLike::Updates(tl::enums::Updates::UpdateShort(tl::types::UpdateShort {
+            update: tl::enums::Update::LoginToken,
+            date: 123,
+        }));
+        assert!(contains_qr_login_update(&login));
+
+        let unrelated = UpdatesLike::Updates(tl::enums::Updates::TooLong);
+        assert!(!contains_qr_login_update(&unrelated));
+    }
+
+    #[test]
+    fn qr_migration_requires_a_real_datacenter_and_import_token() {
+        assert!(validate_qr_migration(4, b"import-token").is_ok());
+        assert_eq!(
+            validate_qr_migration(0, b"import-token")
+                .expect_err("invalid DC must fail")
+                .kind(),
+            TelegramErrorKind::Network
+        );
+        assert_eq!(
+            validate_qr_migration(4, b"")
+                .expect_err("empty import token must fail")
+                .kind(),
+            TelegramErrorKind::Network
+        );
+    }
+
+    #[test]
+    fn download_destination_is_collision_safe_and_has_private_partial_name() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let destination = directory.path().join("report.pdf");
+        assert!(validate_download_destination(&destination).is_ok());
+        assert_eq!(
+            partial_download_path(&destination).expect("partial path"),
+            directory.path().join(".report.pdf.teleark-partial")
+        );
+        std::fs::write(&destination, b"existing").expect("write fixture");
+        assert_eq!(
+            validate_download_destination(&destination)
+                .expect_err("existing destination must not be replaced")
+                .kind(),
+            TelegramErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn partial_publication_is_atomic_and_never_replaces_a_racing_destination() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("Tokio runtime");
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let partial = directory.path().join(".file.teleark-partial");
+        let destination = directory.path().join("file.bin");
+        std::fs::write(&partial, b"complete").expect("write partial");
+        runtime
+            .block_on(publish_partial(&partial, &destination))
+            .expect("publish partial");
+        assert_eq!(
+            std::fs::read(&destination).expect("final bytes"),
+            b"complete"
+        );
+        assert!(!partial.exists());
+
+        std::fs::write(&partial, b"replacement").expect("write second partial");
+        let error = runtime
+            .block_on(publish_partial(&partial, &destination))
+            .expect_err("existing final path must win the race");
+        assert_eq!(error.kind(), TelegramErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(&destination).expect("original final"),
+            b"complete"
+        );
     }
 }

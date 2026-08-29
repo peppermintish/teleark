@@ -48,6 +48,25 @@ The current GPUI target renders through Metal on macOS, but this workspace enabl
 
 Upstream has not published a standalone minimum macOS version for this exact TeleArk dependency pair. Define and test TeleArk's own deployment floor before release rather than inheriting claims from the Zed application. Both Apple Silicon and Intel need explicit build/run verification.
 
+### Distributor Telegram credentials
+
+An official distributor can make Telegram sign-in available without first-run
+setup by supplying its own Telegram application pair at compile time:
+
+```bash
+TELEARK_DISTRIBUTION_TELEGRAM_API_ID=12345 \
+TELEARK_DISTRIBUTION_TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef \
+cargo build -p teleark-gui --release --locked
+```
+
+Both variables must be present and valid or runtime startup reports a
+configuration failure. Never commit a real pair to source, test fixtures,
+shell history, or CI logs; use protected release secrets. The resulting hash is
+recoverable from the application binary, so it identifies the distributor's
+application but does not replace Telegram session protection. User-saved
+credentials take precedence and remain removable. Shared Telegram Desktop or
+sample credentials are not a release fallback.
+
 ## Build boundaries
 
 - Core/domain code contains no GPUI imports or concepts.

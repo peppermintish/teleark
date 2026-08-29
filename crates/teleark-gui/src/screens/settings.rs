@@ -1,17 +1,22 @@
 use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, px, rgba,
 };
-use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_component::{
+    Disableable as _, Icon, IconName, input::Input, scroll::ScrollableElement as _,
+};
 use teleark_i18n::SupportedLocale;
+use teleark_runtime::TelegramCredentialSource;
 
 use crate::{
-    app::{LocalePersistence, TeleArkApp},
+    app::{LocalePersistence, TeleArkApp, TelegramApiIdPersistence},
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
 };
+
+const TELEGRAM_API_PANEL_URL: &str = "https://my.telegram.org/apps";
 
 impl TeleArkApp {
     pub(crate) fn render_settings(
@@ -161,6 +166,144 @@ impl TeleArkApp {
                 },
             )));
 
+        let telegram_credentials = components::card()
+            .p_5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(components::section_title(
+                        self.tr("settings-telegram-credentials-title"),
+                    ))
+                    .child(div().flex_1())
+                    .child(components::badge(
+                        self.tr(self.telegram_api_id_status_message_id()),
+                        self.telegram_api_id_status_tone(),
+                    )),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("settings-telegram-credentials-description")),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .grid()
+                    .grid_cols(if layout.is_compact() { 1 } else { 2 })
+                    .items_end()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w_full()
+                            .child(
+                                div()
+                                    .mb_2()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(self.tr("telegram-api-id-label")),
+                            )
+                            .child(Input::new(&self.telegram_api_id).h(px(38.0))),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .child(
+                                div()
+                                    .mb_2()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(self.tr("telegram-api-hash-label")),
+                            )
+                            .child(Input::new(&self.telegram_api_hash).h(px(38.0))),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .flex()
+                    .when(layout.is_compact(), |row| row.flex_col())
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        components::button(
+                            "settings-save-telegram-credentials",
+                            self.tr("settings-telegram-credentials-save-action"),
+                            Some(IconName::Check),
+                            true,
+                        )
+                        .disabled(matches!(
+                            self.telegram_api_id_persistence,
+                            TelegramApiIdPersistence::Saving
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_telegram_credentials(window, cx);
+                        })),
+                    )
+                    .child(
+                        components::button(
+                            "settings-clear-telegram-credentials",
+                            self.tr("settings-telegram-credentials-clear-action"),
+                            Some(IconName::Delete),
+                            false,
+                        )
+                        .disabled(
+                            self.telegram_credential_source != Some(TelegramCredentialSource::User)
+                                || matches!(
+                                    self.telegram_api_id_persistence,
+                                    TelegramApiIdPersistence::Saving
+                                ),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_telegram_credentials(window, cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::amber_soft())
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(Icon::new(IconName::Info).text_color(theme::amber()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .whitespace_normal()
+                            .child(div().w_full().min_w_0().whitespace_normal().child(self.tr(
+                                if self.telegram_credential_source
+                                    == Some(TelegramCredentialSource::Distribution)
+                                {
+                                    "settings-telegram-credentials-distribution-note"
+                                } else {
+                                    "settings-telegram-credentials-storage-note"
+                                },
+                            )))
+                            .child(
+                                div().mt_2().child(
+                                    components::button(
+                                        "settings-open-telegram-api-panel",
+                                        self.tr("settings-telegram-api-panel-action"),
+                                        Some(IconName::ExternalLink),
+                                        false,
+                                    )
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url(TELEGRAM_API_PANEL_URL);
+                                    }),
+                                ),
+                            ),
+                    ),
+            );
+
         let appearance = components::card()
             .mt_4()
             .p_5()
@@ -226,7 +369,8 @@ impl TeleArkApp {
                     .max_w(px(880.0))
                     .mx_auto()
                     .pb_5()
-                    .child(language)
+                    .child(telegram_credentials)
+                    .child(language.mt_4())
                     .child(appearance)
                     .child(behavior),
             );
@@ -415,6 +559,218 @@ impl TeleArkApp {
             })
             .into_any_element()
     }
+
+    fn telegram_api_id_status_message_id(&self) -> &'static str {
+        match self.telegram_api_id_persistence {
+            TelegramApiIdPersistence::Saving => "settings-telegram-api-id-saving",
+            TelegramApiIdPersistence::Saved => "settings-telegram-api-id-saved",
+            TelegramApiIdPersistence::Removed
+                if self.telegram_credential_source
+                    == Some(TelegramCredentialSource::Distribution) =>
+            {
+                "settings-telegram-credentials-removed-using-distribution"
+            }
+            TelegramApiIdPersistence::Removed => "settings-telegram-credentials-removed",
+            TelegramApiIdPersistence::Failed(
+                teleark_core::ApplicationErrorKind::InvalidRequest,
+            ) => "settings-telegram-api-id-invalid",
+            TelegramApiIdPersistence::Failed(_) => "settings-telegram-api-id-failed",
+            TelegramApiIdPersistence::Idle
+                if self.telegram_credential_source
+                    == Some(TelegramCredentialSource::Distribution) =>
+            {
+                "settings-telegram-api-id-distribution"
+            }
+            TelegramApiIdPersistence::Idle if self.configured_telegram_api_id.is_some() => {
+                "settings-telegram-api-id-configured"
+            }
+            TelegramApiIdPersistence::Idle => "settings-telegram-api-id-missing",
+        }
+    }
+
+    fn telegram_api_id_status_tone(&self) -> Tone {
+        match self.telegram_api_id_persistence {
+            TelegramApiIdPersistence::Saving => Tone::Amber,
+            TelegramApiIdPersistence::Failed(_) => Tone::Red,
+            TelegramApiIdPersistence::Saved => Tone::Green,
+            TelegramApiIdPersistence::Removed
+                if self.telegram_credential_source
+                    == Some(TelegramCredentialSource::Distribution) =>
+            {
+                Tone::Green
+            }
+            TelegramApiIdPersistence::Removed => Tone::Amber,
+            TelegramApiIdPersistence::Idle if self.configured_telegram_api_id.is_some() => {
+                Tone::Green
+            }
+            TelegramApiIdPersistence::Idle => Tone::Amber,
+        }
+    }
+}
+
+pub fn render_telegram_api_id_prompt(app: &TeleArkApp, cx: &mut Context<TeleArkApp>) -> AnyElement {
+    let failed_message = match app.telegram_api_id_persistence {
+        TelegramApiIdPersistence::Failed(teleark_core::ApplicationErrorKind::InvalidRequest) => {
+            Some(app.tr("settings-telegram-api-id-invalid"))
+        }
+        TelegramApiIdPersistence::Failed(_) => Some(app.tr("settings-telegram-api-id-failed")),
+        TelegramApiIdPersistence::Idle
+        | TelegramApiIdPersistence::Saving
+        | TelegramApiIdPersistence::Saved
+        | TelegramApiIdPersistence::Removed => None,
+    };
+    let dialog = components::card()
+        .w(px(560.0))
+        .max_w_full()
+        .p_6()
+        .child(
+            div()
+                .size(px(44.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme::RADIUS_MEDIUM)
+                .bg(theme::blue_soft())
+                .child(Icon::new(IconName::Settings2).text_color(theme::blue())),
+        )
+        .child(
+            div()
+                .mt_4()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(app.tr("telegram-credentials-prompt-title")),
+        )
+        .child(
+            div()
+                .mt_2()
+                .text_sm()
+                .text_color(theme::text_secondary())
+                .child(app.tr("telegram-credentials-prompt-description")),
+        )
+        .child(
+            div()
+                .mt_4()
+                .p_3()
+                .rounded(theme::RADIUS_SMALL)
+                .bg(theme::blue_pale())
+                .flex()
+                .items_start()
+                .gap_2()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(Icon::new(IconName::Info).text_color(theme::blue()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .whitespace_normal()
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(app.tr("telegram-credentials-official-panel-note")),
+                        )
+                        .child(
+                            div().mt_2().child(
+                                components::button(
+                                    "telegram-prompt-open-api-panel",
+                                    app.tr("settings-telegram-api-panel-action"),
+                                    Some(IconName::ExternalLink),
+                                    false,
+                                )
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(TELEGRAM_API_PANEL_URL);
+                                }),
+                            ),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .mt_5()
+                .grid()
+                .grid_cols(2)
+                .gap_3()
+                .child(
+                    div()
+                        .child(
+                            div()
+                                .mb_2()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(app.tr("telegram-api-id-label")),
+                        )
+                        .child(Input::new(&app.telegram_api_id).h(px(38.0))),
+                )
+                .child(
+                    div()
+                        .child(
+                            div()
+                                .mb_2()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(app.tr("telegram-api-hash-label")),
+                        )
+                        .child(Input::new(&app.telegram_api_hash).h(px(38.0))),
+                ),
+        )
+        .when_some(failed_message, |dialog, message| {
+            dialog.child(
+                div()
+                    .mt_3()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::red_soft())
+                    .text_sm()
+                    .text_color(theme::red())
+                    .child(message),
+            )
+        })
+        .child(
+            div()
+                .mt_5()
+                .flex()
+                .justify_end()
+                .gap_3()
+                .child(
+                    components::button(
+                        "telegram-api-id-skip",
+                        app.tr("telegram-api-id-skip-action"),
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.skip_telegram_api_id_prompt(cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        "telegram-api-id-save",
+                        app.tr("telegram-credentials-save-action"),
+                        Some(IconName::Check),
+                        true,
+                    )
+                    .disabled(matches!(
+                        app.telegram_api_id_persistence,
+                        TelegramApiIdPersistence::Saving
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.save_telegram_credentials(window, cx);
+                    })),
+                ),
+        );
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x18203366))
+        .p_4()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(dialog)
+        .into_any_element()
 }
 
 fn settings_nav_item(icon: IconName, label: SharedString, selected: bool) -> AnyElement {
@@ -554,4 +910,14 @@ fn preference_row(title: SharedString, description: SharedString, enabled: bool)
                 .child(div().size(px(16.0)).rounded_full().bg(theme::surface())),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TELEGRAM_API_PANEL_URL;
+
+    #[test]
+    fn telegram_api_panel_button_targets_the_official_https_page() {
+        assert_eq!(TELEGRAM_API_PANEL_URL, "https://my.telegram.org/apps");
+    }
 }

@@ -8,22 +8,30 @@ mod mock;
 mod screens;
 mod theme;
 
-use app::{LocaleStartup, Page, RuntimeStartup, TeleArkApp};
+use app::{AppStartup, LocaleStartup, Page, RuntimeStartup, TeleArkApp};
 use gpui::{
-    App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext as _, Application, Bounds, KeyBinding, Pixels, Size, TitlebarOptions,
+    WindowBounds, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 use gpui_component_assets::Assets;
+use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
-use teleark_runtime::{DesktopLibrary, DesktopTelegram};
+use teleark_runtime::{DesktopLibrary, DesktopTelegram, DesktopTransfers};
 
-gpui::actions!(teleark, [DismissOverlay]);
+gpui::actions!(teleark, [DismissOverlay, ToggleFullscreen]);
 
 fn main() {
     let system_locale = detect_system_locale();
     let library = DesktopLibrary::open_default();
     let telegram = DesktopTelegram::open_default();
+    let transfers = match telegram.as_ref() {
+        Ok(telegram) => DesktopTransfers::new(telegram.clone()),
+        Err(error) => Err(ApplicationError::new(match error.kind() {
+            ApplicationErrorKind::Persistence => ApplicationErrorKind::Persistence,
+            _ => ApplicationErrorKind::Network,
+        })),
+    };
     let mut launch = LaunchOptions::from_env(system_locale);
     let persisted_locale = library
         .as_ref()
@@ -36,7 +44,10 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            cx.bind_keys([KeyBinding::new("escape", DismissOverlay, None)]);
+            cx.bind_keys([
+                KeyBinding::new("escape", DismissOverlay, None),
+                KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, None),
+            ]);
 
             let localizer = match Localizer::new(launch.locale) {
                 Ok(localizer) => localizer,
@@ -51,41 +62,34 @@ fn main() {
                 px(launch.window_width as f32),
                 px(launch.window_height as f32),
             );
-            let window_size = cx
+            let bounds = cx
                 .primary_display()
-                .map(|display| requested_size.min(&display.bounds().size))
-                .unwrap_or(requested_size);
-            let bounds = Bounds::centered(None, window_size, cx);
-            let window = cx.open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: None,
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(900.0), px(600.0))),
-                    app_id: Some("com.teleark.desktop".to_owned()),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    let view = cx.new(|cx| {
-                        TeleArkApp::new(
-                            window,
-                            cx,
-                            localizer,
-                            RuntimeStartup { library, telegram },
-                            launch.page,
-                            launch.show_upload,
-                            LocaleStartup {
+                .map(|display| fit_window_bounds(requested_size, display.bounds()))
+                .unwrap_or_else(|| Bounds::centered(None, requested_size, cx));
+            let window = cx.open_window(main_window_options(bounds), move |window, cx| {
+                let view = cx.new(|cx| {
+                    TeleArkApp::new(
+                        window,
+                        cx,
+                        localizer,
+                        RuntimeStartup {
+                            library,
+                            telegram,
+                            transfers,
+                        },
+                        AppStartup {
+                            page: launch.page,
+                            show_upload: launch.show_upload,
+                            skip_telegram_api_id_prompt: launch.skip_telegram_api_id_prompt,
+                            locale: LocaleStartup {
                                 system_locale,
                                 follows_system_locale,
                             },
-                        )
-                    });
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            );
+                        },
+                    )
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            });
 
             match window {
                 Ok(window) => {
@@ -99,6 +103,48 @@ fn main() {
         });
 }
 
+fn main_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some("TeleArk".into()),
+            // Keep the native macOS titlebar so the traffic lights and the
+            // top-edge full-screen reveal remain owned by AppKit.
+            appears_transparent: false,
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(900.0), px(600.0))),
+        app_id: Some("com.teleark.desktop".to_owned()),
+        ..Default::default()
+    }
+}
+
+fn fit_window_bounds(requested: Size<Pixels>, display: Bounds<Pixels>) -> Bounds<Pixels> {
+    let horizontal_inset = px(16.0);
+    let top_inset = px(28.0);
+    let bottom_inset = px(80.0);
+    let safe_width = (display.size.width - horizontal_inset * 2.0)
+        .max(px(900.0))
+        .min(display.size.width);
+    let safe_height = (display.size.height - top_inset - bottom_inset)
+        .max(px(600.0))
+        .min(display.size.height);
+    let safe = Bounds::new(
+        point(
+            display.origin.x + (display.size.width - safe_width) / 2.0,
+            display.origin.y + top_inset.min((display.size.height - safe_height).max(px(0.0))),
+        ),
+        size(safe_width, safe_height),
+    );
+    let window_size = requested.min(&safe.size);
+    let center = safe.center();
+    let offset = window_size / 2.0;
+    Bounds::new(
+        point(center.x - offset.width, center.y - offset.height),
+        window_size,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LaunchOptions {
     page: Page,
@@ -107,6 +153,7 @@ struct LaunchOptions {
     window_width: u32,
     window_height: u32,
     locale_from_command_line: bool,
+    skip_telegram_api_id_prompt: bool,
 }
 
 impl LaunchOptions {
@@ -123,6 +170,7 @@ impl LaunchOptions {
         let mut show_upload = false;
         let mut explicit_locale = None;
         let mut window_size = (1360, 760);
+        let mut skip_telegram_api_id_prompt = false;
 
         for argument in arguments {
             let argument = argument.as_ref();
@@ -152,6 +200,10 @@ impl LaunchOptions {
             {
                 window_size = size;
             }
+
+            if argument == "--skip-telegram-api-id-prompt" {
+                skip_telegram_api_id_prompt = true;
+            }
         }
 
         let locale = explicit_locale.unwrap_or(fallback_locale);
@@ -162,6 +214,7 @@ impl LaunchOptions {
             window_width: window_size.0,
             window_height: window_size.1,
             locale_from_command_line: explicit_locale.is_some(),
+            skip_telegram_api_id_prompt,
         }
     }
 }
@@ -240,6 +293,7 @@ mod tests {
                 window_width: 1360,
                 window_height: 760,
                 locale_from_command_line: true,
+                skip_telegram_api_id_prompt: false,
             }
         );
     }
@@ -253,6 +307,14 @@ mod tests {
         assert!(options.show_upload);
         assert!(!options.locale_from_command_line);
         assert_eq!((options.window_width, options.window_height), (1360, 760));
+    }
+
+    #[test]
+    fn visual_test_launch_can_take_the_same_session_only_skip_path_as_the_dialog() {
+        let options =
+            LaunchOptions::from_args(["--skip-telegram-api-id-prompt"], SupportedLocale::EnUs);
+
+        assert!(options.skip_telegram_api_id_prompt);
     }
 
     #[test]
@@ -283,6 +345,34 @@ mod tests {
             (spacious.window_width, spacious.window_height),
             (1920, 1080)
         );
+    }
+
+    #[test]
+    fn oversized_windows_stay_inside_desktop_safe_insets() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1_440.0), px(900.0)));
+        let bounds = fit_window_bounds(size(px(1_680.0), px(960.0)), display);
+        assert_eq!(bounds.origin, point(px(16.0), px(28.0)));
+        assert_eq!(bounds.size, size(px(1_408.0), px(792.0)));
+
+        let compact = fit_window_bounds(size(px(900.0), px(600.0)), display);
+        assert_eq!(compact.size, size(px(900.0), px(600.0)));
+        assert!(compact.origin.y >= px(28.0));
+    }
+
+    #[test]
+    fn main_window_keeps_native_fullscreen_controls_available() {
+        let bounds = Bounds::new(point(px(16.0), px(28.0)), size(px(900.0), px(600.0)));
+        let options = main_window_options(bounds);
+        let titlebar = options.titlebar.expect("native titlebar configuration");
+
+        assert_eq!(
+            titlebar.title.map(|title| title.to_string()),
+            Some("TeleArk".to_owned())
+        );
+        assert!(!titlebar.appears_transparent);
+        assert!(options.is_resizable);
+        assert!(options.is_minimizable);
+        assert_eq!(options.window_bounds, Some(WindowBounds::Windowed(bounds)));
     }
 
     #[test]

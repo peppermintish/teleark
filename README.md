@@ -11,9 +11,9 @@ will still present one name, one size, one transfer, and one recovery record.
 
 > [!IMPORTANT]
 > TeleArk is an early alpha. The local library and bounded Telegram channel
-> indexing described below are functional. Uploads, encrypted downloads, Vault,
-> and recovery are not complete. Do not rely on this build as the only copy of
-> important data or secrets.
+> browsing/download described below are functional. Encrypted desktop uploads,
+> encrypted recovery, and Vault unlock flows are not complete. Do not rely on
+> this build as the only copy of important data or secrets.
 
 ## What works today
 
@@ -28,15 +28,21 @@ The current desktop build provides a useful local catalog and Telegram index:
 - open an imported file or reveal its original location in Finder;
 - switch live between English, Simplified Chinese, and Japanese, remember an
   explicit choice, or follow the system language;
-- use compact, standard, and large desktop window layouts.
-- sign in to Telegram with a login code and optional two-step verification;
-- choose a real Telegram source and scan its history in bounded pages;
+- use compact, standard, and large desktop window layouts;
+- sign in to Telegram by scanning a short-lived QR code, or with a login code
+  and optional two-step verification;
+- choose a real Telegram source and browse downloadable documents page by page;
+- switch between channels without mixing their results;
+- choose a destination and download a Telegram document through the bounded
+  desktop transfer queue;
+- see real queued, running, completed, and failed downloads on Transfers;
+- scan a source history in bounded pages;
 - retain Telegram file identities and scan progress in SQLite so later scans
   continue from the last committed page.
 
 Importing local files records metadata only. TeleArk does not copy, move, alter,
-or upload those selected files. Transfer, Upload, Key Vault, and most Settings
-content is visibly marked **Preview** because it still uses demonstration data.
+or upload those selected files. Native Telegram downloads are real. Upload, Key
+Vault, encrypted desktop recovery, and most Settings content remain Preview.
 
 ## Run TeleArk
 
@@ -48,8 +54,17 @@ cargo run -p teleark-gui --bin teleark
 ```
 
 Open **Library** to import local files, or open **Telegram Sources** to connect
-an account and index channel documents. Search and file-type filters operate on
-the persistent local index.
+an account, browse channel documents, download them, and optionally add them to
+the persistent local index. **Transfers** shows downloads started in this run.
+
+An official TeleArk distribution can include API credentials registered by its
+distributor, making Telegram sign-in available immediately. Source builds that
+do not include a distributor pair ask for the API ID and API Hash assigned to
+your own Telegram application. You can create them in Telegram's
+[API development panel](https://my.telegram.org/apps), skip setup to use the
+local Library only, and add or remove the pair later in **Settings**. Personal
+credentials override the distributor pair. TeleArk never embeds or reuses
+Telegram Desktop credentials.
 
 The default catalog is stored at:
 
@@ -88,11 +103,20 @@ upload limits.
 
 - The local catalog contains filenames, source paths, sizes, and timestamps.
   Protect your macOS account and backups accordingly.
+- A personal API ID and API Hash are stored in the same local SQLite database
+  so they survive restarts. SQLite is not encrypted; anyone who can read the
+  database or its backups can read the API Hash. Distributor credentials are
+  compiled into that distributor's build instead. Telegram login sessions
+  remain in a separate protected session cache.
 - The Telegram Sources route contacts Telegram only after you provide
-  credentials and choose an action. Transfer and Vault preview data remains
-  fictional.
+  credentials and choose an action. QR login links stay in memory and are
+  redacted from debug output. Native download tasks are real; Upload and Vault
+  remain previews.
 - The current encryption and manifest implementation is still provisional and
-  is not wired into desktop storage workflows.
+  is not wired into the desktop encrypted-storage workflow.
+- Native downloads verify Telegram's declared byte length and publish the final
+  path only after a temporary file is complete. They do not yet provide
+  cryptographic content verification, restart resume, pause, or retry controls.
 - A future encrypted Vault cannot hide all metadata from Telegram; account and
   channel relationships, timing, ciphertext sizes, and message counts may
   remain observable.

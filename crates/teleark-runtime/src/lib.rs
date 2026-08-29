@@ -23,9 +23,15 @@ use teleark_storage::{
 };
 use teleark_telegram::TelegramAccount;
 
+mod channel_transfer;
+mod credentials;
 mod telegram;
 mod transfer;
 
+pub use channel_transfer::{
+    ChannelDownloadRequest, ChannelDownloadSnapshot, ChannelDownloadState, DesktopTransfers,
+};
+pub use credentials::TelegramCredentialSource;
 pub use telegram::{
     DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFilePage, TelegramFileSummary,
     default_telegram_session_path,
@@ -38,6 +44,16 @@ pub use transfer::{
 
 const STORAGE_QUEUE_CAPACITY: usize = 64;
 const LOCALE_OVERRIDE_SETTING_KEY: &str = "locale.override";
+const TELEGRAM_API_ID_SETTING_KEY: &str = "telegram.api_id";
+const TELEGRAM_API_HASH_SETTING_KEY: &str = "telegram.api_hash";
+
+/// Non-secret credential presence exposed to frontends. The API Hash value is
+/// loaded only inside the runtime when Telegram authentication starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TelegramCredentialsStatus {
+    pub api_id: i32,
+    pub source: TelegramCredentialSource,
+}
 
 /// Resolves the per-user database location without creating it.
 pub fn default_database_path() -> Option<PathBuf> {
@@ -155,6 +171,39 @@ impl DesktopLibrary {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         self.worker.set_locale_override(locale)
+    }
+
+    /// Reports whether a complete, validated Telegram API credential pair is
+    /// stored without exposing the API Hash to the frontend.
+    pub fn telegram_credentials_status(
+        &self,
+    ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
+        self.worker.telegram_credentials_status()
+    }
+
+    /// Persists a complete Telegram API credential pair in the Library
+    /// database. Callers must not log or retain `api_hash` after this returns.
+    pub fn set_telegram_credentials(
+        &self,
+        api_id: i32,
+        api_hash: &str,
+    ) -> Result<(), ApplicationError> {
+        if api_id <= 0 {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        credentials::validate_api_hash(api_hash)?;
+        self.worker.set_telegram_credentials(api_id, api_hash)
+    }
+
+    /// Removes both stored Telegram application credentials atomically.
+    pub fn clear_telegram_credentials(&self) -> Result<(), ApplicationError> {
+        self.worker.clear_telegram_credentials()
+    }
+
+    pub(crate) fn stored_telegram_credentials(
+        &self,
+    ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
+        self.worker.active_telegram_credentials()
     }
 
     /// Persists the authorized account and its currently visible dialogs.
@@ -287,6 +336,20 @@ enum StorageRequest {
         locale: Option<String>,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    TelegramCredentialsStatus {
+        reply: SyncSender<Result<Option<TelegramCredentialsStatus>, ApplicationError>>,
+    },
+    ActiveTelegramCredentials {
+        reply: SyncSender<Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError>>,
+    },
+    SetTelegramCredentials {
+        api_id: i32,
+        api_hash: zeroize::Zeroizing<String>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    ClearTelegramCredentials {
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     SaveTelegramSources {
         account: AccountRecord,
         chats: Vec<ChatRecord>,
@@ -366,6 +429,34 @@ impl StorageWorker {
             locale: locale.map(str::to_owned),
             reply,
         })
+    }
+
+    fn telegram_credentials_status(
+        &self,
+    ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
+        self.request(|reply| StorageRequest::TelegramCredentialsStatus { reply })
+    }
+
+    fn active_telegram_credentials(
+        &self,
+    ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
+        self.request(|reply| StorageRequest::ActiveTelegramCredentials { reply })
+    }
+
+    fn set_telegram_credentials(
+        &self,
+        api_id: i32,
+        api_hash: &str,
+    ) -> Result<(), ApplicationError> {
+        self.request(|reply| StorageRequest::SetTelegramCredentials {
+            api_id,
+            api_hash: zeroize::Zeroizing::new(api_hash.to_owned()),
+            reply,
+        })
+    }
+
+    fn clear_telegram_credentials(&self) -> Result<(), ApplicationError> {
+        self.request(|reply| StorageRequest::ClearTelegramCredentials { reply })
     }
 
     fn save_telegram_sources(
@@ -511,6 +602,26 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let result = set_locale_override(&mut database, locale.as_deref());
                 let _ = reply.send(result);
             }
+            StorageRequest::TelegramCredentialsStatus { reply } => {
+                let result = telegram_credentials_status(&database);
+                let _ = reply.send(result);
+            }
+            StorageRequest::ActiveTelegramCredentials { reply } => {
+                let result = active_telegram_credentials(&database);
+                let _ = reply.send(result);
+            }
+            StorageRequest::SetTelegramCredentials {
+                api_id,
+                api_hash,
+                reply,
+            } => {
+                let result = set_telegram_credentials(&mut database, api_id, &api_hash);
+                let _ = reply.send(result);
+            }
+            StorageRequest::ClearTelegramCredentials { reply } => {
+                let result = clear_telegram_credentials(&mut database);
+                let _ = reply.send(result);
+            }
             StorageRequest::SaveTelegramSources {
                 account,
                 chats,
@@ -646,6 +757,80 @@ fn set_locale_override(
             .map(|_| ())
             .map_err(map_storage_error),
     }
+}
+
+fn telegram_credentials_status(
+    database: &Database,
+) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
+    active_telegram_credentials(database).map(|credentials| {
+        credentials.map(|credentials| TelegramCredentialsStatus {
+            api_id: credentials.api_id,
+            source: TelegramCredentialSource::User,
+        })
+    })
+}
+
+fn active_telegram_credentials(
+    database: &Database,
+) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
+    let api_id = database
+        .setting(TELEGRAM_API_ID_SETTING_KEY)
+        .map_err(map_storage_error)?;
+    let api_hash = database
+        .setting(TELEGRAM_API_HASH_SETTING_KEY)
+        .map_err(map_storage_error)?;
+    match (api_id, api_hash) {
+        (None, None) => Ok(None),
+        (Some(api_id), Some(api_hash)) => {
+            let api_id = api_id
+                .value
+                .parse::<i32>()
+                .ok()
+                .filter(|api_id| *api_id > 0)
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            credentials::validate_api_hash(&api_hash.value)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            Ok(Some(credentials::ActiveTelegramCredentials {
+                api_id,
+                api_hash: zeroize::Zeroizing::new(api_hash.value),
+            }))
+        }
+        _ => Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+    }
+}
+
+fn set_telegram_credentials(
+    database: &mut Database,
+    api_id: i32,
+    api_hash: &str,
+) -> Result<(), ApplicationError> {
+    if api_id <= 0 {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    credentials::validate_api_hash(api_hash)?;
+    let updated_at_unix_ms = system_time_unix_ms(SystemTime::now())
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    database
+        .set_settings(&[
+            SettingRecord {
+                key: TELEGRAM_API_ID_SETTING_KEY.to_owned(),
+                value: api_id.to_string(),
+                updated_at_unix_ms,
+            },
+            SettingRecord {
+                key: TELEGRAM_API_HASH_SETTING_KEY.to_owned(),
+                value: api_hash.to_owned(),
+                updated_at_unix_ms,
+            },
+        ])
+        .map_err(map_storage_error)
+}
+
+fn clear_telegram_credentials(database: &mut Database) -> Result<(), ApplicationError> {
+    database
+        .delete_settings(&[TELEGRAM_API_ID_SETTING_KEY, TELEGRAM_API_HASH_SETTING_KEY])
+        .map(|_| ())
+        .map_err(map_storage_error)
 }
 
 fn import_into_database(
@@ -826,6 +1011,103 @@ mod tests {
             .set_locale_override(None)
             .expect("restore system default");
         assert_eq!(reopened.locale_override().expect("read default"), None);
+    }
+
+    #[test]
+    fn telegram_credentials_persist_as_a_pair_clear_and_reject_invalid_values() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("library.sqlite3");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        let api_hash = "0123456789abcdef0123456789abcdef";
+
+        assert_eq!(
+            library
+                .telegram_credentials_status()
+                .expect("read empty credential status"),
+            None
+        );
+        let error = library
+            .set_telegram_credentials(0, api_hash)
+            .expect_err("zero API ID must be rejected");
+        assert_eq!(error.kind(), ApplicationErrorKind::InvalidRequest);
+        let error = library
+            .set_telegram_credentials(12_345, "short")
+            .expect_err("malformed API Hash must be rejected");
+        assert_eq!(error.kind(), ApplicationErrorKind::InvalidRequest);
+
+        library
+            .set_telegram_credentials(12_345, api_hash)
+            .expect("persist credential pair");
+        assert_eq!(
+            library
+                .telegram_credentials_status()
+                .expect("read saved credential status"),
+            Some(TelegramCredentialsStatus {
+                api_id: 12_345,
+                source: TelegramCredentialSource::User,
+            })
+        );
+        let active = library
+            .stored_telegram_credentials()
+            .expect("load saved credential pair")
+            .expect("saved credential pair");
+        assert_eq!(active.api_id, 12_345);
+        assert_eq!(active.api_hash.as_str(), api_hash);
+        assert!(!format!("{active:?}").contains(api_hash));
+        drop(library);
+
+        let reopened = DesktopLibrary::open(&database_path).expect("reopen library");
+        assert_eq!(
+            reopened
+                .telegram_credentials_status()
+                .expect("read persisted credential status"),
+            Some(TelegramCredentialsStatus {
+                api_id: 12_345,
+                source: TelegramCredentialSource::User,
+            })
+        );
+        reopened
+            .clear_telegram_credentials()
+            .expect("clear persisted credential pair");
+        assert_eq!(
+            reopened
+                .telegram_credentials_status()
+                .expect("read cleared credentials"),
+            None
+        );
+        drop(reopened);
+
+        let cleared = DesktopLibrary::open(&database_path).expect("reopen cleared library");
+        assert_eq!(
+            cleared
+                .telegram_credentials_status()
+                .expect("read cleared credentials"),
+            None
+        );
+    }
+
+    #[test]
+    fn incomplete_or_corrupt_persisted_credentials_fail_closed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("library.sqlite3");
+        let mut database = Database::open(&database_path).expect("open database");
+        database
+            .set_setting(&SettingRecord {
+                key: TELEGRAM_API_ID_SETTING_KEY.to_owned(),
+                value: "12345".to_owned(),
+                updated_at_unix_ms: 1,
+            })
+            .expect("write deliberately incomplete pair");
+        drop(database);
+
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        assert_eq!(
+            library
+                .telegram_credentials_status()
+                .expect_err("incomplete credentials must not enable login")
+                .kind(),
+            ApplicationErrorKind::Persistence
+        );
     }
 
     #[test]
