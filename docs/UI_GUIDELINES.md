@@ -154,7 +154,10 @@ shared Telegram Desktop credentials as an available fallback.
 Normal macOS windows retain the native titlebar and traffic-light controls.
 Full-screen mode must remain reversible through the top-edge AppKit controls,
 the platform `Control-Command-F` shortcut, Escape, and an in-app exit control.
-Custom titlebar styling must not replace those recovery paths.
+The desktop installs native, localized application, View, and Window menus;
+AppKit owns the View menu's Enter/Exit Full Screen command and the standard
+full-screen Space transition. This preserves the menu-bar and window-management
+context. Custom titlebar styling must not replace those recovery paths.
 
 ## Internationalization and flexible layout
 

@@ -28,7 +28,7 @@ Upload, encrypted transfer controls, Vault, and key-unlock UX remain previews.
 | Core application API | Typed Library queries, imports, pages, statistics, repository port, structured errors; 25 Core tests total | Transfer/Index/Vault services are separate foundations, not one application command bus |
 | Persistent Library | SQLite migrations v1-v5, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, transfer checkpoints, and atomic credential-pair settings; 18 temporary-database tests | Vault package/manifest tables, collection editor, and million-row benchmark remain |
 | Desktop runtime | Bounded storage/Telegram workers, validated personal/distributor credential resolution, persistent personal API ID/Hash pair, QR/code/2FA login, dialog discovery, per-channel document queries, idempotent projection, restart index cursor, and a retained bounded native-download worker with structured snapshots; 24 tests | Native download tasks are sequential and in-memory; personal API Hashes remain in unencrypted SQLite at the requested alpha tradeoff |
-| GPUI desktop | Conditional startup credential prompt with skip path, live-localized API settings, explicit personal/distributor status and removal fallback, real API-panel action, visibly disabled login without configuration, real dual-method QR/phone login, per-channel file browsing/download, source scan, native Transfers, and recoverable macOS full-screen routes; compact/standard/spacious layouts; 35 GUI tests | Upload/Vault/encrypted-transfer controls remain previews; large lists are bounded but not virtualized |
+| GPUI desktop | Conditional startup credential prompt with skip path, live-localized API settings, explicit personal/distributor status and removal fallback, real API-panel action, visibly disabled login without configuration, real dual-method QR/phone login, per-channel file browsing/download, source scan, native Transfers, and recoverable macOS full-screen routes backed by localized AppKit application/View/Window menus; compact/standard/spacious layouts; 36 GUI tests | Upload/Vault/encrypted-transfer controls remain previews; large lists are bounded but not virtualized |
 | Localization | Complete synchronized Fluent catalogs for `en-US`, `zh-CN`, and `ja-JP`; live switching, persistent explicit override, System Default; 20 tests | Native-speaker, assistive-technology, and pixel-level locale review remain |
 | Telegram adapter | `grammers` 0.10 connection, short-lived QR login with DC migration, code/2FA, dialogs, refetch by message identity, bounded cursor scans, upload/download, structured errors, atomic no-replace partial-file publication, and a versioned atomic `0600` session cache; 12 tests | Native download checks Telegram's byte length rather than a content hash; ordinary tests use no live credentials and OS credential-store UX remains |
 | Historical Index Engine | Desktop Telegram-to-SQLite bounded scan with durable cursor plus the separate CAS/range coordinator and its 12 deterministic tests | Full coordinator repository mapping, live updates, retry owner, pause/cancel UI, and range compaction remain |
@@ -81,7 +81,10 @@ both primary login buttons without clipping, and an English Settings view whose
 localized API placeholders and wrapped credential notice remain inside the
 card at `900x600`. Visual inspection also found and fixed compact navigation
 scrollbar wrapping, transfer-summary overlap, and oversized-window placement.
-Oversized requests use desktop-safe insets before centering.
+Oversized requests use desktop-safe insets before centering. Native macOS
+windowed/full-screen transitions were also exercised with the traffic-light
+control; the app now publishes localized application, View, and Window menus
+while retaining Escape and the visible in-app exit-full-screen control.
 
 ## Verification evidence
 
@@ -97,8 +100,8 @@ cargo deny check
 git diff --check
 ```
 
-The workspace test suite contains 206 deterministic tests: Core 25, Crypto 35,
-GUI 35, i18n 20, Index 12, Runtime 24, Storage 18, Telegram 12, and Transfer 25.
+The workspace test suite contains 207 deterministic tests: Core 25, Crypto 35,
+GUI 36, i18n 20, Index 12, Runtime 24, Storage 18, Telegram 12, and Transfer 25.
 The current gate passes format, check, strict Clippy, all workspace tests,
 warning-denied docs, dependency policy, and diff validation.
 
@@ -143,9 +146,10 @@ locked graph gained only `qrcode` while reusing the existing `base64` package.
   rows.
 - Accessibility, focus trapping, reduced motion, screen-reader labels, and
   native-speaker wording still need dedicated product review.
-- Actual screenshots now verify compact Chinese login/Transfers layouts and a
-  display-fitted spacious Japanese login layout. The full route/locale pixel
-  matrix, a packaged-app native full-screen transition check, and authenticated
+- Actual screenshots now verify compact Chinese login/Transfers layouts, a
+  display-fitted spacious Japanese login layout, and the local development
+  binary's native full-screen transition. The full route/locale pixel matrix, a
+  packaged-app native full-screen transition check, and authenticated
   QR/channel/file/download states still need capture.
 
 ## Next implementation sequence

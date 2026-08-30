@@ -26,6 +26,14 @@ common-all = すべて
 common-connected = 接続済み
 common-account-count = { $count } アカウント
 
+menu-application-services = サービス
+menu-application-quit = TeleArkを終了
+menu-view-title = 表示
+menu-view-toggle-fullscreen = フルスクリーンを切り替える
+menu-window-title = ウインドウ
+menu-window-minimize = しまう
+menu-window-zoom = 拡大／縮小
+
 library-title = ライブラリ
 library-all-files = すべてのファイル
 library-recent = 最近追加した項目

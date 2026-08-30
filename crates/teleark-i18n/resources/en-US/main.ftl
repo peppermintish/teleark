@@ -30,6 +30,14 @@ common-account-count =
        *[other] { $count } accounts
     }
 
+menu-application-services = Services
+menu-application-quit = Quit TeleArk
+menu-view-title = View
+menu-view-toggle-fullscreen = Toggle Full Screen
+menu-window-title = Window
+menu-window-minimize = Minimize
+menu-window-zoom = Zoom
+
 library-title = Library
 library-all-files = All Files
 library-recent = Recently Added

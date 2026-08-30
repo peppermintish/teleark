@@ -94,7 +94,7 @@ impl TeleArkApp {
                     .p_3()
                     .text_xs()
                     .text_color(theme::text_muted())
-                    .child("TeleArk 0.1.0"),
+                    .child(concat!("TeleArk ", env!("CARGO_PKG_VERSION"))),
             );
 
         let language = components::card()

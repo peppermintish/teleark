@@ -24,7 +24,7 @@ use teleark_runtime::{
 use teleark_telegram::TelegramAccount;
 
 use crate::{
-    DismissOverlay, ToggleFullscreen,
+    DismissOverlay, MinimizeWindow, ToggleFullscreen, ZoomWindow,
     components::{self, Tone},
     layout::LayoutPolicy,
     library_state::{ImportActivity, ImportFeedback, LibraryContent, LibrarySnapshot},
@@ -1176,6 +1176,7 @@ impl TeleArkApp {
                 input.set_placeholder(placeholder, window, input_cx);
             });
         }
+        cx.set_menus(crate::menus::application_menus(&self.localizer));
         cx.notify();
     }
 
@@ -1960,8 +1961,14 @@ impl Render for TeleArkApp {
                     EscapeBehavior::Ignore => {}
                 }
             }))
+            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| {
+                window.minimize_window();
+            }))
             .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _| {
                 window.toggle_fullscreen();
+            }))
+            .on_action(cx.listener(|_, _: &ZoomWindow, window, _| {
+                window.zoom_window();
             }))
             .child(self.render_header(window, layout, cx))
             .when(layout.is_compact(), |root| {

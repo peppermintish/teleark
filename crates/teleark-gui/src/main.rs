@@ -4,6 +4,7 @@ mod app;
 mod components;
 mod layout;
 mod library_state;
+mod menus;
 mod mock;
 mod screens;
 mod theme;
@@ -19,7 +20,16 @@ use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
 use teleark_runtime::{DesktopLibrary, DesktopTelegram, DesktopTransfers};
 
-gpui::actions!(teleark, [DismissOverlay, ToggleFullscreen]);
+gpui::actions!(
+    teleark,
+    [
+        DismissOverlay,
+        MinimizeWindow,
+        Quit,
+        ToggleFullscreen,
+        ZoomWindow
+    ]
+);
 
 fn main() {
     let system_locale = detect_system_locale();
@@ -46,6 +56,8 @@ fn main() {
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("escape", DismissOverlay, None),
+                KeyBinding::new("cmd-m", MinimizeWindow, None),
+                KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, None),
             ]);
 
@@ -57,6 +69,12 @@ fn main() {
                     return;
                 }
             };
+            cx.on_action(quit);
+            cx.on_action(minimize_window);
+            cx.on_action(toggle_fullscreen);
+            cx.on_action(zoom_window);
+            cx.set_menus(menus::application_menus(&localizer));
+            cx.activate(true);
 
             let requested_size = size(
                 px(launch.window_width as f32),
@@ -101,6 +119,28 @@ fn main() {
                 }
             }
         });
+}
+
+fn quit(_: &Quit, cx: &mut App) {
+    cx.quit();
+}
+
+fn minimize_window(_: &MinimizeWindow, cx: &mut App) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, _| window.minimize_window());
+    }
+}
+
+fn toggle_fullscreen(_: &ToggleFullscreen, cx: &mut App) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, _| window.toggle_fullscreen());
+    }
+}
+
+fn zoom_window(_: &ZoomWindow, cx: &mut App) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, _| window.zoom_window());
+    }
 }
 
 fn main_window_options(bounds: Bounds<Pixels>) -> WindowOptions {

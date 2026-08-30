@@ -26,6 +26,14 @@ common-all = 全部
 common-connected = 已连接
 common-account-count = { $count } 个账号
 
+menu-application-services = 服务
+menu-application-quit = 退出 TeleArk
+menu-view-title = 显示
+menu-view-toggle-fullscreen = 切换全屏幕
+menu-window-title = 窗口
+menu-window-minimize = 最小化
+menu-window-zoom = 缩放
+
 library-title = 文件库
 library-all-files = 全部文件
 library-recent = 最近新增
