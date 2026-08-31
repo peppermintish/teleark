@@ -13,10 +13,11 @@ use crate::error::{CursorError, InvariantViolation};
 use crate::migration::{APPLICATION_ID, LATEST_SCHEMA_VERSION, MIGRATIONS};
 use crate::model::{
     AccountRecord, ChatRecord, CollectionKind, CollectionRecord, FileSearchFacets, IndexBatch,
-    IndexJobRecord, IndexRangeRecord, NewLogicalFileRecord, RemoteFileUpsert, SearchQuery,
-    SettingRecord, StoredIndexCoverage, StoredIndexJobState, StoredPartState,
-    StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord, TransferPartCheckpoint,
-    TransferTaskRecord,
+    IndexJobRecord, IndexRangeRecord, NewLogicalFileRecord, NewNativeDownloadBatchRecord,
+    NewNativeDownloadTaskRecord, RemoteFileUpsert, SearchQuery, SettingRecord, StoredIndexCoverage,
+    StoredIndexJobState, StoredNativeDownloadState, StoredNativeDownloadVerification,
+    StoredPartState, StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord,
+    TransferPartCheckpoint, TransferTaskRecord,
 };
 
 fn account(id: i64) -> AccountRecord {
@@ -176,6 +177,93 @@ fn assigned_ids_are_not_reused_and_paths_round_trip() -> Result<(), Box<dyn Erro
             .and_then(|file| file.local_source_path),
         Some(second_path)
     );
+    Ok(())
+}
+
+#[test]
+fn native_download_history_progress_and_terminal_state_round_trip() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    let destination = std::env::temp_dir()
+        .join("TeleArk")
+        .join("restored-video.mp4");
+    let mut task = database.insert_native_download(&NewNativeDownloadTaskRecord {
+        chat_id: 101,
+        message_id: 202,
+        message_sent_at_unix_ms: Some(9),
+        file_name: "restored-video.mp4".to_owned(),
+        caption: Some("A complete Telegram caption".to_owned()),
+        mime_type: Some("video/mp4".to_owned()),
+        size_bytes: 1_048_576,
+        destination: destination.clone(),
+        created_at_unix_ms: 10,
+    })?;
+    assert!(task.id > 0);
+    assert_eq!(task.state, StoredNativeDownloadState::Queued);
+    task.state = StoredNativeDownloadState::Running;
+    task.transferred_bytes = 524_288;
+    task.started_at_unix_ms = Some(11);
+    task.queue_wait_ms = Some(1);
+    task.attempts = 1;
+    task.updated_at_unix_ms = 12;
+    database.save_native_download(&task)?;
+    task.state = StoredNativeDownloadState::Completed;
+    task.verification = StoredNativeDownloadVerification::SizeChecked;
+    task.transferred_bytes = task.size_bytes;
+    task.finished_at_unix_ms = Some(20);
+    task.duration_ms = Some(9);
+    task.average_bytes_per_second = Some(116_508_444);
+    task.updated_at_unix_ms = 20;
+    database.save_native_download(&task)?;
+
+    let restored = database.native_downloads()?;
+    assert_eq!(restored, vec![task]);
+    assert_eq!(restored[0].destination, destination);
+    Ok(())
+}
+
+#[test]
+fn native_download_batch_is_atomic_and_restores_message_metadata() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    let task = |chat_id, message_id, name: &str| NewNativeDownloadTaskRecord {
+        chat_id,
+        message_id,
+        message_sent_at_unix_ms: Some(1_700_000_000_000 + message_id),
+        file_name: name.to_owned(),
+        caption: Some(format!("caption-{message_id}")),
+        mime_type: Some("video/mp4".to_owned()),
+        size_bytes: 100,
+        destination: std::env::temp_dir().join("TeleArk").join(name),
+        created_at_unix_ms: 10,
+    };
+    let tasks = vec![task(101, 201, "first.mp4"), task(101, 202, "second.mp4")];
+    let (batch, inserted) = database.insert_native_download_batch(
+        &NewNativeDownloadBatchRecord {
+            chat_id: 101,
+            created_at_unix_ms: 10,
+        },
+        &tasks,
+    )?;
+    assert_eq!(inserted.len(), 2);
+    assert!(
+        inserted
+            .iter()
+            .all(|record| record.batch_id == Some(batch.id))
+    );
+    assert_eq!(inserted[0].caption.as_deref(), Some("caption-201"));
+    assert_eq!(database.native_downloads()?, inserted);
+
+    let invalid = vec![task(101, 203, "third.mp4"), task(999, 204, "wrong.mp4")];
+    assert!(matches!(
+        database.insert_native_download_batch(
+            &NewNativeDownloadBatchRecord {
+                chat_id: 101,
+                created_at_unix_ms: 11,
+            },
+            &invalid,
+        ),
+        Err(StorageError::InvalidInput { .. })
+    ));
+    assert_eq!(database.native_downloads()?, inserted);
     Ok(())
 }
 

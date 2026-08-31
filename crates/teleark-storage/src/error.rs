@@ -12,6 +12,7 @@ pub enum EntityKind {
     LogicalFile,
     Collection,
     TransferTask,
+    NativeDownload,
     IndexJob,
 }
 

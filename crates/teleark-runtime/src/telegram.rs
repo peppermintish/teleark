@@ -3,14 +3,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use teleark_core::{ApplicationError, ApplicationErrorKind};
+use teleark_core::{ApplicationError, ApplicationErrorKind, FileKind};
 use teleark_telegram::{
-    PasswordChallenge, PasswordOutcome, PendingLogin, QrLoginOutcome, SignInOutcome,
-    TelegramAccount, TelegramChat, TelegramChatKind, TelegramConfig, TelegramConnection,
-    TelegramError, TelegramErrorKind,
+    DownloadObserver, PasswordChallenge, PasswordOutcome, PendingLogin, QrLoginOutcome,
+    SignInOutcome, TelegramAccount, TelegramChat, TelegramChatKind, TelegramConfig,
+    TelegramConnection, TelegramError, TelegramErrorKind,
 };
 use zeroize::Zeroizing;
 
@@ -21,6 +21,8 @@ use crate::{
 
 const TELEGRAM_QUEUE_CAPACITY: usize = 32;
 const MAX_DIALOGS: usize = 10_000;
+const MAX_BATCH_SCAN_MESSAGES: usize = 50_000;
+const MAX_BATCH_FILES: usize = 2_000;
 
 pub fn default_telegram_session_path() -> Option<PathBuf> {
     super::default_database_path().map(|path| path.with_file_name("telegram.session"))
@@ -37,6 +39,7 @@ pub struct TelegramChatSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelegramFileSummary {
     pub message_id: i64,
+    pub sent_at_unix_ms: i64,
     pub modified_at_unix_ms: i64,
     pub file_name: String,
     pub caption: String,
@@ -50,6 +53,13 @@ pub struct TelegramFilePage {
     pub next_before_message_id: Option<i64>,
     pub exhausted: bool,
     pub examined_messages: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TelegramFileFilter {
+    pub after_unix_ms: Option<i64>,
+    pub before_unix_ms: Option<i64>,
+    pub kind: Option<FileKind>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -138,10 +148,16 @@ enum TelegramRequest {
         limit: usize,
         reply: mpsc::SyncSender<Result<TelegramFilePage, ApplicationError>>,
     },
+    ScanFilteredFiles {
+        chat_id: i64,
+        filter: TelegramFileFilter,
+        reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
+    },
     Download {
         chat_id: i64,
         message_id: i64,
         destination: PathBuf,
+        observer: Option<Arc<dyn DownloadObserver>>,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     DownloadBytes {
@@ -250,7 +266,7 @@ impl DesktopTelegram {
 
     pub fn connect(&self, api_id: i32) -> Result<TelegramAuthState, ApplicationError> {
         let session_path = self.inner.session_path.clone();
-        self.request(|reply| TelegramRequest::Connect {
+        self.request("connect", |reply| TelegramRequest::Connect {
             api_id,
             session_path,
             reply,
@@ -324,7 +340,7 @@ impl DesktopTelegram {
         phone: String,
         api_hash: Zeroizing<String>,
     ) -> Result<TelegramAuthState, ApplicationError> {
-        self.request(|reply| TelegramRequest::RequestCode {
+        self.request("request_login_code", |reply| TelegramRequest::RequestCode {
             phone,
             api_hash,
             reply,
@@ -342,18 +358,23 @@ impl DesktopTelegram {
         &self,
         api_hash: Zeroizing<String>,
     ) -> Result<TelegramAuthState, ApplicationError> {
-        self.request(|reply| TelegramRequest::BeginQrLogin { api_hash, reply })
+        self.request("begin_qr_login", |reply| TelegramRequest::BeginQrLogin {
+            api_hash,
+            reply,
+        })
     }
 
     pub fn poll_qr_login(&self) -> Result<TelegramAuthState, ApplicationError> {
-        self.request(|reply| TelegramRequest::PollQrLogin { reply })
+        self.request("poll_qr_login", |reply| TelegramRequest::PollQrLogin {
+            reply,
+        })
     }
 
     pub fn submit_code(
         &self,
         code: impl Into<String>,
     ) -> Result<TelegramAuthState, ApplicationError> {
-        self.request(|reply| TelegramRequest::SubmitCode {
+        self.request("submit_login_code", |reply| TelegramRequest::SubmitCode {
             code: code.into(),
             reply,
         })
@@ -363,14 +384,16 @@ impl DesktopTelegram {
         &self,
         password: impl Into<Vec<u8>>,
     ) -> Result<TelegramAuthState, ApplicationError> {
-        self.request(|reply| TelegramRequest::SubmitPassword {
+        self.request("submit_password", |reply| TelegramRequest::SubmitPassword {
             password: password.into(),
             reply,
         })
     }
 
     pub fn list_dialogs(&self) -> Result<Vec<TelegramChatSummary>, ApplicationError> {
-        self.request(|reply| TelegramRequest::ListDialogs { reply })
+        self.request("list_dialogs", |reply| TelegramRequest::ListDialogs {
+            reply,
+        })
     }
 
     pub fn scan_file_page(
@@ -379,11 +402,25 @@ impl DesktopTelegram {
         before_message_id: Option<i64>,
         limit: usize,
     ) -> Result<TelegramFilePage, ApplicationError> {
-        self.request(|reply| TelegramRequest::ScanPage {
+        self.request("scan_file_page", |reply| TelegramRequest::ScanPage {
             chat_id,
             before_message_id,
             limit,
             reply,
+        })
+    }
+
+    pub fn scan_filtered_files(
+        &self,
+        chat_id: i64,
+        filter: TelegramFileFilter,
+    ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+        self.request("scan_filtered_files", |reply| {
+            TelegramRequest::ScanFilteredFiles {
+                chat_id,
+                filter,
+                reply,
+            }
         })
     }
 
@@ -393,12 +430,38 @@ impl DesktopTelegram {
         message_id: i64,
         destination: impl AsRef<Path>,
     ) -> Result<(), ApplicationError> {
-        self.request(|reply| TelegramRequest::Download {
+        self.request("download_file", |reply| TelegramRequest::Download {
             chat_id,
             message_id,
             destination: destination.as_ref().to_owned(),
+            observer: None,
             reply,
         })
+    }
+
+    pub(crate) fn download_file_observed(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        destination: impl AsRef<Path>,
+        observer: Arc<dyn DownloadObserver>,
+    ) -> Result<(), ApplicationError> {
+        self.request("download_file_observed", |reply| {
+            TelegramRequest::Download {
+                chat_id,
+                message_id,
+                destination: destination.as_ref().to_owned(),
+                observer: Some(observer),
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn discard_partial_download(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<(), ApplicationError> {
+        teleark_telegram::discard_partial_download(destination).map_err(map_telegram_error)
     }
 
     pub fn download_bytes(
@@ -406,7 +469,7 @@ impl DesktopTelegram {
         chat_id: i64,
         message_id: i64,
     ) -> Result<Vec<u8>, ApplicationError> {
-        self.request(|reply| TelegramRequest::DownloadBytes {
+        self.request("download_bytes", |reply| TelegramRequest::DownloadBytes {
             chat_id,
             message_id,
             reply,
@@ -419,7 +482,7 @@ impl DesktopTelegram {
         caption: impl Into<String>,
         limit: usize,
     ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
-        self.request(|reply| TelegramRequest::SearchFiles {
+        self.request("search_files", |reply| TelegramRequest::SearchFiles {
             chat_id,
             caption: caption.into(),
             limit,
@@ -434,7 +497,7 @@ impl DesktopTelegram {
         caption: impl Into<String>,
         bytes: Vec<u8>,
     ) -> Result<i64, ApplicationError> {
-        self.request(|reply| TelegramRequest::UploadBytes {
+        self.request("upload_bytes", |reply| TelegramRequest::UploadBytes {
             chat_id,
             file_name: file_name.into(),
             caption: caption.into(),
@@ -444,21 +507,44 @@ impl DesktopTelegram {
     }
 
     pub fn sign_out(&self) -> Result<(), ApplicationError> {
-        self.request(|reply| TelegramRequest::SignOut { reply })
+        self.request("sign_out", |reply| TelegramRequest::SignOut { reply })
     }
 
     fn request<T>(
         &self,
+        operation: &'static str,
         build: impl FnOnce(mpsc::SyncSender<Result<T, ApplicationError>>) -> TelegramRequest,
     ) -> Result<T, ApplicationError> {
+        let started = Instant::now();
         let (reply, response) = mpsc::sync_channel(1);
-        self.inner
+        let result = self
+            .inner
             .sender
             .blocking_send(build(reply))
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
-        response
-            .recv()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
+            .and_then(|()| {
+                response
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
+            })
+            .and_then(|result| result);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(_) => tracing::debug!(
+                event = "telegram.operation.completed",
+                operation,
+                elapsed_ms,
+                "Telegram operation completed"
+            ),
+            Err(error) => tracing::warn!(
+                event = "telegram.operation.failed",
+                operation,
+                elapsed_ms,
+                error_kind = ?error.kind(),
+                "Telegram operation failed"
+            ),
+        }
+        result
     }
 }
 
@@ -522,13 +608,22 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 let result = scan_page(&state, chat_id, before_message_id, limit).await;
                 let _ = reply.send(result);
             }
+            TelegramRequest::ScanFilteredFiles {
+                chat_id,
+                filter,
+                reply,
+            } => {
+                let result = scan_filtered_files(&state, chat_id, filter).await;
+                let _ = reply.send(result);
+            }
             TelegramRequest::Download {
                 chat_id,
                 message_id,
                 destination,
+                observer,
                 reply,
             } => {
-                let result = download(&state, chat_id, message_id, destination).await;
+                let result = download(&state, chat_id, message_id, destination, observer).await;
                 let _ = reply.send(result);
             }
             TelegramRequest::DownloadBytes {
@@ -793,6 +888,7 @@ async fn scan_page(
             .into_iter()
             .map(|file| TelegramFileSummary {
                 message_id: file.message_id(),
+                sent_at_unix_ms: file.sent_at_unix_ms(),
                 modified_at_unix_ms: file.modified_at_unix_ms(),
                 file_name: file.file_name().to_owned(),
                 caption: file.caption().to_owned(),
@@ -807,11 +903,72 @@ async fn scan_page(
     })
 }
 
+async fn scan_filtered_files(
+    state: &WorkerState,
+    chat_id: i64,
+    filter: TelegramFileFilter,
+) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+    validate_file_filter(filter)?;
+    let mut cursor = None;
+    let mut examined = 0_usize;
+    let mut matches = Vec::new();
+    while examined < MAX_BATCH_SCAN_MESSAGES && matches.len() < MAX_BATCH_FILES {
+        let limit = 1_000.min(MAX_BATCH_SCAN_MESSAGES - examined);
+        let page = scan_page(state, chat_id, cursor, limit).await?;
+        examined = examined.saturating_add(
+            usize::try_from(page.examined_messages)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?,
+        );
+        let reached_lower_bound = filter
+            .after_unix_ms
+            .is_some_and(|after| page.files.iter().any(|file| file.sent_at_unix_ms < after));
+        matches.extend(
+            page.files
+                .into_iter()
+                .filter(|file| file_matches_filter(file, filter)),
+        );
+        matches.truncate(MAX_BATCH_FILES);
+        if page.exhausted || reached_lower_bound {
+            break;
+        }
+        let Some(next) = page.next_before_message_id else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    Ok(matches)
+}
+
+fn validate_file_filter(filter: TelegramFileFilter) -> Result<(), ApplicationError> {
+    if filter
+        .after_unix_ms
+        .zip(filter.before_unix_ms)
+        .is_some_and(|(after, before)| after > before)
+    {
+        Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest))
+    } else {
+        Ok(())
+    }
+}
+
+fn file_matches_filter(file: &TelegramFileSummary, filter: TelegramFileFilter) -> bool {
+    filter
+        .after_unix_ms
+        .is_none_or(|after| file.sent_at_unix_ms >= after)
+        && filter
+            .before_unix_ms
+            .is_none_or(|before| file.sent_at_unix_ms <= before)
+        && filter
+            .kind
+            .is_none_or(|kind| crate::classify_file(Path::new(&file.file_name)) == kind)
+}
+
 async fn download(
     state: &WorkerState,
     chat_id: i64,
     message_id: i64,
     destination: PathBuf,
+    observer: Option<Arc<dyn DownloadObserver>>,
 ) -> Result<(), ApplicationError> {
     let chat = state
         .chats
@@ -823,10 +980,16 @@ async fn download(
         .await
         .map_err(map_telegram_error)?
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-    connection
-        .download_file(&file, destination)
-        .await
-        .map_err(map_telegram_error)
+    match observer {
+        Some(observer) => connection
+            .download_file_observed(&file, destination, observer.as_ref())
+            .await
+            .map_err(map_telegram_error),
+        None => connection
+            .download_file(&file, destination)
+            .await
+            .map_err(map_telegram_error),
+    }
 }
 
 async fn download_bytes(
@@ -897,6 +1060,7 @@ async fn fetch_file(
 fn file_summary(file: &teleark_telegram::TelegramFile) -> TelegramFileSummary {
     TelegramFileSummary {
         message_id: file.message_id(),
+        sent_at_unix_ms: file.sent_at_unix_ms(),
         modified_at_unix_ms: file.modified_at_unix_ms(),
         file_name: file.file_name().to_owned(),
         caption: file.caption().to_owned(),
@@ -941,7 +1105,9 @@ fn map_telegram_error(error: TelegramError) -> ApplicationError {
         TelegramErrorKind::SourceMissing => ApplicationErrorKind::SourceMissing,
         TelegramErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
         TelegramErrorKind::LimitExceeded => ApplicationErrorKind::Capacity,
-        TelegramErrorKind::Cancelled => ApplicationErrorKind::Cancelled,
+        TelegramErrorKind::Cancelled | TelegramErrorKind::Interrupted => {
+            ApplicationErrorKind::Cancelled
+        }
         _ => ApplicationErrorKind::Network,
     };
     ApplicationError::new(kind)
@@ -1065,6 +1231,43 @@ mod tests {
                 .effective_credentials_status(&library)
                 .expect("resolve effective credentials"),
             expected
+        );
+    }
+
+    #[test]
+    fn batch_file_filters_are_inclusive_and_classify_names_without_live_telegram() {
+        let file = TelegramFileSummary {
+            message_id: 7,
+            sent_at_unix_ms: 1_700,
+            modified_at_unix_ms: 1_800,
+            file_name: "clip.MP4".to_owned(),
+            caption: "full caption".to_owned(),
+            mime_type: Some("video/mp4".to_owned()),
+            size_bytes: 10,
+        };
+        let filter = TelegramFileFilter {
+            after_unix_ms: Some(1_700),
+            before_unix_ms: Some(1_700),
+            kind: Some(FileKind::Video),
+        };
+        assert!(validate_file_filter(filter).is_ok());
+        assert!(file_matches_filter(&file, filter));
+        assert!(!file_matches_filter(
+            &file,
+            TelegramFileFilter {
+                kind: Some(FileKind::Document),
+                ..filter
+            }
+        ));
+        assert_eq!(
+            validate_file_filter(TelegramFileFilter {
+                after_unix_ms: Some(2),
+                before_unix_ms: Some(1),
+                kind: None,
+            })
+            .expect_err("reversed range must fail")
+            .kind(),
+            ApplicationErrorKind::InvalidRequest
         );
     }
 }

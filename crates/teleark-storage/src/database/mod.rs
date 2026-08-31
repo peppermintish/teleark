@@ -1,5 +1,6 @@
 mod collections;
 mod index;
+mod native_downloads;
 mod remote;
 mod search;
 mod telegram_index;

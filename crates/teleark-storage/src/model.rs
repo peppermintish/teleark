@@ -69,6 +69,75 @@ pub struct TelegramIndexStateRecord {
     pub updated_at_unix_ms: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredNativeDownloadState {
+    Queued,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredNativeDownloadVerification {
+    Pending,
+    SizeChecked,
+    NotReached,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewNativeDownloadTaskRecord {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub message_sent_at_unix_ms: Option<i64>,
+    pub file_name: String,
+    pub caption: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub destination: PathBuf,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewNativeDownloadBatchRecord {
+    pub chat_id: i64,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeDownloadBatchRecord {
+    pub id: u64,
+    pub chat_id: i64,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeDownloadTaskRecord {
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub message_sent_at_unix_ms: Option<i64>,
+    pub file_name: String,
+    pub caption: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub destination: PathBuf,
+    pub state: StoredNativeDownloadState,
+    pub verification: StoredNativeDownloadVerification,
+    pub transferred_bytes: u64,
+    pub created_at_unix_ms: i64,
+    pub started_at_unix_ms: Option<i64>,
+    pub finished_at_unix_ms: Option<i64>,
+    pub queue_wait_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub average_bytes_per_second: Option<u64>,
+    pub attempts: u32,
+    pub failure_code: Option<String>,
+    pub updated_at_unix_ms: i64,
+}
+
 /// Durable projection of one file-centric library item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogicalFileRecord {

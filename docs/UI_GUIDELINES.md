@@ -106,7 +106,7 @@ Sidebar + toolbar/search + file table + footer/storage summary. The current alph
 
 ### Settings
 
-Language and Telegram API credentials are connected settings areas in the
+Every Settings navigation item is connected to runtime-owned state in the
 alpha. All three explicit locales switch live—including every input
 placeholder—and persist, while System Default removes the override and
 renegotiates. A build with neither a personal nor distributor API ID/API Hash
@@ -116,8 +116,15 @@ personal pair, and links through a real action to Telegram's official API
 development panel. Personal values persist in the local SQLite Library
 database with a visible local-data warning; distributor values are build-time
 configuration. Long localized notices wrap inside their card at the supported
-minimum width. Other settings controls remain visibly Preview until they have
-real application/runtime backing.
+minimum width. Downloads always use the runtime-owned managed `Downloads`
+directory without a per-file prompt and avoid overwriting an existing file.
+The managed root and its `Downloads`, `Cache`, and `Logs` children are shown
+together. Upload defaults,
+Key Vault auto-lock, indexing batch size, in-app transfer notifications, and
+light/dark/system appearance are typed, validated, and atomically persisted by
+the frontend-neutral runtime. Upload defaults configure the current desktop
+upload form; they do not imply that the preview encrypted-upload workflow is
+production-ready.
 
 ### Upload dialog
 
@@ -126,6 +133,46 @@ Shows selected logical file, account/storage target, automatic multipart compati
 ### Transfers
 
 Summary cards, queue controls/table, speed totals, logs/connections tabs, and inspector mirror the reference. State, verified parts, direction, speed, ETA, concurrency, retry, pause, and failure cause use real Core snapshots when integrated. A 100% byte bar is not “Completed” until verification succeeds.
+The first table column supports row selection and select-all for the current
+filtered result. Completed native downloads expose both Open and Show in
+Finder actions. Tables and Telegram source/file panes own bounded internal
+scroll regions so their last rows remain reachable without moving fixed
+controls off screen.
+
+Starting a Telegram download must not open a per-file destination dialog. The
+Downloads settings page presents the single TeleArk managed-files root and its
+derived `Downloads`, `Cache`, and `Logs` paths together. Users can choose the root,
+restore the platform default, or open it in the system file manager. Existing
+files are never overwritten; collision suffixes are assigned by the runtime.
+
+The Storage settings page shows the active structured diagnostic-log location,
+bounded-writer drop count, privacy disclosure, and an action to open the logs.
+Runtime-backed transfer details show safe performance timings, average speed,
+Trace ID, lifecycle events, verification state, and a localized failure reason
+with action guidance. A transfer that fails before verification must say
+verification was not reached rather than claiming integrity verification failed.
+Running native downloads update transferred bytes, current speed, progress,
+and ETA from real chunk events. Pause, resume, retry, and cancel controls invoke
+runtime commands. Persisted rows remain visible after restart; interrupted work
+stays queued until Telegram authorization is restored.
+
+Each Telegram source offers bounded batch download controls for sent-time and
+file-kind filters. One batch occupies one Transfers row; activating the row
+expands its individual files without losing their independent controls or
+durable checkpoints. Telegram file rows show sent time and a Unicode-safe
+caption preview. Hover reveals the full caption, and selection opens a bounded,
+scrollable detail panel with the full file name, message ID, sent time, MIME
+type, declared size, and caption. Filenames and captions remain unmodified user
+content. The per-file list is the primary source action and owns the available
+vertical space. Batch filters start collapsed and expand on demand so they do
+not displace direct per-file download controls.
+
+The global sidebar footer shows live aggregate upload/download rates, available
+space on the managed-files destination, and current TeleArk disk usage. Rates
+must come from current transfer samples rather than completed-task averages.
+When an upload owner is unavailable, the upload rate is truthfully zero rather
+than a simulated estimate. Disk sizing runs outside the UI thread, is bounded,
+and never follows symbolic links.
 
 ### File detail
 

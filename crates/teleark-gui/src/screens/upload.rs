@@ -16,6 +16,28 @@ pub fn render_upload_overlay(
     layout: LayoutPolicy,
     cx: &mut Context<TeleArkApp>,
 ) -> AnyElement {
+    let part_size_mib = app.preferences.upload_part_size_mib;
+    let part_size_label = app.tr_with(
+        "upload-part-size-mib",
+        teleark_i18n::MessageArgs::new().with(
+            "size",
+            teleark_i18n::format::format_integer(app.locale(), u64::from(part_size_mib)),
+        ),
+    );
+    let compatibility_part_size = app.tr_with(
+        "upload-part-size-mib",
+        teleark_i18n::MessageArgs::new().with(
+            "size",
+            teleark_i18n::format::format_integer(app.locale(), 1_900),
+        ),
+    );
+    let conservative_part_size = app.tr_with(
+        "upload-part-size-mib",
+        teleark_i18n::MessageArgs::new().with(
+            "size",
+            teleark_i18n::format::format_integer(app.locale(), 1_024),
+        ),
+    );
     let file_preview = div()
         .w(px(layout.upload_preview_width()))
         .h_full()
@@ -125,14 +147,14 @@ pub fn render_upload_overlay(
                         .flex_1()
                         .child(form_label(app.tr("upload-part-size")))
                         .child(radio_row(
-                            "1900 MiB",
+                            compatibility_part_size,
                             app.tr("upload-compatibility-mode"),
-                            true,
+                            part_size_mib == 1_900,
                         ))
                         .child(radio_row(
-                            "1024 MiB",
+                            conservative_part_size,
                             app.tr("upload-conservative-mode"),
-                            false,
+                            part_size_mib == 1_024,
                         )),
                 )
                 .child(
@@ -150,7 +172,7 @@ pub fn render_upload_overlay(
                         .child(estimate_row(app.tr("upload-estimate-parts"), "39"))
                         .child(estimate_row(
                             app.tr("upload-estimate-part-size"),
-                            "1900 MiB",
+                            part_size_label,
                         ))
                         .child(estimate_row(
                             app.tr("upload-estimate-total-size"),
@@ -170,7 +192,7 @@ pub fn render_upload_overlay(
                 .child(check_row(
                     app.tr("upload-client-encryption"),
                     app.tr("upload-client-encryption-description"),
-                    true,
+                    app.preferences.upload_encrypt_content,
                 ))
                 .child(
                     div()
@@ -199,12 +221,12 @@ pub fn render_upload_overlay(
                 .child(check_row(
                     app.tr("upload-hide-filename"),
                     app.tr("upload-hide-filename-description"),
-                    true,
+                    app.preferences.upload_hide_file_name,
                 ))
                 .child(check_row(
                     app.tr("upload-encrypt-metadata"),
                     app.tr("upload-encrypt-metadata-description"),
-                    true,
+                    app.preferences.upload_encrypt_metadata,
                 )),
         );
 
@@ -392,7 +414,7 @@ fn check_row(title: SharedString, description: SharedString, checked: bool) -> A
         .into_any_element()
 }
 
-fn radio_row(title: &'static str, hint: SharedString, selected: bool) -> AnyElement {
+fn radio_row(title: impl Into<SharedString>, hint: SharedString, selected: bool) -> AnyElement {
     div()
         .mt_3()
         .flex()
@@ -413,12 +435,17 @@ fn radio_row(title: &'static str, hint: SharedString, selected: bool) -> AnyElem
                     radio.child(div().size_full().rounded_full().bg(theme::blue()))
                 }),
         )
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(title.into()),
+        )
         .child(div().text_xs().text_color(theme::text_muted()).child(hint))
         .into_any_element()
 }
 
-fn estimate_row(label: SharedString, value: &'static str) -> AnyElement {
+fn estimate_row(label: SharedString, value: impl Into<SharedString>) -> AnyElement {
     div()
         .mt_3()
         .flex()
@@ -435,7 +462,7 @@ fn estimate_row(label: SharedString, value: &'static str) -> AnyElement {
             div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::text_secondary())
-                .child(value),
+                .child(value.into()),
         )
         .into_any_element()
 }

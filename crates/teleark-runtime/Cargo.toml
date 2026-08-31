@@ -9,11 +9,15 @@ rust-version.workspace = true
 
 [dependencies]
 teleark-core.workspace = true
-teleark-crypto = { version = "=0.1.1", path = "../teleark-crypto" }
-teleark-storage = { version = "=0.1.1", path = "../teleark-storage" }
-teleark-telegram = { version = "=0.1.1", path = "../teleark-telegram" }
-teleark-transfer = { version = "=0.1.1", path = "../teleark-transfer" }
+teleark-crypto = { version = "=0.2.2", path = "../teleark-crypto" }
+teleark-storage = { version = "=0.2.2", path = "../teleark-storage" }
+teleark-telegram = { version = "=0.2.2", path = "../teleark-telegram" }
+teleark-transfer = { version = "=0.2.2", path = "../teleark-transfer" }
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
+tracing.workspace = true
+tracing-appender = "=0.2.5"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "std"] }
+sysinfo = { version = "=0.31.4", default-features = false, features = ["disk"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]

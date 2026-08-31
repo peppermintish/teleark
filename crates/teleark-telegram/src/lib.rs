@@ -38,6 +38,26 @@ const MAX_DIALOGS_PER_REQUEST: usize = 10_000;
 const MAX_MESSAGES_PER_SCAN: usize = 10_000;
 const MAX_SEARCH_RESULTS: usize = 1_000;
 pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+const DOWNLOAD_CHUNK_SIZE: u64 = 512 * 1024;
+
+/// Cooperative command sampled between bounded Telegram download chunks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DownloadControl {
+    Continue,
+    Pause,
+    Cancel,
+    /// Stops the current process owner while retaining the resumable partial.
+    Stop,
+}
+
+/// Frontend-neutral progress and control surface for a native Telegram download.
+///
+/// Implementations must return quickly and must not expose secrets or file
+/// content. Telegram invokes the observer after each durable in-process write.
+pub trait DownloadObserver: Send + Sync {
+    fn control(&self) -> DownloadControl;
+    fn progressed(&self, transferred_bytes: u64);
+}
 
 /// Configuration that is safe to persist as ordinary application settings.
 ///
@@ -65,6 +85,7 @@ pub enum TelegramErrorKind {
     PermissionDenied,
     LimitExceeded,
     Cancelled,
+    Interrupted,
 }
 
 /// A locale-neutral Telegram adapter failure.
@@ -224,6 +245,7 @@ impl TelegramChat {
 #[derive(Clone, Debug)]
 pub struct TelegramFile {
     message_id: i64,
+    sent_at_unix_ms: i64,
     modified_at_unix_ms: i64,
     file_name: String,
     caption: String,
@@ -254,6 +276,10 @@ impl TelegramFilePage {
 impl TelegramFile {
     pub const fn message_id(&self) -> i64 {
         self.message_id
+    }
+
+    pub const fn sent_at_unix_ms(&self) -> i64 {
+        self.sent_at_unix_ms
     }
 
     pub const fn modified_at_unix_ms(&self) -> i64 {
@@ -630,19 +656,44 @@ impl TelegramConnection {
         file: &TelegramFile,
         destination: impl AsRef<Path>,
     ) -> Result<(), TelegramError> {
+        self.download_file_observed(file, destination, &UncontrolledDownload)
+            .await
+    }
+
+    /// Downloads a document with resumable partial-file handling, cooperative
+    /// pause/cancel control, and chunk-level byte progress.
+    pub async fn download_file_observed(
+        &self,
+        file: &TelegramFile,
+        destination: impl AsRef<Path>,
+        observer: &dyn DownloadObserver,
+    ) -> Result<(), TelegramError> {
         let destination = destination.as_ref();
         validate_download_destination(destination)?;
         let partial = partial_download_path(destination)?;
-        let mut output = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial)
-            .await
-            .map_err(map_io)?;
+        let mut received = prepare_partial_download(&partial, file.size_bytes).await?;
+        observer.progressed(received);
         let result = async {
-            let mut received = 0_u64;
-            let mut download = self.client.iter_download(&file.document);
+            check_download_control(observer)?;
+            if received == file.size_bytes {
+                publish_partial(&partial, destination).await?;
+                return Ok(());
+            }
+            let mut output = tokio::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&partial)
+                .await
+                .map_err(map_io)?;
+            let skipped_chunks = i32::try_from(received / DOWNLOAD_CHUNK_SIZE)
+                .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
+            let mut download = self
+                .client
+                .iter_download(&file.document)
+                .chunk_size(DOWNLOAD_CHUNK_SIZE as i32)
+                .skip_chunks(skipped_chunks);
             while let Some(chunk) = download.next().await.map_err(map_invocation)? {
+                check_download_control(observer)?;
                 received = received
                     .checked_add(
                         u64::try_from(chunk.len())
@@ -653,6 +704,7 @@ impl TelegramConnection {
                     return Err(TelegramError::new(TelegramErrorKind::Network));
                 }
                 output.write_all(&chunk).await.map_err(map_io)?;
+                observer.progressed(received);
             }
             if received != file.size_bytes {
                 return Err(TelegramError::new(TelegramErrorKind::Network));
@@ -660,11 +712,15 @@ impl TelegramConnection {
             output.flush().await.map_err(map_io)?;
             output.sync_all().await.map_err(map_io)?;
             drop(output);
+            check_download_control(observer)?;
             publish_partial(&partial, destination).await?;
             Ok(())
         }
         .await;
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == TelegramErrorKind::Cancelled)
+        {
             let _ = tokio::fs::remove_file(&partial).await;
         }
         result
@@ -786,6 +842,57 @@ impl TelegramConnection {
     }
 }
 
+struct UncontrolledDownload;
+
+impl DownloadObserver for UncontrolledDownload {
+    fn control(&self) -> DownloadControl {
+        DownloadControl::Continue
+    }
+
+    fn progressed(&self, _transferred_bytes: u64) {}
+}
+
+fn check_download_control(observer: &dyn DownloadObserver) -> Result<(), TelegramError> {
+    match observer.control() {
+        DownloadControl::Continue => Ok(()),
+        DownloadControl::Pause | DownloadControl::Stop => {
+            Err(TelegramError::new(TelegramErrorKind::Interrupted))
+        }
+        DownloadControl::Cancel => Err(TelegramError::new(TelegramErrorKind::Cancelled)),
+    }
+}
+
+async fn prepare_partial_download(
+    partial: &Path,
+    expected_bytes: u64,
+) -> Result<u64, TelegramError> {
+    let existing_bytes = match tokio::fs::symlink_metadata(partial).await {
+        Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+        Ok(_) => return Err(TelegramError::new(TelegramErrorKind::PermissionDenied)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(map_io(error)),
+    };
+    if existing_bytes > expected_bytes {
+        return Err(TelegramError::new(TelegramErrorKind::Network));
+    }
+    let resumable_bytes = if existing_bytes == expected_bytes {
+        existing_bytes
+    } else {
+        existing_bytes - (existing_bytes % DOWNLOAD_CHUNK_SIZE)
+    };
+    let output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(partial)
+        .await
+        .map_err(map_io)?;
+    if resumable_bytes != existing_bytes {
+        output.set_len(resumable_bytes).await.map_err(map_io)?;
+    }
+    Ok(resumable_bytes)
+}
+
 impl Drop for TelegramConnection {
     fn drop(&mut self) {
         self.client.disconnect();
@@ -857,6 +964,17 @@ fn partial_download_path(destination: &Path) -> Result<PathBuf, TelegramError> {
         .filter(|name| !name.is_empty())
         .ok_or_else(|| TelegramError::new(TelegramErrorKind::InvalidConfiguration))?;
     Ok(destination.with_file_name(format!(".{file_name}.teleark-partial")))
+}
+
+/// Removes the private resumable partial for an explicitly cancelled native
+/// download. A missing partial is already the desired state.
+pub fn discard_partial_download(destination: impl AsRef<Path>) -> Result<(), TelegramError> {
+    let partial = partial_download_path(destination.as_ref())?;
+    match std::fs::remove_file(partial) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(map_io(error)),
+    }
 }
 
 async fn publish_partial(partial: &Path, destination: &Path) -> Result<(), TelegramError> {
@@ -940,6 +1058,7 @@ fn file_from_message(
         .timestamp_millis();
     Ok(Some(TelegramFile {
         message_id: i64::from(message.id()),
+        sent_at_unix_ms: message.date().timestamp_millis(),
         modified_at_unix_ms,
         file_name: document.name().unwrap_or_default().to_owned(),
         caption: message.text().to_owned(),
@@ -1129,5 +1248,27 @@ mod tests {
             std::fs::read(&destination).expect("original final"),
             b"complete"
         );
+    }
+
+    #[test]
+    fn interrupted_partial_is_truncated_to_a_safe_resumable_chunk() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("Tokio runtime");
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let partial = directory.path().join(".resume.teleark-partial");
+        std::fs::write(&partial, vec![7_u8; DOWNLOAD_CHUNK_SIZE as usize + 123])
+            .expect("write interrupted partial");
+        let resume = runtime
+            .block_on(prepare_partial_download(&partial, DOWNLOAD_CHUNK_SIZE * 3))
+            .expect("prepare resumable partial");
+        assert_eq!(resume, DOWNLOAD_CHUNK_SIZE);
+        assert_eq!(
+            std::fs::metadata(&partial).expect("partial metadata").len(),
+            resume
+        );
+        discard_partial_download(directory.path().join("resume"))
+            .expect("discard resumable partial");
+        assert!(!partial.exists());
     }
 }

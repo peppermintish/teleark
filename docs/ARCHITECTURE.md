@@ -140,6 +140,36 @@ Collections, search results, and transfer history reference `LogicalFile`. Appli
 
 SQLite is a local index, cache, checkpoint store, settings store, and search engine. It is not the sole authority for encrypted packages. A versioned manifest stored with opaque remote parts must be sufficient, together with valid account access and the required key, to rediscover and reconstruct the package after local database loss.
 
+Desktop preferences cross the GUI/runtime boundary as the typed
+`DesktopPreferences` value and are stored atomically under the explicit
+`preferences.v1.*` SQLite namespace. The GUI never reads or writes those rows
+directly. One optional managed-files root controls a runtime-owned filesystem
+layout with `Downloads`, `Cache`, and `Logs` children. The runtime creates the
+layout and
+allocates non-overwriting download destinations; the GUI never prompts for or
+constructs individual download paths. SQLite and the Telegram session remain
+in the platform application-data directory so an active database or session is
+never moved by a preference change. Encoding, defaults, validation, and
+compatibility behavior are specified in
+[PREFERENCES_FORMAT.md](PREFERENCES_FORMAT.md).
+
+Process diagnostics use structured `tracing` events with an explicitly safe
+field allowlist. A bounded non-blocking writer emits daily JSONL files under
+the managed `Logs` directory; storage, Telegram, and transfer owners never
+block on log I/O. Frontend-neutral native-download snapshots separately expose
+safe timing, verification, event, and failure-class data for localized UI.
+Diagnostic output is not a durable compatibility format. See
+[DIAGNOSTICS.md](DIAGNOSTICS.md).
+
+Telegram-native desktop downloads persist separately in schema-v7
+`native_download_batches` and `native_download_tasks` tables because they do
+not yet represent encrypted multipart packages. The runtime owns bounded
+per-channel time/kind scans, atomic batch creation, the bounded queue,
+cooperative control, chunk-level progress aggregation, resumable private
+partials, source message metadata, and restoration. The GUI consumes snapshots,
+aggregates a batch into an expandable presentation row, and never reads those
+tables directly.
+
 The Telegram application API ID and API Hash are resolved by the
 frontend-neutral runtime worker. An atomically managed personal pair persists
 in SQLite and takes precedence over an optional distributor pair compiled into

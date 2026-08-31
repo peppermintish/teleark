@@ -88,6 +88,10 @@ impl LayoutPolicy {
         }
     }
 
+    pub(crate) fn channel_compact_file_list_height(self) -> f32 {
+        (self.height - 220.0).clamp(380.0, 560.0)
+    }
+
     pub(crate) fn transfer_inspector_width(self) -> f32 {
         match self.class {
             WindowClass::Compact => 276.0,
@@ -323,6 +327,17 @@ mod tests {
     }
 
     #[test]
+    fn compact_channel_file_list_grows_with_available_window_height() {
+        let minimum = LayoutPolicy::from_size(900.0, 600.0);
+        let common = LayoutPolicy::from_size(960.0, 640.0);
+        let tall = LayoutPolicy::from_size(1_200.0, 960.0);
+
+        assert_eq!(minimum.channel_compact_file_list_height(), 380.0);
+        assert_eq!(common.channel_compact_file_list_height(), 420.0);
+        assert_eq!(tall.channel_compact_file_list_height(), 560.0);
+    }
+
+    #[test]
     fn dialogs_and_inspectors_fit_each_supported_target() {
         for (width, height) in SUPPORTED_VIEWPORTS {
             let policy = LayoutPolicy::from_size(width, height);
@@ -429,6 +444,12 @@ mod tests {
                 policy.channel_compact_panel_width() >= 876.0,
                 "channel at {width}x{height}"
             );
+            if policy.is_compact() {
+                assert!(
+                    policy.channel_compact_file_list_height() >= 380.0,
+                    "channel files at {width}x{height}"
+                );
+            }
             if !policy.is_compact() {
                 assert!(
                     policy.channel_job_viewport_height() >= 400.0,
@@ -510,7 +531,7 @@ mod tests {
             assert!(channel_toolbar <= compact.route_width(), "{locale:?}");
 
             let settings_toolbar = estimated_message_width(&localizer, "settings-title")
-                + estimated_message_width(&localizer, "settings-preview-controls")
+                + estimated_message_width(&localizer, "settings-preferences-failed")
                 + 28.0
                 + compact.content_padding() * 2.0;
             assert!(settings_toolbar <= compact.route_width(), "{locale:?}");

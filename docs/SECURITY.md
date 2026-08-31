@@ -8,6 +8,15 @@ The intended Vault mode protects file content, original filename/path, and encry
 
 The product also aims to prevent accidental exposure through final filenames, logs, debug formatting, crash checkpoints, fixtures, and source control.
 
+Desktop diagnostics follow the allowlist and retention policy in
+`DIAGNOSTICS.md`. Daily JSONL logs may contain numeric task/chat/message IDs,
+byte counts, timings, and structured error classes, but never credentials,
+login inputs/tokens, filenames, captions, channel titles, local paths, or file
+content. Logging is bounded and non-blocking so diagnostics cannot exert
+unbounded memory pressure or stall transfer/storage owners. The subscriber
+filters out all third-party targets so dependency events cannot bypass this
+field review.
+
 ## Assets
 
 - plaintext files and original names/paths;

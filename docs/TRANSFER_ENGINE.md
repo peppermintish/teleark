@@ -6,9 +6,9 @@ Runtime integration covers encrypted upload, checkpoint restart, Manifest
 publication, fresh-database File Key/layout recovery, authenticated download,
 whole-file equality, and atomic finalization against a deterministic fake
 remote. The desktop additionally owns a bounded real Telegram-native download
-queue and renders its task snapshots. Encrypted desktop ownership, credentialed
-Telegram system tests, bandwidth control, pause/retry, and large-file encrypted
-streaming remain.
+queue and renders its durable, controllable task snapshots. Encrypted desktop
+ownership, credentialed Telegram system tests, bandwidth control, and
+large-file encrypted streaming remain.
 
 ## Scope
 
@@ -60,17 +60,36 @@ and manifests.
 ## Native channel-download path
 
 The Telegram Sources screen queries the selected dialog in exclusive-cursor
-pages and keeps source/message identity on every row. A user-selected save path
-becomes a bounded runtime request. The adapter refetches the document by chat
+pages and keeps source/message identity on every row. A runtime-allocated path
+under the configured managed `Downloads` directory becomes a bounded runtime
+request. The adapter refetches the document by chat
 and message identity, streams it into a private `.teleark-partial` sibling,
 checks the declared byte count, flushes, and atomically publishes the final
 path. Existing destinations are never silently overwritten.
 
-The task snapshots exposed to GPUI are `Queued`, `Running`, `Completed`, or a
-structured `Failed` kind. This first native path is intentionally sequential and
-in-memory: byte-level progress, restart resume, pause/cancel/retry, durable task
-history, and content hashes remain required before it can replace the encrypted
-engine for managed TeleArk files.
+The task snapshots exposed to GPUI are `Queued`, `Running`, `Paused`,
+`Completed`, structured `Failed`, or `Cancelled`. Every 512 KiB Telegram chunk
+updates transferred bytes, current speed, and ETA. The adapter preserves a
+private partial at a complete chunk boundary across network/process
+interruption; explicit cancel removes it. Pause interrupts at the next chunk
+boundary so another queued task may run, while resume skips already written
+chunks. A per-channel batch request scans at most 50,000 messages, retains at
+most 2,000 matching files, and can filter inclusively by sent-time range and
+file kind. SQLite schema v7 persists bounded task history, progress, timing,
+attempt, verification, failure data, source message metadata, and an optional
+batch identity. The batch and all child tasks are inserted atomically. GPUI
+renders the batch as one aggregate transfer row and expands its child tasks on
+request; individual task controls still target the durable child identity.
+Startup restores every retained row,
+normalizes interrupted running work to queued, and resumes it after Telegram
+authorization/dialog discovery. The path remains sequential and verifies
+Telegram's declared byte size rather than a content hash. Matching structured
+tracing events omit filenames and paths.
+
+Application shutdown first persists the latest observed byte checkpoint and
+signals the observer, but never waits indefinitely for Telegram to deliver one
+more network chunk. A blocked download worker is safely detached so the
+desktop process can exit promptly.
 
 ## Task state machine
 

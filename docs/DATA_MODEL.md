@@ -124,11 +124,12 @@ accounts, chats
 logical_files, logical_files_fts
 index_jobs, index_ranges
 transfer_tasks, transfer_parts
+native_download_batches, native_download_tasks
 collections, collection_items
 settings, id_allocators
 ```
 
-Five ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, and add Telegram remote-object identities plus per-source scan cursors. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
+Seven ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, add Telegram remote-object identities plus per-source scan cursors, and persist bounded native-download history/progress for restart recovery. Schema v7 adds durable batch identity plus the source message's sent time, caption, and MIME type to native download tasks. A batch header and all of its task rows are inserted in one transaction, so a rejected member cannot leave a partial batch. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
 
 Still absent are tables/repositories for Vault `file_parts`, `packages`, `manifests`, encryption profiles, and Vault metadata. Native Telegram documents now use `remote_objects` keyed by account/chat/message with monotonic revision checks and an opaque bounded transport key. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
 

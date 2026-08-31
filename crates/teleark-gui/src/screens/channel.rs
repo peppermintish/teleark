@@ -2,16 +2,23 @@ use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName, input::Input, scroll::ScrollableElement as _};
+use gpui_component::{
+    Disableable as _, Icon, IconName, input::Input, scroll::ScrollableElement as _,
+    tooltip::Tooltip,
+};
 use qrcode::{QrCode, types::Color};
+use teleark_core::FileKind;
 use teleark_i18n::{
     MessageArgs,
-    format::{format_bytes, format_integer},
+    format::{format_bytes, format_integer, format_unix_millis},
 };
 use teleark_runtime::{ChannelDownloadState, TelegramAuthState};
 
 use crate::{
-    app::{TeleArkApp, TelegramActivity, telegram_login_controls_enabled},
+    app::{
+        ChannelBatchActivity, ChannelBatchPeriod, TeleArkApp, TelegramActivity,
+        telegram_login_controls_enabled,
+    },
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
@@ -25,6 +32,7 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let padding = layout.content_padding();
+        let authorized = matches!(self.telegram_auth, TelegramAuthState::Authorized(_));
         let body = match &self.telegram_auth {
             TelegramAuthState::Disconnected | TelegramAuthState::Unauthorized => {
                 self.render_telegram_login_methods(layout, None, cx)
@@ -38,6 +46,17 @@ impl TeleArkApp {
                 self.render_telegram_password(hint.as_deref(), cx)
             }
             TelegramAuthState::Authorized(_) => self.render_telegram_channels(layout, cx),
+        };
+        let content = div()
+            .flex_1()
+            .min_h_0()
+            .px(px(padding))
+            .pb(px(padding))
+            .child(body);
+        let content = if channel_uses_route_scroll(authorized, layout) {
+            content.overflow_y_scrollbar().into_any_element()
+        } else {
+            content.into_any_element()
         };
         div()
             .flex_1()
@@ -56,15 +75,7 @@ impl TeleArkApp {
                     .child(div().flex_1())
                     .child(self.telegram_status_badge()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .px(px(padding))
-                    .pb(px(padding))
-                    .overflow_y_scrollbar()
-                    .child(body),
-            )
+            .child(content)
             .into_any_element()
     }
 
@@ -343,7 +354,8 @@ impl TeleArkApp {
             .when(layout.is_compact(), |list| list.w_full())
             .when(!layout.is_compact(), |list| list.w(px(330.0)).flex_none())
             .p_2()
-            .max_h(px(if layout.is_compact() { 280.0 } else { 620.0 }))
+            .when(layout.is_compact(), |list| list.max_h(px(280.0)))
+            .when(!layout.is_compact(), |list| list.h_full().min_h_0())
             .overflow_y_scrollbar()
             .child(
                 div()
@@ -388,6 +400,14 @@ impl TeleArkApp {
         let detail = components::card()
             .flex_1()
             .min_w_0()
+            .when(!layout.is_compact(), |detail| {
+                detail
+                    .h_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+            })
             .p_5()
             .child(components::section_title(selected_name))
             .child(
@@ -450,14 +470,168 @@ impl TeleArkApp {
                         })),
                     ),
             )
+            .child(self.render_channel_batch_controls(cx))
             .child(self.render_telegram_file_list(layout, cx));
 
         div()
             .flex()
+            .when(!layout.is_compact(), |body| body.h_full().min_h_0())
             .when(layout.is_compact(), |body| body.flex_col())
             .gap_4()
             .child(list)
             .child(detail)
+            .into_any_element()
+    }
+
+    fn render_channel_batch_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let preparing = self.channel_batch_activity == ChannelBatchActivity::Preparing;
+        let periods = [
+            (ChannelBatchPeriod::AnyTime, "telegram-batch-period-any"),
+            (ChannelBatchPeriod::Past24Hours, "telegram-batch-period-24h"),
+            (ChannelBatchPeriod::Past7Days, "telegram-batch-period-7d"),
+            (ChannelBatchPeriod::Past30Days, "telegram-batch-period-30d"),
+        ];
+        let kinds = [
+            (None, "telegram-batch-kind-all"),
+            (Some(FileKind::Video), "telegram-batch-kind-video"),
+            (Some(FileKind::Document), "telegram-batch-kind-document"),
+            (Some(FileKind::Archive), "telegram-batch-kind-archive"),
+            (Some(FileKind::Audio), "telegram-batch-kind-audio"),
+            (Some(FileKind::Image), "telegram-batch-kind-image"),
+            (Some(FileKind::Other), "telegram-batch-kind-other"),
+        ];
+        let status = match self.channel_batch_activity {
+            ChannelBatchActivity::Idle => None,
+            ChannelBatchActivity::Preparing => {
+                Some((self.tr("telegram-batch-preparing"), Tone::Blue))
+            }
+            ChannelBatchActivity::Queued { count, .. } => Some((
+                self.tr_with(
+                    "telegram-batch-queued",
+                    MessageArgs::new().with("count", format_integer(self.locale(), count as u64)),
+                ),
+                Tone::Green,
+            )),
+            ChannelBatchActivity::NoMatches => {
+                Some((self.tr("telegram-batch-no-matches"), Tone::Amber))
+            }
+            ChannelBatchActivity::Failed(_) => Some((self.tr("telegram-batch-failed"), Tone::Red)),
+        };
+        components::card()
+            .mt_3()
+            .p_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(self.tr("telegram-batch-title")),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme::text_secondary())
+                                    .child(self.tr("telegram-batch-description")),
+                            ),
+                    )
+                    .when_some(status, |row, (label, tone)| {
+                        row.child(components::badge(label, tone))
+                    })
+                    .child(
+                        components::icon_button(
+                            "telegram-batch-toggle",
+                            if self.channel_batch_expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            },
+                            self.tr("telegram-batch-title"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.channel_batch_expanded = !this.channel_batch_expanded;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .when(self.channel_batch_expanded, |card| {
+                card.child(
+                    div()
+                        .mt_3()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("telegram-batch-period-label")),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(periods.into_iter().map(|(period, label)| {
+                            components::button(
+                                ("telegram-batch-period", period as usize),
+                                self.tr(label),
+                                None,
+                                self.channel_batch_period == period,
+                            )
+                            .disabled(preparing)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.channel_batch_period = period;
+                                    this.channel_batch_activity = ChannelBatchActivity::Idle;
+                                    cx.notify();
+                                },
+                            ))
+                        })),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("telegram-batch-kind-label")),
+                )
+                .child(div().mt_2().flex().flex_wrap().gap_2().children(
+                    kinds.into_iter().enumerate().map(|(index, (kind, label))| {
+                        components::button(
+                            ("telegram-batch-kind", index),
+                            self.tr(label),
+                            None,
+                            self.channel_batch_kind == kind,
+                        )
+                        .disabled(preparing)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.channel_batch_kind = kind;
+                            this.channel_batch_activity = ChannelBatchActivity::Idle;
+                            cx.notify();
+                        }))
+                    }),
+                ))
+                .child(
+                    div().mt_3().child(
+                        components::button(
+                            "telegram-batch-download",
+                            self.tr("telegram-batch-download-action"),
+                            Some(IconName::ArrowDown),
+                            true,
+                        )
+                        .disabled(preparing || self.selected_chat_id.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.download_filtered_telegram_files(cx);
+                        })),
+                    ),
+                )
+            })
             .into_any_element()
     }
 
@@ -475,6 +649,9 @@ impl TeleArkApp {
         );
         let mut list = div()
             .mt_5()
+            .when(!layout.is_compact(), |list| {
+                list.flex_1().min_h_0().flex().flex_col().overflow_hidden()
+            })
             .border_t_1()
             .border_color(theme::border())
             .child(
@@ -502,10 +679,14 @@ impl TeleArkApp {
         } else {
             list = list.child(
                 div()
-                    .max_h(px(if layout.is_compact() { 360.0 } else { 430.0 }))
+                    .when(layout.is_compact(), |body| {
+                        body.h(px(layout.channel_compact_file_list_height()))
+                    })
+                    .when(!layout.is_compact(), |body| body.flex_1().min_h_0())
                     .overflow_y_scrollbar()
                     .children(self.telegram_files.iter().map(|file| {
                         let message_id = file.message_id;
+                        let selected = self.selected_telegram_message_id == Some(message_id);
                         let name = if file.file_name.trim().is_empty() {
                             self.tr_with(
                                 "telegram-file-unnamed",
@@ -514,15 +695,30 @@ impl TeleArkApp {
                         } else {
                             file.file_name.clone().into()
                         };
+                        let caption = if file.caption.trim().is_empty() {
+                            self.tr("telegram-message-no-caption").to_string()
+                        } else {
+                            file.caption.clone()
+                        };
+                        let caption_preview = caption_preview(&caption, 96);
+                        let caption_tooltip = caption.clone();
+                        let sent_at = format_unix_millis(self.locale(), file.sent_at_unix_ms);
                         div()
                             .id(("telegram-file", message_id.unsigned_abs()))
-                            .min_h(px(54.0))
+                            .min_h(px(72.0))
                             .py_2()
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap_3()
                             .border_b_1()
                             .border_color(theme::border_subtle())
+                            .cursor_pointer()
+                            .when(selected, |row| row.bg(theme::blue_pale()))
+                            .hover(|row| row.bg(theme::blue_pale()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected_telegram_message_id = Some(message_id);
+                                cx.notify();
+                            }))
                             .child(Icon::new(IconName::File).text_color(theme::blue()))
                             .child(
                                 div()
@@ -547,7 +743,22 @@ impl TeleArkApp {
                                                         )
                                                         .with("message_id", message_id.to_string()),
                                                 ),
-                                            ),
+                                            )
+                                            .child(" · ")
+                                            .child(sent_at),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("telegram-caption", message_id.unsigned_abs()))
+                                            .mt_1()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(caption_preview)
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(caption_tooltip.clone())
+                                                    .build(window, cx)
+                                            }),
                                     ),
                             )
                             .child(
@@ -571,8 +782,10 @@ impl TeleArkApp {
             let (message, tone) = match state {
                 ChannelDownloadState::Queued => ("telegram-download-queued", Tone::Amber),
                 ChannelDownloadState::Running => ("telegram-download-running", Tone::Blue),
+                ChannelDownloadState::Paused => ("telegram-download-paused", Tone::Amber),
                 ChannelDownloadState::Completed => ("telegram-download-completed", Tone::Green),
                 ChannelDownloadState::Failed(_) => ("telegram-download-failed", Tone::Red),
+                ChannelDownloadState::Cancelled => ("telegram-download-cancelled", Tone::Red),
             };
             list.child(
                 div()
@@ -596,7 +809,89 @@ impl TeleArkApp {
                 ),
             );
         }
-        list.into_any_element()
+        let selected_message = self.selected_telegram_message_id.and_then(|message_id| {
+            self.telegram_files
+                .iter()
+                .find(|file| file.message_id == message_id)
+        });
+        div()
+            .when(!layout.is_compact(), |browser| {
+                browser.flex_1().min_h_0().flex().gap_4()
+            })
+            .when(layout.is_compact(), |browser| browser.flex().flex_col())
+            .child(
+                div()
+                    .min_w_0()
+                    .when(!layout.is_compact(), |panel| {
+                        panel.flex_1().min_h_0().flex().flex_col().overflow_hidden()
+                    })
+                    .child(list),
+            )
+            .when_some(selected_message, |browser, file| {
+                browser.child(self.render_telegram_message_detail(file, layout))
+            })
+            .into_any_element()
+    }
+
+    fn render_telegram_message_detail(
+        &self,
+        file: &teleark_runtime::TelegramFileSummary,
+        layout: LayoutPolicy,
+    ) -> AnyElement {
+        let caption = if file.caption.trim().is_empty() {
+            self.tr("telegram-message-no-caption")
+        } else {
+            file.caption.clone().into()
+        };
+        components::card()
+            .when(!layout.is_compact(), |detail| {
+                detail.w(px(300.0)).flex_none().mt_5().mb_3()
+            })
+            .when(layout.is_compact(), |detail| detail.mt_3())
+            .p_4()
+            .overflow_y_scrollbar()
+            .child(components::section_title(
+                self.tr("telegram-message-detail-title"),
+            ))
+            .child(message_detail_row(
+                self.tr("telegram-message-file-name"),
+                if file.file_name.is_empty() {
+                    self.tr_with(
+                        "telegram-file-unnamed",
+                        MessageArgs::new().with("message_id", file.message_id.to_string()),
+                    )
+                } else {
+                    file.file_name.clone().into()
+                },
+            ))
+            .child(message_detail_row(
+                self.tr("detail-message-id"),
+                file.message_id.to_string().into(),
+            ))
+            .child(message_detail_row(
+                self.tr("telegram-message-sent-at"),
+                format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
+            ))
+            .child(message_detail_row(
+                self.tr("telegram-message-mime-type"),
+                file.mime_type
+                    .clone()
+                    .unwrap_or_else(|| self.tr("transfer-value-unavailable").to_string())
+                    .into(),
+            ))
+            .child(message_detail_row(
+                self.tr("table-size"),
+                format_bytes(self.locale(), file.size_bytes).into(),
+            ))
+            .child(
+                div()
+                    .mt_4()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(self.tr("telegram-message-caption")),
+            )
+            .child(div().mt_2().text_sm().whitespace_normal().child(caption))
+            .into_any_element()
     }
 
     fn telegram_error_message(&self) -> Option<gpui::SharedString> {
@@ -611,6 +906,27 @@ impl TeleArkApp {
             _ => "telegram-error-generic",
         }))
     }
+}
+
+fn channel_uses_route_scroll(authorized: bool, layout: LayoutPolicy) -> bool {
+    !authorized || layout.is_compact()
+}
+
+fn caption_preview(caption: &str, maximum_chars: usize) -> String {
+    let mut characters = caption.chars();
+    let preview: String = characters.by_ref().take(maximum_chars).collect();
+    if characters.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+fn message_detail_row(label: gpui::SharedString, value: gpui::SharedString) -> gpui::Div {
+    div()
+        .mt_3()
+        .child(div().text_xs().text_color(theme::text_muted()).child(label))
+        .child(div().mt_1().text_sm().whitespace_normal().child(value))
 }
 
 fn credential_qr_placeholder(size: f32, label: gpui::SharedString) -> AnyElement {
@@ -788,5 +1104,28 @@ mod tests {
             login_method_columns(LayoutPolicy::from_size(1_920.0, 1_080.0)),
             2
         );
+    }
+
+    #[test]
+    fn authorized_desktop_sources_use_independent_channel_and_file_scroll_panes() {
+        assert!(channel_uses_route_scroll(
+            true,
+            LayoutPolicy::from_size(960.0, 640.0)
+        ));
+        assert!(!channel_uses_route_scroll(
+            true,
+            LayoutPolicy::from_size(1_360.0, 760.0)
+        ));
+        assert!(channel_uses_route_scroll(
+            false,
+            LayoutPolicy::from_size(1_920.0, 1_080.0)
+        ));
+    }
+
+    #[test]
+    fn caption_preview_is_unicode_safe_and_only_truncates_long_content() {
+        assert_eq!(caption_preview("完整 caption", 20), "完整 caption");
+        assert_eq!(caption_preview("一二三四五六", 4), "一二三四…");
+        assert_eq!(caption_preview("hidden", 0), "…");
     }
 }

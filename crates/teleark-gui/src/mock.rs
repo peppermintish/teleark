@@ -10,8 +10,10 @@ pub enum TransferState {
     Downloading,
     Uploading,
     Waiting,
+    Paused,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl TransferState {
@@ -20,8 +22,10 @@ impl TransferState {
             Self::Downloading => "transfer.state.downloading",
             Self::Uploading => "transfer.state.uploading",
             Self::Waiting => "transfer.state.waiting",
+            Self::Paused => "transfer.state.paused",
             Self::Completed => "transfer.state.completed",
             Self::Failed => "transfer.state.failed",
+            Self::Cancelled => "transfer.state.cancelled",
         }
     }
 }
@@ -29,7 +33,12 @@ impl TransferState {
 #[derive(Clone, Debug)]
 pub struct TransferRow {
     pub runtime_task_id: Option<u64>,
+    pub runtime_batch_id: Option<u64>,
+    pub batch_child: bool,
     pub message_id: Option<i64>,
+    pub message_sent_at_unix_ms: Option<i64>,
+    pub caption: Option<SharedString>,
+    pub mime_type: Option<SharedString>,
     pub name: SharedString,
     pub source: SharedString,
     pub size: SharedString,
@@ -57,7 +66,12 @@ macro_rules! transfer_row {
     ) => {
         TransferRow {
             runtime_task_id: None,
+            runtime_batch_id: None,
+            batch_child: false,
             message_id: None,
+            message_sent_at_unix_ms: None,
+            caption: None,
+            mime_type: None,
             name: $name.into(),
             source: $source.into(),
             size: $size.into(),

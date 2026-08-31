@@ -6,11 +6,17 @@ use gpui::{
 use gpui_component::{
     Disableable as _, Icon, IconName, input::Input, scroll::ScrollableElement as _,
 };
-use teleark_i18n::SupportedLocale;
-use teleark_runtime::TelegramCredentialSource;
+use teleark_i18n::{SupportedLocale, format::format_integer};
+use teleark_runtime::{
+    AppearancePreference, TelegramCredentialSource, default_database_path,
+    default_managed_directories, diagnostics_status,
+};
 
 use crate::{
-    app::{LocalePersistence, TeleArkApp, TelegramApiIdPersistence},
+    app::{
+        LocalePersistence, PreferencePersistence, SettingsSection, TeleArkApp,
+        TelegramApiIdPersistence,
+    },
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
@@ -34,8 +40,17 @@ impl TeleArkApp {
             .child(components::section_title(self.tr("settings-title")))
             .child(div().flex_1())
             .child(components::badge(
-                self.tr("settings-preview-controls"),
-                Tone::Amber,
+                self.tr(match self.preference_persistence {
+                    PreferencePersistence::Idle => "settings-preferences-ready",
+                    PreferencePersistence::Saving => "settings-preferences-saving",
+                    PreferencePersistence::Saved => "settings-preferences-saved",
+                    PreferencePersistence::Failed => "settings-preferences-failed",
+                }),
+                match self.preference_persistence {
+                    PreferencePersistence::Saving => Tone::Amber,
+                    PreferencePersistence::Failed => Tone::Red,
+                    PreferencePersistence::Idle | PreferencePersistence::Saved => Tone::Green,
+                },
             ));
 
         let settings_nav = components::card()
@@ -43,50 +58,59 @@ impl TeleArkApp {
             .h_full()
             .flex_none()
             .p_2()
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Settings,
                 self.tr("settings-general"),
-                true,
+                SettingsSection::General,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::CircleUser,
                 self.tr("settings-accounts"),
-                false,
+                SettingsSection::Accounts,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Inbox,
                 self.tr("settings-storage"),
-                false,
+                SettingsSection::Storage,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::ArrowDown,
                 self.tr("settings-downloads"),
-                false,
+                SettingsSection::Downloads,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::ArrowUp,
                 self.tr("settings-uploads"),
-                false,
+                SettingsSection::Uploads,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Asterisk,
                 self.tr("settings-key-vault"),
-                false,
+                SettingsSection::KeyVault,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Search,
                 self.tr("settings-indexing"),
-                false,
+                SettingsSection::Indexing,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Bell,
                 self.tr("settings-notifications"),
-                false,
+                SettingsSection::Notifications,
+                cx,
             ))
-            .child(settings_nav_item(
+            .child(self.settings_nav_item(
                 IconName::Palette,
                 self.tr("settings-appearance"),
-                false,
+                SettingsSection::Appearance,
+                cx,
             ))
             .child(div().flex_1())
             .child(
@@ -304,60 +328,17 @@ impl TeleArkApp {
                     ),
             );
 
-        let appearance = components::card()
-            .mt_4()
-            .p_5()
-            .child(components::section_title(self.tr("settings-appearance")))
-            .child(
-                div()
-                    .mt_4()
-                    .flex()
-                    .gap_3()
-                    .child(theme_option(
-                        self.tr("settings-theme-system"),
-                        self.tr("settings-theme-system-description"),
-                        true,
-                    ))
-                    .child(theme_option(
-                        self.tr("settings-theme-light"),
-                        self.tr("settings-theme-light-description"),
-                        false,
-                    ))
-                    .child(theme_option(
-                        self.tr("settings-theme-dark"),
-                        self.tr("settings-theme-dark-description"),
-                        false,
-                    )),
-            );
-
-        let behavior = components::card()
-            .mt_4()
-            .p_5()
-            .child(components::section_title(
-                self.tr("settings-behavior-title"),
-            ))
-            .child(
-                div()
-                    .mt_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(preference_row(
-                        self.tr("settings-start-at-login"),
-                        self.tr("settings-start-at-login-description"),
-                        false,
-                    ))
-                    .child(preference_row(
-                        self.tr("settings-restore-window"),
-                        self.tr("settings-restore-window-description"),
-                        true,
-                    ))
-                    .child(preference_row(
-                        self.tr("settings-show-menu-bar"),
-                        self.tr("settings-show-menu-bar-description"),
-                        true,
-                    )),
-            );
+        let active_content = match self.settings_section {
+            SettingsSection::General => language.into_any_element(),
+            SettingsSection::Accounts => telegram_credentials.into_any_element(),
+            SettingsSection::Storage => self.render_storage_settings(cx),
+            SettingsSection::Downloads => self.render_download_settings(cx),
+            SettingsSection::Uploads => self.render_upload_settings(cx),
+            SettingsSection::KeyVault => self.render_key_vault_settings(cx),
+            SettingsSection::Indexing => self.render_indexing_settings(cx),
+            SettingsSection::Notifications => self.render_notification_settings(cx),
+            SettingsSection::Appearance => self.render_appearance_settings(layout, cx),
+        };
 
         let content = div()
             .flex_1()
@@ -369,10 +350,7 @@ impl TeleArkApp {
                     .max_w(px(880.0))
                     .mx_auto()
                     .pb_5()
-                    .child(telegram_credentials)
-                    .child(language.mt_4())
-                    .child(appearance)
-                    .child(behavior),
+                    .child(active_content),
             );
 
         div()
@@ -395,6 +373,514 @@ impl TeleArkApp {
                     .child(content),
             )
             .into_any_element()
+    }
+
+    fn settings_nav_item(
+        &self,
+        icon: IconName,
+        label: SharedString,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.settings_section == section;
+        div()
+            .id(("settings-section", section as u64))
+            .h(px(38.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded(theme::RADIUS_SMALL)
+            .bg(if selected {
+                theme::blue_soft()
+            } else {
+                theme::surface()
+            })
+            .text_color(if selected {
+                theme::blue()
+            } else {
+                theme::text_secondary()
+            })
+            .text_sm()
+            .cursor_pointer()
+            .focusable()
+            .tab_index(0)
+            .hover(|item| item.bg(theme::blue_pale()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_settings_section(section, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.set_settings_section(section, cx);
+                }
+            }))
+            .child(Icon::new(icon).text_color(if selected {
+                theme::blue()
+            } else {
+                theme::text_secondary()
+            }))
+            .child(div().min_w_0().truncate().child(label))
+            .into_any_element()
+    }
+
+    fn render_storage_settings(&self, _cx: &mut Context<Self>) -> AnyElement {
+        let database_path = default_database_path();
+        let display_path = database_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.tr("settings-path-unavailable").to_string());
+        let library_card = settings_card(
+            self.tr("settings-storage-library-title"),
+            self.tr("settings-storage-library-description"),
+        )
+        .child(path_panel(display_path))
+        .when_some(database_path, |card, path| {
+            card.child(
+                div().mt_4().child(
+                    components::button(
+                        "settings-reveal-library-database",
+                        self.tr("settings-storage-reveal-action"),
+                        Some(IconName::FolderOpen),
+                        false,
+                    )
+                    .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                ),
+            )
+        })
+        .child(
+            div()
+                .mt_4()
+                .p_3()
+                .rounded(theme::RADIUS_SMALL)
+                .bg(theme::blue_pale())
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(self.tr("settings-storage-sqlite-note")),
+        )
+        .into_any_element();
+        let diagnostics = diagnostics_status();
+        let diagnostics_path = diagnostics
+            .as_ref()
+            .map(|status| status.log_directory.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.tr("settings-diagnostics-unavailable").to_string());
+        let dropped_events = diagnostics
+            .as_ref()
+            .map(|status| status.dropped_event_count)
+            .unwrap_or_default();
+        let diagnostics_directory = diagnostics.map(|status| status.log_directory);
+        let diagnostics_card = settings_card(
+            self.tr("settings-diagnostics-title"),
+            self.tr("settings-diagnostics-description"),
+        )
+        .child(path_panel(diagnostics_path))
+        .child(
+            div()
+                .mt_3()
+                .text_xs()
+                .text_color(if dropped_events == 0 {
+                    theme::green()
+                } else {
+                    theme::amber()
+                })
+                .child(self.tr_with(
+                    "settings-diagnostics-dropped-events",
+                    teleark_i18n::MessageArgs::new().with(
+                        "count",
+                        format_integer(self.locale(), dropped_events as u64),
+                    ),
+                )),
+        )
+        .when_some(diagnostics_directory, |card, directory| {
+            card.child(
+                div().mt_3().child(
+                    components::button(
+                        "settings-open-diagnostics",
+                        self.tr("settings-diagnostics-open-action"),
+                        Some(IconName::FolderOpen),
+                        false,
+                    )
+                    .on_click(move |_, _, cx| cx.open_with_system(&directory)),
+                ),
+            )
+        })
+        .child(
+            div()
+                .mt_4()
+                .p_3()
+                .rounded(theme::RADIUS_SMALL)
+                .bg(theme::blue_pale())
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(self.tr("settings-diagnostics-privacy-note")),
+        )
+        .into_any_element();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(library_card)
+            .child(diagnostics_card)
+            .into_any_element()
+    }
+
+    fn render_download_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let directories = default_managed_directories(&self.preferences);
+        let root = directories
+            .as_ref()
+            .map(|directories| directories.root.clone());
+        let active_diagnostics = diagnostics_status();
+        let logs_relocation_pending = directories
+            .as_ref()
+            .zip(active_diagnostics.as_ref())
+            .is_some_and(|(directories, status)| directories.logs != status.log_directory);
+        let mut card = settings_card(
+            self.tr("settings-download-title"),
+            self.tr("settings-download-description"),
+        );
+        if let Some(directories) = directories {
+            card = card
+                .child(labeled_path_panel(
+                    self.tr("settings-managed-root-label"),
+                    directories.root.to_string_lossy().into_owned(),
+                ))
+                .child(labeled_path_panel(
+                    self.tr("settings-managed-downloads-label"),
+                    directories.downloads.to_string_lossy().into_owned(),
+                ))
+                .child(labeled_path_panel(
+                    self.tr("settings-managed-cache-label"),
+                    directories.cache.to_string_lossy().into_owned(),
+                ))
+                .child(labeled_path_panel(
+                    self.tr("settings-managed-logs-label"),
+                    directories.logs.to_string_lossy().into_owned(),
+                ));
+        } else {
+            card = card.child(path_panel(self.tr("settings-path-unavailable")));
+        }
+        card = card.when(logs_relocation_pending, |card| {
+            card.child(
+                div()
+                    .mt_3()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::amber_soft())
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("settings-managed-logs-restart-note")),
+            )
+        });
+        card.child(
+            div()
+                .mt_3()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    components::button(
+                        "settings-choose-download-directory",
+                        self.tr("settings-managed-root-action"),
+                        Some(IconName::FolderOpen),
+                        true,
+                    )
+                    .disabled(self.preference_persistence == PreferencePersistence::Saving)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.choose_managed_files_root(cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        "settings-clear-download-directory",
+                        self.tr("settings-managed-root-default-action"),
+                        Some(IconName::Undo),
+                        false,
+                    )
+                    .disabled(
+                        self.preference_persistence == PreferencePersistence::Saving
+                            || self.preferences.managed_files_root.is_none(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving
+                            && this.preferences.managed_files_root.is_some()
+                        {
+                            this.preferences.managed_files_root = None;
+                            this.persist_preferences(cx);
+                        }
+                    })),
+                )
+                .when_some(root, |actions, root| {
+                    actions.child(
+                        components::button(
+                            "settings-open-managed-root",
+                            self.tr("settings-managed-root-open-action"),
+                            Some(IconName::FolderOpen),
+                            false,
+                        )
+                        .on_click(move |_, _, cx| cx.open_with_system(&root)),
+                    )
+                }),
+        )
+        .child(div().mt_5().flex().flex_col().gap_2().child(preference_row(
+            "settings-reveal-completed-downloads",
+            self.tr("settings-download-reveal-completed"),
+            self.tr("settings-download-reveal-completed-description"),
+            self.preferences.reveal_completed_downloads,
+            cx.listener(|this, _, _, cx| {
+                if this.preference_persistence != PreferencePersistence::Saving {
+                    this.preferences.reveal_completed_downloads =
+                        !this.preferences.reveal_completed_downloads;
+                    this.persist_preferences(cx);
+                }
+            }),
+        )))
+        .into_any_element()
+    }
+
+    fn render_upload_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let part_size = self.preferences.upload_part_size_mib;
+        settings_card(
+            self.tr("settings-upload-title"),
+            self.tr("settings-upload-description"),
+        )
+        .child(
+            div()
+                .mt_4()
+                .grid()
+                .grid_cols(2)
+                .gap_3()
+                .child(selection_option(
+                    "settings-upload-part-1900",
+                    self.tr_with(
+                        "upload-part-size-mib",
+                        teleark_i18n::MessageArgs::new()
+                            .with("size", format_integer(self.locale(), 1_900)),
+                    ),
+                    self.tr("upload-compatibility-mode"),
+                    part_size == 1_900,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.upload_part_size_mib = 1_900;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                ))
+                .child(selection_option(
+                    "settings-upload-part-1024",
+                    self.tr_with(
+                        "upload-part-size-mib",
+                        teleark_i18n::MessageArgs::new()
+                            .with("size", format_integer(self.locale(), 1_024)),
+                    ),
+                    self.tr("upload-conservative-mode"),
+                    part_size == 1_024,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.upload_part_size_mib = 1_024;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                )),
+        )
+        .child(
+            div()
+                .mt_5()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(preference_row(
+                    "settings-upload-encrypt-content",
+                    self.tr("upload-client-encryption"),
+                    self.tr("upload-client-encryption-description"),
+                    self.preferences.upload_encrypt_content,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.upload_encrypt_content =
+                                !this.preferences.upload_encrypt_content;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                ))
+                .child(preference_row(
+                    "settings-upload-hide-name",
+                    self.tr("upload-hide-filename"),
+                    self.tr("upload-hide-filename-description"),
+                    self.preferences.upload_hide_file_name,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.upload_hide_file_name =
+                                !this.preferences.upload_hide_file_name;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                ))
+                .child(preference_row(
+                    "settings-upload-encrypt-metadata",
+                    self.tr("upload-encrypt-metadata"),
+                    self.tr("upload-encrypt-metadata-description"),
+                    self.preferences.upload_encrypt_metadata,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.upload_encrypt_metadata =
+                                !this.preferences.upload_encrypt_metadata;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                )),
+        )
+        .into_any_element()
+    }
+
+    fn render_key_vault_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        settings_card(
+            self.tr("settings-vault-title"),
+            self.tr("settings-vault-description"),
+        )
+        .child(div().mt_4().child(preference_row(
+            "settings-lock-vault-when-hidden",
+            self.tr("settings-vault-lock-when-hidden"),
+            self.tr("settings-vault-lock-when-hidden-description"),
+            self.preferences.lock_vault_when_hidden,
+            cx.listener(|this, _, _, cx| {
+                if this.preference_persistence != PreferencePersistence::Saving {
+                    this.preferences.lock_vault_when_hidden =
+                        !this.preferences.lock_vault_when_hidden;
+                    this.persist_preferences(cx);
+                }
+            }),
+        )))
+        .child(
+            div().mt_4().child(
+                components::button(
+                    "settings-lock-vault-now",
+                    self.tr("settings-vault-lock-now-action"),
+                    Some(IconName::Asterisk),
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.vault_locked = true;
+                    this.recovery_visible = false;
+                    cx.notify();
+                })),
+            ),
+        )
+        .into_any_element()
+    }
+
+    fn render_indexing_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let options = [200_u16, 500, 1_000].into_iter().map(|batch_size| {
+            selection_option(
+                ("settings-index-batch", usize::from(batch_size)),
+                self.tr_with(
+                    "settings-index-batch-option",
+                    teleark_i18n::MessageArgs::new().with(
+                        "count",
+                        format_integer(self.locale(), u64::from(batch_size)),
+                    ),
+                ),
+                self.tr("settings-index-batch-option-description"),
+                self.preferences.index_batch_size == batch_size,
+                cx.listener(move |this, _, _, cx| {
+                    if this.preference_persistence != PreferencePersistence::Saving {
+                        this.preferences.index_batch_size = batch_size;
+                        this.persist_preferences(cx);
+                    }
+                }),
+            )
+        });
+        settings_card(
+            self.tr("settings-index-title"),
+            self.tr("settings-index-description"),
+        )
+        .child(div().mt_4().grid().grid_cols(3).gap_3().children(options))
+        .into_any_element()
+    }
+
+    fn render_notification_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        settings_card(
+            self.tr("settings-notification-title"),
+            self.tr("settings-notification-description"),
+        )
+        .child(
+            div()
+                .mt_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(preference_row(
+                    "settings-notify-download-complete",
+                    self.tr("settings-notify-download-completed"),
+                    self.tr("settings-notify-download-completed-description"),
+                    self.preferences.notify_download_completed,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.notify_download_completed =
+                                !this.preferences.notify_download_completed;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                ))
+                .child(preference_row(
+                    "settings-notify-download-failed",
+                    self.tr("settings-notify-download-failed"),
+                    self.tr("settings-notify-download-failed-description"),
+                    self.preferences.notify_download_failed,
+                    cx.listener(|this, _, _, cx| {
+                        if this.preference_persistence != PreferencePersistence::Saving {
+                            this.preferences.notify_download_failed =
+                                !this.preferences.notify_download_failed;
+                            this.persist_preferences(cx);
+                        }
+                    }),
+                )),
+        )
+        .into_any_element()
+    }
+
+    fn render_appearance_settings(
+        &self,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        settings_card(
+            self.tr("settings-appearance-title"),
+            self.tr("settings-appearance-description"),
+        )
+        .child(
+            div()
+                .mt_4()
+                .grid()
+                .grid_cols(if layout.is_compact() { 1 } else { 3 })
+                .gap_3()
+                .child(theme_option(
+                    "settings-theme-system",
+                    self.tr("settings-theme-system"),
+                    self.tr("settings-theme-system-description"),
+                    self.preferences.appearance == AppearancePreference::System,
+                    cx.listener(|this, _, window, cx| {
+                        this.set_appearance_preference(AppearancePreference::System, window, cx);
+                    }),
+                ))
+                .child(theme_option(
+                    "settings-theme-light",
+                    self.tr("settings-theme-light"),
+                    self.tr("settings-theme-light-description"),
+                    self.preferences.appearance == AppearancePreference::Light,
+                    cx.listener(|this, _, window, cx| {
+                        this.set_appearance_preference(AppearancePreference::Light, window, cx);
+                    }),
+                ))
+                .child(theme_option(
+                    "settings-theme-dark",
+                    self.tr("settings-theme-dark"),
+                    self.tr("settings-theme-dark-description"),
+                    self.preferences.appearance == AppearancePreference::Dark,
+                    cx.listener(|this, _, window, cx| {
+                        this.set_appearance_preference(AppearancePreference::Dark, window, cx);
+                    }),
+                )),
+        )
+        .into_any_element()
     }
 
     fn locale_card(
@@ -773,36 +1259,58 @@ pub fn render_telegram_api_id_prompt(app: &TeleArkApp, cx: &mut Context<TeleArkA
         .into_any_element()
 }
 
-fn settings_nav_item(icon: IconName, label: SharedString, selected: bool) -> AnyElement {
+fn settings_card(title: SharedString, description: SharedString) -> gpui::Div {
+    components::card()
+        .p_5()
+        .child(components::section_title(title))
+        .child(
+            div()
+                .mt_1()
+                .text_sm()
+                .text_color(theme::text_secondary())
+                .child(description),
+        )
+}
+
+fn path_panel(path: impl Into<SharedString>) -> AnyElement {
     div()
-        .h(px(38.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .gap_3()
+        .mt_4()
+        .p_3()
         .rounded(theme::RADIUS_SMALL)
-        .bg(if selected {
-            theme::blue_soft()
-        } else {
-            theme::surface()
-        })
-        .text_color(if selected {
-            theme::blue()
-        } else {
-            theme::text_secondary()
-        })
-        .text_sm()
-        .child(Icon::new(icon).text_color(if selected {
-            theme::blue()
-        } else {
-            theme::text_secondary()
-        }))
-        .child(div().min_w_0().truncate().child(label))
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::sidebar())
+        .font_family("monospace")
+        .text_xs()
+        .text_color(theme::text_secondary())
+        .child(path.into())
         .into_any_element()
 }
 
-fn theme_option(title: SharedString, description: SharedString, selected: bool) -> AnyElement {
+fn labeled_path_panel(label: SharedString, path: impl Into<SharedString>) -> AnyElement {
     div()
+        .mt_4()
+        .child(
+            div()
+                .mb_1()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::text_secondary())
+                .child(label),
+        )
+        .child(path_panel(path))
+        .into_any_element()
+}
+
+fn theme_option(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    selected: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
         .flex_1()
         .min_w_0()
         .p_4()
@@ -818,6 +1326,11 @@ fn theme_option(title: SharedString, description: SharedString, selected: bool) 
         } else {
             theme::surface()
         })
+        .cursor_pointer()
+        .focusable()
+        .tab_index(0)
+        .hover(|option| option.bg(theme::blue_pale()))
+        .on_click(on_click)
         .child(
             div()
                 .h(px(70.0))
@@ -874,12 +1387,75 @@ fn theme_option(title: SharedString, description: SharedString, selected: bool) 
         .into_any_element()
 }
 
-fn preference_row(title: SharedString, description: SharedString, enabled: bool) -> AnyElement {
+fn selection_option(
+    id: impl Into<gpui::ElementId>,
+    title: impl Into<SharedString>,
+    description: SharedString,
+    selected: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
     div()
+        .id(id)
+        .p_4()
+        .rounded(theme::RADIUS_MEDIUM)
+        .border_1()
+        .border_color(if selected {
+            theme::blue()
+        } else {
+            theme::border()
+        })
+        .bg(if selected {
+            theme::blue_pale()
+        } else {
+            theme::surface()
+        })
+        .cursor_pointer()
+        .focusable()
+        .tab_index(0)
+        .hover(|option| option.bg(theme::blue_pale()))
+        .on_click(on_click)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(title.into()),
+                )
+                .when(selected, |row| {
+                    row.child(Icon::new(IconName::CircleCheck).text_color(theme::blue()))
+                }),
+        )
+        .child(
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(theme::text_muted())
+                .child(description),
+        )
+        .into_any_element()
+}
+
+fn preference_row(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
         .py_2()
         .flex()
         .items_center()
         .gap_4()
+        .cursor_pointer()
+        .focusable()
+        .tab_index(0)
+        .on_click(on_click)
         .child(
             div()
                 .flex_1()

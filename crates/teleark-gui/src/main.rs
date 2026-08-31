@@ -18,7 +18,7 @@ use gpui_component::Root;
 use gpui_component_assets::Assets;
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
-use teleark_runtime::{DesktopLibrary, DesktopTelegram, DesktopTransfers};
+use teleark_runtime::{DesktopLibrary, DesktopTelegram, DesktopTransfers, initialize_diagnostics};
 
 gpui::actions!(
     teleark,
@@ -34,10 +34,20 @@ gpui::actions!(
 fn main() {
     let system_locale = detect_system_locale();
     let library = DesktopLibrary::open_default();
+    let _diagnostics = library
+        .as_ref()
+        .map_err(|error| ApplicationError::new(error.kind()))
+        .and_then(|library| library.managed_directories())
+        .and_then(|directories| initialize_diagnostics(&directories.logs));
+    tracing::info!(
+        event = "application.starting",
+        version = env!("CARGO_PKG_VERSION"),
+        "TeleArk application starting"
+    );
     let telegram = DesktopTelegram::open_default();
-    let transfers = match telegram.as_ref() {
-        Ok(telegram) => DesktopTransfers::new(telegram.clone()),
-        Err(error) => Err(ApplicationError::new(match error.kind() {
+    let transfers = match (telegram.as_ref(), library.as_ref()) {
+        (Ok(telegram), Ok(library)) => DesktopTransfers::new(telegram.clone(), library.clone()),
+        (Err(error), _) | (_, Err(error)) => Err(ApplicationError::new(match error.kind() {
             ApplicationErrorKind::Persistence => ApplicationErrorKind::Persistence,
             _ => ApplicationErrorKind::Network,
         })),
@@ -74,6 +84,12 @@ fn main() {
             cx.on_action(toggle_fullscreen);
             cx.on_action(zoom_window);
             cx.set_menus(menus::application_menus(&localizer));
+            cx.on_window_closed(|cx| {
+                if should_quit_after_window_close(cx.windows().len()) {
+                    cx.quit();
+                }
+            })
+            .detach();
             cx.activate(true);
 
             let requested_size = size(
@@ -123,6 +139,10 @@ fn main() {
 
 fn quit(_: &Quit, cx: &mut App) {
     cx.quit();
+}
+
+fn should_quit_after_window_close(open_window_count: usize) -> bool {
+    open_window_count == 0
 }
 
 fn minimize_window(_: &MinimizeWindow, cx: &mut App) {
@@ -413,6 +433,13 @@ mod tests {
         assert!(options.is_resizable);
         assert!(options.is_minimizable);
         assert_eq!(options.window_bounds, Some(WindowBounds::Windowed(bounds)));
+    }
+
+    #[test]
+    fn closing_the_last_window_terminates_the_application_event_loop() {
+        assert!(should_quit_after_window_close(0));
+        assert!(!should_quit_after_window_close(1));
+        assert!(!should_quit_after_window_close(2));
     }
 
     #[test]

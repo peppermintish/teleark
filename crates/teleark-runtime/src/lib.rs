@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use teleark_core::{
@@ -17,24 +17,30 @@ use teleark_core::{
     LogicalFileId,
 };
 use teleark_storage::{
-    AccountRecord, ChatRecord, Database, FileSearchFacets, LogicalFileRecord, NewLogicalFileRecord,
-    PageCursor, RemoteFileUpsert, SearchQuery, SettingRecord, StorageError,
-    TelegramIndexStateRecord,
+    AccountRecord, ChatRecord, Database, FileSearchFacets, LogicalFileRecord,
+    NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
+    NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
+    SearchQuery, SettingRecord, StorageError, TelegramIndexStateRecord,
 };
 use teleark_telegram::TelegramAccount;
 
 mod channel_transfer;
 mod credentials;
+mod diagnostics;
 mod telegram;
 mod transfer;
 
 pub use channel_transfer::{
-    ChannelDownloadRequest, ChannelDownloadSnapshot, ChannelDownloadState, DesktopTransfers,
+    ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
+    ChannelDownloadFailureStage, ChannelDownloadRequest, ChannelDownloadSnapshot,
+    ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers, TransferRates,
+    available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
+pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
 pub use telegram::{
-    DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFilePage, TelegramFileSummary,
-    default_telegram_session_path,
+    DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFileFilter, TelegramFilePage,
+    TelegramFileSummary, default_telegram_session_path,
 };
 pub use transfer::{
     EncryptedRemoteTransport, ManifestPublishRequest, ManifestRecoveryReport, ProductionTransferIo,
@@ -46,6 +52,65 @@ const STORAGE_QUEUE_CAPACITY: usize = 64;
 const LOCALE_OVERRIDE_SETTING_KEY: &str = "locale.override";
 const TELEGRAM_API_ID_SETTING_KEY: &str = "telegram.api_id";
 const TELEGRAM_API_HASH_SETTING_KEY: &str = "telegram.api_hash";
+const PREFERENCE_PREFIX: &str = "preferences.v1.";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AppearancePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopPreferences {
+    pub managed_files_root: Option<PathBuf>,
+    pub reveal_completed_downloads: bool,
+    pub upload_part_size_mib: u16,
+    pub upload_encrypt_content: bool,
+    pub upload_hide_file_name: bool,
+    pub upload_encrypt_metadata: bool,
+    pub lock_vault_when_hidden: bool,
+    pub index_batch_size: u16,
+    pub notify_download_completed: bool,
+    pub notify_download_failed: bool,
+    pub appearance: AppearancePreference,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            managed_files_root: None,
+            reveal_completed_downloads: false,
+            upload_part_size_mib: 1_900,
+            upload_encrypt_content: true,
+            upload_hide_file_name: true,
+            upload_encrypt_metadata: true,
+            lock_vault_when_hidden: true,
+            index_batch_size: 1_000,
+            notify_download_completed: true,
+            notify_download_failed: true,
+            appearance: AppearancePreference::System,
+        }
+    }
+}
+
+/// Filesystem layout owned by TeleArk for user-manageable data. The SQLite
+/// database and Telegram session remain in the platform application-data
+/// directory so changing this root never moves an open database or session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedDirectories {
+    pub root: PathBuf,
+    pub downloads: PathBuf,
+    pub cache: PathBuf,
+    pub logs: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagedStorageMetrics {
+    pub app_used_bytes: u64,
+    pub available_bytes: u64,
+}
 
 /// Non-secret credential presence exposed to frontends. The API Hash value is
 /// loaded only inside the runtime when Telegram authentication starts.
@@ -84,6 +149,120 @@ pub fn default_database_path() -> Option<PathBuf> {
     }
 }
 
+/// Resolves the default desktop managed-file layout without touching disk.
+pub fn default_managed_directories(preferences: &DesktopPreferences) -> Option<ManagedDirectories> {
+    default_database_path().and_then(|path| managed_directories_for(&path, preferences).ok())
+}
+
+fn managed_directories_for(
+    database_path: &Path,
+    preferences: &DesktopPreferences,
+) -> Result<ManagedDirectories, ApplicationError> {
+    let root = match preferences.managed_files_root.as_ref() {
+        Some(root) => root.clone(),
+        None => database_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+    };
+    if root.as_os_str().is_empty() || root.to_str().is_none() {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    Ok(ManagedDirectories {
+        downloads: root.join("Downloads"),
+        cache: root.join("Cache"),
+        logs: root.join("Logs"),
+        root,
+    })
+}
+
+fn prepare_managed_directories(
+    database_path: &Path,
+    preferences: &DesktopPreferences,
+) -> Result<ManagedDirectories, ApplicationError> {
+    let directories = managed_directories_for(database_path, preferences)?;
+    std::fs::create_dir_all(&directories.downloads).map_err(map_filesystem_error)?;
+    std::fs::create_dir_all(&directories.cache).map_err(map_filesystem_error)?;
+    std::fs::create_dir_all(&directories.logs).map_err(map_filesystem_error)?;
+    Ok(directories)
+}
+
+fn managed_storage_metrics(
+    managed_root: &Path,
+    database_path: &Path,
+) -> Result<ManagedStorageMetrics, ApplicationError> {
+    const MAX_STORAGE_ENTRIES: usize = 1_000_000;
+    let database_root = database_path
+        .parent()
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    let roots: Vec<&Path> = if managed_root.starts_with(database_root) {
+        vec![database_root]
+    } else if database_root.starts_with(managed_root) {
+        vec![managed_root]
+    } else {
+        vec![managed_root, database_root]
+    };
+    let mut remaining_entries = MAX_STORAGE_ENTRIES;
+    let mut app_used_bytes = 0_u64;
+    for root in roots {
+        app_used_bytes =
+            app_used_bytes.saturating_add(directory_size_bounded(root, &mut remaining_entries)?);
+    }
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let available_bytes = disks
+        .list()
+        .iter()
+        .filter(|disk| managed_root.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| disk.available_space())
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    Ok(ManagedStorageMetrics {
+        app_used_bytes,
+        available_bytes,
+    })
+}
+
+fn directory_size_bounded(
+    root: &Path,
+    remaining_entries: &mut usize,
+) -> Result<u64, ApplicationError> {
+    let mut pending = vec![root.to_owned()];
+    let mut total = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(map_filesystem_error(error)),
+        };
+        for entry in entries {
+            if *remaining_entries == 0 {
+                return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
+            }
+            *remaining_entries -= 1;
+            let entry = entry.map_err(map_filesystem_error)?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(map_filesystem_error)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn map_filesystem_error(error: std::io::Error) -> ApplicationError {
+    let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        ApplicationErrorKind::PermissionDenied
+    } else {
+        ApplicationErrorKind::Persistence
+    };
+    ApplicationError::new(kind)
+}
+
 /// Classifies a local filename without altering the user's name or extension.
 pub fn classify_file(path: &Path) -> FileKind {
     let extension = path
@@ -106,6 +285,7 @@ pub fn classify_file(path: &Path) -> FileKind {
 pub struct DesktopLibrary {
     service: Arc<LibraryService<StorageWorker>>,
     worker: StorageWorker,
+    database_path: Arc<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,6 +304,7 @@ impl DesktopLibrary {
         Ok(Self {
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
+            database_path: Arc::new(path.to_owned()),
         })
     }
 
@@ -198,6 +379,69 @@ impl DesktopLibrary {
     /// Removes both stored Telegram application credentials atomically.
     pub fn clear_telegram_credentials(&self) -> Result<(), ApplicationError> {
         self.worker.clear_telegram_credentials()
+    }
+
+    pub fn preferences(&self) -> Result<DesktopPreferences, ApplicationError> {
+        self.worker.preferences()
+    }
+
+    pub fn set_preferences(
+        &self,
+        preferences: &DesktopPreferences,
+    ) -> Result<(), ApplicationError> {
+        validate_preferences(preferences)?;
+        self.worker.set_preferences(preferences.clone())
+    }
+
+    /// Returns the managed layout, creating its download and cache
+    /// directories when necessary.
+    pub fn managed_directories(&self) -> Result<ManagedDirectories, ApplicationError> {
+        self.worker.managed_directories()
+    }
+
+    /// Measures TeleArk-owned data without following symlinks. Callers should
+    /// run this bounded filesystem walk away from the GUI thread.
+    pub fn managed_storage_metrics(&self) -> Result<ManagedStorageMetrics, ApplicationError> {
+        let managed = self.managed_directories()?;
+        managed_storage_metrics(&managed.root, &self.database_path)
+    }
+
+    /// Allocates a non-existing path in the managed Downloads directory.
+    /// This keeps destination selection and collision handling outside the UI.
+    pub fn next_download_destination(
+        &self,
+        suggested_file_name: &str,
+    ) -> Result<PathBuf, ApplicationError> {
+        self.worker
+            .next_download_destination(suggested_file_name.to_owned())
+    }
+
+    pub(crate) fn insert_native_download(
+        &self,
+        task: NewNativeDownloadTaskRecord,
+    ) -> Result<NativeDownloadTaskRecord, ApplicationError> {
+        self.worker.insert_native_download(task)
+    }
+
+    pub(crate) fn insert_native_download_batch(
+        &self,
+        batch: NewNativeDownloadBatchRecord,
+        tasks: Vec<NewNativeDownloadTaskRecord>,
+    ) -> Result<(NativeDownloadBatchRecord, Vec<NativeDownloadTaskRecord>), ApplicationError> {
+        self.worker.insert_native_download_batch(batch, tasks)
+    }
+
+    pub(crate) fn save_native_download(
+        &self,
+        task: NativeDownloadTaskRecord,
+    ) -> Result<(), ApplicationError> {
+        self.worker.save_native_download(task)
+    }
+
+    pub(crate) fn native_downloads(
+        &self,
+    ) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
+        self.worker.native_downloads()
     }
 
     pub(crate) fn stored_telegram_credentials(
@@ -336,6 +580,20 @@ enum StorageRequest {
         locale: Option<String>,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    Preferences {
+        reply: SyncSender<Result<DesktopPreferences, ApplicationError>>,
+    },
+    SetPreferences {
+        preferences: DesktopPreferences,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    ManagedDirectories {
+        reply: SyncSender<Result<ManagedDirectories, ApplicationError>>,
+    },
+    NextDownloadDestination {
+        suggested_file_name: String,
+        reply: SyncSender<Result<PathBuf, ApplicationError>>,
+    },
     TelegramCredentialsStatus {
         reply: SyncSender<Result<Option<TelegramCredentialsStatus>, ApplicationError>>,
     },
@@ -368,6 +626,24 @@ enum StorageRequest {
         state: TelegramIndexStateRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    InsertNativeDownload {
+        task: NewNativeDownloadTaskRecord,
+        reply: SyncSender<Result<NativeDownloadTaskRecord, ApplicationError>>,
+    },
+    InsertNativeDownloadBatch {
+        batch: NewNativeDownloadBatchRecord,
+        tasks: Vec<NewNativeDownloadTaskRecord>,
+        reply: SyncSender<
+            Result<(NativeDownloadBatchRecord, Vec<NativeDownloadTaskRecord>), ApplicationError>,
+        >,
+    },
+    SaveNativeDownload {
+        task: NativeDownloadTaskRecord,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    NativeDownloads {
+        reply: SyncSender<Result<Vec<NativeDownloadTaskRecord>, ApplicationError>>,
+    },
     Shutdown,
 }
 
@@ -377,10 +653,10 @@ impl StorageWorker {
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("teleark-storage".to_owned())
-            .spawn(move || match Database::open(path) {
+            .spawn(move || match Database::open(&path) {
                 Ok(database) => {
                     let _ = ready_sender.send(Ok(()));
-                    storage_loop(database, receiver);
+                    storage_loop(database, path, receiver);
                 }
                 Err(error) => {
                     let _ = ready_sender.send(Err(map_storage_error(error)));
@@ -408,39 +684,134 @@ impl StorageWorker {
 
     fn request<T>(
         &self,
+        operation: &'static str,
         build: impl FnOnce(SyncSender<Result<T, ApplicationError>>) -> StorageRequest,
     ) -> Result<T, ApplicationError> {
+        let started = Instant::now();
         let (reply, response) = mpsc::sync_channel(1);
-        self.inner
+        let result = self
+            .inner
             .sender
             .send(build(reply))
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
-        response
-            .recv()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))
+            .and_then(|()| {
+                response
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))
+            })
+            .and_then(|result| result);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(_) => tracing::debug!(
+                event = "storage.operation.completed",
+                operation,
+                elapsed_ms,
+                "storage operation completed"
+            ),
+            Err(error) => tracing::warn!(
+                event = "storage.operation.failed",
+                operation,
+                elapsed_ms,
+                error_kind = ?error.kind(),
+                "storage operation failed"
+            ),
+        }
+        result
     }
 
     fn locale_override(&self) -> Result<Option<String>, ApplicationError> {
-        self.request(|reply| StorageRequest::LocaleOverride { reply })
+        self.request("locale_override", |reply| StorageRequest::LocaleOverride {
+            reply,
+        })
     }
 
     fn set_locale_override(&self, locale: Option<&str>) -> Result<(), ApplicationError> {
-        self.request(|reply| StorageRequest::SetLocaleOverride {
-            locale: locale.map(str::to_owned),
+        self.request("set_locale_override", |reply| {
+            StorageRequest::SetLocaleOverride {
+                locale: locale.map(str::to_owned),
+                reply,
+            }
+        })
+    }
+
+    fn preferences(&self) -> Result<DesktopPreferences, ApplicationError> {
+        self.request("preferences", |reply| StorageRequest::Preferences { reply })
+    }
+
+    fn set_preferences(&self, preferences: DesktopPreferences) -> Result<(), ApplicationError> {
+        self.request("set_preferences", |reply| StorageRequest::SetPreferences {
+            preferences,
             reply,
+        })
+    }
+
+    fn insert_native_download(
+        &self,
+        task: NewNativeDownloadTaskRecord,
+    ) -> Result<NativeDownloadTaskRecord, ApplicationError> {
+        self.request("insert_native_download", |reply| {
+            StorageRequest::InsertNativeDownload { task, reply }
+        })
+    }
+
+    fn insert_native_download_batch(
+        &self,
+        batch: NewNativeDownloadBatchRecord,
+        tasks: Vec<NewNativeDownloadTaskRecord>,
+    ) -> Result<(NativeDownloadBatchRecord, Vec<NativeDownloadTaskRecord>), ApplicationError> {
+        self.request("insert_native_download_batch", |reply| {
+            StorageRequest::InsertNativeDownloadBatch {
+                batch,
+                tasks,
+                reply,
+            }
+        })
+    }
+
+    fn save_native_download(&self, task: NativeDownloadTaskRecord) -> Result<(), ApplicationError> {
+        self.request("save_native_download", |reply| {
+            StorageRequest::SaveNativeDownload { task, reply }
+        })
+    }
+
+    fn native_downloads(&self) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
+        self.request("native_downloads", |reply| {
+            StorageRequest::NativeDownloads { reply }
+        })
+    }
+
+    fn managed_directories(&self) -> Result<ManagedDirectories, ApplicationError> {
+        self.request("managed_directories", |reply| {
+            StorageRequest::ManagedDirectories { reply }
+        })
+    }
+
+    fn next_download_destination(
+        &self,
+        suggested_file_name: String,
+    ) -> Result<PathBuf, ApplicationError> {
+        self.request("next_download_destination", |reply| {
+            StorageRequest::NextDownloadDestination {
+                suggested_file_name,
+                reply,
+            }
         })
     }
 
     fn telegram_credentials_status(
         &self,
     ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
-        self.request(|reply| StorageRequest::TelegramCredentialsStatus { reply })
+        self.request("telegram_credentials_status", |reply| {
+            StorageRequest::TelegramCredentialsStatus { reply }
+        })
     }
 
     fn active_telegram_credentials(
         &self,
     ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
-        self.request(|reply| StorageRequest::ActiveTelegramCredentials { reply })
+        self.request("active_telegram_credentials", |reply| {
+            StorageRequest::ActiveTelegramCredentials { reply }
+        })
     }
 
     fn set_telegram_credentials(
@@ -448,15 +819,19 @@ impl StorageWorker {
         api_id: i32,
         api_hash: &str,
     ) -> Result<(), ApplicationError> {
-        self.request(|reply| StorageRequest::SetTelegramCredentials {
-            api_id,
-            api_hash: zeroize::Zeroizing::new(api_hash.to_owned()),
-            reply,
+        self.request("set_telegram_credentials", |reply| {
+            StorageRequest::SetTelegramCredentials {
+                api_id,
+                api_hash: zeroize::Zeroizing::new(api_hash.to_owned()),
+                reply,
+            }
         })
     }
 
     fn clear_telegram_credentials(&self) -> Result<(), ApplicationError> {
-        self.request(|reply| StorageRequest::ClearTelegramCredentials { reply })
+        self.request("clear_telegram_credentials", |reply| {
+            StorageRequest::ClearTelegramCredentials { reply }
+        })
     }
 
     fn save_telegram_sources(
@@ -486,15 +861,19 @@ impl StorageWorker {
                 updated_at_unix_ms: now,
             })
             .collect();
-        self.request(|reply| StorageRequest::SaveTelegramSources {
-            account,
-            chats,
-            reply,
+        self.request("save_telegram_sources", |reply| {
+            StorageRequest::SaveTelegramSources {
+                account,
+                chats,
+                reply,
+            }
         })
     }
 
     fn upsert_remote_files(&self, files: Vec<RemoteFileUpsert>) -> Result<u64, ApplicationError> {
-        self.request(|reply| StorageRequest::UpsertRemoteFiles { files, reply })
+        self.request("upsert_remote_files", |reply| {
+            StorageRequest::UpsertRemoteFiles { files, reply }
+        })
     }
 
     fn telegram_index_state(
@@ -502,10 +881,12 @@ impl StorageWorker {
         account_id: teleark_core::AccountId,
         chat_id: teleark_core::ChatId,
     ) -> Result<Option<TelegramIndexStateRecord>, ApplicationError> {
-        self.request(|reply| StorageRequest::TelegramIndexState {
-            account_id,
-            chat_id,
-            reply,
+        self.request("telegram_index_state", |reply| {
+            StorageRequest::TelegramIndexState {
+                account_id,
+                chat_id,
+                reply,
+            }
         })
     }
 
@@ -513,7 +894,9 @@ impl StorageWorker {
         &self,
         state: TelegramIndexStateRecord,
     ) -> Result<(), ApplicationError> {
-        self.request(|reply| StorageRequest::SaveTelegramIndexState { state, reply })
+        self.request("save_telegram_index_state", |reply| {
+            StorageRequest::SaveTelegramIndexState { state, reply }
+        })
     }
 }
 
@@ -530,36 +913,40 @@ impl Drop for WorkerInner {
 
 impl LibraryRepository for StorageWorker {
     fn search(&self, query: &LibraryQuery) -> Result<LibraryPage, ApplicationError> {
-        self.request(|reply| StorageRequest::Search {
+        self.request("search", |reply| StorageRequest::Search {
             query: query.clone(),
             reply,
         })
     }
 
     fn statistics(&self) -> Result<LibraryStatistics, ApplicationError> {
-        self.request(|reply| StorageRequest::Statistics { reply })
+        self.request("statistics", |reply| StorageRequest::Statistics { reply })
     }
 
     fn import_local_file(
         &self,
         command: &ImportLocalFile,
     ) -> Result<LogicalFile, ApplicationError> {
-        self.request(|reply| StorageRequest::Import {
+        self.request("import", |reply| StorageRequest::Import {
             command: command.clone(),
             reply,
         })
     }
 
     fn file(&self, id: LogicalFileId) -> Result<Option<LogicalFile>, ApplicationError> {
-        self.request(|reply| StorageRequest::File { id, reply })
+        self.request("file", |reply| StorageRequest::File { id, reply })
     }
 
     fn delete_file(&self, id: LogicalFileId) -> Result<bool, ApplicationError> {
-        self.request(|reply| StorageRequest::Delete { id, reply })
+        self.request("delete", |reply| StorageRequest::Delete { id, reply })
     }
 }
 
-fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>) {
+fn storage_loop(
+    mut database: Database,
+    database_path: PathBuf,
+    receiver: mpsc::Receiver<StorageRequest>,
+) {
     while let Ok(request) = receiver.recv() {
         match request {
             StorageRequest::Search { query, reply } => {
@@ -600,6 +987,33 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             }
             StorageRequest::SetLocaleOverride { locale, reply } => {
                 let result = set_locale_override(&mut database, locale.as_deref());
+                let _ = reply.send(result);
+            }
+            StorageRequest::Preferences { reply } => {
+                let _ = reply.send(load_preferences(&database));
+            }
+            StorageRequest::SetPreferences { preferences, reply } => {
+                let result = prepare_managed_directories(&database_path, &preferences)
+                    .and_then(|_| store_preferences(&mut database, &preferences));
+                let _ = reply.send(result);
+            }
+            StorageRequest::ManagedDirectories { reply } => {
+                let result = load_preferences(&database).and_then(|preferences| {
+                    prepare_managed_directories(&database_path, &preferences)
+                });
+                let _ = reply.send(result);
+            }
+            StorageRequest::NextDownloadDestination {
+                suggested_file_name,
+                reply,
+            } => {
+                let result = load_preferences(&database)
+                    .and_then(|preferences| {
+                        prepare_managed_directories(&database_path, &preferences)
+                    })
+                    .and_then(|directories| {
+                        available_download_destination(&directories.downloads, &suggested_file_name)
+                    });
                 let _ = reply.send(result);
             }
             StorageRequest::TelegramCredentialsStatus { reply } => {
@@ -648,6 +1062,32 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let result = database
                     .save_telegram_index_state(&state)
                     .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::InsertNativeDownload { task, reply } => {
+                let result = database
+                    .insert_native_download(&task)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::InsertNativeDownloadBatch {
+                batch,
+                tasks,
+                reply,
+            } => {
+                let result = database
+                    .insert_native_download_batch(&batch, &tasks)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::SaveNativeDownload { task, reply } => {
+                let result = database
+                    .save_native_download(&task)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::NativeDownloads { reply } => {
+                let result = database.native_downloads().map_err(map_storage_error);
                 let _ = reply.send(result);
             }
             StorageRequest::Shutdown => break,
@@ -757,6 +1197,191 @@ fn set_locale_override(
             .map(|_| ())
             .map_err(map_storage_error),
     }
+}
+
+fn load_preferences(database: &Database) -> Result<DesktopPreferences, ApplicationError> {
+    let mut preferences = DesktopPreferences::default();
+    let mut managed_root_seen = false;
+    let mut legacy_download_directory = None;
+    for setting in database.settings().map_err(map_storage_error)? {
+        let Some(key) = setting.key.strip_prefix(PREFERENCE_PREFIX) else {
+            continue;
+        };
+        match key {
+            "managed_files_root" => {
+                managed_root_seen = true;
+                preferences.managed_files_root = if setting.value.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(setting.value))
+                };
+            }
+            "download_directory" => {
+                legacy_download_directory = if setting.value.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(setting.value))
+                };
+            }
+            // Retained only so databases written by 0.2.0 remain readable.
+            // Downloads are always automatic in the managed Downloads folder.
+            "ask_download_destination" => {}
+            "reveal_completed_downloads" => {
+                preferences.reveal_completed_downloads = parse_bool_setting(&setting.value)?;
+            }
+            "upload_part_size_mib" => {
+                preferences.upload_part_size_mib = setting
+                    .value
+                    .parse()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
+            "upload_encrypt_content" => {
+                preferences.upload_encrypt_content = parse_bool_setting(&setting.value)?;
+            }
+            "upload_hide_file_name" => {
+                preferences.upload_hide_file_name = parse_bool_setting(&setting.value)?;
+            }
+            "upload_encrypt_metadata" => {
+                preferences.upload_encrypt_metadata = parse_bool_setting(&setting.value)?;
+            }
+            "lock_vault_when_hidden" => {
+                preferences.lock_vault_when_hidden = parse_bool_setting(&setting.value)?;
+            }
+            "index_batch_size" => {
+                preferences.index_batch_size = setting
+                    .value
+                    .parse()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
+            "notify_download_completed" => {
+                preferences.notify_download_completed = parse_bool_setting(&setting.value)?;
+            }
+            "notify_download_failed" => {
+                preferences.notify_download_failed = parse_bool_setting(&setting.value)?;
+            }
+            "appearance" => {
+                preferences.appearance = match setting.value.as_str() {
+                    "system" => AppearancePreference::System,
+                    "light" => AppearancePreference::Light,
+                    "dark" => AppearancePreference::Dark,
+                    _ => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+                };
+            }
+            _ => {}
+        }
+    }
+    if !managed_root_seen {
+        preferences.managed_files_root = legacy_download_directory.map(|directory| {
+            let is_downloads_directory = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("downloads"));
+            if is_downloads_directory {
+                directory
+                    .parent()
+                    .map_or(directory.clone(), Path::to_path_buf)
+            } else {
+                directory
+            }
+        });
+    }
+    validate_preferences(&preferences)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    Ok(preferences)
+}
+
+fn store_preferences(
+    database: &mut Database,
+    preferences: &DesktopPreferences,
+) -> Result<(), ApplicationError> {
+    validate_preferences(preferences)?;
+    let updated_at_unix_ms = system_time_unix_ms(SystemTime::now())
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    let managed_root = preferences
+        .managed_files_root
+        .as_ref()
+        .map(|path| {
+            path.to_str()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let appearance = match preferences.appearance {
+        AppearancePreference::System => "system",
+        AppearancePreference::Light => "light",
+        AppearancePreference::Dark => "dark",
+    };
+    let values = [
+        ("managed_files_root", managed_root.to_owned()),
+        // Clear the retired values so older releases cannot reopen a stale
+        // per-download prompt configuration after this version has run.
+        ("download_directory", String::new()),
+        ("ask_download_destination", bool_setting(false)),
+        (
+            "reveal_completed_downloads",
+            bool_setting(preferences.reveal_completed_downloads),
+        ),
+        (
+            "upload_part_size_mib",
+            preferences.upload_part_size_mib.to_string(),
+        ),
+        (
+            "upload_encrypt_content",
+            bool_setting(preferences.upload_encrypt_content),
+        ),
+        (
+            "upload_hide_file_name",
+            bool_setting(preferences.upload_hide_file_name),
+        ),
+        (
+            "upload_encrypt_metadata",
+            bool_setting(preferences.upload_encrypt_metadata),
+        ),
+        (
+            "lock_vault_when_hidden",
+            bool_setting(preferences.lock_vault_when_hidden),
+        ),
+        ("index_batch_size", preferences.index_batch_size.to_string()),
+        (
+            "notify_download_completed",
+            bool_setting(preferences.notify_download_completed),
+        ),
+        (
+            "notify_download_failed",
+            bool_setting(preferences.notify_download_failed),
+        ),
+        ("appearance", appearance.to_owned()),
+    ];
+    let settings = values.map(|(key, value)| SettingRecord {
+        key: format!("{PREFERENCE_PREFIX}{key}"),
+        value,
+        updated_at_unix_ms,
+    });
+    database.set_settings(&settings).map_err(map_storage_error)
+}
+
+fn validate_preferences(preferences: &DesktopPreferences) -> Result<(), ApplicationError> {
+    if !matches!(preferences.upload_part_size_mib, 1_024 | 1_900)
+        || !matches!(preferences.index_batch_size, 200 | 500 | 1_000)
+        || preferences.managed_files_root.as_ref().is_some_and(|path| {
+            path.as_os_str().is_empty() || path.to_str().is_none() || !path.is_absolute()
+        })
+    {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    Ok(())
+}
+
+fn parse_bool_setting(value: &str) -> Result<bool, ApplicationError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+    }
+}
+
+fn bool_setting(value: bool) -> String {
+    value.to_string()
 }
 
 fn telegram_credentials_status(
@@ -1011,6 +1636,216 @@ mod tests {
             .set_locale_override(None)
             .expect("restore system default");
         assert_eq!(reopened.locale_override().expect("read default"), None);
+    }
+
+    #[test]
+    fn desktop_preferences_round_trip_as_one_validated_versioned_set() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("library.sqlite3");
+        let managed_files_root = directory.path().join("managed-files");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        assert_eq!(
+            library.preferences().expect("read defaults"),
+            DesktopPreferences::default()
+        );
+
+        let preferences = DesktopPreferences {
+            managed_files_root: Some(managed_files_root.clone()),
+            reveal_completed_downloads: true,
+            upload_part_size_mib: 1_024,
+            upload_encrypt_content: false,
+            upload_hide_file_name: false,
+            upload_encrypt_metadata: false,
+            lock_vault_when_hidden: false,
+            index_batch_size: 500,
+            notify_download_completed: false,
+            notify_download_failed: false,
+            appearance: AppearancePreference::Dark,
+        };
+        library
+            .set_preferences(&preferences)
+            .expect("persist preferences");
+        drop(library);
+
+        let reopened = DesktopLibrary::open(&database_path).expect("reopen library");
+        assert_eq!(
+            reopened.preferences().expect("read preferences"),
+            preferences
+        );
+
+        let invalid = DesktopPreferences {
+            index_batch_size: 999,
+            ..DesktopPreferences::default()
+        };
+        assert_eq!(
+            reopened
+                .set_preferences(&invalid)
+                .expect_err("invalid preference must fail")
+                .kind(),
+            ApplicationErrorKind::InvalidRequest
+        );
+        assert_eq!(
+            reopened.preferences().expect("unchanged preferences"),
+            preferences
+        );
+
+        let relative_root = DesktopPreferences {
+            managed_files_root: Some(PathBuf::from("relative-root")),
+            ..DesktopPreferences::default()
+        };
+        assert_eq!(
+            reopened
+                .set_preferences(&relative_root)
+                .expect_err("relative managed root must fail")
+                .kind(),
+            ApplicationErrorKind::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn managed_directories_are_created_together_and_download_names_never_overwrite() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("database/library.sqlite3");
+        let managed_root = directory.path().join("user-managed");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        library
+            .set_preferences(&DesktopPreferences {
+                managed_files_root: Some(managed_root.clone()),
+                ..DesktopPreferences::default()
+            })
+            .expect("save managed root");
+
+        let directories = library.managed_directories().expect("managed directories");
+        assert_eq!(directories.root, managed_root);
+        assert_eq!(directories.downloads, managed_root.join("Downloads"));
+        assert_eq!(directories.cache, managed_root.join("Cache"));
+        assert_eq!(directories.logs, managed_root.join("Logs"));
+        assert!(directories.downloads.is_dir());
+        assert!(directories.cache.is_dir());
+        assert!(directories.logs.is_dir());
+
+        let first = library
+            .next_download_destination("report.pdf")
+            .expect("first destination");
+        assert_eq!(first, directories.downloads.join("report.pdf"));
+        std::fs::write(&first, b"existing").expect("write collision fixture");
+        let second = library
+            .next_download_destination("report.pdf")
+            .expect("collision-safe destination");
+        assert_eq!(second, directories.downloads.join("report (1).pdf"));
+    }
+
+    #[test]
+    fn managed_storage_metrics_include_managed_files_and_report_destination_capacity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("database/library.sqlite3");
+        let managed_root = directory.path().join("managed");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        library
+            .set_preferences(&DesktopPreferences {
+                managed_files_root: Some(managed_root),
+                ..DesktopPreferences::default()
+            })
+            .expect("save managed root");
+        let directories = library.managed_directories().expect("managed directories");
+        std::fs::write(directories.downloads.join("download.bin"), [0_u8; 7])
+            .expect("write managed download");
+        std::fs::write(directories.cache.join("cache.bin"), [0_u8; 5])
+            .expect("write managed cache");
+
+        let metrics = library
+            .managed_storage_metrics()
+            .expect("managed storage metrics");
+        assert!(metrics.app_used_bytes >= 12);
+        assert!(metrics.available_bytes > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_storage_scan_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path().join("root");
+        let outside = directory.path().join("outside.bin");
+        std::fs::create_dir(&root).expect("create scan root");
+        std::fs::write(root.join("inside.bin"), [0_u8; 3]).expect("write inside file");
+        std::fs::write(&outside, [0_u8; 100]).expect("write outside file");
+        symlink(outside, root.join("linked.bin")).expect("create symbolic link");
+        let mut remaining = 100;
+        assert_eq!(
+            directory_size_bounded(&root, &mut remaining).expect("bounded scan"),
+            3
+        );
+    }
+
+    #[test]
+    fn legacy_download_directory_becomes_the_managed_root() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("library.sqlite3");
+        let legacy_root = directory.path().join("legacy-root");
+        let legacy_directory = legacy_root.join("Downloads");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        drop(library);
+
+        let mut database = Database::open(&database_path).expect("open storage fixture");
+        database
+            .set_setting(&SettingRecord {
+                key: format!("{PREFERENCE_PREFIX}download_directory"),
+                value: legacy_directory.to_string_lossy().into_owned(),
+                updated_at_unix_ms: 1,
+            })
+            .expect("write legacy preference");
+        database
+            .set_setting(&SettingRecord {
+                key: format!("{PREFERENCE_PREFIX}ask_download_destination"),
+                value: "true".to_owned(),
+                updated_at_unix_ms: 1,
+            })
+            .expect("write retired prompt preference");
+        drop(database);
+
+        let reopened = DesktopLibrary::open(&database_path).expect("reopen library");
+        assert_eq!(
+            reopened
+                .preferences()
+                .expect("migrated preferences")
+                .managed_files_root,
+            Some(legacy_root.clone())
+        );
+        assert_eq!(
+            reopened
+                .next_download_destination("legacy.bin")
+                .expect("automatic destination"),
+            legacy_directory.join("legacy.bin")
+        );
+    }
+
+    #[test]
+    fn malformed_known_preference_fails_closed_instead_of_silently_changing_behavior() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("library.sqlite3");
+        let library = DesktopLibrary::open(&database_path).expect("open library");
+        drop(library);
+
+        let mut database = Database::open(&database_path).expect("open storage fixture");
+        database
+            .set_setting(&SettingRecord {
+                key: format!("{PREFERENCE_PREFIX}index_batch_size"),
+                value: "999".to_owned(),
+                updated_at_unix_ms: 1,
+            })
+            .expect("write malformed known preference");
+        drop(database);
+
+        let reopened = DesktopLibrary::open(&database_path).expect("reopen library");
+        assert_eq!(
+            reopened
+                .preferences()
+                .expect_err("malformed persisted value must fail")
+                .kind(),
+            ApplicationErrorKind::Persistence
+        );
     }
 
     #[test]

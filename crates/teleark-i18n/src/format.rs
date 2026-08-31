@@ -73,6 +73,36 @@ pub fn format_speed(locale: SupportedLocale, bytes_per_second: u64) -> String {
     format!("{}/s", format_bytes(locale, bytes_per_second))
 }
 
+/// Formats diagnostic and transfer durations with a stable compact policy.
+pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        let value = format_integer(locale, milliseconds);
+        return match locale {
+            SupportedLocale::EnUs => format!("{value} ms"),
+            SupportedLocale::ZhCn => format!("{value} 毫秒"),
+            SupportedLocale::JaJp => format!("{value} ミリ秒"),
+        };
+    }
+    if milliseconds < 60_000 {
+        let value = format_decimal(locale, milliseconds as f64 / 1_000.0, 1);
+        return match locale {
+            SupportedLocale::EnUs => format!("{value} s"),
+            SupportedLocale::ZhCn => format!("{value} 秒"),
+            SupportedLocale::JaJp => format!("{value}秒"),
+        };
+    }
+    let total_seconds = milliseconds / 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    let minutes = format_integer(locale, minutes);
+    let seconds = format_integer(locale, seconds);
+    match locale {
+        SupportedLocale::EnUs => format!("{minutes} min {seconds} s"),
+        SupportedLocale::ZhCn => format!("{minutes} 分钟 {seconds} 秒"),
+        SupportedLocale::JaJp => format!("{minutes}分{seconds}秒"),
+    }
+}
+
 /// Formats a Unix millisecond timestamp in the user's local time zone.
 ///
 /// The first-release locales share 24-hour time but use different conventional
@@ -140,6 +170,19 @@ mod tests {
     #[test]
     fn speed_reuses_exactly_the_same_size_policy() {
         assert_eq!(format_speed(SupportedLocale::EnUs, 18_400_000), "18.4 MB/s");
+    }
+
+    #[test]
+    fn durations_cover_milliseconds_seconds_and_minutes() {
+        assert_eq!(format_duration_millis(SupportedLocale::EnUs, 245), "245 ms");
+        assert_eq!(
+            format_duration_millis(SupportedLocale::ZhCn, 12_460),
+            "12.5 秒"
+        );
+        assert_eq!(
+            format_duration_millis(SupportedLocale::JaJp, 125_000),
+            "2分5秒"
+        );
     }
 
     #[test]

@@ -1,11 +1,14 @@
+use std::collections::BTreeSet;
+
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, Timer, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName,
+    Icon, IconName, WindowExt as _,
     input::{InputEvent, InputState},
+    notification::Notification,
     scroll::ScrollableElement as _,
 };
 use teleark_core::{
@@ -14,11 +17,12 @@ use teleark_core::{
 };
 use teleark_i18n::{
     Localizer, MessageArgs, MessageId, SupportedLocale,
-    format::{format_bytes, format_integer},
+    format::{format_bytes, format_integer, format_speed},
 };
 use teleark_runtime::{
-    ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary, DesktopTelegram,
-    DesktopTransfers, TelegramAuthState, TelegramChatSummary, TelegramCredentialSource,
+    AppearancePreference, ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary,
+    DesktopPreferences, DesktopTelegram, DesktopTransfers, ManagedStorageMetrics,
+    TelegramAuthState, TelegramChatSummary, TelegramCredentialSource, TelegramFileFilter,
     TelegramFilePage, TelegramFileSummary, TelegramIndexPage,
 };
 use teleark_telegram::TelegramAccount;
@@ -56,6 +60,24 @@ pub(crate) enum TelegramActivity {
     Failed(teleark_core::ApplicationErrorKind),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ChannelBatchPeriod {
+    #[default]
+    AnyTime,
+    Past24Hours,
+    Past7Days,
+    Past30Days,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChannelBatchActivity {
+    Idle,
+    Preparing,
+    Queued { batch_id: u64, count: usize },
+    NoMatches,
+    Failed(teleark_core::ApplicationErrorKind),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TelegramApiIdPersistence {
     Idle,
@@ -63,6 +85,28 @@ pub(crate) enum TelegramApiIdPersistence {
     Saved,
     Removed,
     Failed(teleark_core::ApplicationErrorKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreferencePersistence {
+    Idle,
+    Saving,
+    Saved,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SettingsSection {
+    #[default]
+    General,
+    Accounts,
+    Storage,
+    Downloads,
+    Uploads,
+    KeyVault,
+    Indexing,
+    Notifications,
+    Appearance,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +201,8 @@ pub struct TeleArkApp {
     pub(crate) upload_queued: bool,
     pub(crate) transfer_paused: bool,
     pub(crate) selected_file: usize,
+    pub(crate) selected_transfer_keys: BTreeSet<u64>,
+    pub(crate) expanded_transfer_batches: BTreeSet<u64>,
     pub(crate) vault_locked: bool,
     pub(crate) recovery_visible: bool,
     pub(crate) nav_selection: &'static str,
@@ -180,6 +226,11 @@ pub struct TeleArkApp {
     pub(crate) telegram_files_exhausted: bool,
     pub(crate) telegram_files_loading: bool,
     pub(crate) telegram_download: Option<(u64, ChannelDownloadState)>,
+    pub(crate) selected_telegram_message_id: Option<i64>,
+    pub(crate) channel_batch_period: ChannelBatchPeriod,
+    pub(crate) channel_batch_kind: Option<FileKind>,
+    pub(crate) channel_batch_activity: ChannelBatchActivity,
+    pub(crate) channel_batch_expanded: bool,
     pub(crate) telegram_api_id: Entity<InputState>,
     pub(crate) telegram_api_hash: Entity<InputState>,
     pub(crate) telegram_phone: Entity<InputState>,
@@ -189,6 +240,10 @@ pub struct TeleArkApp {
     pub(crate) telegram_credential_source: Option<TelegramCredentialSource>,
     pub(crate) telegram_api_id_persistence: TelegramApiIdPersistence,
     pub(crate) show_telegram_api_id_prompt: bool,
+    pub(crate) settings_section: SettingsSection,
+    pub(crate) preferences: DesktopPreferences,
+    pub(crate) preference_persistence: PreferencePersistence,
+    pub(crate) overall_storage_metrics: Option<ManagedStorageMetrics>,
     library: Option<DesktopLibrary>,
     telegram: Option<DesktopTelegram>,
     pub(crate) transfers: Option<DesktopTransfers>,
@@ -202,7 +257,12 @@ pub struct TeleArkApp {
     telegram_task: Option<Task<()>>,
     telegram_file_task: Option<Task<()>>,
     telegram_download_task: Option<Task<()>>,
+    telegram_batch_task: Option<Task<()>>,
+    preference_task: Option<Task<()>>,
+    preference_picker_task: Option<Task<()>>,
+    storage_metrics_task: Option<Task<()>>,
     transfer_monitor_task: Option<Task<()>>,
+    transfer_refresh_task: Option<Task<()>>,
     qr_poll_task: Option<Task<()>>,
     telegram_login_generation: u64,
     telegram_file_generation: u64,
@@ -248,6 +308,20 @@ impl TeleArkApp {
                 ),
                 Err(kind) => (None, None, TelegramApiIdPersistence::Failed(kind)),
             };
+        let (preferences, preference_persistence) = match library.as_ref() {
+            Ok(library) => match library.preferences() {
+                Ok(preferences) => (preferences, PreferencePersistence::Idle),
+                Err(_) => (DesktopPreferences::default(), PreferencePersistence::Failed),
+            },
+            Err(_) => (DesktopPreferences::default(), PreferencePersistence::Failed),
+        };
+        theme::apply_appearance(preferences.appearance, window, cx);
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            if this.preferences.appearance == AppearancePreference::System {
+                theme::apply_appearance(AppearancePreference::System, window, cx);
+                cx.notify();
+            }
+        });
         let placeholder = localizer.translate_or_id(MessageId::new("search-placeholder"));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let telegram_api_id = cx.new(|cx| {
@@ -317,6 +391,8 @@ impl TeleArkApp {
             upload_queued: false,
             transfer_paused: false,
             selected_file: 0,
+            selected_transfer_keys: BTreeSet::new(),
+            expanded_transfer_batches: BTreeSet::new(),
             vault_locked: true,
             recovery_visible: false,
             nav_selection,
@@ -344,6 +420,11 @@ impl TeleArkApp {
             telegram_files_exhausted: false,
             telegram_files_loading: false,
             telegram_download: None,
+            selected_telegram_message_id: None,
+            channel_batch_period: ChannelBatchPeriod::AnyTime,
+            channel_batch_kind: None,
+            channel_batch_activity: ChannelBatchActivity::Idle,
+            channel_batch_expanded: false,
             telegram_api_id,
             telegram_api_hash,
             telegram_phone,
@@ -356,6 +437,10 @@ impl TeleArkApp {
                 skip_telegram_api_id_prompt,
                 configured_telegram_api_id,
             ),
+            settings_section: SettingsSection::General,
+            preferences,
+            preference_persistence,
+            overall_storage_metrics: None,
             library,
             telegram: telegram.ok(),
             transfers: transfers.ok(),
@@ -369,15 +454,22 @@ impl TeleArkApp {
             telegram_task: None,
             telegram_file_task: None,
             telegram_download_task: None,
+            telegram_batch_task: None,
+            preference_task: None,
+            preference_picker_task: None,
+            storage_metrics_task: None,
             transfer_monitor_task: None,
+            transfer_refresh_task: None,
             qr_poll_task: None,
             telegram_login_generation: 0,
             telegram_file_generation: 0,
-            _subscriptions: vec![search_subscription],
+            _subscriptions: vec![search_subscription, appearance_subscription],
         };
         if app.library.is_some() {
             app.refresh_library(cx);
         }
+        app.start_transfer_refresh(cx);
+        app.start_storage_metrics_refresh(cx);
         app
     }
 
@@ -594,6 +686,9 @@ impl TeleArkApp {
                         this.telegram_files_exhausted = false;
                         this.telegram_file_generation =
                             this.telegram_file_generation.wrapping_add(1);
+                        if let Some(transfers) = this.transfers.as_ref() {
+                            let _ = transfers.activate_pending_downloads();
+                        }
                         this.load_selected_telegram_files(false, cx);
                     }
                     Err(error) => this.telegram_activity = TelegramActivity::Failed(error.kind()),
@@ -613,6 +708,9 @@ impl TeleArkApp {
         self.telegram_files_loading = false;
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.telegram_download = None;
+        self.selected_telegram_message_id = None;
+        self.channel_batch_activity = ChannelBatchActivity::Idle;
+        self.channel_batch_expanded = false;
         self.load_selected_telegram_files(false, cx);
     }
 
@@ -659,7 +757,8 @@ impl TeleArkApp {
     }
 
     pub(crate) fn download_telegram_file(&mut self, message_id: i64, cx: &mut Context<Self>) {
-        let (Some(transfers), Some(chat_id), Some(file)) = (
+        let (Some(library), Some(transfers), Some(chat_id), Some(file)) = (
+            self.library.clone(),
             self.transfers.clone(),
             self.selected_chat_id,
             self.telegram_files
@@ -673,46 +772,67 @@ impl TeleArkApp {
             return;
         };
         let suggested_name = safe_suggested_file_name(&file.file_name, file.message_id);
-        let directory = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let selected_path = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let destination_work = cx.background_spawn({
+            let suggested_name = suggested_name.clone();
+            async move { library.next_download_destination(&suggested_name) }
+        });
         self.telegram_download_task = Some(cx.spawn(async move |this, cx| {
-            let destination = match selected_path.await {
-                Ok(Ok(Some(destination))) => destination,
-                Ok(Ok(None)) => return,
-                Ok(Err(_)) | Err(_) => {
+            let destination = match destination_work.await {
+                Ok(destination) => destination,
+                Err(error) => {
                     let Some(this) = this.upgrade() else { return };
                     this.update(cx, |this, cx| {
-                        this.telegram_activity = TelegramActivity::Failed(
-                            teleark_core::ApplicationErrorKind::PermissionDenied,
-                        );
+                        this.telegram_activity = TelegramActivity::Failed(error.kind());
                         cx.notify();
                     })
                     .ok();
                     return;
                 }
             };
-            let result = transfers.enqueue_channel_download(ChannelDownloadRequest {
-                chat_id,
-                message_id: file.message_id,
-                file_name: suggested_name,
-                size_bytes: file.size_bytes,
-                destination,
-            });
             let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| match result {
-                Ok(id) => {
-                    this.telegram_download = Some((id, ChannelDownloadState::Queued));
-                    this.telegram_activity = TelegramActivity::Idle;
-                    this.monitor_channel_download(id, cx);
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.telegram_activity = TelegramActivity::Failed(error.kind());
-                    cx.notify();
-                }
+            this.update(cx, |this, cx| {
+                this.enqueue_telegram_download(
+                    transfers,
+                    chat_id,
+                    file,
+                    suggested_name,
+                    destination,
+                    cx,
+                );
             })
             .ok();
         }));
+    }
+
+    fn enqueue_telegram_download(
+        &mut self,
+        transfers: DesktopTransfers,
+        chat_id: i64,
+        file: TelegramFileSummary,
+        file_name: String,
+        destination: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        match transfers.enqueue_channel_download(ChannelDownloadRequest {
+            chat_id,
+            message_id: file.message_id,
+            message_sent_at_unix_ms: Some(file.sent_at_unix_ms),
+            file_name,
+            caption: (!file.caption.is_empty()).then_some(file.caption),
+            mime_type: file.mime_type,
+            size_bytes: file.size_bytes,
+            destination,
+        }) {
+            Ok(id) => {
+                self.telegram_download = Some((id, ChannelDownloadState::Queued));
+                self.telegram_activity = TelegramActivity::Idle;
+                self.monitor_channel_download(id, cx);
+            }
+            Err(error) => {
+                self.telegram_activity = TelegramActivity::Failed(error.kind());
+            }
+        }
+        cx.notify();
     }
 
     fn monitor_channel_download(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -724,28 +844,156 @@ impl TeleArkApp {
                 Timer::after(std::time::Duration::from_millis(250)).await;
                 let snapshots = transfers.snapshots();
                 let Some(entity) = this.upgrade() else { return };
-                let terminal = entity
+                let outcome = entity
                     .update(cx, |this, cx| {
-                        let state = snapshots
-                            .ok()
-                            .and_then(|snapshots| {
-                                snapshots.into_iter().find(|snapshot| snapshot.id == id)
-                            })
-                            .map(|snapshot| snapshot.state)
-                            .unwrap_or(ChannelDownloadState::Failed(
+                        let snapshot = snapshots.ok().and_then(|snapshots| {
+                            snapshots.into_iter().find(|snapshot| snapshot.id == id)
+                        });
+                        let state = snapshot.as_ref().map(|snapshot| snapshot.state).unwrap_or(
+                            ChannelDownloadState::Failed(
                                 teleark_core::ApplicationErrorKind::Persistence,
-                            ));
+                            ),
+                        );
                         this.telegram_download = Some((id, state));
+                        let file_name = snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.file_name.clone())
+                            .unwrap_or_else(|| this.tr("transfer-value-unavailable").to_string());
+                        let notification = match state {
+                            ChannelDownloadState::Completed
+                                if this.preferences.notify_download_completed =>
+                            {
+                                Some((
+                                    true,
+                                    this.tr_with(
+                                        "notification-download-completed",
+                                        MessageArgs::new().with("name", file_name.clone()),
+                                    ),
+                                ))
+                            }
+                            ChannelDownloadState::Failed(_)
+                                if this.preferences.notify_download_failed =>
+                            {
+                                Some((
+                                    false,
+                                    this.tr_with(
+                                        "notification-download-failed",
+                                        MessageArgs::new().with("name", file_name),
+                                    ),
+                                ))
+                            }
+                            _ => None,
+                        };
+                        let reveal_path = (state == ChannelDownloadState::Completed
+                            && this.preferences.reveal_completed_downloads)
+                            .then(|| snapshot.map(|snapshot| snapshot.destination))
+                            .flatten();
                         cx.notify();
-                        matches!(
-                            state,
-                            ChannelDownloadState::Completed | ChannelDownloadState::Failed(_)
+                        (
+                            matches!(
+                                state,
+                                ChannelDownloadState::Completed
+                                    | ChannelDownloadState::Failed(_)
+                                    | ChannelDownloadState::Cancelled
+                            ),
+                            notification,
+                            reveal_path,
                         )
                     })
-                    .unwrap_or(true);
+                    .unwrap_or((true, None, None));
+                let (terminal, notification, reveal_path) = outcome;
+                if notification.is_some() || reveal_path.is_some() {
+                    cx.update(|cx| {
+                        if let Some(path) = reveal_path {
+                            cx.reveal_path(&path);
+                        }
+                        if let Some((success, message)) = notification
+                            && let Some(handle) = cx.active_window()
+                        {
+                            let _ = handle.update(cx, |_, window, cx| {
+                                window.push_notification(
+                                    if success {
+                                        Notification::success(message)
+                                    } else {
+                                        Notification::error(message)
+                                    },
+                                    cx,
+                                );
+                            });
+                        }
+                    })
+                    .ok();
+                }
                 if terminal {
                     break;
                 }
+            }
+        }));
+    }
+
+    fn start_transfer_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(transfers) = self.transfers.clone() else {
+            return;
+        };
+        self.transfer_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let mut previous = Vec::new();
+            loop {
+                Timer::after(std::time::Duration::from_millis(250)).await;
+                let Some(entity) = this.upgrade() else { return };
+                let authorized = entity
+                    .update(cx, |this, _cx| {
+                        matches!(this.telegram_auth, TelegramAuthState::Authorized(_))
+                    })
+                    .unwrap_or(false);
+                if authorized {
+                    let _ = transfers.activate_pending_downloads();
+                }
+                let snapshots = transfers.snapshots().unwrap_or_default();
+                let signature: Vec<_> = snapshots
+                    .iter()
+                    .map(|snapshot| {
+                        (
+                            snapshot.id,
+                            snapshot.state,
+                            snapshot.transferred_bytes,
+                            snapshot.current_bytes_per_second,
+                            snapshot.eta_ms,
+                        )
+                    })
+                    .collect();
+                if signature == previous {
+                    continue;
+                }
+                previous = signature;
+                if entity.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn start_storage_metrics_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(library) = self.library.clone() else {
+            return;
+        };
+        self.storage_metrics_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let library = library.clone();
+                let metrics = cx
+                    .background_spawn(async move { library.managed_storage_metrics() })
+                    .await
+                    .ok();
+                let Some(entity) = this.upgrade() else { return };
+                if entity
+                    .update(cx, |this, cx| {
+                        this.overall_storage_metrics = metrics;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                Timer::after(std::time::Duration::from_secs(15)).await;
             }
         }));
     }
@@ -766,9 +1014,10 @@ impl TeleArkApp {
             .telegram_index
             .as_ref()
             .and_then(|page| page.next_before_message_id);
+        let batch_size = usize::from(self.preferences.index_batch_size);
         self.telegram_activity = TelegramActivity::Working;
         let work = cx.background_spawn(async move {
-            library.index_telegram_page(&telegram, account.id, chat_id, before, 1_000)
+            library.index_telegram_page(&telegram, account.id, chat_id, before, batch_size)
         });
         self.telegram_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -799,11 +1048,88 @@ impl TeleArkApp {
         }
     }
 
+    pub(crate) fn download_filtered_telegram_files(&mut self, cx: &mut Context<Self>) {
+        if self.channel_batch_activity == ChannelBatchActivity::Preparing {
+            return;
+        }
+        let (Some(telegram), Some(library), Some(transfers), Some(chat_id)) = (
+            self.telegram.clone(),
+            self.library.clone(),
+            self.transfers.clone(),
+            self.selected_chat_id,
+        ) else {
+            return;
+        };
+        let now = current_system_unix_millis().unwrap_or(i64::MAX);
+        let after_unix_ms = match self.channel_batch_period {
+            ChannelBatchPeriod::AnyTime => None,
+            ChannelBatchPeriod::Past24Hours => Some(now.saturating_sub(24 * 60 * 60 * 1_000)),
+            ChannelBatchPeriod::Past7Days => Some(now.saturating_sub(7 * 24 * 60 * 60 * 1_000)),
+            ChannelBatchPeriod::Past30Days => Some(now.saturating_sub(30 * 24 * 60 * 60 * 1_000)),
+        };
+        let filter = TelegramFileFilter {
+            after_unix_ms,
+            before_unix_ms: None,
+            kind: self.channel_batch_kind,
+        };
+        self.channel_batch_activity = ChannelBatchActivity::Preparing;
+        let work = cx.background_spawn(async move {
+            let files = telegram.scan_filtered_files(chat_id, filter)?;
+            if files.is_empty() {
+                return Ok(None);
+            }
+            let mut reserved = BTreeSet::new();
+            let mut requests = Vec::with_capacity(files.len());
+            for file in files {
+                let suggested_name = safe_suggested_file_name(&file.file_name, file.message_id);
+                let destination =
+                    next_reserved_download_destination(&library, &suggested_name, &mut reserved)?;
+                requests.push(ChannelDownloadRequest {
+                    chat_id,
+                    message_id: file.message_id,
+                    message_sent_at_unix_ms: Some(file.sent_at_unix_ms),
+                    file_name: suggested_name,
+                    caption: (!file.caption.is_empty()).then_some(file.caption),
+                    mime_type: file.mime_type,
+                    size_bytes: file.size_bytes,
+                    destination,
+                });
+            }
+            let count = requests.len();
+            transfers
+                .enqueue_channel_download_batch(requests)
+                .map(|batch_id| Some((batch_id, count)))
+        });
+        self.telegram_batch_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.channel_batch_activity = match result {
+                    Ok(Some((batch_id, count))) => {
+                        this.expanded_transfer_batches.insert(batch_id);
+                        ChannelBatchActivity::Queued { batch_id, count }
+                    }
+                    Ok(None) => ChannelBatchActivity::NoMatches,
+                    Err(error) => ChannelBatchActivity::Failed(error.kind()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub(crate) fn locale(&self) -> SupportedLocale {
         self.localizer.locale()
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == Page::Vault
+            && page != Page::Vault
+            && self.preferences.lock_vault_when_hidden
+        {
+            self.vault_locked = true;
+            self.recovery_visible = false;
+        }
         self.page = page;
         self.show_upload = false;
         if page == Page::Library {
@@ -815,8 +1141,94 @@ impl TeleArkApp {
 
     pub(crate) fn open_telegram_api_id_settings(&mut self, cx: &mut Context<Self>) {
         self.show_telegram_api_id_prompt = false;
+        self.settings_section = SettingsSection::Accounts;
         self.nav_selection = "nav-settings";
         self.set_page(Page::Settings, cx);
+    }
+
+    pub(crate) fn set_settings_section(
+        &mut self,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_section = section;
+        cx.notify();
+    }
+
+    pub(crate) fn persist_preferences(&mut self, cx: &mut Context<Self>) {
+        if self.preference_persistence == PreferencePersistence::Saving {
+            return;
+        }
+        let Some(library) = self.library.clone() else {
+            self.preference_persistence = PreferencePersistence::Failed;
+            cx.notify();
+            return;
+        };
+        let preferences = self.preferences.clone();
+        self.preference_persistence = PreferencePersistence::Saving;
+        cx.notify();
+        let work = cx.background_spawn(async move { library.set_preferences(&preferences) });
+        self.preference_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.preference_persistence = if result.is_ok() {
+                    PreferencePersistence::Saved
+                } else {
+                    PreferencePersistence::Failed
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn set_appearance_preference(
+        &mut self,
+        appearance: AppearancePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preference_persistence == PreferencePersistence::Saving {
+            return;
+        }
+        self.preferences.appearance = appearance;
+        theme::apply_appearance(appearance, window, cx);
+        self.persist_preferences(cx);
+    }
+
+    pub(crate) fn choose_managed_files_root(&mut self, cx: &mut Context<Self>) {
+        if self.preference_persistence == PreferencePersistence::Saving {
+            return;
+        }
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.tr("settings-managed-root-picker")),
+        });
+        self.preference_picker_task = Some(cx.spawn(async move |this, cx| {
+            let path = match selected.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(_)) | Err(_) => {
+                    let Some(this) = this.upgrade() else { return };
+                    this.update(cx, |this, cx| {
+                        this.preference_persistence = PreferencePersistence::Failed;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(path) = path else { return };
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.preferences.managed_files_root = Some(path);
+                this.persist_preferences(cx);
+            })
+            .ok();
+        }));
     }
 
     pub(crate) fn skip_telegram_api_id_prompt(&mut self, cx: &mut Context<Self>) {
@@ -1224,7 +1636,7 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preview_backed = self.show_upload
-            || matches!(self.page, Page::Vault | Page::Settings)
+            || self.page == Page::Vault
             || (self.page == Page::Transfers && self.transfers.is_none())
             || (self.page == Page::Library && is_preview_library_selection(self.nav_selection));
         let brand = div()
@@ -1517,14 +1929,20 @@ impl TeleArkApp {
                 snapshot.statistics.logical_file_count,
             ))
         });
-        let library_size = self.library_content.snapshot().map_or_else(
+        let rates = self
+            .transfers
+            .as_ref()
+            .and_then(|transfers| transfers.current_rates().ok())
+            .unwrap_or_default();
+        let download_speed = format_speed(self.locale(), rates.download_bytes_per_second);
+        let upload_speed = format_speed(self.locale(), rates.upload_bytes_per_second);
+        let free_space = self.overall_storage_metrics.map_or_else(
             || SharedString::from("—"),
-            |snapshot| {
-                SharedString::from(format_bytes(
-                    self.locale(),
-                    snapshot.statistics.logical_bytes,
-                ))
-            },
+            |metrics| SharedString::from(format_bytes(self.locale(), metrics.available_bytes)),
+        );
+        let app_usage = self.overall_storage_metrics.map_or_else(
+            || SharedString::from("—"),
+            |metrics| SharedString::from(format_bytes(self.locale(), metrics.app_used_bytes)),
         );
         let storage_card = div()
             .mx_3()
@@ -1538,45 +1956,201 @@ impl TeleArkApp {
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         div()
-                            .size(px(38.0))
+                            .size(px(32.0))
                             .rounded(theme::RADIUS_SMALL)
                             .bg(theme::blue_soft())
                             .text_color(theme::blue())
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_lg()
+                            .text_sm()
                             .child("▰"),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .text_sm()
-                                    .child(self.tr("storage-local"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme::green())
-                                            .child(self.tr("status-healthy")),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme::text_muted())
-                                    .child(library_size),
-                            ),
+                        div().flex_1().min_w_0().child(
+                            div()
+                                .flex()
+                                .text_sm()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(self.tr("overall-title")),
+                        ),
                     ),
-            );
+            )
+            .child(sidebar_metric_row(
+                self.tr("overall-download-speed"),
+                download_speed.into(),
+                theme::blue(),
+            ))
+            .child(sidebar_metric_row(
+                self.tr("overall-upload-speed"),
+                upload_speed.into(),
+                theme::green(),
+            ))
+            .child(sidebar_metric_row(
+                self.tr("overall-free-space"),
+                free_space,
+                theme::text_secondary(),
+            ))
+            .child(sidebar_metric_row(
+                self.tr("overall-app-usage"),
+                app_usage,
+                theme::text_secondary(),
+            ));
+
+        let navigation =
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(self.group_label("nav-library"))
+                .child(self.nav_item(
+                    "nav-all",
+                    "nav-all-files",
+                    IconName::FolderOpen,
+                    library_count,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-recent",
+                    "nav-recent",
+                    IconName::Calendar,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-videos",
+                    "nav-videos",
+                    IconName::GalleryVerticalEnd,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-docs",
+                    "nav-documents",
+                    IconName::File,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-archives",
+                    "nav-archives",
+                    IconName::Inbox,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-images",
+                    "library-images",
+                    IconName::File,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-audio",
+                    "library-audio",
+                    IconName::File,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-disk-images",
+                    "library-disk-images",
+                    IconName::File,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-other",
+                    "library-other",
+                    IconName::File,
+                    None,
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.group_label("nav-channels"))
+                .child(
+                    self.nav_item(
+                        "nav-telegram-sources",
+                        "telegram-library-title",
+                        IconName::Inbox,
+                        self.telegram_chats.len().try_into().ok().map(|count: u64| {
+                            SharedString::from(format_integer(self.locale(), count))
+                        }),
+                        Page::Channel,
+                        cx,
+                    ),
+                )
+                .child(self.group_label("nav-collections"))
+                .child(self.source_item(
+                    "collection-mac",
+                    "M",
+                    "Mac Backup",
+                    "12,040",
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.source_item(
+                    "collection-course",
+                    "A",
+                    "AI Course",
+                    "876",
+                    Page::Library,
+                    cx,
+                ))
+                .child(self.group_label("nav-transfers"))
+                .child(self.nav_item(
+                    "nav-transfers-all",
+                    "nav-all-transfers",
+                    IconName::ArrowDown,
+                    Some("176".into()),
+                    Page::Transfers,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-completed",
+                    "nav-completed",
+                    IconName::CircleCheck,
+                    Some("3,842".into()),
+                    Page::Transfers,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-failed",
+                    "nav-failed",
+                    IconName::TriangleAlert,
+                    Some("12".into()),
+                    Page::Transfers,
+                    cx,
+                ))
+                .child(self.group_label("nav-storage"))
+                .child(self.nav_item(
+                    "nav-vault",
+                    "nav-key-vault",
+                    IconName::Asterisk,
+                    None,
+                    Page::Vault,
+                    cx,
+                ))
+                .child(self.nav_item(
+                    "nav-settings",
+                    "nav-settings",
+                    IconName::Settings,
+                    None,
+                    Page::Settings,
+                    cx,
+                ));
 
         div()
             .w(px(layout.sidebar_width()))
@@ -1588,155 +2162,7 @@ impl TeleArkApp {
             .bg(theme::sidebar())
             .border_r_1()
             .border_color(theme::border())
-            .overflow_y_scrollbar()
-            .child(self.group_label("nav-library"))
-            .child(self.nav_item(
-                "nav-all",
-                "nav-all-files",
-                IconName::FolderOpen,
-                library_count,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-recent",
-                "nav-recent",
-                IconName::Calendar,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-videos",
-                "nav-videos",
-                IconName::GalleryVerticalEnd,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-docs",
-                "nav-documents",
-                IconName::File,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-archives",
-                "nav-archives",
-                IconName::Inbox,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-images",
-                "library-images",
-                IconName::File,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-audio",
-                "library-audio",
-                IconName::File,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-disk-images",
-                "library-disk-images",
-                IconName::File,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-other",
-                "library-other",
-                IconName::File,
-                None,
-                Page::Library,
-                cx,
-            ))
-            .child(self.group_label("nav-channels"))
-            .child(
-                self.nav_item(
-                    "nav-telegram-sources",
-                    "telegram-library-title",
-                    IconName::Inbox,
-                    self.telegram_chats
-                        .len()
-                        .try_into()
-                        .ok()
-                        .map(|count: u64| SharedString::from(format_integer(self.locale(), count))),
-                    Page::Channel,
-                    cx,
-                ),
-            )
-            .child(self.group_label("nav-collections"))
-            .child(self.source_item(
-                "collection-mac",
-                "M",
-                "Mac Backup",
-                "12,040",
-                Page::Library,
-                cx,
-            ))
-            .child(self.source_item(
-                "collection-course",
-                "A",
-                "AI Course",
-                "876",
-                Page::Library,
-                cx,
-            ))
-            .child(self.group_label("nav-transfers"))
-            .child(self.nav_item(
-                "nav-transfers-all",
-                "nav-all-transfers",
-                IconName::ArrowDown,
-                Some("176".into()),
-                Page::Transfers,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-completed",
-                "nav-completed",
-                IconName::CircleCheck,
-                Some("3,842".into()),
-                Page::Transfers,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-failed",
-                "nav-failed",
-                IconName::TriangleAlert,
-                Some("12".into()),
-                Page::Transfers,
-                cx,
-            ))
-            .child(self.group_label("nav-storage"))
-            .child(self.nav_item(
-                "nav-vault",
-                "nav-key-vault",
-                IconName::Asterisk,
-                None,
-                Page::Vault,
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-settings",
-                "nav-settings",
-                IconName::Settings,
-                None,
-                Page::Settings,
-                cx,
-            ))
-            .child(div().flex_1())
+            .child(navigation)
             .child(storage_card)
             .child(div().h(px(12.0)))
             .into_any_element()
@@ -1909,6 +2335,48 @@ fn safe_suggested_file_name(remote_name: &str, message_id: i64) -> String {
         .unwrap_or_else(|| format!("telegram-document-{message_id}"))
 }
 
+fn next_reserved_download_destination(
+    library: &DesktopLibrary,
+    suggested_name: &str,
+    reserved: &mut BTreeSet<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ApplicationError> {
+    for suffix in 0_u32..10_000 {
+        let candidate_name = if suffix == 0 {
+            suggested_name.to_owned()
+        } else {
+            append_file_name_suffix(suggested_name, suffix)
+        };
+        let destination = library.next_download_destination(&candidate_name)?;
+        if reserved.insert(destination.clone()) {
+            return Ok(destination);
+        }
+    }
+    Err(ApplicationError::new(
+        teleark_core::ApplicationErrorKind::Capacity,
+    ))
+}
+
+fn append_file_name_suffix(file_name: &str, suffix: u32) -> String {
+    let path = std::path::Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name);
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map_or_else(
+            || format!("{stem} ({suffix})"),
+            |extension| format!("{stem} ({suffix}).{extension}"),
+        )
+}
+
+fn current_system_unix_millis() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+}
+
 fn merge_telegram_file_page(
     files: &mut Vec<TelegramFileSummary>,
     page: TelegramFilePage,
@@ -1991,6 +2459,29 @@ impl Render for TeleArkApp {
                 root.child(screens::settings::render_telegram_api_id_prompt(self, cx))
             })
     }
+}
+
+fn sidebar_metric_row(
+    label: SharedString,
+    value: SharedString,
+    value_color: gpui::Rgba,
+) -> AnyElement {
+    div()
+        .mt_2()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .text_xs()
+        .child(div().min_w_0().text_color(theme::text_muted()).child(label))
+        .child(
+            div()
+                .flex_none()
+                .text_color(value_color)
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(value),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -2090,6 +2581,7 @@ mod tests {
     fn channel_file_pages_replace_append_and_deduplicate_by_message() {
         let file = |message_id, name: &str| TelegramFileSummary {
             message_id,
+            sent_at_unix_ms: 1,
             modified_at_unix_ms: 1,
             file_name: name.to_owned(),
             caption: String::new(),

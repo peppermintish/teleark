@@ -33,9 +33,11 @@ The current desktop build provides a useful local catalog and Telegram index:
   and optional two-step verification;
 - choose a real Telegram source and browse downloadable documents page by page;
 - switch between channels without mixing their results;
-- choose a destination and download a Telegram document through the bounded
-  desktop transfer queue;
+- download a Telegram document automatically into the configured TeleArk
+  managed-files location through the bounded desktop transfer queue;
 - see real queued, running, completed, and failed downloads on Transfers;
+- inspect per-download timing, average speed, verification state, lifecycle
+  events, and localized failure reasons, with privacy-bounded JSON diagnostics;
 - scan a source history in bounded pages;
 - retain Telegram file identities and scan progress in SQLite so later scans
   continue from the last committed page.

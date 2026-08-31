@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 5;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 7;
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -320,6 +320,69 @@ CREATE TABLE telegram_index_state (
 ) STRICT, WITHOUT ROWID;
 
 INSERT INTO id_allocators (entity, next_id) VALUES ('remote_object', 1);
+"#,
+    },
+    Migration {
+        version: 6,
+        sql: r#"
+CREATE TABLE native_download_tasks (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id                     INTEGER NOT NULL CHECK (chat_id > 0),
+    message_id                  INTEGER NOT NULL CHECK (message_id > 0),
+    file_name                   TEXT NOT NULL CHECK (
+                                    length(trim(file_name)) > 0
+                                    AND length(CAST(file_name AS BLOB)) <= 4096),
+    size_bytes                  INTEGER NOT NULL CHECK (size_bytes >= 0),
+    destination_path            TEXT NOT NULL UNIQUE CHECK (
+                                    length(CAST(destination_path AS BLOB)) BETWEEN 1 AND 32768),
+    state                       TEXT NOT NULL CHECK (state IN (
+                                    'queued', 'running', 'paused',
+                                    'completed', 'failed', 'cancelled')),
+    verification                TEXT NOT NULL CHECK (verification IN (
+                                    'pending', 'size_checked', 'not_reached')),
+    transferred_bytes           INTEGER NOT NULL CHECK (
+                                    transferred_bytes >= 0
+                                    AND transferred_bytes <= size_bytes),
+    started_at_unix_ms          INTEGER,
+    finished_at_unix_ms         INTEGER,
+    queue_wait_ms               INTEGER CHECK (queue_wait_ms >= 0),
+    duration_ms                 INTEGER CHECK (duration_ms >= 0),
+    average_bytes_per_second    INTEGER CHECK (average_bytes_per_second >= 0),
+    attempts                    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure_code                TEXT CHECK (
+                                    failure_code IS NULL
+                                    OR length(CAST(failure_code AS BLOB)) BETWEEN 1 AND 64),
+    created_at_unix_ms          INTEGER NOT NULL,
+    updated_at_unix_ms          INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX native_download_tasks_history
+    ON native_download_tasks (created_at_unix_ms DESC, id DESC);
+CREATE INDEX native_download_tasks_resume
+    ON native_download_tasks (state, created_at_unix_ms, id);
+"#,
+    },
+    Migration {
+        version: 7,
+        sql: r#"
+CREATE TABLE native_download_batches (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id                     INTEGER NOT NULL CHECK (chat_id > 0),
+    created_at_unix_ms          INTEGER NOT NULL
+) STRICT;
+
+ALTER TABLE native_download_tasks ADD COLUMN batch_id INTEGER
+    REFERENCES native_download_batches(id) ON DELETE SET NULL;
+ALTER TABLE native_download_tasks ADD COLUMN message_sent_at_unix_ms INTEGER;
+ALTER TABLE native_download_tasks ADD COLUMN caption TEXT CHECK (
+    caption IS NULL OR length(CAST(caption AS BLOB)) <= 1048576);
+ALTER TABLE native_download_tasks ADD COLUMN mime_type TEXT CHECK (
+    mime_type IS NULL OR length(CAST(mime_type AS BLOB)) <= 512);
+
+CREATE INDEX native_download_tasks_batch
+    ON native_download_tasks (batch_id, id);
+CREATE INDEX native_download_batches_history
+    ON native_download_batches (created_at_unix_ms DESC, id DESC);
 "#,
     },
 ];
