@@ -1,9 +1,16 @@
+use std::{collections::HashSet, path::Path};
+
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, input::Input, scroll::ScrollableElement as _,
+    Disableable as _, Icon, IconName, Sizable as _,
+    checkbox::Checkbox,
+    input::Input,
+    scroll::ScrollableElement as _,
+    table::{Column, Table, TableDelegate, TableState},
     tooltip::Tooltip,
 };
 use qrcode::{QrCode, types::Color};
@@ -12,7 +19,7 @@ use teleark_i18n::{
     MessageArgs,
     format::{format_bytes, format_integer, format_unix_millis},
 };
-use teleark_runtime::{ChannelDownloadState, TelegramAuthState};
+use teleark_runtime::{ChannelDownloadState, TelegramAuthState, TelegramFileSummary};
 
 use crate::{
     app::{
@@ -24,7 +31,342 @@ use crate::{
     theme,
 };
 
+pub(crate) const CHANNEL_FILE_PAGE_SIZE: usize = 5_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChannelFileTableRow {
+    message_id: i64,
+    name: SharedString,
+    sent_at: SharedString,
+    kind: SharedString,
+    size: SharedString,
+}
+
+pub(crate) struct ChannelFileTableDelegate {
+    columns: Vec<Column>,
+    rows: Vec<ChannelFileTableRow>,
+    owner: Option<WeakEntity<TeleArkApp>>,
+    loading: bool,
+    exhausted: bool,
+    select_all_label: SharedString,
+    select_file_label: SharedString,
+    download_label: SharedString,
+    empty_label: SharedString,
+}
+
+impl ChannelFileTableDelegate {
+    pub(crate) fn new() -> Self {
+        Self {
+            columns: channel_table_columns(["", "", "", "", "", ""].map(Into::into)),
+            rows: Vec::new(),
+            owner: None,
+            loading: false,
+            exhausted: true,
+            select_all_label: "".into(),
+            select_file_label: "".into(),
+            download_label: "".into(),
+            empty_label: "".into(),
+        }
+    }
+
+    pub(crate) fn message_id_at(&self, row: usize) -> Option<i64> {
+        self.rows.get(row).map(|row| row.message_id)
+    }
+}
+
+impl TableDelegate for ChannelFileTableDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {
+        self.columns.len()
+    }
+
+    fn rows_count(&self, _cx: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _cx: &App) -> &Column {
+        &self.columns[col_ix]
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if col_ix != 0 {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .child(self.columns[col_ix].name.clone())
+                .into_any_element();
+        }
+        let all_selected = self.owner.as_ref().is_some_and(|owner| {
+            owner
+                .read_with(cx, |app, _| {
+                    !self.rows.is_empty()
+                        && self
+                            .rows
+                            .iter()
+                            .all(|row| app.selected_channel_message_ids.contains(&row.message_id))
+                })
+                .unwrap_or(false)
+        });
+        let owner = self.owner.clone();
+        let tooltip = self.select_all_label.clone();
+        div()
+            .id("channel-files-select-all-cell")
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Checkbox::new("channel-files-select-all")
+                    .checked(all_selected)
+                    .on_click(move |checked, _, cx| {
+                        if let Some(owner) = owner.as_ref() {
+                            let _ = owner.update(cx, |app, cx| {
+                                app.set_all_channel_files_selected(*checked, cx);
+                            });
+                        }
+                    }),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .into_any_element()
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(row) = self.rows.get(row_ix).cloned() else {
+            return div().into_any_element();
+        };
+        match col_ix {
+            0 => {
+                let checked = self.owner.as_ref().is_some_and(|owner| {
+                    owner
+                        .read_with(cx, |app, _| {
+                            app.selected_channel_message_ids.contains(&row.message_id)
+                        })
+                        .unwrap_or(false)
+                });
+                let owner = self.owner.clone();
+                let tooltip = self.select_file_label.clone();
+                div()
+                    .id(("channel-file-select-cell", row.message_id.unsigned_abs()))
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Checkbox::new(("channel-file-select", row.message_id.unsigned_abs()))
+                            .checked(checked)
+                            .on_click(move |checked, _, cx| {
+                                if let Some(owner) = owner.as_ref() {
+                                    let _ = owner.update(cx, |app, cx| {
+                                        app.set_channel_file_selected(row.message_id, *checked, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .into_any_element()
+            }
+            1 => div()
+                .size_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(IconName::File).text_color(theme::blue()))
+                .child(div().min_w_0().flex_1().truncate().child(row.name))
+                .into_any_element(),
+            2 => table_cell(row.sent_at),
+            3 => table_cell(row.kind),
+            4 => table_cell(row.size),
+            _ => {
+                let owner = self.owner.clone();
+                let tooltip = self.download_label.clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        components::icon_button(
+                            ("channel-file-download", row.message_id.unsigned_abs()),
+                            IconName::ArrowDown,
+                            tooltip,
+                        )
+                        .on_click(move |_, _, cx| {
+                            if let Some(owner) = owner.as_ref() {
+                                let _ = owner.update(cx, |app, cx| {
+                                    app.download_telegram_file(row.message_id, cx);
+                                });
+                            }
+                        }),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_empty(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(theme::text_secondary())
+            .child(self.empty_label.clone())
+    }
+
+    fn loading(&self, _cx: &App) -> bool {
+        self.loading && self.rows.is_empty()
+    }
+
+    fn is_eof(&self, _cx: &App) -> bool {
+        self.exhausted
+    }
+
+    fn load_more_threshold(&self) -> usize {
+        100
+    }
+
+    fn load_more(&mut self, _window: &mut Window, cx: &mut Context<TableState<Self>>) {
+        if self.loading || self.exhausted {
+            return;
+        }
+        self.loading = true;
+        if let Some(owner) = self.owner.as_ref() {
+            let _ = owner.update(cx, |app, cx| {
+                app.load_selected_telegram_files(true, cx);
+            });
+        }
+    }
+}
+
 impl TeleArkApp {
+    pub(crate) fn refresh_channel_file_table(&mut self, cx: &mut Context<Self>) {
+        let rows = self
+            .channel_filtered_files()
+            .into_iter()
+            .map(|file| {
+                let name = if file.file_name.trim().is_empty() {
+                    self.tr_with(
+                        "telegram-file-unnamed",
+                        MessageArgs::new().with("message_id", file.message_id.to_string()),
+                    )
+                } else {
+                    file.file_name.clone().into()
+                };
+                let kind = teleark_runtime::classify_file(Path::new(&file.file_name));
+                ChannelFileTableRow {
+                    message_id: file.message_id,
+                    name,
+                    sent_at: format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
+                    kind: self.tr(crate::screens::library::file_kind_message_id(kind)),
+                    size: format_bytes(self.locale(), file.size_bytes).into(),
+                }
+            })
+            .collect();
+        let columns = channel_table_columns([
+            "".into(),
+            self.tr("table-name"),
+            self.tr("telegram-message-sent-at"),
+            self.tr("table-type"),
+            self.tr("table-size"),
+            "".into(),
+        ]);
+        let owner = cx.weak_entity();
+        let loading = self.telegram_files_loading;
+        let exhausted = self.telegram_files_exhausted;
+        let select_all_label = self.tr("telegram-files-select-all");
+        let select_file_label = self.tr("telegram-file-select-action");
+        let download_label = self.tr("telegram-file-download-action");
+        let empty_label = self.tr(if loading {
+            "telegram-files-loading"
+        } else {
+            "telegram-files-empty"
+        });
+        self.channel_file_table.update(cx, |table, table_cx| {
+            let delegate = table.delegate_mut();
+            delegate.rows = rows;
+            delegate.columns = columns;
+            delegate.owner = Some(owner);
+            delegate.loading = loading;
+            delegate.exhausted = exhausted;
+            delegate.select_all_label = select_all_label;
+            delegate.select_file_label = select_file_label;
+            delegate.download_label = download_label;
+            delegate.empty_label = empty_label;
+            table.refresh(table_cx);
+        });
+    }
+
+    pub(crate) fn notify_channel_file_table(&self, cx: &mut Context<Self>) {
+        self.channel_file_table
+            .update(cx, |_, table_cx| table_cx.notify());
+    }
+
+    pub(crate) fn set_channel_file_selected(
+        &mut self,
+        message_id: i64,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if selected {
+            self.selected_channel_message_ids.insert(message_id);
+        } else {
+            self.selected_channel_message_ids.remove(&message_id);
+        }
+        self.notify_channel_file_table(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_all_channel_files_selected(
+        &mut self,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if selected {
+            let ids = self
+                .channel_filtered_files()
+                .into_iter()
+                .map(|file| file.message_id)
+                .collect::<Vec<_>>();
+            self.selected_channel_message_ids.extend(ids);
+        } else {
+            self.selected_channel_message_ids.clear();
+        }
+        self.notify_channel_file_table(cx);
+        cx.notify();
+    }
+
+    fn channel_filtered_files(&self) -> Vec<&TelegramFileSummary> {
+        let now_unix_ms = current_unix_millis();
+        self.telegram_files
+            .iter()
+            .filter(|file| {
+                channel_file_matches_filters(
+                    file,
+                    self.channel_batch_period,
+                    &self.channel_batch_kinds,
+                    now_unix_ms,
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn render_channel(
         &self,
         _window: &mut Window,
@@ -352,9 +694,9 @@ impl TeleArkApp {
     fn render_telegram_channels(&self, layout: LayoutPolicy, cx: &mut Context<Self>) -> AnyElement {
         let list = components::card()
             .when(layout.is_compact(), |list| list.w_full())
-            .when(!layout.is_compact(), |list| list.w(px(330.0)).flex_none())
-            .p_2()
-            .when(layout.is_compact(), |list| list.max_h(px(280.0)))
+            .when(!layout.is_compact(), |list| list.w(px(220.0)).flex_none())
+            .p_1()
+            .when(layout.is_compact(), |list| list.max_h(px(220.0)))
             .when(!layout.is_compact(), |list| list.h_full().min_h_0())
             .overflow_y_scrollbar()
             .child(
@@ -375,11 +717,11 @@ impl TeleArkApp {
                 };
                 div()
                     .id(("telegram-chat", id.unsigned_abs()))
-                    .px_3()
-                    .py_2()
+                    .h(px(34.0))
+                    .px_2()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .rounded(theme::RADIUS_SMALL)
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme::blue_soft()))
@@ -408,20 +750,46 @@ impl TeleArkApp {
                     .flex_col()
                     .overflow_hidden()
             })
-            .p_5()
-            .child(components::section_title(selected_name))
+            .p_3()
             .child(
                 div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("telegram-index-description")),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(components::section_title(selected_name)),
+                    )
+                    .child(
+                        components::icon_button(
+                            "telegram-files-refresh",
+                            IconName::Redo2,
+                            self.tr("telegram-files-refresh-action"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.load_selected_telegram_files(false, cx);
+                        })),
+                    )
+                    .child(
+                        components::button(
+                            "telegram-index-next",
+                            self.tr("telegram-index-next-action"),
+                            Some(IconName::Search),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.index_selected_telegram_chat(cx);
+                        })),
+                    ),
             )
             .when_some(self.telegram_index.as_ref(), |detail, progress| {
                 detail.child(
                     div()
-                        .mt_4()
-                        .p_3()
+                        .mt_2()
+                        .px_3()
+                        .py_2()
                         .rounded(theme::RADIUS_SMALL)
                         .bg(theme::blue_pale())
                         .text_sm()
@@ -441,35 +809,6 @@ impl TeleArkApp {
             .when_some(self.telegram_error_message(), |detail, message| {
                 detail.child(error_banner(message))
             })
-            .child(
-                div()
-                    .mt_4()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        components::button(
-                            "telegram-files-refresh",
-                            self.tr("telegram-files-refresh-action"),
-                            Some(IconName::Redo2),
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.load_selected_telegram_files(false, cx);
-                        })),
-                    )
-                    .child(
-                        components::button(
-                            "telegram-index-next",
-                            self.tr("telegram-index-next-action"),
-                            Some(IconName::Search),
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.index_selected_telegram_chat(cx);
-                        })),
-                    ),
-            )
             .child(self.render_channel_batch_controls(cx))
             .child(self.render_telegram_file_list(layout, cx));
 
@@ -492,39 +831,22 @@ impl TeleArkApp {
             (ChannelBatchPeriod::Past30Days, "telegram-batch-period-30d"),
         ];
         let kinds = [
-            (None, "telegram-batch-kind-all"),
-            (Some(FileKind::Video), "telegram-batch-kind-video"),
-            (Some(FileKind::Document), "telegram-batch-kind-document"),
-            (Some(FileKind::Archive), "telegram-batch-kind-archive"),
-            (Some(FileKind::Audio), "telegram-batch-kind-audio"),
-            (Some(FileKind::Image), "telegram-batch-kind-image"),
-            (Some(FileKind::Other), "telegram-batch-kind-other"),
+            (FileKind::Video, "telegram-batch-kind-video"),
+            (FileKind::Document, "telegram-batch-kind-document"),
+            (FileKind::Archive, "telegram-batch-kind-archive"),
+            (FileKind::Audio, "telegram-batch-kind-audio"),
+            (FileKind::Image, "telegram-batch-kind-image"),
+            (FileKind::Other, "telegram-batch-kind-other"),
         ];
-        let status = match self.channel_batch_activity {
-            ChannelBatchActivity::Idle => None,
-            ChannelBatchActivity::Preparing => {
-                Some((self.tr("telegram-batch-preparing"), Tone::Blue))
-            }
-            ChannelBatchActivity::Queued { count, .. } => Some((
-                self.tr_with(
-                    "telegram-batch-queued",
-                    MessageArgs::new().with("count", format_integer(self.locale(), count as u64)),
-                ),
-                Tone::Green,
-            )),
-            ChannelBatchActivity::NoMatches => {
-                Some((self.tr("telegram-batch-no-matches"), Tone::Amber))
-            }
-            ChannelBatchActivity::Failed(_) => Some((self.tr("telegram-batch-failed"), Tone::Red)),
-        };
         components::card()
-            .mt_3()
-            .p_3()
+            .mt_2()
+            .px_3()
+            .py_2()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         div()
                             .flex_1()
@@ -544,9 +866,6 @@ impl TeleArkApp {
                                     .child(self.tr("telegram-batch-description")),
                             ),
                     )
-                    .when_some(status, |row, (label, tone)| {
-                        row.child(components::badge(label, tone))
-                    })
                     .child(
                         components::icon_button(
                             "telegram-batch-toggle",
@@ -589,6 +908,8 @@ impl TeleArkApp {
                                 move |this, _, _, cx| {
                                     this.channel_batch_period = period;
                                     this.channel_batch_activity = ChannelBatchActivity::Idle;
+                                    this.selected_channel_message_ids.clear();
+                                    this.refresh_channel_file_table(cx);
                                     cx.notify();
                                 },
                             ))
@@ -601,258 +922,199 @@ impl TeleArkApp {
                         .text_color(theme::text_muted())
                         .child(self.tr("telegram-batch-kind-label")),
                 )
-                .child(div().mt_2().flex().flex_wrap().gap_2().children(
-                    kinds.into_iter().enumerate().map(|(index, (kind, label))| {
-                        components::button(
-                            ("telegram-batch-kind", index),
-                            self.tr(label),
-                            None,
-                            self.channel_batch_kind == kind,
-                        )
-                        .disabled(preparing)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.channel_batch_kind = kind;
-                            this.channel_batch_activity = ChannelBatchActivity::Idle;
-                            cx.notify();
-                        }))
-                    }),
-                ))
                 .child(
-                    div().mt_3().child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            components::button(
+                                "telegram-batch-kind-all",
+                                self.tr("telegram-batch-kind-all"),
+                                None,
+                                self.channel_batch_kinds.is_empty(),
+                            )
+                            .disabled(preparing)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.channel_batch_kinds.clear();
+                                this.channel_batch_activity = ChannelBatchActivity::Idle;
+                                this.selected_channel_message_ids.clear();
+                                this.refresh_channel_file_table(cx);
+                                cx.notify();
+                            })),
+                        )
+                        .children(kinds.into_iter().enumerate().map(|(index, (kind, label))| {
+                            components::button(
+                                ("telegram-batch-kind", index),
+                                self.tr(label),
+                                None,
+                                self.channel_batch_kinds.contains(&kind),
+                            )
+                            .disabled(preparing)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if !this.channel_batch_kinds.remove(&kind) {
+                                        this.channel_batch_kinds.insert(kind);
+                                    }
+                                    this.channel_batch_activity = ChannelBatchActivity::Idle;
+                                    this.selected_channel_message_ids.clear();
+                                    this.refresh_channel_file_table(cx);
+                                    cx.notify();
+                                },
+                            ))
+                        })),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr_with(
+                            "telegram-files-title",
+                            MessageArgs::new().with(
+                                "count",
+                                format_integer(
+                                    self.locale(),
+                                    self.channel_filtered_files().len() as u64,
+                                ),
+                            ),
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .mt_2()
+                    .h(px(40.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(components::badge(
+                        self.tr_with(
+                            "telegram-files-selected",
+                            MessageArgs::new().with(
+                                "count",
+                                format_integer(
+                                    self.locale(),
+                                    self.selected_channel_message_ids.len() as u64,
+                                ),
+                            ),
+                        ),
+                        Tone::Blue,
+                    ))
+                    .child(
+                        components::button(
+                            "telegram-files-select-all-results",
+                            self.tr("telegram-files-select-all"),
+                            None,
+                            false,
+                        )
+                        .disabled(self.channel_filtered_files().is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_all_channel_files_selected(true, cx);
+                        })),
+                    )
+                    .child(
+                        components::button(
+                            "telegram-files-clear-selection",
+                            self.tr("telegram-files-clear-selection"),
+                            None,
+                            false,
+                        )
+                        .disabled(self.selected_channel_message_ids.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_all_channel_files_selected(false, cx);
+                        })),
+                    )
+                    .child(div().flex_1())
+                    .when_some(channel_batch_status(self), |row, (label, tone)| {
+                        row.child(components::badge(label, tone))
+                    })
+                    .child(
                         components::button(
                             "telegram-batch-download",
                             self.tr("telegram-batch-download-action"),
                             Some(IconName::ArrowDown),
                             true,
                         )
-                        .disabled(preparing || self.selected_chat_id.is_none())
+                        .disabled(preparing || self.selected_channel_message_ids.is_empty())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.download_filtered_telegram_files(cx);
                         })),
                     ),
-                )
-            })
+            )
             .into_any_element()
     }
 
     fn render_telegram_file_list(
         &self,
         layout: LayoutPolicy,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
-        let heading = self.tr_with(
-            "telegram-files-title",
-            MessageArgs::new().with(
-                "count",
-                format_integer(self.locale(), self.telegram_files.len() as u64),
-            ),
-        );
-        let mut list = div()
-            .mt_5()
-            .when(!layout.is_compact(), |list| {
-                list.flex_1().min_h_0().flex().flex_col().overflow_hidden()
-            })
-            .border_t_1()
-            .border_color(theme::border())
-            .child(
-                div()
-                    .h(px(42.0))
-                    .flex()
-                    .items_center()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_sm()
-                    .child(heading),
-            );
-
-        if self.telegram_files.is_empty() {
-            list = list.child(
-                div()
-                    .py_6()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(if self.telegram_files_loading {
-                        self.tr("telegram-files-loading")
-                    } else {
-                        self.tr("telegram-files-empty")
-                    }),
-            );
-        } else {
-            list = list.child(
-                div()
-                    .when(layout.is_compact(), |body| {
-                        body.h(px(layout.channel_compact_file_list_height()))
-                    })
-                    .when(!layout.is_compact(), |body| body.flex_1().min_h_0())
-                    .overflow_y_scrollbar()
-                    .children(self.telegram_files.iter().map(|file| {
-                        let message_id = file.message_id;
-                        let selected = self.selected_telegram_message_id == Some(message_id);
-                        let name = if file.file_name.trim().is_empty() {
-                            self.tr_with(
-                                "telegram-file-unnamed",
-                                MessageArgs::new().with("message_id", message_id.to_string()),
-                            )
-                        } else {
-                            file.file_name.clone().into()
-                        };
-                        let caption = if file.caption.trim().is_empty() {
-                            self.tr("telegram-message-no-caption").to_string()
-                        } else {
-                            file.caption.clone()
-                        };
-                        let caption_preview = caption_preview(&caption, 96);
-                        let caption_tooltip = caption.clone();
-                        let sent_at = format_unix_millis(self.locale(), file.sent_at_unix_ms);
-                        div()
-                            .id(("telegram-file", message_id.unsigned_abs()))
-                            .min_h(px(72.0))
-                            .py_2()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .border_b_1()
-                            .border_color(theme::border_subtle())
-                            .cursor_pointer()
-                            .when(selected, |row| row.bg(theme::blue_pale()))
-                            .hover(|row| row.bg(theme::blue_pale()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.selected_telegram_message_id = Some(message_id);
-                                cx.notify();
-                            }))
-                            .child(Icon::new(IconName::File).text_color(theme::blue()))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(div().truncate().text_sm().child(name))
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .child(
-                                                self.tr_with(
-                                                    "telegram-file-metadata",
-                                                    MessageArgs::new()
-                                                        .with(
-                                                            "size",
-                                                            format_bytes(
-                                                                self.locale(),
-                                                                file.size_bytes,
-                                                            ),
-                                                        )
-                                                        .with("message_id", message_id.to_string()),
-                                                ),
-                                            )
-                                            .child(" · ")
-                                            .child(sent_at),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(("telegram-caption", message_id.unsigned_abs()))
-                                            .mt_1()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(theme::text_muted())
-                                            .child(caption_preview)
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(caption_tooltip.clone())
-                                                    .build(window, cx)
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                components::button(
-                                    ("telegram-download", message_id.unsigned_abs()),
-                                    self.tr("telegram-file-download-action"),
-                                    Some(IconName::ArrowDown),
-                                    false,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.download_telegram_file(message_id, cx);
-                                    },
-                                )),
-                            )
-                    })),
-            );
-        }
-
-        list = list.when_some(self.telegram_download, |list, (_, state)| {
-            let (message, tone) = match state {
-                ChannelDownloadState::Queued => ("telegram-download-queued", Tone::Amber),
-                ChannelDownloadState::Running => ("telegram-download-running", Tone::Blue),
-                ChannelDownloadState::Paused => ("telegram-download-paused", Tone::Amber),
-                ChannelDownloadState::Completed => ("telegram-download-completed", Tone::Green),
-                ChannelDownloadState::Failed(_) => ("telegram-download-failed", Tone::Red),
-                ChannelDownloadState::Cancelled => ("telegram-download-cancelled", Tone::Red),
-            };
-            list.child(
-                div()
-                    .mt_3()
-                    .child(components::badge(self.tr(message), tone)),
-            )
-        });
-
-        if !self.telegram_files_exhausted && !self.telegram_files.is_empty() {
-            list = list.child(
-                div().mt_3().child(
-                    components::button(
-                        "telegram-files-more",
-                        self.tr("telegram-files-more-action"),
-                        Some(IconName::ChevronDown),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.load_selected_telegram_files(true, cx);
-                    })),
-                ),
-            );
-        }
         let selected_message = self.selected_telegram_message_id.and_then(|message_id| {
             self.telegram_files
                 .iter()
                 .find(|file| file.message_id == message_id)
         });
+        let table = div()
+            .min_w_0()
+            .when(!layout.is_compact(), |panel| panel.flex_1().min_h_0())
+            .when(layout.is_compact(), |panel| {
+                panel.h(px(layout.channel_compact_file_list_height()))
+            })
+            .border_1()
+            .border_color(theme::border())
+            .rounded(theme::RADIUS_SMALL)
+            .overflow_hidden()
+            .child(
+                Table::new(&self.channel_file_table)
+                    .small()
+                    .bordered(false)
+                    .scrollbar_visible(true, false),
+            );
         div()
+            .mt_2()
             .when(!layout.is_compact(), |browser| {
-                browser.flex_1().min_h_0().flex().gap_4()
+                browser.flex_1().min_h_0().flex().gap_3()
             })
             .when(layout.is_compact(), |browser| browser.flex().flex_col())
-            .child(
-                div()
-                    .min_w_0()
-                    .when(!layout.is_compact(), |panel| {
-                        panel.flex_1().min_h_0().flex().flex_col().overflow_hidden()
-                    })
-                    .child(list),
-            )
-            .when_some(selected_message, |browser, file| {
-                browser.child(self.render_telegram_message_detail(file, layout))
-            })
+            .child(table)
+            .child(self.render_telegram_message_detail(selected_message, layout))
             .into_any_element()
     }
 
     fn render_telegram_message_detail(
         &self,
-        file: &teleark_runtime::TelegramFileSummary,
+        file: Option<&TelegramFileSummary>,
         layout: LayoutPolicy,
     ) -> AnyElement {
+        let detail = components::card()
+            .when(!layout.is_compact(), |detail| {
+                detail.w(px(300.0)).h_full().flex_none()
+            })
+            .when(layout.is_compact(), |detail| detail.mt_3())
+            .p_3()
+            .overflow_y_scrollbar()
+            .child(components::section_title(
+                self.tr("telegram-message-detail-title"),
+            ));
+        let Some(file) = file else {
+            return detail
+                .child(
+                    div()
+                        .mt_4()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("telegram-message-detail-empty")),
+                )
+                .into_any_element();
+        };
         let caption = if file.caption.trim().is_empty() {
             self.tr("telegram-message-no-caption")
         } else {
             file.caption.clone().into()
         };
-        components::card()
-            .when(!layout.is_compact(), |detail| {
-                detail.w(px(300.0)).flex_none().mt_5().mb_3()
-            })
-            .when(layout.is_compact(), |detail| detail.mt_3())
-            .p_4()
-            .overflow_y_scrollbar()
-            .child(components::section_title(
-                self.tr("telegram-message-detail-title"),
-            ))
+        detail
             .child(message_detail_row(
                 self.tr("telegram-message-file-name"),
                 if file.file_name.is_empty() {
@@ -912,13 +1174,90 @@ fn channel_uses_route_scroll(authorized: bool, layout: LayoutPolicy) -> bool {
     !authorized || layout.is_compact()
 }
 
-fn caption_preview(caption: &str, maximum_chars: usize) -> String {
-    let mut characters = caption.chars();
-    let preview: String = characters.by_ref().take(maximum_chars).collect();
-    if characters.next().is_some() {
-        format!("{preview}…")
-    } else {
-        preview
+fn channel_table_columns(names: [SharedString; 6]) -> Vec<Column> {
+    [
+        ("selected", 36.0),
+        ("name", 280.0),
+        ("sent_at", 150.0),
+        ("kind", 96.0),
+        ("size", 104.0),
+        ("action", 44.0),
+    ]
+    .into_iter()
+    .zip(names)
+    .map(|((key, width), name)| {
+        Column::new(key, name)
+            .width(px(width))
+            .resizable(false)
+            .movable(false)
+            .selectable(false)
+    })
+    .collect()
+}
+
+fn table_cell(value: SharedString) -> AnyElement {
+    div()
+        .size_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .truncate()
+        .child(value)
+        .into_any_element()
+}
+
+fn current_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+fn channel_file_matches_filters(
+    file: &TelegramFileSummary,
+    period: ChannelBatchPeriod,
+    kinds: &HashSet<FileKind>,
+    now_unix_ms: i64,
+) -> bool {
+    let maximum_age_ms = match period {
+        ChannelBatchPeriod::AnyTime => None,
+        ChannelBatchPeriod::Past24Hours => Some(24 * 60 * 60 * 1_000),
+        ChannelBatchPeriod::Past7Days => Some(7 * 24 * 60 * 60 * 1_000),
+        ChannelBatchPeriod::Past30Days => Some(30 * 24 * 60 * 60 * 1_000),
+    };
+    let matches_period = maximum_age_ms.is_none_or(|age| {
+        file.sent_at_unix_ms >= now_unix_ms.saturating_sub(age)
+            && file.sent_at_unix_ms <= now_unix_ms
+    });
+    let matches_kind = kinds.is_empty()
+        || kinds.contains(&teleark_runtime::classify_file(Path::new(&file.file_name)));
+    matches_period && matches_kind
+}
+
+fn channel_batch_status(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
+    match app.channel_batch_activity {
+        ChannelBatchActivity::Idle => app.telegram_download.map(|(_, state)| {
+            let (message, tone) = match state {
+                ChannelDownloadState::Queued => ("telegram-download-queued", Tone::Amber),
+                ChannelDownloadState::Running => ("telegram-download-running", Tone::Blue),
+                ChannelDownloadState::Paused => ("telegram-download-paused", Tone::Amber),
+                ChannelDownloadState::Completed => ("telegram-download-completed", Tone::Green),
+                ChannelDownloadState::Failed(_) => ("telegram-download-failed", Tone::Red),
+                ChannelDownloadState::Cancelled => ("telegram-download-cancelled", Tone::Red),
+            };
+            (app.tr(message), tone)
+        }),
+        ChannelBatchActivity::Preparing => Some((app.tr("telegram-batch-preparing"), Tone::Blue)),
+        ChannelBatchActivity::Queued { count, .. } => Some((
+            app.tr_with(
+                "telegram-batch-queued",
+                MessageArgs::new().with("count", format_integer(app.locale(), count as u64)),
+            ),
+            Tone::Green,
+        )),
+        ChannelBatchActivity::NoMatches => Some((app.tr("telegram-batch-no-matches"), Tone::Amber)),
+        ChannelBatchActivity::Failed(_) => Some((app.tr("telegram-batch-failed"), Tone::Red)),
     }
 }
 
@@ -1123,9 +1462,31 @@ mod tests {
     }
 
     #[test]
-    fn caption_preview_is_unicode_safe_and_only_truncates_long_content() {
-        assert_eq!(caption_preview("完整 caption", 20), "完整 caption");
-        assert_eq!(caption_preview("一二三四五六", 4), "一二三四…");
-        assert_eq!(caption_preview("hidden", 0), "…");
+    fn one_channel_page_supports_five_thousand_filtered_rows() {
+        let now = 2_000_000_000_000;
+        let files = (0..CHANNEL_FILE_PAGE_SIZE)
+            .map(|message_id| TelegramFileSummary {
+                message_id: message_id as i64,
+                modified_at_unix_ms: now - 1_000,
+                file_name: format!("archive-{message_id}.zip"),
+                caption: String::new(),
+                mime_type: None,
+                size_bytes: 1,
+                sent_at_unix_ms: now - 1_000,
+            })
+            .collect::<Vec<_>>();
+        let kinds = HashSet::from([FileKind::Archive]);
+        assert_eq!(
+            files
+                .iter()
+                .filter(|file| channel_file_matches_filters(
+                    file,
+                    ChannelBatchPeriod::Past24Hours,
+                    &kinds,
+                    now,
+                ))
+                .count(),
+            CHANNEL_FILE_PAGE_SIZE
+        );
     }
 }

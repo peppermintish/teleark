@@ -157,15 +157,22 @@ runtime commands. Persisted rows remain visible after restart; interrupted work
 stays queued until Telegram authorization is restored.
 
 Each Telegram source offers bounded batch download controls for sent-time and
-file-kind filters. One batch occupies one Transfers row; activating the row
+multi-select file-kind filters. Filters operate directly on the loaded file
+table, and changing them clears stale row selection. The filters start collapsed
+so the table retains the primary vertical space. The table uses the verified
+gpui-component virtualized `Table` API and requests up to 5,000 messages per
+page; scrolling near the end prefetches the next bounded page. Its first column
+supports per-row selection and select-all for the current filtered result, while
+the final column retains direct single-file download. Clicking a row opens the
+fixed right-side message inspector without changing its checkbox state.
+
+One batch occupies one Transfers row; activating the row
 expands its individual files without losing their independent controls or
-durable checkpoints. Telegram file rows show sent time and a Unicode-safe
-caption preview. Hover reveals the full caption, and selection opens a bounded,
-scrollable detail panel with the full file name, message ID, sent time, MIME
+durable checkpoints. Row selection opens a bounded, scrollable detail panel
+with the full file name, message ID, sent time, MIME
 type, declared size, and caption. Filenames and captions remain unmodified user
 content. The per-file list is the primary source action and owns the available
-vertical space. Batch filters start collapsed and expand on demand so they do
-not displace direct per-file download controls.
+vertical space.
 
 The global sidebar footer shows live aggregate upload/download rates, available
 space on the managed-files destination, and current TeleArk disk usage. Rates

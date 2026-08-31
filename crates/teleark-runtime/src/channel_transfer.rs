@@ -20,6 +20,7 @@ use teleark_telegram::{DownloadControl, DownloadObserver};
 use crate::{DesktopLibrary, DesktopTelegram};
 
 const CHANNEL_DOWNLOAD_QUEUE_CAPACITY: usize = 32;
+const CHANNEL_DOWNLOAD_BATCH_CAPACITY: usize = 5_000;
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_millis(750);
 const CONTROL_RUNNING: u8 = 0;
 const CONTROL_PAUSED: u8 = 1;
@@ -432,9 +433,7 @@ impl DesktopTransfers {
         &self,
         requests: Vec<ChannelDownloadRequest>,
     ) -> Result<u64, ApplicationError> {
-        if requests.is_empty() || requests.len() > 2_000 {
-            return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
-        }
+        validate_batch_size(requests.len())?;
         for request in &requests {
             validate_request(request)?;
         }
@@ -817,6 +816,13 @@ fn validate_request(request: &ChannelDownloadRequest) -> Result<(), ApplicationE
         || request.destination.file_name().is_none()
     {
         return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    Ok(())
+}
+
+fn validate_batch_size(size: usize) -> Result<(), ApplicationError> {
+    if size == 0 || size > CHANNEL_DOWNLOAD_BATCH_CAPACITY {
+        return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
     }
     Ok(())
 }
@@ -1347,6 +1353,17 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn batch_capacity_accepts_one_full_channel_page() {
+        assert!(validate_batch_size(CHANNEL_DOWNLOAD_BATCH_CAPACITY).is_ok());
+        assert_eq!(
+            validate_batch_size(CHANNEL_DOWNLOAD_BATCH_CAPACITY + 1)
+                .expect_err("oversized batch must fail")
+                .kind(),
+            ApplicationErrorKind::Capacity
+        );
+    }
 
     struct FakeBackend {
         outcome: Result<(), ApplicationErrorKind>,

@@ -10,9 +10,10 @@ foundation**. In addition to local import/search/open/reveal, the desktop
 atomically persists a personal Telegram API ID/API Hash pair or uses an
 optional distributor-owned pair supplied at build time, performs QR or
 code/2FA authorization, lists real
-dialogs, browses each selected source in bounded document pages, downloads a
-selected document without a per-file save dialog through a retained bounded
-worker, creates atomic per-channel time/type-filtered batch downloads, and can
+dialogs, browses each selected source in virtualized pages of up to 5,000
+messages, filters by time and multiple file types, supports direct and
+multi-selected downloads without a per-file save dialog through a retained
+bounded worker, creates atomic per-channel selected-file batch downloads, and can
 scan source pages into SQLite/FTS5. Batch tasks appear as one expandable
 Transfers row, while their message sent time, MIME type, and full caption
 survive restart. A configurable managed-files
@@ -41,8 +42,8 @@ Upload, encrypted transfer controls, Vault, and key-unlock UX remain previews.
 | --- | --- | --- |
 | Core application API | Typed Library queries, imports, pages, statistics, repository port, structured errors; 25 Core tests total | Transfer/Index/Vault services are separate foundations, not one application command bus |
 | Persistent Library | SQLite migrations v1-v7, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, encrypted transfer checkpoints, durable native-download history/progress/message metadata, atomic batch creation, and atomic credential-pair settings; 20 temporary-database tests | Vault package/manifest tables, collection editor, and million-row benchmark remain |
-| Desktop runtime | Bounded storage/Telegram workers, validated personal/distributor credential resolution, persistent personal API ID/Hash pair, typed atomic `preferences.v1` settings, one configurable managed-files root with created `Downloads`/`Cache`/`Logs` children, bounded non-blocking daily JSON tracing, safe automatic non-overwriting download paths, QR/code/2FA login, dialog discovery, bounded per-channel time/type batch scans, idempotent projection, restart index cursor, bounded background disk metrics, and a retained bounded native-download worker with atomic batch identity, chunk progress, current speed/ETA, pause/resume/cancel/retry, durable history, and restart restoration; 37 tests | Native downloads remain sequential and validate Telegram's declared length rather than a content hash; personal API Hashes remain in unencrypted SQLite at the requested alpha tradeoff |
-| GPUI desktop | Conditional startup credential prompt with skip path, live-localized API/settings screens, real API-panel action, dual-method QR/phone login, independently scrollable channel/file panes, per-channel browsing/direct download plus collapsed-on-demand time/type batch controls, sent-time/caption rows and full message details, expandable native transfer groups with multi-select/select-all/Open/Show in Finder plus timing, Trace ID, verification timeline, actionable failure details, live overall rate/disk metrics, diagnostic log disclosure/open action, last-window process termination, and recoverable macOS full-screen routes backed by localized AppKit application/View/Window menus; compact/standard/spacious layouts; 44 GUI tests | Encrypted Upload/Vault workflows remain previews; large lists are bounded but not virtualized |
+| Desktop runtime | Bounded storage/Telegram workers, validated personal/distributor credential resolution, persistent personal API ID/Hash pair, typed atomic `preferences.v1` settings, one configurable managed-files root with created `Downloads`/`Cache`/`Logs` children, bounded non-blocking daily JSON tracing, safe automatic non-overwriting download paths, QR/code/2FA login, dialog discovery, bounded 5,000-item channel batches, idempotent projection, restart index cursor, bounded background disk metrics, and a retained bounded native-download worker with atomic batch identity, chunk progress, current speed/ETA, pause/resume/cancel/retry, durable history, and restart restoration; 38 tests | Native downloads remain sequential and validate Telegram's declared length rather than a content hash; personal API Hashes remain in unencrypted SQLite at the requested alpha tradeoff |
+| GPUI desktop | Conditional startup credential prompt with skip path, live-localized API/settings screens, real API-panel action, dual-method QR/phone login, compact channel navigation, a virtualized 5,000-message file table with collapsible time/multi-type filters, per-row/select-all batch selection, direct download, and a fixed right-side message inspector; expandable native transfer groups with multi-select/select-all/Open/Show in Finder plus timing, Trace ID, verification timeline, actionable failure details, live overall rate/disk metrics, diagnostic log disclosure/open action, last-window process termination, and recoverable macOS full-screen routes backed by localized AppKit application/View/Window menus; compact/standard/spacious layouts; 44 GUI tests | Encrypted Upload/Vault workflows remain previews; Library rows remain paged but not virtualized |
 | Localization | Complete synchronized Fluent catalogs for `en-US`, `zh-CN`, and `ja-JP`; live switching, persistent explicit override, System Default; 21 tests | Native-speaker, assistive-technology, and pixel-level locale review remain |
 | Telegram adapter | `grammers` 0.10 connection, short-lived QR login with DC migration, code/2FA, dialogs, refetch by message identity, bounded cursor scans, upload/download, structured errors, chunk observer/control, resumable private partials, atomic no-replace publication, and a versioned atomic `0600` session cache; 13 tests | Native download checks Telegram's byte length rather than a content hash; ordinary tests use no live credentials and OS credential-store UX remains |
 | Historical Index Engine | Desktop Telegram-to-SQLite bounded scan with durable cursor plus the separate CAS/range coordinator and its 12 deterministic tests | Full coordinator repository mapping, live updates, retry owner, pause/cancel UI, and range compaction remain |
@@ -127,8 +128,8 @@ cargo deny check
 git diff --check
 ```
 
-The workspace test suite contains 232 deterministic tests: Core 25, Crypto 35,
-GUI 44, i18n 21, Index 12, Runtime 37, Storage 20, Telegram 13, and Transfer 25.
+The workspace test suite contains 233 deterministic tests: Core 25, Crypto 35,
+GUI 44, i18n 21, Index 12, Runtime 38, Storage 20, Telegram 13, and Transfer 25.
 The current gate passes format, check, strict Clippy, all workspace tests,
 warning-denied docs, dependency policy, and diff validation.
 

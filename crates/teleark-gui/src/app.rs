@@ -10,6 +10,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     notification::Notification,
     scroll::ScrollableElement as _,
+    table::{TableEvent, TableState},
 };
 use teleark_core::{
     ApplicationError, FileKind, LibraryFilter, LibraryPage, LibraryQuery, LibrarySort,
@@ -22,8 +23,8 @@ use teleark_i18n::{
 use teleark_runtime::{
     AppearancePreference, ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary,
     DesktopPreferences, DesktopTelegram, DesktopTransfers, ManagedStorageMetrics,
-    TelegramAuthState, TelegramChatSummary, TelegramCredentialSource, TelegramFileFilter,
-    TelegramFilePage, TelegramFileSummary, TelegramIndexPage,
+    TelegramAuthState, TelegramChatSummary, TelegramCredentialSource, TelegramFilePage,
+    TelegramFileSummary, TelegramIndexPage,
 };
 use teleark_telegram::TelegramAccount;
 
@@ -32,7 +33,11 @@ use crate::{
     components::{self, Tone},
     layout::LayoutPolicy,
     library_state::{ImportActivity, ImportFeedback, LibraryContent, LibrarySnapshot},
-    screens, theme,
+    screens::{
+        self,
+        channel::{CHANNEL_FILE_PAGE_SIZE, ChannelFileTableDelegate},
+    },
+    theme,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,10 +232,12 @@ pub struct TeleArkApp {
     pub(crate) telegram_files_loading: bool,
     pub(crate) telegram_download: Option<(u64, ChannelDownloadState)>,
     pub(crate) selected_telegram_message_id: Option<i64>,
+    pub(crate) selected_channel_message_ids: BTreeSet<i64>,
     pub(crate) channel_batch_period: ChannelBatchPeriod,
-    pub(crate) channel_batch_kind: Option<FileKind>,
+    pub(crate) channel_batch_kinds: std::collections::HashSet<FileKind>,
     pub(crate) channel_batch_activity: ChannelBatchActivity,
     pub(crate) channel_batch_expanded: bool,
+    pub(crate) channel_file_table: Entity<TableState<ChannelFileTableDelegate>>,
     pub(crate) telegram_api_id: Entity<InputState>,
     pub(crate) telegram_api_hash: Entity<InputState>,
     pub(crate) telegram_phone: Entity<InputState>,
@@ -356,6 +363,13 @@ impl TeleArkApp {
                 )
                 .masked(true)
         });
+        let channel_file_table = cx.new(|cx| {
+            TableState::new(ChannelFileTableDelegate::new(), window, cx)
+                .sortable(false)
+                .col_movable(false)
+                .col_resizable(false)
+                .col_selectable(false)
+        });
         let search_subscription = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) && this.page == Page::Library {
                 this.refresh_library(cx);
@@ -363,6 +377,16 @@ impl TeleArkApp {
                 cx.notify();
             }
         });
+        let channel_table_subscription = cx.subscribe(
+            &channel_file_table,
+            |this, table, event: &TableEvent, cx| {
+                if let TableEvent::SelectRow(row) = event {
+                    this.selected_telegram_message_id =
+                        table.read(cx).delegate().message_id_at(*row);
+                    cx.notify();
+                }
+            },
+        );
         let nav_selection = match page {
             Page::Library | Page::FileDetail => "nav-all",
             Page::Transfers => "nav-transfers-all",
@@ -421,10 +445,12 @@ impl TeleArkApp {
             telegram_files_loading: false,
             telegram_download: None,
             selected_telegram_message_id: None,
+            selected_channel_message_ids: BTreeSet::new(),
             channel_batch_period: ChannelBatchPeriod::AnyTime,
-            channel_batch_kind: None,
+            channel_batch_kinds: std::collections::HashSet::new(),
             channel_batch_activity: ChannelBatchActivity::Idle,
             channel_batch_expanded: false,
+            channel_file_table,
             telegram_api_id,
             telegram_api_hash,
             telegram_phone,
@@ -463,7 +489,11 @@ impl TeleArkApp {
             qr_poll_task: None,
             telegram_login_generation: 0,
             telegram_file_generation: 0,
-            _subscriptions: vec![search_subscription, appearance_subscription],
+            _subscriptions: vec![
+                search_subscription,
+                appearance_subscription,
+                channel_table_subscription,
+            ],
         };
         if app.library.is_some() {
             app.refresh_library(cx);
@@ -684,6 +714,8 @@ impl TeleArkApp {
                         this.telegram_files.clear();
                         this.telegram_files_next = None;
                         this.telegram_files_exhausted = false;
+                        this.selected_telegram_message_id = None;
+                        this.selected_channel_message_ids.clear();
                         this.telegram_file_generation =
                             this.telegram_file_generation.wrapping_add(1);
                         if let Some(transfers) = this.transfers.as_ref() {
@@ -709,8 +741,12 @@ impl TeleArkApp {
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.telegram_download = None;
         self.selected_telegram_message_id = None;
+        self.selected_channel_message_ids.clear();
+        self.channel_batch_period = ChannelBatchPeriod::AnyTime;
+        self.channel_batch_kinds.clear();
         self.channel_batch_activity = ChannelBatchActivity::Idle;
         self.channel_batch_expanded = false;
+        self.refresh_channel_file_table(cx);
         self.load_selected_telegram_files(false, cx);
     }
 
@@ -723,11 +759,19 @@ impl TeleArkApp {
         };
         let before = append.then_some(self.telegram_files_next).flatten();
         let generation = self.telegram_file_generation;
+        if !append {
+            self.selected_telegram_message_id = None;
+            self.selected_channel_message_ids.clear();
+        }
         self.telegram_files_loading = true;
         self.telegram_activity = TelegramActivity::Working;
+        if !append {
+            self.refresh_channel_file_table(cx);
+        }
         cx.notify();
-        let work =
-            cx.background_spawn(async move { telegram.scan_file_page(chat_id, before, 200) });
+        let work = cx.background_spawn(async move {
+            telegram.scan_file_page(chat_id, before, CHANNEL_FILE_PAGE_SIZE)
+        });
         self.telegram_file_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
@@ -750,6 +794,7 @@ impl TeleArkApp {
                         this.telegram_activity = TelegramActivity::Failed(error.kind());
                     }
                 }
+                this.refresh_channel_file_table(cx);
                 cx.notify();
             })
             .ok();
@@ -1052,32 +1097,26 @@ impl TeleArkApp {
         if self.channel_batch_activity == ChannelBatchActivity::Preparing {
             return;
         }
-        let (Some(telegram), Some(library), Some(transfers), Some(chat_id)) = (
-            self.telegram.clone(),
+        let (Some(library), Some(transfers), Some(chat_id)) = (
             self.library.clone(),
             self.transfers.clone(),
             self.selected_chat_id,
         ) else {
             return;
         };
-        let now = current_system_unix_millis().unwrap_or(i64::MAX);
-        let after_unix_ms = match self.channel_batch_period {
-            ChannelBatchPeriod::AnyTime => None,
-            ChannelBatchPeriod::Past24Hours => Some(now.saturating_sub(24 * 60 * 60 * 1_000)),
-            ChannelBatchPeriod::Past7Days => Some(now.saturating_sub(7 * 24 * 60 * 60 * 1_000)),
-            ChannelBatchPeriod::Past30Days => Some(now.saturating_sub(30 * 24 * 60 * 60 * 1_000)),
-        };
-        let filter = TelegramFileFilter {
-            after_unix_ms,
-            before_unix_ms: None,
-            kind: self.channel_batch_kind,
-        };
+        let files: Vec<_> = self
+            .telegram_files
+            .iter()
+            .filter(|file| self.selected_channel_message_ids.contains(&file.message_id))
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            self.channel_batch_activity = ChannelBatchActivity::NoMatches;
+            cx.notify();
+            return;
+        }
         self.channel_batch_activity = ChannelBatchActivity::Preparing;
         let work = cx.background_spawn(async move {
-            let files = telegram.scan_filtered_files(chat_id, filter)?;
-            if files.is_empty() {
-                return Ok(None);
-            }
             let mut reserved = BTreeSet::new();
             let mut requests = Vec::with_capacity(files.len());
             for file in files {
@@ -1098,18 +1137,19 @@ impl TeleArkApp {
             let count = requests.len();
             transfers
                 .enqueue_channel_download_batch(requests)
-                .map(|batch_id| Some((batch_id, count)))
+                .map(|batch_id| (batch_id, count))
         });
         self.telegram_batch_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
                 this.channel_batch_activity = match result {
-                    Ok(Some((batch_id, count))) => {
+                    Ok((batch_id, count)) => {
                         this.expanded_transfer_batches.insert(batch_id);
+                        this.selected_channel_message_ids.clear();
+                        this.notify_channel_file_table(cx);
                         ChannelBatchActivity::Queued { batch_id, count }
                     }
-                    Ok(None) => ChannelBatchActivity::NoMatches,
                     Err(error) => ChannelBatchActivity::Failed(error.kind()),
                 };
                 cx.notify();
@@ -1588,6 +1628,7 @@ impl TeleArkApp {
                 input.set_placeholder(placeholder, window, input_cx);
             });
         }
+        self.refresh_channel_file_table(cx);
         cx.set_menus(crate::menus::application_menus(&self.localizer));
         cx.notify();
     }
@@ -2368,13 +2409,6 @@ fn append_file_name_suffix(file_name: &str, suffix: u32) -> String {
             || format!("{stem} ({suffix})"),
             |extension| format!("{stem} ({suffix}).{extension}"),
         )
-}
-
-fn current_system_unix_millis() -> Option<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
 }
 
 fn merge_telegram_file_page(
