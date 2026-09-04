@@ -2,42 +2,29 @@ use gpui::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
     div, prelude::FluentBuilder as _, px, rgba,
 };
-use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
+use teleark_i18n::format::format_bytes;
+use teleark_runtime::encrypted_part_plaintext_limit;
 
-use crate::{
-    app::{Page, TeleArkApp},
-    components,
-    layout::LayoutPolicy,
-    theme,
-};
+use crate::{app::TeleArkApp, components, layout::LayoutPolicy, theme};
 
 pub fn render_upload_overlay(
     app: &TeleArkApp,
     layout: LayoutPolicy,
     cx: &mut Context<TeleArkApp>,
 ) -> AnyElement {
-    let part_size_mib = app.preferences.upload_part_size_mib;
-    let part_size_label = app.tr_with(
-        "upload-part-size-mib",
-        teleark_i18n::MessageArgs::new().with(
-            "size",
-            teleark_i18n::format::format_integer(app.locale(), u64::from(part_size_mib)),
-        ),
-    );
-    let compatibility_part_size = app.tr_with(
-        "upload-part-size-mib",
-        teleark_i18n::MessageArgs::new().with(
-            "size",
-            teleark_i18n::format::format_integer(app.locale(), 1_900),
-        ),
-    );
-    let conservative_part_size = app.tr_with(
-        "upload-part-size-mib",
-        teleark_i18n::MessageArgs::new().with(
-            "size",
-            teleark_i18n::format::format_integer(app.locale(), 1_024),
-        ),
-    );
+    let part_size_label = format_bytes(app.locale(), encrypted_part_plaintext_limit());
+    let source_name = app
+        .upload_source
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| app.tr("upload-no-file-selected").to_string());
+    let source_path = app
+        .upload_source
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| app.tr("upload-select-file-description").to_string());
     let file_preview = div()
         .w(px(layout.upload_preview_width()))
         .h_full()
@@ -69,14 +56,14 @@ pub fn render_upload_overlay(
                 .max_w_full()
                 .truncate()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Movie_Archive.mkv"),
+                .child(source_name),
         )
         .child(
             div()
                 .mt_2()
                 .text_sm()
                 .text_color(theme::text_secondary())
-                .child("73.6 GB"),
+                .child(app.tr("transfer-value-unavailable")),
         )
         .child(
             div()
@@ -85,7 +72,7 @@ pub fn render_upload_overlay(
                 .text_center()
                 .text_xs()
                 .text_color(theme::text_muted())
-                .child("/Users/maxmeng/Movies/Movie_Archive.mkv"),
+                .child(source_path),
         )
         .child(
             components::button(
@@ -95,7 +82,8 @@ pub fn render_upload_overlay(
                 false,
             )
             .mt_5()
-            .w_full(),
+            .w_full()
+            .on_click(cx.listener(|this, _, _, cx| this.choose_upload_file(cx))),
         )
         .child(div().flex_1())
         .child(
@@ -128,9 +116,19 @@ pub fn render_upload_overlay(
         .flex_col()
         .overflow_y_scrollbar()
         .child(form_label(app.tr("upload-target-account")))
-        .child(select_field("maxmeng", app.tr("account-standard")))
+        .child(select_field(
+            app.telegram_account
+                .as_ref()
+                .map(|account| account.display_name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| app.tr("transfer-value-unavailable").to_string()),
+            app.tr("account-standard"),
+        ))
         .child(form_label(app.tr("upload-target-channel")).mt_4())
-        .child(select_field("My Storage", app.tr("channel-private")))
+        .child(select_field(
+            app.tr("upload-target-saved-messages"),
+            app.tr("channel-private"),
+        ))
         .child(form_label(app.tr("upload-storage-method")).mt_5())
         .child(check_row(
             app.tr("upload-automatic-multipart"),
@@ -146,15 +144,14 @@ pub fn render_upload_overlay(
                     div()
                         .flex_1()
                         .child(form_label(app.tr("upload-part-size")))
-                        .child(radio_row(
-                            compatibility_part_size,
-                            app.tr("upload-compatibility-mode"),
-                            part_size_mib == 1_900,
-                        ))
-                        .child(radio_row(
-                            conservative_part_size,
-                            app.tr("upload-conservative-mode"),
-                            part_size_mib == 1_024,
+                        .child(check_row(
+                            app.tr("upload-current-part-size"),
+                            app.tr_with(
+                                "upload-current-part-size-description",
+                                teleark_i18n::MessageArgs::new()
+                                    .with("size", part_size_label.clone()),
+                            ),
+                            true,
                         )),
                 )
                 .child(
@@ -169,17 +166,26 @@ pub fn render_upload_overlay(
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(app.tr("upload-estimate-title")),
                         )
-                        .child(estimate_row(app.tr("upload-estimate-parts"), "39"))
+                        .child(estimate_row(
+                            app.tr("upload-estimate-parts"),
+                            app.tr("transfer-value-unavailable"),
+                        ))
                         .child(estimate_row(
                             app.tr("upload-estimate-part-size"),
                             part_size_label,
                         ))
                         .child(estimate_row(
                             app.tr("upload-estimate-total-size"),
-                            "73.6 GB",
+                            app.tr("transfer-value-unavailable"),
                         ))
-                        .child(estimate_row(app.tr("upload-estimate-messages"), "40"))
-                        .child(estimate_row(app.tr("upload-estimate-time"), "≈ 48m")),
+                        .child(estimate_row(
+                            app.tr("upload-estimate-messages"),
+                            app.tr("transfer-value-unavailable"),
+                        ))
+                        .child(estimate_row(
+                            app.tr("upload-estimate-time"),
+                            app.tr("transfer-value-unavailable"),
+                        )),
                 ),
         )
         .child(
@@ -189,10 +195,17 @@ pub fn render_upload_overlay(
                 .border_t_1()
                 .border_color(theme::border())
                 .child(form_label(app.tr("upload-security")))
+                .child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(app.tr("upload-saved-messages-security-note")),
+                )
                 .child(check_row(
                     app.tr("upload-client-encryption"),
                     app.tr("upload-client-encryption-description"),
-                    app.preferences.upload_encrypt_content,
+                    true,
                 ))
                 .child(
                     div()
@@ -221,12 +234,12 @@ pub fn render_upload_overlay(
                 .child(check_row(
                     app.tr("upload-hide-filename"),
                     app.tr("upload-hide-filename-description"),
-                    app.preferences.upload_hide_file_name,
+                    true,
                 ))
                 .child(check_row(
                     app.tr("upload-encrypt-metadata"),
                     app.tr("upload-encrypt-metadata-description"),
-                    app.preferences.upload_encrypt_metadata,
+                    true,
                 )),
         );
 
@@ -257,12 +270,13 @@ pub fn render_upload_overlay(
                 Some(IconName::ArrowUp),
                 true,
             )
+            .disabled(
+                app.upload_source.is_none()
+                    || app.vault_status.locked
+                    || app.vault_activity == crate::app::VaultActivity::Working,
+            )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.show_upload = false;
-                this.upload_queued = true;
-                this.nav_selection = "nav-transfers-all";
-                this.selected_file = 0;
-                this.set_page(Page::Transfers, cx);
+                this.enqueue_vault_upload(cx);
             })),
         );
 
@@ -327,7 +341,7 @@ fn form_label(label: impl Into<SharedString>) -> gpui::Div {
         .child(label.into())
 }
 
-fn select_field(value: &'static str, hint: SharedString) -> AnyElement {
+fn select_field(value: impl Into<SharedString>, hint: SharedString) -> AnyElement {
     div()
         .mt_2()
         .h(px(38.0))
@@ -354,7 +368,7 @@ fn select_field(value: &'static str, hint: SharedString) -> AnyElement {
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .child(value),
+                .child(value.into()),
         )
         .child(
             div()
@@ -411,37 +425,6 @@ fn check_row(title: SharedString, description: SharedString, checked: bool) -> A
                         .child(description),
                 ),
         )
-        .into_any_element()
-}
-
-fn radio_row(title: impl Into<SharedString>, hint: SharedString, selected: bool) -> AnyElement {
-    div()
-        .mt_3()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .size(px(15.0))
-                .p(px(3.0))
-                .rounded_full()
-                .border_1()
-                .border_color(if selected {
-                    theme::blue()
-                } else {
-                    theme::border()
-                })
-                .when(selected, |radio| {
-                    radio.child(div().size_full().rounded_full().bg(theme::blue()))
-                }),
-        )
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(title.into()),
-        )
-        .child(div().text_xs().text_color(theme::text_muted()).child(hint))
         .into_any_element()
 }
 

@@ -17,9 +17,11 @@ Only completed packages have this disaster-recovery guarantee. Parts uploaded be
 The current codec authenticates the envelope/public header, decrypts only after
 File Key resolution, validates bounded canonical metadata and exact
 part/container bindings, derives opaque remote names, and redacts sensitive
-fields from `Debug`. Runtime integration establishes the recovery mechanics;
-the desktop app still lacks the transfer/key-unlock owner and therefore does not
-yet present this as a user-facing recovery guarantee.
+fields from `Debug`. The retained desktop Vault owner now uses those mechanics
+for Saved Messages upload, authenticated managed-file discovery, and verified
+restore. This remains an alpha workflow rather than a release recovery
+guarantee because the format is provisional and credentialed crash/system and
+independent security tests remain.
 
 ## Design properties
 
@@ -41,6 +43,18 @@ When hidden filenames are enabled, upload opaque ASCII names derived only from p
 <lowercase-hex-package-id>.v1.000000.part.tav
 <lowercase-hex-package-id>.v1.000001.part.tav
 ```
+
+The provisional discovery captions paired with those names are:
+
+```text
+teleark-manifest-v1
+teleark-object-v1-<lowercase-hex-package-id>-<eight-digit-lowercase-hex-part-index>
+```
+
+The raw Saved Messages UI may use the exact name/caption pair to explain that
+an object is a candidate manifest or part. This is classification only: it must
+not expose encrypted metadata as trusted or claim a package is recoverable
+until the bounded codec authenticates the manifest and validates its locators.
 
 No original filename/path appears in the Telegram remote name or caption. Remote naming intentionally leaks package linkage, kind, format generation, and part ordering; it does not promise traffic-analysis resistance. A final naming alphabet/length and Telegram behavior must be verified before v1 fixtures are frozen.
 
@@ -177,7 +191,11 @@ authenticate Telegram account
  -> report incomplete/corrupt/unsupported packages separately
 ```
 
-Do not trust remote filenames alone. Duplicate package IDs/generations, conflicting manifests, missing parts, cross-account locators, and unexpected objects require deterministic conflict handling and user-visible structured status. Recovery never deletes remote objects automatically.
+Do not trust remote filenames alone. Discovery name/caption pairs are only
+candidates; the envelope and manifest must still authenticate. Duplicate
+package IDs/generations, conflicting manifests, missing parts, cross-account
+locators, and unexpected objects require deterministic conflict handling and
+user-visible structured status. Recovery never deletes remote objects automatically.
 
 ## Candidate fixtures and remaining recovery tests
 

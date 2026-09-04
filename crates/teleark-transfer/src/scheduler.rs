@@ -62,6 +62,16 @@ impl SchedulerConfig {
             max_queued_parts,
         })
     }
+
+    #[must_use]
+    pub const fn max_active(self) -> usize {
+        self.max_active
+    }
+
+    #[must_use]
+    pub const fn max_per_file(self) -> usize {
+        self.max_per_file
+    }
 }
 
 /// One application-part scheduling request.
@@ -130,6 +140,19 @@ impl TransferScheduler {
 
     pub fn enqueue(&mut self, item: WorkItem) -> Result<(), TransferEngineError> {
         self.enqueue_batch(&[item])
+    }
+
+    /// Applies controller-selected limits without interrupting already active
+    /// work. A lower bound takes effect for the next dispatch; active permits
+    /// drain naturally and are never revoked in the middle of an RPC.
+    pub fn reconfigure(&mut self, config: SchedulerConfig) -> Result<(), TransferEngineError> {
+        if self.queue.len() > config.max_queued_parts {
+            return Err(TransferEngineError::QueueFull {
+                limit: config.max_queued_parts,
+            });
+        }
+        self.config = config;
+        Ok(())
     }
 
     /// Atomically add a batch or reject it without partially changing the queue.

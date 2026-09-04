@@ -4,4 +4,3 @@ pub mod library;
 pub mod settings;
 pub mod transfers;
 pub mod upload;
-pub mod vault;

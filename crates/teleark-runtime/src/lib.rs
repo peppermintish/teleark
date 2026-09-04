@@ -17,10 +17,10 @@ use teleark_core::{
     LogicalFileId,
 };
 use teleark_storage::{
-    AccountRecord, ChatRecord, Database, FileSearchFacets, LogicalFileRecord,
-    NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
+    AccountRecord, CachedTelegramFileRecord, ChatRecord, Database, FileSearchFacets,
+    LogicalFileRecord, NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
     NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
-    SearchQuery, SettingRecord, StorageError, TelegramIndexStateRecord,
+    SearchQuery, SettingRecord, StorageError, TelegramIndexStateRecord, VaultMetadataRecord,
 };
 use teleark_telegram::TelegramAccount;
 
@@ -29,23 +29,36 @@ mod credentials;
 mod diagnostics;
 mod telegram;
 mod transfer;
+mod vault;
 
 pub use channel_transfer::{
     ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
-    ChannelDownloadFailureStage, ChannelDownloadRequest, ChannelDownloadSnapshot,
-    ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers, TransferRates,
-    available_download_destination,
+    ChannelDownloadFailureStage, ChannelDownloadPartEvent, ChannelDownloadRequest,
+    ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers,
+    TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
 pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
+pub use teleark_telegram::DownloadPartState;
+pub use teleark_transfer::{
+    ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
+    DOWNLOAD_PART_SIZE_BYTES, LaneTelemetry, MemoryCounters, ParameterBounds, PartCounters,
+    QueueCounters, SoftLimitPolicy, TransferBottleneck, TransferControlParameters,
+    TransferTelemetrySnapshot, TunableParameter,
+};
 pub use telegram::{
     DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFileFilter, TelegramFilePage,
-    TelegramFileSummary, default_telegram_session_path,
+    TelegramFileSummary, TelegramScanCancellation, default_telegram_session_path,
 };
 pub use transfer::{
     EncryptedRemoteTransport, ManifestPublishRequest, ManifestRecoveryReport, ProductionTransferIo,
     RecoveredManifest, RejectedManifest, RemoteByteObject, RemoteObjectStore,
-    SqliteCheckpointStore, TelegramObjectStore, encrypted_part_sizes, recover_remote_manifests,
+    SqliteCheckpointStore, TelegramObjectStore, encrypted_part_plaintext_limit,
+    encrypted_part_sizes, recover_remote_manifests,
+};
+pub use vault::{
+    DesktopVault, ManagedVaultFile, ManagedVaultScan, VaultStatus, VaultTransferDirection,
+    VaultTransferSnapshot, VaultTransferState,
 };
 
 const STORAGE_QUEUE_CAPACITY: usize = 64;
@@ -70,6 +83,7 @@ pub struct DesktopPreferences {
     pub upload_encrypt_content: bool,
     pub upload_hide_file_name: bool,
     pub upload_encrypt_metadata: bool,
+    pub transfer_soft_limit_policy: SoftLimitPolicy,
     pub lock_vault_when_hidden: bool,
     pub index_batch_size: u16,
     pub notify_download_completed: bool,
@@ -86,6 +100,7 @@ impl Default for DesktopPreferences {
             upload_encrypt_content: true,
             upload_hide_file_name: true,
             upload_encrypt_metadata: true,
+            transfer_soft_limit_policy: SoftLimitPolicy::AdaptiveOverride,
             lock_vault_when_hidden: true,
             index_batch_size: 1_000,
             notify_download_completed: true,
@@ -459,6 +474,37 @@ impl DesktopLibrary {
         self.worker.save_telegram_sources(account, chats)
     }
 
+    /// Returns already projected files for immediate source browsing. These
+    /// rows are a cache only and do not imply complete history coverage.
+    pub fn cached_telegram_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        limit: usize,
+    ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+        self.worker
+            .cached_telegram_files(
+                teleark_core::AccountId::new(account_id),
+                teleark_core::ChatId::new(chat_id),
+                limit,
+            )
+            .map(|files| files.into_iter().map(cached_file_summary).collect())
+    }
+
+    /// Projects files observed by interactive browsing into the local cache
+    /// without advancing durable index coverage or its cursor.
+    pub fn cache_telegram_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        files: &[TelegramFileSummary],
+    ) -> Result<u64, ApplicationError> {
+        let account_id = teleark_core::AccountId::new(account_id);
+        let chat_id = teleark_core::ChatId::new(chat_id);
+        let files = telegram_file_upserts(account_id, chat_id, files)?;
+        self.worker.upsert_remote_files(files)
+    }
+
     /// Fetches one bounded Telegram history page and atomically projects every
     /// document into SQLite. The returned cursor advances over non-file
     /// messages too, so restart cannot stall on a text-only history region.
@@ -489,27 +535,7 @@ impl DesktopLibrary {
             .map(teleark_core::MessageId::get)
             .or(before_message_id);
         let page = telegram.scan_file_page(chat_id.get(), durable_before, limit)?;
-        let files = page
-            .files
-            .iter()
-            .map(|file| RemoteFileUpsert {
-                account_id,
-                chat_id,
-                message_id: teleark_core::MessageId::new(file.message_id),
-                revision: u64::try_from(file.modified_at_unix_ms.max(0)).unwrap_or_default(),
-                remote_key: file.message_id.to_be_bytes().to_vec(),
-                name: if file.file_name.trim().is_empty() {
-                    format!("telegram-document-{}", file.message_id)
-                } else {
-                    file.file_name.clone()
-                },
-                size_bytes: file.size_bytes,
-                kind: classify_file(Path::new(&file.file_name)),
-                mime_type: file.mime_type.clone(),
-                caption: (!file.caption.is_empty()).then(|| file.caption.clone()),
-                modified_at_unix_ms: file.modified_at_unix_ms,
-            })
-            .collect();
+        let files = telegram_file_upserts(account_id, chat_id, &page.files)?;
         let page_files = self.worker.upsert_remote_files(files)?;
         let files_indexed = previous
             .as_ref()
@@ -608,6 +634,13 @@ enum StorageRequest {
     ClearTelegramCredentials {
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    VaultMetadata {
+        reply: SyncSender<Result<Option<VaultMetadataRecord>, ApplicationError>>,
+    },
+    SaveVaultMetadata {
+        record: VaultMetadataRecord,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     SaveTelegramSources {
         account: AccountRecord,
         chats: Vec<ChatRecord>,
@@ -616,6 +649,12 @@ enum StorageRequest {
     UpsertRemoteFiles {
         files: Vec<RemoteFileUpsert>,
         reply: SyncSender<Result<u64, ApplicationError>>,
+    },
+    CachedTelegramFiles {
+        account_id: teleark_core::AccountId,
+        chat_id: teleark_core::ChatId,
+        limit: usize,
+        reply: SyncSender<Result<Vec<CachedTelegramFileRecord>, ApplicationError>>,
     },
     TelegramIndexState {
         account_id: teleark_core::AccountId,
@@ -834,6 +873,18 @@ impl StorageWorker {
         })
     }
 
+    fn vault_metadata(&self) -> Result<Option<VaultMetadataRecord>, ApplicationError> {
+        self.request("vault_metadata", |reply| StorageRequest::VaultMetadata {
+            reply,
+        })
+    }
+
+    fn save_vault_metadata(&self, record: VaultMetadataRecord) -> Result<(), ApplicationError> {
+        self.request("save_vault_metadata", |reply| {
+            StorageRequest::SaveVaultMetadata { record, reply }
+        })
+    }
+
     fn save_telegram_sources(
         &self,
         account: &TelegramAccount,
@@ -873,6 +924,22 @@ impl StorageWorker {
     fn upsert_remote_files(&self, files: Vec<RemoteFileUpsert>) -> Result<u64, ApplicationError> {
         self.request("upsert_remote_files", |reply| {
             StorageRequest::UpsertRemoteFiles { files, reply }
+        })
+    }
+
+    fn cached_telegram_files(
+        &self,
+        account_id: teleark_core::AccountId,
+        chat_id: teleark_core::ChatId,
+        limit: usize,
+    ) -> Result<Vec<CachedTelegramFileRecord>, ApplicationError> {
+        self.request("cached_telegram_files", |reply| {
+            StorageRequest::CachedTelegramFiles {
+                account_id,
+                chat_id,
+                limit,
+                reply,
+            }
         })
     }
 
@@ -1036,6 +1103,16 @@ fn storage_loop(
                 let result = clear_telegram_credentials(&mut database);
                 let _ = reply.send(result);
             }
+            StorageRequest::VaultMetadata { reply } => {
+                let result = database.vault_metadata().map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::SaveVaultMetadata { record, reply } => {
+                let result = database
+                    .save_vault_metadata(&record)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
             StorageRequest::SaveTelegramSources {
                 account,
                 chats,
@@ -1046,6 +1123,17 @@ fn storage_loop(
             }
             StorageRequest::UpsertRemoteFiles { files, reply } => {
                 let result = upsert_remote_files(&mut database, &files);
+                let _ = reply.send(result);
+            }
+            StorageRequest::CachedTelegramFiles {
+                account_id,
+                chat_id,
+                limit,
+                reply,
+            } => {
+                let result = database
+                    .cached_telegram_files(account_id, chat_id, limit)
+                    .map_err(map_storage_error);
                 let _ = reply.send(result);
             }
             StorageRequest::TelegramIndexState {
@@ -1119,6 +1207,50 @@ fn upsert_remote_files(
             .map_err(map_storage_error)?;
     }
     u64::try_from(files.len()).map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))
+}
+
+fn telegram_file_upserts(
+    account_id: teleark_core::AccountId,
+    chat_id: teleark_core::ChatId,
+    files: &[TelegramFileSummary],
+) -> Result<Vec<RemoteFileUpsert>, ApplicationError> {
+    files
+        .iter()
+        .map(|file| {
+            let revision = u64::try_from(file.modified_at_unix_ms.max(0))
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+            Ok(RemoteFileUpsert {
+                account_id,
+                chat_id,
+                message_id: teleark_core::MessageId::new(file.message_id),
+                revision,
+                remote_key: file.message_id.to_be_bytes().to_vec(),
+                name: if file.file_name.trim().is_empty() {
+                    format!("telegram-document-{}", file.message_id)
+                } else {
+                    file.file_name.clone()
+                },
+                size_bytes: file.size_bytes,
+                kind: classify_file(Path::new(&file.file_name)),
+                mime_type: file.mime_type.clone(),
+                caption: (!file.caption.is_empty()).then(|| file.caption.clone()),
+                sent_at_unix_ms: file.sent_at_unix_ms,
+                modified_at_unix_ms: file.modified_at_unix_ms,
+            })
+        })
+        .collect()
+}
+
+fn cached_file_summary(file: CachedTelegramFileRecord) -> TelegramFileSummary {
+    TelegramFileSummary {
+        message_id: file.message_id.get(),
+        sent_at_unix_ms: file.sent_at_unix_ms,
+        modified_at_unix_ms: file.modified_at_unix_ms,
+        file_name: file.file_name,
+        caption: file.caption.unwrap_or_default(),
+        mime_type: file.mime_type,
+        size_bytes: file.size_bytes,
+    }
 }
 
 fn search_database(
@@ -1244,6 +1376,14 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
             "upload_encrypt_metadata" => {
                 preferences.upload_encrypt_metadata = parse_bool_setting(&setting.value)?;
             }
+            "transfer_soft_limit_policy" => {
+                preferences.transfer_soft_limit_policy = match setting.value.as_str() {
+                    "respect" => SoftLimitPolicy::Respect,
+                    "adaptive_override" => SoftLimitPolicy::AdaptiveOverride,
+                    "ignore" => SoftLimitPolicy::Ignore,
+                    _ => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+                };
+            }
             "lock_vault_when_hidden" => {
                 preferences.lock_vault_when_hidden = parse_bool_setting(&setting.value)?;
             }
@@ -1311,6 +1451,11 @@ fn store_preferences(
         AppearancePreference::Light => "light",
         AppearancePreference::Dark => "dark",
     };
+    let transfer_soft_limit_policy = match preferences.transfer_soft_limit_policy {
+        SoftLimitPolicy::Respect => "respect",
+        SoftLimitPolicy::AdaptiveOverride => "adaptive_override",
+        SoftLimitPolicy::Ignore => "ignore",
+    };
     let values = [
         ("managed_files_root", managed_root.to_owned()),
         // Clear the retired values so older releases cannot reopen a stale
@@ -1336,6 +1481,10 @@ fn store_preferences(
         (
             "upload_encrypt_metadata",
             bool_setting(preferences.upload_encrypt_metadata),
+        ),
+        (
+            "transfer_soft_limit_policy",
+            transfer_soft_limit_policy.to_owned(),
         ),
         (
             "lock_vault_when_hidden",
@@ -1656,6 +1805,7 @@ mod tests {
             upload_encrypt_content: false,
             upload_hide_file_name: false,
             upload_encrypt_metadata: false,
+            transfer_soft_limit_policy: SoftLimitPolicy::Ignore,
             lock_vault_when_hidden: false,
             index_batch_size: 500,
             notify_download_completed: false,
@@ -1917,6 +2067,58 @@ mod tests {
             cleared
                 .telegram_credentials_status()
                 .expect("read cleared credentials"),
+            None
+        );
+    }
+
+    #[test]
+    fn interactive_telegram_files_are_cached_without_index_coverage() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("open library");
+        let account = TelegramAccount {
+            id: 11,
+            display_name: "fixture account".to_owned(),
+            username: None,
+        };
+        let chat = TelegramChatSummary {
+            id: 22,
+            name: "fixture chat".to_owned(),
+            username: None,
+            kind: teleark_telegram::TelegramChatKind::Channel,
+        };
+        library
+            .save_telegram_sources(&account, std::slice::from_ref(&chat))
+            .expect("save source identity");
+        let file = TelegramFileSummary {
+            message_id: 33,
+            sent_at_unix_ms: 1_000,
+            modified_at_unix_ms: 1_100,
+            file_name: "cached.pdf".to_owned(),
+            caption: "cached caption".to_owned(),
+            mime_type: Some("application/pdf".to_owned()),
+            size_bytes: 44,
+        };
+        assert_eq!(
+            library
+                .cache_telegram_files(account.id, chat.id, std::slice::from_ref(&file))
+                .expect("cache browsed file"),
+            1
+        );
+        assert_eq!(
+            library
+                .cached_telegram_files(account.id, chat.id, 5_000)
+                .expect("read cached file"),
+            vec![file]
+        );
+        assert_eq!(
+            library
+                .worker
+                .telegram_index_state(
+                    teleark_core::AccountId::new(account.id),
+                    teleark_core::ChatId::new(chat.id),
+                )
+                .expect("read index state"),
             None
         );
     }

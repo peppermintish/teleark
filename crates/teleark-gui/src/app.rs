@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -22,11 +22,12 @@ use teleark_i18n::{
 };
 use teleark_runtime::{
     AppearancePreference, ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary,
-    DesktopPreferences, DesktopTelegram, DesktopTransfers, ManagedStorageMetrics,
-    TelegramAuthState, TelegramChatSummary, TelegramCredentialSource, TelegramFilePage,
-    TelegramFileSummary, TelegramIndexPage,
+    DesktopPreferences, DesktopTelegram, DesktopTransfers, DesktopVault, ManagedStorageMetrics,
+    ManagedVaultFile, TelegramAuthState, TelegramChatSummary, TelegramCredentialSource,
+    TelegramFilePage, TelegramFileSummary, TelegramIndexPage, TelegramScanCancellation,
+    VaultStatus,
 };
-use teleark_telegram::TelegramAccount;
+use teleark_telegram::{TelegramAccount, TelegramChatKind};
 
 use crate::{
     DismissOverlay, MinimizeWindow, ToggleFullscreen, ZoomWindow,
@@ -35,7 +36,10 @@ use crate::{
     library_state::{ImportActivity, ImportFeedback, LibraryContent, LibrarySnapshot},
     screens::{
         self,
-        channel::{CHANNEL_FILE_PAGE_SIZE, ChannelFileTableDelegate},
+        channel::{
+            CHANNEL_FILE_INITIAL_SCAN, CHANNEL_FILE_LIST_CAPACITY, CHANNEL_FILE_LOAD_MORE_SCAN,
+            CHANNEL_FILE_SCAN_CHUNK, ChannelFileTableDelegate,
+        },
     },
     theme,
 };
@@ -45,7 +49,6 @@ pub enum Page {
     Library,
     Transfers,
     FileDetail,
-    Vault,
     Channel,
     Settings,
 }
@@ -63,6 +66,13 @@ pub(crate) enum TelegramActivity {
     Idle,
     Working,
     Failed(teleark_core::ApplicationErrorKind),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SavedMessagesView {
+    #[default]
+    TelegramFiles,
+    TeleArkFiles,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -188,6 +198,16 @@ pub struct RuntimeStartup {
     pub library: Result<DesktopLibrary, ApplicationError>,
     pub telegram: Result<DesktopTelegram, ApplicationError>,
     pub transfers: Result<DesktopTransfers, ApplicationError>,
+    pub vault: Result<DesktopVault, ApplicationError>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum VaultActivity {
+    #[default]
+    Idle,
+    Working,
+    Succeeded,
+    Failed(teleark_core::ApplicationErrorKind),
 }
 
 struct CompactNavItem {
@@ -208,10 +228,21 @@ pub struct TeleArkApp {
     pub(crate) selected_file: usize,
     pub(crate) selected_transfer_keys: BTreeSet<u64>,
     pub(crate) expanded_transfer_batches: BTreeSet<u64>,
+    pub(crate) transfer_inspector_replay: bool,
+    pub(crate) transfer_replay_cursor: usize,
     pub(crate) vault_locked: bool,
     pub(crate) recovery_visible: bool,
+    pub(crate) vault_status: VaultStatus,
+    pub(crate) vault_activity: VaultActivity,
+    pub(crate) vault_recovery_secret: Option<String>,
+    pub(crate) vault_password: Entity<InputState>,
+    pub(crate) vault_new_password: Entity<InputState>,
+    pub(crate) vault_recovery_key: Entity<InputState>,
+    pub(crate) managed_vault_files: Vec<ManagedVaultFile>,
+    pub(crate) managed_vault_rejected: usize,
+    pub(crate) upload_source: Option<std::path::PathBuf>,
     pub(crate) nav_selection: &'static str,
-    pub(crate) selected_source: &'static str,
+    pub(crate) saved_messages_view: SavedMessagesView,
     pub(crate) library_content: LibraryContent,
     pub(crate) import_activity: ImportActivity,
     pub(crate) import_feedback: Option<ImportFeedback>,
@@ -230,6 +261,10 @@ pub struct TeleArkApp {
     pub(crate) telegram_files_next: Option<i64>,
     pub(crate) telegram_files_exhausted: bool,
     pub(crate) telegram_files_loading: bool,
+    pub(crate) telegram_files_scanned: u64,
+    pub(crate) telegram_files_scan_target: u64,
+    pub(crate) telegram_files_slow: bool,
+    pub(crate) telegram_files_retry_append: bool,
     pub(crate) telegram_download: Option<(u64, ChannelDownloadState)>,
     pub(crate) selected_telegram_message_id: Option<i64>,
     pub(crate) selected_channel_message_ids: BTreeSet<i64>,
@@ -254,6 +289,7 @@ pub struct TeleArkApp {
     library: Option<DesktopLibrary>,
     telegram: Option<DesktopTelegram>,
     pub(crate) transfers: Option<DesktopTransfers>,
+    pub(crate) vault: Option<DesktopVault>,
     library_query_generation: u64,
     pending_locale_override: Option<LocaleOverrideChoice>,
     library_task: Option<Task<()>>,
@@ -263,6 +299,8 @@ pub struct TeleArkApp {
     telegram_api_id_task: Option<Task<()>>,
     telegram_task: Option<Task<()>>,
     telegram_file_task: Option<Task<()>>,
+    telegram_file_slow_task: Option<Task<()>>,
+    telegram_file_cancellation: Option<TelegramScanCancellation>,
     telegram_download_task: Option<Task<()>>,
     telegram_batch_task: Option<Task<()>>,
     preference_task: Option<Task<()>>,
@@ -270,6 +308,10 @@ pub struct TeleArkApp {
     storage_metrics_task: Option<Task<()>>,
     transfer_monitor_task: Option<Task<()>>,
     transfer_refresh_task: Option<Task<()>>,
+    vault_task: Option<Task<()>>,
+    vault_scan_task: Option<Task<()>>,
+    vault_download_task: Option<Task<()>>,
+    upload_picker_task: Option<Task<()>>,
     qr_poll_task: Option<Task<()>>,
     telegram_login_generation: u64,
     telegram_file_generation: u64,
@@ -294,6 +336,7 @@ impl TeleArkApp {
             library,
             telegram,
             transfers,
+            vault,
         } = runtime;
         let credential_status =
             library
@@ -363,6 +406,27 @@ impl TeleArkApp {
                 )
                 .masked(true)
         });
+        let vault_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(
+                    localizer.translate_or_id(MessageId::new("vault-password-placeholder")),
+                )
+                .masked(true)
+        });
+        let vault_new_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(
+                    localizer.translate_or_id(MessageId::new("vault-new-password-placeholder")),
+                )
+                .masked(true)
+        });
+        let vault_recovery_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(
+                    localizer.translate_or_id(MessageId::new("vault-recovery-placeholder")),
+                )
+                .masked(true)
+        });
         let channel_file_table = cx.new(|cx| {
             TableState::new(ChannelFileTableDelegate::new(), window, cx)
                 .sortable(false)
@@ -390,8 +454,7 @@ impl TeleArkApp {
         let nav_selection = match page {
             Page::Library | Page::FileDetail => "nav-all",
             Page::Transfers => "nav-transfers-all",
-            Page::Vault => "nav-vault",
-            Page::Channel => "nav-telegram-sources",
+            Page::Channel => "nav-channel",
             Page::Settings => "nav-settings",
         };
         let (library, library_content, locale_persistence) = match library {
@@ -407,6 +470,16 @@ impl TeleArkApp {
             ),
         };
 
+        let vault_status = vault
+            .as_ref()
+            .map(DesktopVault::status)
+            .unwrap_or(VaultStatus {
+                configured: false,
+                locked: true,
+                created_at_unix_ms: None,
+                password_generation: None,
+                recovery_generation: None,
+            });
         let mut app = Self {
             page,
             localizer,
@@ -417,10 +490,25 @@ impl TeleArkApp {
             selected_file: 0,
             selected_transfer_keys: BTreeSet::new(),
             expanded_transfer_batches: BTreeSet::new(),
-            vault_locked: true,
+            transfer_inspector_replay: false,
+            transfer_replay_cursor: 0,
+            vault_locked: vault_status.locked,
             recovery_visible: false,
+            vault_status,
+            vault_activity: if vault.is_ok() {
+                VaultActivity::Idle
+            } else {
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
+            },
+            vault_recovery_secret: None,
+            vault_password,
+            vault_new_password,
+            vault_recovery_key,
+            managed_vault_files: Vec::new(),
+            managed_vault_rejected: 0,
+            upload_source: None,
             nav_selection,
-            selected_source: "Cinema 4K",
+            saved_messages_view: SavedMessagesView::TelegramFiles,
             library_content,
             import_activity: ImportActivity::Idle,
             import_feedback: None,
@@ -443,6 +531,10 @@ impl TeleArkApp {
             telegram_files_next: None,
             telegram_files_exhausted: false,
             telegram_files_loading: false,
+            telegram_files_scanned: 0,
+            telegram_files_scan_target: 0,
+            telegram_files_slow: false,
+            telegram_files_retry_append: false,
             telegram_download: None,
             selected_telegram_message_id: None,
             selected_channel_message_ids: BTreeSet::new(),
@@ -470,6 +562,7 @@ impl TeleArkApp {
             library,
             telegram: telegram.ok(),
             transfers: transfers.ok(),
+            vault: vault.ok(),
             library_query_generation: 0,
             pending_locale_override: None,
             library_task: None,
@@ -479,6 +572,8 @@ impl TeleArkApp {
             telegram_api_id_task: None,
             telegram_task: None,
             telegram_file_task: None,
+            telegram_file_slow_task: None,
+            telegram_file_cancellation: None,
             telegram_download_task: None,
             telegram_batch_task: None,
             preference_task: None,
@@ -486,6 +581,10 @@ impl TeleArkApp {
             storage_metrics_task: None,
             transfer_monitor_task: None,
             transfer_refresh_task: None,
+            vault_task: None,
+            vault_scan_task: None,
+            vault_download_task: None,
+            upload_picker_task: None,
             qr_poll_task: None,
             telegram_login_generation: 0,
             telegram_file_generation: 0,
@@ -495,7 +594,7 @@ impl TeleArkApp {
                 channel_table_subscription,
             ],
         };
-        if app.library.is_some() {
+        if app.library.is_some() && matches!(app.page, Page::Library | Page::FileDetail) {
             app.refresh_library(cx);
         }
         app.start_transfer_refresh(cx);
@@ -708,7 +807,17 @@ impl TeleArkApp {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(chats) => {
-                        this.selected_chat_id = chats.first().map(|chat| chat.id);
+                        this.selected_chat_id = chats
+                            .iter()
+                            .find(|chat| chat.kind == TelegramChatKind::Channel)
+                            .or_else(|| {
+                                this.telegram_account.as_ref().and_then(|account| {
+                                    chats.iter().find(|chat| {
+                                        chat.kind == TelegramChatKind::User && chat.id == account.id
+                                    })
+                                })
+                            })
+                            .map(|chat| chat.id);
                         this.telegram_chats = chats;
                         this.telegram_activity = TelegramActivity::Idle;
                         this.telegram_files.clear();
@@ -732,13 +841,13 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_telegram_chat(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.cancel_telegram_file_load(cx);
+        self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.selected_chat_id = Some(chat_id);
         self.telegram_index = None;
         self.telegram_files.clear();
         self.telegram_files_next = None;
         self.telegram_files_exhausted = false;
-        self.telegram_files_loading = false;
-        self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.telegram_download = None;
         self.selected_telegram_message_id = None;
         self.selected_channel_message_ids.clear();
@@ -750,55 +859,259 @@ impl TeleArkApp {
         self.load_selected_telegram_files(false, cx);
     }
 
+    pub(crate) fn select_channel(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.nav_selection = "nav-channel";
+        self.saved_messages_view = SavedMessagesView::TelegramFiles;
+        self.set_page(Page::Channel, cx);
+        if self.selected_chat_id != Some(chat_id) || self.telegram_files.is_empty() {
+            self.select_telegram_chat(chat_id, cx);
+        }
+    }
+
+    pub(crate) fn select_saved_messages(
+        &mut self,
+        view: SavedMessagesView,
+        cx: &mut Context<Self>,
+    ) {
+        self.saved_messages_view = view;
+        self.nav_selection = match view {
+            SavedMessagesView::TelegramFiles => "nav-saved-messages-telegram",
+            SavedMessagesView::TeleArkFiles => "nav-saved-messages-teleark",
+        };
+        self.set_page(Page::Channel, cx);
+        let Some(chat_id) = self.saved_messages_chat_id() else {
+            cx.notify();
+            return;
+        };
+        if self.selected_chat_id != Some(chat_id) || self.telegram_files.is_empty() {
+            self.select_telegram_chat(chat_id, cx);
+        } else {
+            self.refresh_channel_file_table(cx);
+            cx.notify();
+        }
+        if view == SavedMessagesView::TeleArkFiles {
+            self.scan_managed_vault_files(cx);
+        }
+    }
+
+    pub(crate) fn saved_messages_chat_id(&self) -> Option<i64> {
+        let account_id = self.telegram_account.as_ref()?.id;
+        self.telegram_chats
+            .iter()
+            .find(|chat| chat.kind == TelegramChatKind::User && chat.id == account_id)
+            .map(|chat| chat.id)
+    }
+
+    pub(crate) fn viewing_saved_messages(&self) -> bool {
+        self.saved_messages_chat_id().is_some_and(|chat_id| {
+            self.page == Page::Channel && self.selected_chat_id == Some(chat_id)
+        })
+    }
+
     pub(crate) fn load_selected_telegram_files(&mut self, append: bool, cx: &mut Context<Self>) {
-        if self.telegram_files_loading || (append && self.telegram_files_exhausted) {
+        if append && (self.telegram_files_loading || self.telegram_files_exhausted) {
             return;
         }
-        let (Some(telegram), Some(chat_id)) = (self.telegram.clone(), self.selected_chat_id) else {
+        if !append {
+            self.cancel_telegram_file_load(cx);
+        }
+        let (Some(telegram), Some(library), Some(account), Some(chat_id)) = (
+            self.telegram.clone(),
+            self.library.clone(),
+            self.telegram_account.clone(),
+            self.selected_chat_id,
+        ) else {
             return;
         };
         let before = append.then_some(self.telegram_files_next).flatten();
+        let account_id = account.id;
+        let preserve_existing_rows = !self.telegram_files.is_empty();
         let generation = self.telegram_file_generation;
+        let target = if append {
+            CHANNEL_FILE_LOAD_MORE_SCAN
+        } else {
+            CHANNEL_FILE_INITIAL_SCAN
+        };
+        let cancellation = TelegramScanCancellation::new();
+        self.telegram_file_cancellation = Some(cancellation.clone());
         if !append {
             self.selected_telegram_message_id = None;
             self.selected_channel_message_ids.clear();
         }
         self.telegram_files_loading = true;
+        self.telegram_files_scanned = 0;
+        self.telegram_files_scan_target = u64::try_from(target).unwrap_or(u64::MAX);
+        self.telegram_files_slow = false;
+        self.telegram_files_retry_append = append;
         self.telegram_activity = TelegramActivity::Working;
-        if !append {
-            self.refresh_channel_file_table(cx);
-        }
+        self.refresh_channel_file_table(cx);
         cx.notify();
-        let work = cx.background_spawn(async move {
-            telegram.scan_file_page(chat_id, before, CHANNEL_FILE_PAGE_SIZE)
-        });
-        self.telegram_file_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
+
+        self.telegram_file_slow_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_secs(3)).await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
-                if this.selected_chat_id != Some(chat_id)
-                    || this.telegram_file_generation != generation
-                {
-                    return;
+                if this.telegram_file_generation == generation && this.telegram_files_loading {
+                    this.telegram_files_slow = true;
+                    this.refresh_channel_file_table(cx);
+                    cx.notify();
                 }
-                this.telegram_files_loading = false;
-                match result {
-                    Ok(page) => {
-                        let (next, exhausted) =
-                            merge_telegram_file_page(&mut this.telegram_files, page, append);
-                        this.telegram_files_next = next;
-                        this.telegram_files_exhausted = exhausted;
-                        this.telegram_activity = TelegramActivity::Idle;
-                    }
-                    Err(error) => {
-                        this.telegram_activity = TelegramActivity::Failed(error.kind());
-                    }
-                }
-                this.refresh_channel_file_table(cx);
-                cx.notify();
             })
             .ok();
         }));
+
+        let background = cx.background_executor().clone();
+        self.telegram_file_task = Some(cx.spawn(async move |this, cx| {
+            let mut preserve_existing_rows = preserve_existing_rows;
+            if !append {
+                let cached = background
+                    .spawn({
+                        let library = library.clone();
+                        async move {
+                            library.cached_telegram_files(
+                                account_id,
+                                chat_id,
+                                CHANNEL_FILE_LIST_CAPACITY,
+                            )
+                        }
+                    })
+                    .await;
+                if let Ok(cached) = cached
+                    && !cached.is_empty()
+                    && !cancellation.is_cancelled()
+                    && let Some(entity) = this.upgrade()
+                {
+                    preserve_existing_rows = true;
+                    entity
+                        .update(cx, |app, cx| {
+                            if app.selected_chat_id == Some(chat_id)
+                                && app.telegram_file_generation == generation
+                                && app.telegram_files.is_empty()
+                            {
+                                app.telegram_files = cached;
+                                app.refresh_channel_file_table(cx);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                }
+            }
+
+            let mut cursor = before;
+            let mut remaining = target;
+            let mut replace = !append && !preserve_existing_rows;
+            let mut failure = None;
+            while remaining > 0 && !cancellation.is_cancelled() {
+                let limit = remaining.min(CHANNEL_FILE_SCAN_CHUNK);
+                let scan = background
+                    .spawn({
+                        let telegram = telegram.clone();
+                        let cancellation = cancellation.clone();
+                        async move {
+                            telegram.scan_file_page_cancellable(
+                                chat_id,
+                                cursor,
+                                limit,
+                                cancellation,
+                            )
+                        }
+                    })
+                    .await;
+                let page = match scan {
+                    Ok(page) => page,
+                    Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
+                        break;
+                    }
+                    Err(error) => {
+                        failure = Some(error.kind());
+                        break;
+                    }
+                };
+                let examined = usize::try_from(page.examined_messages).unwrap_or(usize::MAX);
+                let next = page.next_before_message_id;
+                let exhausted = page.exhausted;
+                let cached_files = page.files.clone();
+                if let Some(entity) = this.upgrade() {
+                    entity
+                        .update(cx, |app, cx| {
+                            if app.selected_chat_id != Some(chat_id)
+                                || app.telegram_file_generation != generation
+                            {
+                                return;
+                            }
+                            let page_append = !replace;
+                            let (page_next, page_exhausted) = merge_telegram_file_page(
+                                &mut app.telegram_files,
+                                page,
+                                page_append,
+                            );
+                            app.telegram_files.truncate(CHANNEL_FILE_LIST_CAPACITY);
+                            app.telegram_files_next = page_next;
+                            app.telegram_files_exhausted = page_exhausted
+                                || app.telegram_files.len() >= CHANNEL_FILE_LIST_CAPACITY;
+                            app.telegram_files_scanned = app
+                                .telegram_files_scanned
+                                .saturating_add(u64::try_from(examined).unwrap_or(u64::MAX));
+                            app.refresh_channel_file_table(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+
+                if !cached_files.is_empty() {
+                    let library = library.clone();
+                    background
+                        .spawn(async move {
+                            let _ =
+                                library.cache_telegram_files(account_id, chat_id, &cached_files);
+                        })
+                        .await;
+                }
+                replace = false;
+                remaining = remaining.saturating_sub(examined);
+                if exhausted || examined == 0 || next.is_none() {
+                    break;
+                }
+                cursor = next;
+            }
+
+            let Some(entity) = this.upgrade() else { return };
+            entity
+                .update(cx, |app, cx| {
+                    if app.selected_chat_id != Some(chat_id)
+                        || app.telegram_file_generation != generation
+                    {
+                        return;
+                    }
+                    app.telegram_files_loading = false;
+                    app.telegram_files_slow = false;
+                    app.telegram_file_cancellation = None;
+                    app.telegram_activity =
+                        failure.map_or(TelegramActivity::Idle, TelegramActivity::Failed);
+                    app.refresh_channel_file_table(cx);
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+
+    pub(crate) fn cancel_telegram_file_load(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancellation) = self.telegram_file_cancellation.take() {
+            cancellation.cancel();
+        }
+        if self.telegram_files_loading {
+            self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
+            self.telegram_files_loading = false;
+            self.telegram_files_slow = false;
+            self.telegram_activity = TelegramActivity::Idle;
+            self.refresh_channel_file_table(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn retry_telegram_file_load(&mut self, cx: &mut Context<Self>) {
+        let append = self.telegram_files_retry_append && !self.telegram_files.is_empty();
+        self.load_selected_telegram_files(append, cx);
     }
 
     pub(crate) fn download_telegram_file(&mut self, message_id: i64, cx: &mut Context<Self>) {
@@ -977,9 +1290,11 @@ impl TeleArkApp {
     }
 
     fn start_transfer_refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(transfers) = self.transfers.clone() else {
+        let transfers = self.transfers.clone();
+        let vault = self.vault.clone();
+        if transfers.is_none() && vault.is_none() {
             return;
-        };
+        }
         self.transfer_refresh_task = Some(cx.spawn(async move |this, cx| {
             let mut previous = Vec::new();
             loop {
@@ -990,22 +1305,40 @@ impl TeleArkApp {
                         matches!(this.telegram_auth, TelegramAuthState::Authorized(_))
                     })
                     .unwrap_or(false);
-                if authorized {
+                if authorized && let Some(transfers) = transfers.as_ref() {
                     let _ = transfers.activate_pending_downloads();
                 }
-                let snapshots = transfers.snapshots().unwrap_or_default();
-                let signature: Vec<_> = snapshots
-                    .iter()
+                let mut signature: Vec<_> = transfers
+                    .as_ref()
+                    .and_then(|transfers| transfers.snapshots().ok())
+                    .unwrap_or_default()
+                    .into_iter()
                     .map(|snapshot| {
                         (
                             snapshot.id,
-                            snapshot.state,
+                            format!("native:{:?}", snapshot.state),
                             snapshot.transferred_bytes,
                             snapshot.current_bytes_per_second,
-                            snapshot.eta_ms,
+                            0_u32,
                         )
                     })
                     .collect();
+                signature.extend(
+                    vault
+                        .as_ref()
+                        .map(DesktopVault::transfers)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|snapshot| {
+                            (
+                                snapshot.id,
+                                format!("vault:{:?}", snapshot.state),
+                                snapshot.transferred_bytes,
+                                snapshot.average_bytes_per_second,
+                                snapshot.completed_parts,
+                            )
+                        }),
+                );
                 if signature == previous {
                     continue;
                 }
@@ -1163,12 +1496,15 @@ impl TeleArkApp {
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
-        if self.page == Page::Vault
-            && page != Page::Vault
+        if self.page == Page::Channel && page != Page::Channel {
+            self.cancel_telegram_file_load(cx);
+        }
+        if self.page == Page::Settings
+            && self.settings_section == SettingsSection::KeyVault
+            && page != Page::Settings
             && self.preferences.lock_vault_when_hidden
         {
-            self.vault_locked = true;
-            self.recovery_visible = false;
+            self.lock_vault(cx);
         }
         self.page = page;
         self.show_upload = false;
@@ -1191,8 +1527,335 @@ impl TeleArkApp {
         section: SettingsSection,
         cx: &mut Context<Self>,
     ) {
+        if self.settings_section == SettingsSection::KeyVault
+            && section != SettingsSection::KeyVault
+            && self.preferences.lock_vault_when_hidden
+        {
+            self.lock_vault(cx);
+        }
         self.settings_section = section;
         cx.notify();
+    }
+
+    pub(crate) fn initialize_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let password = self.vault_password.read(cx).value().to_string();
+        let confirmation = self.vault_new_password.read(cx).value().to_string();
+        if password.is_empty() || password != confirmation {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
+            cx.notify();
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_recovery_secret = None;
+        self.recovery_visible = false;
+        self.vault_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.vault_new_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let work = cx.background_spawn(async move { vault.initialize(password) });
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(secret) => {
+                        this.vault_recovery_secret = Some(secret);
+                        this.recovery_visible = true;
+                        this.vault_activity = VaultActivity::Succeeded;
+                    }
+                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                }
+                this.sync_vault_status();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn unlock_vault_with_password(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let password = self.vault_password.read(cx).value().to_string();
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let work = cx.background_spawn(async move { vault.unlock_with_password(password) });
+        self.finish_vault_unit_operation(work, cx);
+    }
+
+    pub(crate) fn unlock_vault_with_recovery(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let recovery = self.vault_recovery_key.read(cx).value().to_string();
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_recovery_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let work = cx.background_spawn(async move { vault.unlock_with_recovery(recovery) });
+        self.finish_vault_unit_operation(work, cx);
+    }
+
+    pub(crate) fn restore_vault_with_recovery(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let password = self.vault_password.read(cx).value().to_string();
+        let confirmation = self.vault_new_password.read(cx).value().to_string();
+        let recovery = self.vault_recovery_key.read(cx).value().to_string();
+        if password.is_empty() || password != confirmation || recovery.is_empty() {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.vault_new_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.vault_recovery_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let work =
+            cx.background_spawn(async move { vault.restore_with_recovery(recovery, password) });
+        self.finish_vault_unit_operation(work, cx);
+    }
+
+    pub(crate) fn change_vault_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let password = self.vault_password.read(cx).value().to_string();
+        let confirmation = self.vault_new_password.read(cx).value().to_string();
+        if password.is_empty() || password != confirmation {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.vault_new_password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let work = cx.background_spawn(async move { vault.change_password(password) });
+        self.finish_vault_unit_operation(work, cx);
+    }
+
+    pub(crate) fn rotate_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        self.vault_recovery_secret = None;
+        self.recovery_visible = false;
+        let work = cx.background_spawn(async move { vault.rotate_recovery_key() });
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(secret) => {
+                        this.vault_recovery_secret = Some(secret);
+                        this.recovery_visible = true;
+                        this.vault_activity = VaultActivity::Succeeded;
+                    }
+                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                }
+                this.sync_vault_status();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn hide_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
+        self.recovery_visible = false;
+        self.vault_recovery_secret = None;
+        cx.notify();
+    }
+
+    pub(crate) fn export_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
+        let Some(secret) = self.vault_recovery_secret.clone() else {
+            return;
+        };
+        let initial_directory = self
+            .preferences
+            .managed_files_root
+            .clone()
+            .or_else(|| {
+                teleark_runtime::default_database_path()
+                    .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let default_name = self.tr("vault-recovery-export-default-name").to_string();
+        let selected = cx.prompt_for_new_path(&initial_directory, Some(&default_name));
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let path = match selected.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(_)) | Err(_) => {
+                    let Some(this) = this.upgrade() else { return };
+                    this.update(cx, |this, cx| {
+                        this.vault_activity = VaultActivity::Failed(
+                            teleark_core::ApplicationErrorKind::PermissionDenied,
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let result = cx
+                .background_spawn(async move { write_recovery_key_file(&path, &secret) })
+                .await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                let succeeded = result.is_ok();
+                this.vault_activity = result
+                    .map(|()| VaultActivity::Succeeded)
+                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
+                if succeeded {
+                    this.vault_recovery_secret = None;
+                    this.recovery_visible = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn lock_vault(&mut self, cx: &mut Context<Self>) {
+        self.recovery_visible = false;
+        self.vault_recovery_secret = None;
+        self.managed_vault_files.clear();
+        self.managed_vault_rejected = 0;
+        let Some(vault) = self.vault.clone() else {
+            self.vault_locked = true;
+            return;
+        };
+        let work = cx.background_spawn(async move { vault.lock() });
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.vault_activity = result
+                    .map(|()| VaultActivity::Succeeded)
+                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
+                this.sync_vault_status();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn finish_vault_unit_operation(
+        &mut self,
+        work: Task<Result<(), ApplicationError>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.vault_activity = result
+                    .map(|()| VaultActivity::Succeeded)
+                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
+                this.sync_vault_status();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn sync_vault_status(&mut self) {
+        if let Some(vault) = self.vault.as_ref() {
+            self.vault_status = vault.status();
+            self.vault_locked = self.vault_status.locked;
+        }
+    }
+
+    pub(crate) fn scan_managed_vault_files(&mut self, cx: &mut Context<Self>) {
+        if self.vault_status.locked || self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.saved_messages_chat_id())
+        else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        let work = cx.background_spawn(async move { vault.scan_saved_messages(chat_id) });
+        self.vault_scan_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(scan) => {
+                        this.managed_vault_files = scan.files;
+                        this.managed_vault_rejected = scan.rejected_manifests;
+                        this.vault_activity = VaultActivity::Succeeded;
+                    }
+                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn download_managed_vault_file(&mut self, package_id: u64, cx: &mut Context<Self>) {
+        let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.saved_messages_chat_id())
+        else {
+            return;
+        };
+        self.vault_activity = VaultActivity::Working;
+        let work =
+            cx.background_spawn(async move { vault.download_saved_message(chat_id, package_id) });
+        self.vault_download_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.vault_activity = result
+                    .map(|_| VaultActivity::Succeeded)
+                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub(crate) fn persist_preferences(&mut self, cx: &mut Context<Self>) {
@@ -1266,6 +1929,95 @@ impl TeleArkApp {
             this.update(cx, |this, cx| {
                 this.preferences.managed_files_root = Some(path);
                 this.persist_preferences(cx);
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn choose_upload_file(&mut self, cx: &mut Context<Self>) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(self.tr("upload-file-picker-prompt")),
+        });
+        self.upload_picker_task = Some(cx.spawn(async move |this, cx| {
+            let path = match selected.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(_)) | Err(_) => {
+                    let Some(this) = this.upgrade() else { return };
+                    this.update(cx, |this, cx| {
+                        this.vault_activity = VaultActivity::Failed(
+                            teleark_core::ApplicationErrorKind::PermissionDenied,
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(path) = path else { return };
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.upload_source = Some(path);
+                this.vault_activity = VaultActivity::Idle;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn enqueue_vault_upload(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.upload_source.clone() else {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        };
+        let Some(account_id) = self.telegram_account.as_ref().map(|account| account.id) else {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Authorization);
+            cx.notify();
+            return;
+        };
+        let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.saved_messages_chat_id())
+        else {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Authorization);
+            cx.notify();
+            return;
+        };
+        if vault.status().locked {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Authorization);
+            cx.notify();
+            return;
+        }
+        self.show_upload = false;
+        self.upload_queued = false;
+        self.vault_activity = VaultActivity::Working;
+        self.nav_selection = "nav-uploads";
+        self.set_page(Page::Transfers, cx);
+        let work =
+            cx.background_spawn(
+                async move { vault.upload_saved_message(account_id, chat_id, source) },
+            );
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(file) => {
+                        this.managed_vault_files
+                            .retain(|item| item.package_numeric_id != file.package_numeric_id);
+                        this.managed_vault_files.insert(0, file);
+                        this.upload_source = None;
+                        this.vault_activity = VaultActivity::Succeeded;
+                    }
+                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                }
+                cx.notify();
             })
             .ok();
         }));
@@ -1677,7 +2429,6 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preview_backed = self.show_upload
-            || self.page == Page::Vault
             || (self.page == Page::Transfers && self.transfers.is_none())
             || (self.page == Page::Library && is_preview_library_selection(self.nav_selection));
         let brand = div()
@@ -1771,7 +2522,7 @@ impl TeleArkApp {
                         true,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.nav_selection = "nav-telegram-sources";
+                        this.nav_selection = "nav-channel";
                         this.set_page(Page::Channel, cx);
                     })),
                 )
@@ -1886,19 +2637,23 @@ impl TeleArkApp {
             .into_any_element()
     }
 
-    fn source_item(
+    fn channel_sidebar_item(
         &self,
-        id: &'static str,
-        glyph: &'static str,
-        title: &'static str,
-        count: &'static str,
-        target: Page,
+        chat: &TelegramChatSummary,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.nav_selection == id;
+        let chat_id = chat.id;
+        let selected = self.page == Page::Channel
+            && self.selected_chat_id == Some(chat_id)
+            && !self.viewing_saved_messages();
+        let title = if chat.name.trim().is_empty() {
+            chat.username.clone().unwrap_or_else(|| chat.id.to_string())
+        } else {
+            chat.name.clone()
+        };
         div()
-            .id(id)
-            .h(px(30.0))
+            .id(("sidebar-channel", chat_id.unsigned_abs()))
+            .h(px(32.0))
             .mx_2()
             .px_3()
             .flex()
@@ -1912,31 +2667,20 @@ impl TeleArkApp {
             .when(selected, |style| style.bg(theme::blue_soft()))
             .hover(|style| style.bg(theme::blue_pale()))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.nav_selection = id;
-                this.selected_source = title;
                 this.selected_file = 0;
-                this.set_page(target, cx);
+                this.select_channel(chat_id, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.nav_selection = id;
-                    this.selected_source = title;
                     this.selected_file = 0;
-                    this.set_page(target, cx);
+                    this.select_channel(chat_id, cx);
                 }
             }))
-            .child(
-                div()
-                    .size(px(18.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(theme::purple_soft())
-                    .text_color(theme::purple())
-                    .text_xs()
-                    .child(glyph),
-            )
+            .child(Icon::new(IconName::Inbox).text_color(if selected {
+                theme::blue()
+            } else {
+                theme::purple()
+            }))
             .child(
                 div()
                     .flex_1()
@@ -1945,7 +2689,62 @@ impl TeleArkApp {
                     .text_color(theme::text_primary())
                     .child(title),
             )
-            .child(div().text_xs().text_color(theme::text_muted()).child(count))
+            .into_any_element()
+    }
+
+    fn saved_messages_sidebar_item(
+        &self,
+        id: &'static str,
+        label_id: &'static str,
+        icon: IconName,
+        view: SavedMessagesView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.viewing_saved_messages() && self.saved_messages_view == view;
+        let available = self.saved_messages_chat_id().is_some();
+        div()
+            .id(id)
+            .h(px(32.0))
+            .mx_2()
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded(theme::RADIUS_SMALL)
+            .focusable()
+            .tab_index(0)
+            .text_sm()
+            .text_color(if selected {
+                theme::blue()
+            } else {
+                theme::text_primary()
+            })
+            .when(available, |item| item.cursor_pointer())
+            .when(!available, |item| item.opacity(0.5))
+            .when(selected, |item| item.bg(theme::blue_soft()))
+            .when(available, |item| {
+                item.hover(|style| style.bg(theme::blue_pale()))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.saved_messages_chat_id().is_some() {
+                    this.selected_file = 0;
+                    this.select_saved_messages(view, cx);
+                }
+            }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.saved_messages_chat_id().is_some()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.selected_file = 0;
+                    this.select_saved_messages(view, cx);
+                }
+            }))
+            .child(Icon::new(icon).text_color(if selected {
+                theme::blue()
+            } else {
+                theme::text_secondary()
+            }))
+            .child(div().flex_1().min_w_0().truncate().child(self.tr(label_id)))
             .into_any_element()
     }
 
@@ -1964,17 +2763,30 @@ impl TeleArkApp {
     }
 
     fn render_sidebar(&self, layout: LayoutPolicy, cx: &mut Context<Self>) -> AnyElement {
-        let library_count = self.library_content.snapshot().map(|snapshot| {
-            SharedString::from(format_integer(
-                self.locale(),
-                snapshot.statistics.logical_file_count,
-            ))
-        });
-        let rates = self
+        let mut rates = self
             .transfers
             .as_ref()
             .and_then(|transfers| transfers.current_rates().ok())
             .unwrap_or_default();
+        if let Some(vault) = self.vault.as_ref() {
+            for snapshot in vault
+                .transfers()
+                .into_iter()
+                .filter(|snapshot| snapshot.state == teleark_runtime::VaultTransferState::Running)
+            {
+                let speed = snapshot.average_bytes_per_second.unwrap_or(0);
+                match snapshot.direction {
+                    teleark_runtime::VaultTransferDirection::Upload => {
+                        rates.upload_bytes_per_second =
+                            rates.upload_bytes_per_second.saturating_add(speed);
+                    }
+                    teleark_runtime::VaultTransferDirection::Download => {
+                        rates.download_bytes_per_second =
+                            rates.download_bytes_per_second.saturating_add(speed);
+                    }
+                }
+            }
+        }
         let download_speed = format_speed(self.locale(), rates.download_bytes_per_second);
         let upload_speed = format_speed(self.locale(), rates.upload_bytes_per_second);
         let free_space = self.overall_storage_metrics.map_or_else(
@@ -1985,6 +2797,16 @@ impl TeleArkApp {
             || SharedString::from("—"),
             |metrics| SharedString::from(format_bytes(self.locale(), metrics.app_used_bytes)),
         );
+        let transfer_rows = self.transfer_rows();
+        let transfer_count = |predicate: &dyn Fn(&crate::mock::TransferRow) -> bool| {
+            SharedString::from(format_integer(
+                self.locale(),
+                transfer_rows
+                    .iter()
+                    .filter(|row| !row.batch_child && predicate(row))
+                    .count() as u64,
+            ))
+        };
         let storage_card = div()
             .mx_3()
             .mt_3()
@@ -2042,156 +2864,119 @@ impl TeleArkApp {
                 theme::text_secondary(),
             ));
 
-        let navigation =
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .child(self.group_label("nav-library"))
-                .child(self.nav_item(
-                    "nav-all",
-                    "nav-all-files",
-                    IconName::FolderOpen,
-                    library_count,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-recent",
-                    "nav-recent",
-                    IconName::Calendar,
+        let authorized = matches!(self.telegram_auth, TelegramAuthState::Authorized(_));
+        let channel_count = self
+            .telegram_chats
+            .iter()
+            .filter(|chat| chat.kind == TelegramChatKind::Channel)
+            .count();
+        let navigation = div()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(self.group_label("nav-channels"))
+            .when(!authorized, |navigation| {
+                navigation.child(self.nav_item(
+                    "nav-telegram-login",
+                    "telegram-header-login-action",
+                    IconName::ArrowRight,
                     None,
-                    Page::Library,
+                    Page::Channel,
                     cx,
                 ))
-                .child(self.nav_item(
-                    "nav-videos",
-                    "nav-videos",
-                    IconName::GalleryVerticalEnd,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-docs",
-                    "nav-documents",
-                    IconName::File,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-archives",
-                    "nav-archives",
-                    IconName::Inbox,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-images",
-                    "library-images",
-                    IconName::File,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-audio",
-                    "library-audio",
-                    IconName::File,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-disk-images",
-                    "library-disk-images",
-                    IconName::File,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-other",
-                    "library-other",
-                    IconName::File,
-                    None,
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.group_label("nav-channels"))
-                .child(
-                    self.nav_item(
-                        "nav-telegram-sources",
-                        "telegram-library-title",
-                        IconName::Inbox,
-                        self.telegram_chats.len().try_into().ok().map(|count: u64| {
-                            SharedString::from(format_integer(self.locale(), count))
-                        }),
-                        Page::Channel,
-                        cx,
-                    ),
+            })
+            .when(authorized && channel_count == 0, |navigation| {
+                navigation.child(
+                    div()
+                        .mx_5()
+                        .py_2()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("nav-no-channels")),
                 )
-                .child(self.group_label("nav-collections"))
-                .child(self.source_item(
-                    "collection-mac",
-                    "M",
-                    "Mac Backup",
-                    "12,040",
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.source_item(
-                    "collection-course",
-                    "A",
-                    "AI Course",
-                    "876",
-                    Page::Library,
-                    cx,
-                ))
-                .child(self.group_label("nav-transfers"))
-                .child(self.nav_item(
-                    "nav-transfers-all",
-                    "nav-all-transfers",
-                    IconName::ArrowDown,
-                    Some("176".into()),
-                    Page::Transfers,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-completed",
-                    "nav-completed",
-                    IconName::CircleCheck,
-                    Some("3,842".into()),
-                    Page::Transfers,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-failed",
-                    "nav-failed",
-                    IconName::TriangleAlert,
-                    Some("12".into()),
-                    Page::Transfers,
-                    cx,
-                ))
-                .child(self.group_label("nav-storage"))
-                .child(self.nav_item(
-                    "nav-vault",
-                    "nav-key-vault",
-                    IconName::Asterisk,
-                    None,
-                    Page::Vault,
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "nav-settings",
-                    "nav-settings",
-                    IconName::Settings,
-                    None,
-                    Page::Settings,
-                    cx,
-                ));
+            })
+            .children(
+                self.telegram_chats
+                    .iter()
+                    .filter(|chat| chat.kind == TelegramChatKind::Channel)
+                    .map(|chat| self.channel_sidebar_item(chat, cx)),
+            )
+            .child(self.group_label("nav-saved-messages"))
+            .child(self.saved_messages_sidebar_item(
+                "nav-saved-messages-telegram",
+                "nav-saved-messages-telegram-files",
+                IconName::Inbox,
+                SavedMessagesView::TelegramFiles,
+                cx,
+            ))
+            .child(self.saved_messages_sidebar_item(
+                "nav-saved-messages-teleark",
+                "nav-saved-messages-teleark-files",
+                IconName::FolderOpen,
+                SavedMessagesView::TeleArkFiles,
+                cx,
+            ))
+            .child(self.group_label("nav-transfers"))
+            .child(self.nav_item(
+                "nav-transfers-all",
+                "nav-all-transfers",
+                IconName::ArrowDown,
+                Some(transfer_count(&|_| true)),
+                Page::Transfers,
+                cx,
+            ))
+            .child(self.nav_item(
+                "nav-uploads",
+                "transfer-uploads",
+                IconName::ArrowUp,
+                Some(transfer_count(&|row| {
+                    row.direction == crate::mock::TransferDirection::Upload
+                })),
+                Page::Transfers,
+                cx,
+            ))
+            .child(self.nav_item(
+                "nav-downloads",
+                "transfer-downloads",
+                IconName::ArrowDown,
+                Some(transfer_count(&|row| {
+                    row.direction == crate::mock::TransferDirection::Download
+                })),
+                Page::Transfers,
+                cx,
+            ))
+            .child(self.nav_item(
+                "nav-completed",
+                "nav-completed",
+                IconName::CircleCheck,
+                Some(transfer_count(&|row| {
+                    row.state == crate::mock::TransferState::Completed
+                })),
+                Page::Transfers,
+                cx,
+            ))
+            .child(self.nav_item(
+                "nav-failed",
+                "nav-failed",
+                IconName::TriangleAlert,
+                Some(transfer_count(&|row| {
+                    matches!(
+                        row.state,
+                        crate::mock::TransferState::Failed | crate::mock::TransferState::Cancelled
+                    )
+                })),
+                Page::Transfers,
+                cx,
+            ))
+            .child(self.group_label("nav-storage"))
+            .child(self.nav_item(
+                "nav-settings",
+                "nav-settings",
+                IconName::Settings,
+                None,
+                Page::Settings,
+                cx,
+            ));
 
         div()
             .w(px(layout.sidebar_width()))
@@ -2248,15 +3033,47 @@ impl TeleArkApp {
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.nav_selection = nav_selection;
                 this.selected_file = 0;
-                this.set_page(target, cx);
+                if nav_selection == "nav-saved-messages-telegram" {
+                    this.select_saved_messages(SavedMessagesView::TelegramFiles, cx);
+                } else if nav_selection == "nav-channel" {
+                    if let Some(chat_id) = this
+                        .telegram_chats
+                        .iter()
+                        .find(|chat| chat.kind == TelegramChatKind::Channel)
+                        .map(|chat| chat.id)
+                    {
+                        this.select_channel(chat_id, cx);
+                    } else {
+                        this.nav_selection = nav_selection;
+                        this.set_page(target, cx);
+                    }
+                } else {
+                    this.nav_selection = nav_selection;
+                    this.set_page(target, cx);
+                }
             }))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.nav_selection = nav_selection;
                     this.selected_file = 0;
-                    this.set_page(target, cx);
+                    if nav_selection == "nav-saved-messages-telegram" {
+                        this.select_saved_messages(SavedMessagesView::TelegramFiles, cx);
+                    } else if nav_selection == "nav-channel" {
+                        if let Some(chat_id) = this
+                            .telegram_chats
+                            .iter()
+                            .find(|chat| chat.kind == TelegramChatKind::Channel)
+                            .map(|chat| chat.id)
+                        {
+                            this.select_channel(chat_id, cx);
+                        } else {
+                            this.nav_selection = nav_selection;
+                            this.set_page(target, cx);
+                        }
+                    } else {
+                        this.nav_selection = nav_selection;
+                        this.set_page(target, cx);
+                    }
                 }
             }))
             .child(Icon::new(icon))
@@ -2280,13 +3097,24 @@ impl TeleArkApp {
             .overflow_x_scroll()
             .child(self.compact_nav_item(
                 CompactNavItem {
-                    id: "compact-library",
-                    label_id: "nav-all-files",
-                    icon: IconName::FolderOpen,
-                    target: Page::Library,
-                    nav_selection: "nav-all",
+                    id: "compact-channel",
+                    label_id: "nav-channels",
+                    icon: IconName::Inbox,
+                    target: Page::Channel,
+                    nav_selection: "nav-channel",
                 },
-                matches!(self.page, Page::Library | Page::FileDetail),
+                self.page == Page::Channel && !self.viewing_saved_messages(),
+                cx,
+            ))
+            .child(self.compact_nav_item(
+                CompactNavItem {
+                    id: "compact-saved-messages",
+                    label_id: "nav-saved-messages",
+                    icon: IconName::FolderOpen,
+                    target: Page::Channel,
+                    nav_selection: "nav-saved-messages-telegram",
+                },
+                self.viewing_saved_messages(),
                 cx,
             ))
             .child(self.compact_nav_item(
@@ -2298,28 +3126,6 @@ impl TeleArkApp {
                     nav_selection: "nav-transfers-all",
                 },
                 self.page == Page::Transfers,
-                cx,
-            ))
-            .child(self.compact_nav_item(
-                CompactNavItem {
-                    id: "compact-channel",
-                    label_id: "nav-channels",
-                    icon: IconName::Search,
-                    target: Page::Channel,
-                    nav_selection: "nav-telegram-sources",
-                },
-                self.page == Page::Channel,
-                cx,
-            ))
-            .child(self.compact_nav_item(
-                CompactNavItem {
-                    id: "compact-vault",
-                    label_id: "nav-key-vault",
-                    icon: IconName::Asterisk,
-                    target: Page::Vault,
-                    nav_selection: "nav-vault",
-                },
-                self.page == Page::Vault,
                 cx,
             ))
             .child(self.compact_nav_item(
@@ -2346,7 +3152,6 @@ impl TeleArkApp {
             Page::Library => self.render_library(window, layout, cx),
             Page::Transfers => self.render_transfers(window, layout, cx),
             Page::FileDetail => self.render_file_detail(window, layout, cx),
-            Page::Vault => self.render_vault(window, layout, cx),
             Page::Channel => self.render_channel(window, layout, cx),
             Page::Settings => self.render_settings(window, layout, cx),
         }
@@ -2420,19 +3225,35 @@ fn merge_telegram_file_page(
         *files = page.files;
     } else {
         for file in page.files {
-            if !files
-                .iter()
-                .any(|existing| existing.message_id == file.message_id)
+            if let Some(existing) = files
+                .iter_mut()
+                .find(|existing| existing.message_id == file.message_id)
             {
+                *existing = file;
+            } else {
                 files.push(file);
             }
         }
     }
+    files.sort_by(|left, right| {
+        right
+            .sent_at_unix_ms
+            .cmp(&left.sent_at_unix_ms)
+            .then_with(|| right.message_id.cmp(&left.message_id))
+    });
     (page.next_before_message_id, page.exhausted)
 }
 
 pub(crate) fn is_preview_library_selection(selection: &str) -> bool {
     matches!(selection, "collection-mac" | "collection-course")
+}
+
+impl Drop for TeleArkApp {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.telegram_file_cancellation.take() {
+            cancellation.cancel();
+        }
+    }
 }
 
 impl Render for TeleArkApp {
@@ -2518,9 +3339,61 @@ fn sidebar_metric_row(
         .into_any_element()
 }
 
+fn write_recovery_key_file(path: &std::path::Path, secret: &str) -> Result<(), ApplicationError> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        ApplicationError::new(match error.kind() {
+            std::io::ErrorKind::AlreadyExists => teleark_core::ApplicationErrorKind::Conflict,
+            std::io::ErrorKind::PermissionDenied => {
+                teleark_core::ApplicationErrorKind::PermissionDenied
+            }
+            _ => teleark_core::ApplicationErrorKind::Persistence,
+        })
+    })?;
+    file.write_all(secret.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all())
+        .map_err(|_| ApplicationError::new(teleark_core::ApplicationErrorKind::Persistence))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_export_is_private_and_never_overwrites() -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "teleark-gui-recovery-export-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("recovery.txt");
+        write_recovery_key_file(&path, "secret-bundle")?;
+        assert_eq!(std::fs::read_to_string(&path)?, "secret-bundle\n");
+        assert!(write_recovery_key_file(&path, "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, "secret-bundle\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(path)?;
+        std::fs::remove_dir(directory)?;
+        Ok(())
+    }
 
     #[test]
     fn every_file_kind_facet_maps_to_exactly_one_core_kind() {
@@ -2652,5 +3525,6 @@ mod tests {
             files.iter().map(|file| file.message_id).collect::<Vec<_>>(),
             vec![20, 19, 18]
         );
+        assert_eq!(files[1].file_name, "duplicate");
     }
 }

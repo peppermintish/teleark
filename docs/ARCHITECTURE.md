@@ -1,10 +1,16 @@
 # TeleArk Architecture
 
-Status: accepted target architecture with a persistent local catalog, persisted Telegram API ID onboarding, desktop-connected Telegram QR/code login, source discovery, bounded document browsing/indexing, and a retained native-download worker. The encrypted transfer/recovery composition exists below the GUI, while its desktop Vault/upload workflow remains incomplete. See `IMPLEMENTATION_STATUS.md` for exact current capability.
+Status: accepted target architecture with a persistent local catalog, persisted Telegram API ID onboarding, desktop-connected Telegram QR/code login, source discovery, bounded document browsing/indexing, retained native-download and Vault owners, and a connected Saved Messages encrypted upload/recovery path. See `IMPLEMENTATION_STATUS.md` for exact current capability and alpha limitations.
 
 ## Purpose
 
 TeleArk turns Telegram-hosted media into a file-centric library. The enduring user and domain abstraction is `LogicalFile`, not a Telegram message, remote document, MTProto upload unit, or application multipart object.
+
+The local `Library` remains a domain/catalog concept, not a required primary
+navigation section. The desktop information architecture exposes real Telegram
+channel names directly, treats Saved Messages as the private package boundary,
+and presents Telegram-native objects separately from manifest-reconstructed
+logical files.
 
 The architecture prioritizes recoverability, integrity, cryptographic safety, legal cleanliness, testability, and frontend independence. A local SQLite database accelerates the product but is not the recovery authority for encrypted Vault packages.
 
@@ -59,13 +65,20 @@ The Telegram adapter contains all `grammers` and MTProto types. It owns authenti
 
 The Crypto subsystem owns versioned codecs, envelope encryption, AES-256-GCM frames, Argon2id password derivation, key wrapping, secure randomness, BLAKE3 hashing, redacted secret types, and validation. It has no GUI, Telegram, or database dependency. OS credential storage is a replaceable platform adapter and is not part of the durable format.
 
+The desktop runtime owns the unlocked Vault Master Key on one bounded,
+single-threaded worker. Frontends send typed create/unlock/lock/rewrap/recover,
+scan, upload, and download requests; they never receive the Master Key or File
+Keys. SQLite stores only explicit password/recovery wrap codecs and non-secret
+generation metadata. OS Credential integration is intentionally disabled until
+a reviewed platform adapter exists.
+
 ### Index Engine
 
 The Index Engine coordinates partial and incremental scans through a history-source port, normalizes Telegram metadata, performs bounded batched writes, and maintains non-contiguous `IndexRange` coverage. Search normally reads local SQLite/FTS5 rather than remote history.
 
 ### Transfer Engine
 
-One Transfer Engine schedules upload and download tasks. It owns bounded concurrency, priority, retry/backoff, FloodWait handling, pause/resume/cancel, progress aggregation, verification, checkpoints, and restart reconciliation. A task represents one logical file; a transfer part represents one application part.
+One Transfer Engine schedules upload and download tasks. It owns bounded concurrency, priority, retry/backoff, FloodWait handling, pause/resume/cancel, progress aggregation, verification, checkpoints, and restart reconciliation. A task represents one logical file; a transfer part represents one application part. Its frontend-neutral adaptive controller measures goodput and records every RAMP/PROBE/STABLE/RECOVER decision over connections, per-connection RPCs, active files, per-file parts, encryption workers, and encrypted-queue depth. Runtime adapters must clamp parameters that their transport cannot actually vary rather than displaying invented concurrency.
 
 ## Workspace boundaries
 
@@ -158,17 +171,49 @@ field allowlist. A bounded non-blocking writer emits daily JSONL files under
 the managed `Logs` directory; storage, Telegram, and transfer owners never
 block on log I/O. Frontend-neutral native-download snapshots separately expose
 safe timing, verification, event, and failure-class data for localized UI.
-Diagnostic output is not a durable compatibility format. See
+Diagnostic output is not a durable compatibility format. Each real transfer
+also writes a separate schema-versioned, owner-only session log under
+`Logs/Transfers`; this non-lossy artifact is the source for controller replay
+and follows the stricter format/privacy decision in ADR 0009. See
 [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
 Telegram-native desktop downloads persist separately in schema-v7
 `native_download_batches` and `native_download_tasks` tables because they do
 not yet represent encrypted multipart packages. The runtime owns bounded
 per-channel time/kind scans, atomic batch creation, the bounded queue,
-cooperative control, chunk-level progress aggregation, resumable private
-partials, source message metadata, and restoration. The GUI consumes snapshots,
+cooperative control, one-mebibyte out-of-order part scheduling, positional
+writes, a versioned completion bitmap, resumable private partials, source
+message metadata, and restoration. The GUI consumes snapshots,
 aggregates a batch into an expandable presentation row, and never reads those
 tables directly.
+
+Schema v8 adds the singleton `vault_metadata` record. It contains only the
+Vault identifier, explicit password/recovery wrap bytes, generations, and
+timestamps. A self-contained exported recovery bundle combines the canonical
+Recovery Key text with its authenticated recovery wrap so the runtime can
+recreate this local record and a new password wrap after database loss.
+
+Interactive Telegram source browsing is cache-first without overstating index
+coverage. The runtime reads already projected files for the selected
+account/chat from SQLite, then refreshes remote history in cancellable
+200-message chunks. The GUI renders each completed chunk immediately, requests
+200 messages for the initial view and up to 1,000 on near-end prefetch, and
+bounds the in-memory virtual table at 5,000 rows. A 20-second timeout cancels
+the actual adapter future rather than merely abandoning the frontend wait;
+switching source, leaving the route, refreshing, or closing its owner also
+cancels the active scan. Browsed files may be idempotently cached, but only the
+index workflow advances durable cursors or coverage evidence.
+
+Saved Messages has two frontend projections over the same bounded Telegram
+history. The raw projection preserves each message-backed document exactly as
+other Telegram clients expose it and may identify TeleArk manifests/parts only
+when both their versioned names and discovery captions agree. The managed
+projection asks the runtime-owned Vault/recovery service to open authenticated
+manifests and returns logical-file DTOs with their original names, metadata,
+package identity, and remote relationships. Restore downloads decrypt each
+authenticated part into a controlled partial, verify the whole-file digest,
+flush, and atomically publish a non-overwriting destination. The GUI never
+parses encrypted manifest bytes, resolves keys, or reconstructs parts.
 
 The Telegram application API ID and API Hash are resolved by the
 frontend-neutral runtime worker. An atomically managed personal pair persists

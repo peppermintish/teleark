@@ -25,6 +25,12 @@ pub enum ConfigurationError {
     InvalidProgressPolicy {
         field: &'static str,
     },
+    InvalidAdaptivePolicy {
+        field: &'static str,
+    },
+    InvalidPipelinePolicy {
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for ConfigurationError {
@@ -44,6 +50,12 @@ impl fmt::Display for ConfigurationError {
             }
             Self::InvalidProgressPolicy { field } => {
                 write!(formatter, "invalid progress policy field: {field}")
+            }
+            Self::InvalidAdaptivePolicy { field } => {
+                write!(formatter, "invalid adaptive controller field: {field}")
+            }
+            Self::InvalidPipelinePolicy { field } => {
+                write!(formatter, "invalid encryption pipeline field: {field}")
             }
         }
     }

@@ -1,6 +1,6 @@
 # TeleArk Data Model
 
-Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, Telegram remote-object identity and scan cursors, settings, collections, transfer checkpoints, and index job/range records. Package/manifest/Vault persistence is still missing, and no schema has been released as a compatibility guarantee.
+Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, Telegram remote-object identity and scan cursors, settings, collections, transfer checkpoints, index job/range records, and wrapped Vault metadata. Package/manifest projections remain remote-authoritative and are not yet persisted locally; no schema has been released as a compatibility guarantee.
 
 ## Modeling rules
 
@@ -90,6 +90,14 @@ Allowed task states are centrally defined. The current Core foundation includes 
 
 SQLite now stores task state, totals, retry metadata, locale-neutral failure codes, and ordered per-part checkpoints transactionally. Repository validation rejects non-contiguous indices, offset gaps, mismatched totals/progress, malformed checkpoint version/data pairs, and a completed task whose parts are not fully verified. This is durable state storage, not a transfer worker or proof of remote reconciliation.
 
+Native Telegram downloads use a separate adapter-owned `TARKDPM1` sidecar for
+out-of-order resume. It records the exact total length, fixed 1 MiB logical part
+size, part count, and completion bitmap; it contains no Telegram/grammers types,
+filenames, content, or localized values. This is an explicitly versioned local
+persistent format governed by ADR 0009, not a Rust memory layout or SQLite row.
+Controller session history is likewise stored in schema-1 per-transfer JSONL
+under the managed Logs directory rather than added to the domain tables.
+
 ### IndexJob and IndexRange
 
 An `IndexJob` describes one requested scan/synchronization with account/chat, content policy, requested temporal scope, progress/checkpoint cursor, state, counters, and timing. An `IndexRange` records actual historical coverage rather than one last-message marker:
@@ -113,7 +121,12 @@ A manual collection uses `CollectionItem` rows linking collections to logical fi
 
 ### Vault and encryption metadata
 
-`VaultMetadata` stores non-secret configuration and wrapped key material. It may reference password and recovery wrapping records, algorithm/format IDs, KDF parameters, and credential-store bindings. Raw passwords, unwrapped Vault Master Keys, File Keys, and derived KEKs must not be stored as ordinary database fields or logged.
+`VaultMetadata` is one singleton row containing the 16-byte Vault ID, exact
+Password Wrap and Recovery Wrap codec bytes, their nonzero generations, and
+creation/update timestamps. It contains wrapped key material but no raw
+password, Recovery Key, unwrapped Vault Master Key, File Key, or derived KEK.
+Those secrets must not be stored as ordinary database fields or logged. OS
+credential bindings are intentionally absent until that adapter is implemented.
 
 ## SQLite implementation and remaining areas
 
@@ -127,11 +140,18 @@ transfer_tasks, transfer_parts
 native_download_batches, native_download_tasks
 collections, collection_items
 settings, id_allocators
+vault_metadata
 ```
 
-Seven ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, add Telegram remote-object identities plus per-source scan cursors, and persist bounded native-download history/progress for restart recovery. Schema v7 adds durable batch identity plus the source message's sent time, caption, and MIME type to native download tasks. A batch header and all of its task rows are inserted in one transaction, so a rejected member cannot leave a partial batch. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
+Eight ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, add Telegram remote-object identities plus per-source scan cursors, and persist bounded native-download history/progress for restart recovery. Schema v7 adds durable batch identity plus the source message's sent time, caption, and MIME type to native download tasks. Schema v8 adds one strict Vault metadata row containing only explicit password/recovery wrap codecs, generations, and timestamps. A batch header and all of its task rows are inserted in one transaction, so a rejected member cannot leave a partial batch. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
 
-Still absent are tables/repositories for Vault `file_parts`, `packages`, `manifests`, encryption profiles, and Vault metadata. Native Telegram documents now use `remote_objects` keyed by account/chat/message with monotonic revision checks and an opaque bounded transport key. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
+Still absent are tables/repositories for Vault `file_parts`, `packages`, `manifests`, and encryption profiles. Authenticated Telegram manifests are currently the authoritative managed-file projection. Native Telegram documents now use `remote_objects` keyed by account/chat/message with monotonic revision checks and an opaque bounded transport key. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
+
+The remote-file projection preserves the source message sent time separately
+from its latest modification time. Interactive source browsing can read these
+projected rows as a bounded cache, but the presence of a cached row never
+implies that `telegram_index_state` or an `IndexRange` covers surrounding
+history.
 
 ## Relationships and deletion
 

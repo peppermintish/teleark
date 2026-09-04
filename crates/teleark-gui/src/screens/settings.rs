@@ -1,21 +1,26 @@
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px, rgba,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, input::Input, scroll::ScrollableElement as _,
+    Disableable as _, Icon, IconName,
+    input::{Input, InputState},
+    scroll::ScrollableElement as _,
 };
-use teleark_i18n::{SupportedLocale, format::format_integer};
+use teleark_i18n::{
+    SupportedLocale,
+    format::{format_bytes, format_integer},
+};
 use teleark_runtime::{
-    AppearancePreference, TelegramCredentialSource, default_database_path,
-    default_managed_directories, diagnostics_status,
+    AppearancePreference, SoftLimitPolicy, TelegramCredentialSource, default_database_path,
+    default_managed_directories, diagnostics_status, encrypted_part_plaintext_limit,
 };
 
 use crate::{
     app::{
         LocalePersistence, PreferencePersistence, SettingsSection, TeleArkApp,
-        TelegramApiIdPersistence,
+        TelegramApiIdPersistence, VaultActivity,
     },
     components::{self, Tone},
     layout::LayoutPolicy,
@@ -638,7 +643,7 @@ impl TeleArkApp {
     }
 
     fn render_upload_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let part_size = self.preferences.upload_part_size_mib;
+        let part_size = format_bytes(self.locale(), encrypted_part_plaintext_limit());
         settings_card(
             self.tr("settings-upload-title"),
             self.tr("settings-upload-description"),
@@ -646,95 +651,427 @@ impl TeleArkApp {
         .child(
             div()
                 .mt_4()
-                .grid()
-                .grid_cols(2)
+                .flex()
+                .items_center()
                 .gap_3()
-                .child(selection_option(
-                    "settings-upload-part-1900",
-                    self.tr_with(
-                        "upload-part-size-mib",
-                        teleark_i18n::MessageArgs::new()
-                            .with("size", format_integer(self.locale(), 1_900)),
-                    ),
-                    self.tr("upload-compatibility-mode"),
-                    part_size == 1_900,
-                    cx.listener(|this, _, _, cx| {
-                        if this.preference_persistence != PreferencePersistence::Saving {
-                            this.preferences.upload_part_size_mib = 1_900;
-                            this.persist_preferences(cx);
-                        }
-                    }),
-                ))
-                .child(selection_option(
-                    "settings-upload-part-1024",
-                    self.tr_with(
-                        "upload-part-size-mib",
-                        teleark_i18n::MessageArgs::new()
-                            .with("size", format_integer(self.locale(), 1_024)),
-                    ),
-                    self.tr("upload-conservative-mode"),
-                    part_size == 1_024,
-                    cx.listener(|this, _, _, cx| {
-                        if this.preference_persistence != PreferencePersistence::Saving {
-                            this.preferences.upload_part_size_mib = 1_024;
-                            this.persist_preferences(cx);
-                        }
-                    }),
-                )),
+                .p_4()
+                .rounded(theme::RADIUS_MEDIUM)
+                .bg(theme::blue_pale())
+                .child(Icon::new(IconName::Asterisk).text_color(theme::blue()))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(self.tr("settings-upload-vault-managed-title")),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr_with(
+                                    "settings-upload-vault-managed-description",
+                                    teleark_i18n::MessageArgs::new().with("size", part_size),
+                                )),
+                        ),
+                ),
         )
         .child(
             div()
                 .mt_5()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(preference_row(
-                    "settings-upload-encrypt-content",
-                    self.tr("upload-client-encryption"),
-                    self.tr("upload-client-encryption-description"),
-                    self.preferences.upload_encrypt_content,
-                    cx.listener(|this, _, _, cx| {
-                        if this.preference_persistence != PreferencePersistence::Saving {
-                            this.preferences.upload_encrypt_content =
-                                !this.preferences.upload_encrypt_content;
-                            this.persist_preferences(cx);
-                        }
-                    }),
-                ))
-                .child(preference_row(
-                    "settings-upload-hide-name",
-                    self.tr("upload-hide-filename"),
-                    self.tr("upload-hide-filename-description"),
-                    self.preferences.upload_hide_file_name,
-                    cx.listener(|this, _, _, cx| {
-                        if this.preference_persistence != PreferencePersistence::Saving {
-                            this.preferences.upload_hide_file_name =
-                                !this.preferences.upload_hide_file_name;
-                            this.persist_preferences(cx);
-                        }
-                    }),
-                ))
-                .child(preference_row(
-                    "settings-upload-encrypt-metadata",
-                    self.tr("upload-encrypt-metadata"),
-                    self.tr("upload-encrypt-metadata-description"),
-                    self.preferences.upload_encrypt_metadata,
-                    cx.listener(|this, _, _, cx| {
-                        if this.preference_persistence != PreferencePersistence::Saving {
-                            this.preferences.upload_encrypt_metadata =
-                                !this.preferences.upload_encrypt_metadata;
-                            this.persist_preferences(cx);
-                        }
-                    }),
-                )),
+                .pt_4()
+                .border_t_1()
+                .border_color(theme::border())
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.tr("settings-transfer-soft-limit-title")),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("settings-transfer-soft-limit-description")),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            components::button(
+                                "settings-soft-limit-respect",
+                                self.tr("settings-transfer-soft-limit-respect"),
+                                None,
+                                self.preferences.transfer_soft_limit_policy
+                                    == SoftLimitPolicy::Respect,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.transfer_soft_limit_policy =
+                                    SoftLimitPolicy::Respect;
+                                this.persist_preferences(cx);
+                            })),
+                        )
+                        .child(
+                            components::button(
+                                "settings-soft-limit-adaptive",
+                                self.tr("settings-transfer-soft-limit-adaptive"),
+                                None,
+                                self.preferences.transfer_soft_limit_policy
+                                    == SoftLimitPolicy::AdaptiveOverride,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.transfer_soft_limit_policy =
+                                    SoftLimitPolicy::AdaptiveOverride;
+                                this.persist_preferences(cx);
+                            })),
+                        )
+                        .child(
+                            components::button(
+                                "settings-soft-limit-ignore",
+                                self.tr("settings-transfer-soft-limit-ignore"),
+                                None,
+                                self.preferences.transfer_soft_limit_policy
+                                    == SoftLimitPolicy::Ignore,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.transfer_soft_limit_policy =
+                                    SoftLimitPolicy::Ignore;
+                                this.persist_preferences(cx);
+                            })),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .p_3()
+                        .rounded(theme::RADIUS_SMALL)
+                        .bg(theme::amber_soft())
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("settings-transfer-soft-limit-note")),
+                ),
         )
         .into_any_element()
     }
 
     fn render_key_vault_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        settings_card(
+        let working = self.vault_activity == VaultActivity::Working;
+        let status_id = if !self.vault_status.configured {
+            "vault-status-not-configured"
+        } else if self.vault_status.locked {
+            "vault-status-locked"
+        } else {
+            "vault-status-unlocked"
+        };
+        let status_tone = if !self.vault_status.configured || self.vault_status.locked {
+            Tone::Amber
+        } else {
+            Tone::Green
+        };
+        let card = settings_card(
             self.tr("settings-vault-title"),
             self.tr("settings-vault-description"),
+        )
+        .child(
+            div()
+                .mt_4()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(components::badge(self.tr(status_id), status_tone))
+                .when_some(self.vault_status.password_generation, |row, generation| {
+                    row.child(components::badge(
+                        self.tr_with(
+                            "vault-password-generation",
+                            teleark_i18n::MessageArgs::new().with(
+                                "generation",
+                                format_integer(self.locale(), u64::from(generation)),
+                            ),
+                        ),
+                        Tone::Neutral,
+                    ))
+                })
+                .when(working, |row| {
+                    row.child(components::badge(
+                        self.tr("vault-operation-working"),
+                        Tone::Blue,
+                    ))
+                }),
+        )
+        .when_some(vault_activity_message(self), |card, (message, tone)| {
+            card.child(
+                div()
+                    .mt_3()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(match tone {
+                        Tone::Red => theme::red_soft(),
+                        Tone::Green => theme::green_soft(),
+                        _ => theme::blue_pale(),
+                    })
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(message),
+            )
+        })
+        .when(!self.vault_status.configured, |card| {
+            card.child(vault_input(
+                self.tr("vault-create-password-label"),
+                &self.vault_password,
+            ))
+            .child(vault_input(
+                self.tr("vault-confirm-password-label"),
+                &self.vault_new_password,
+            ))
+            .child(
+                components::button(
+                    "settings-create-vault",
+                    self.tr("vault-create-action"),
+                    Some(IconName::Asterisk),
+                    true,
+                )
+                .mt_3()
+                .disabled(working)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.initialize_vault(window, cx);
+                })),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr("vault-restore-title")),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("vault-restore-description")),
+            )
+            .child(vault_input(
+                self.tr("vault-recovery-bundle-label"),
+                &self.vault_recovery_key,
+            ))
+            .child(
+                components::button(
+                    "settings-restore-vault",
+                    self.tr("vault-restore-action"),
+                    Some(IconName::Redo2),
+                    false,
+                )
+                .mt_3()
+                .disabled(working)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.restore_vault_with_recovery(window, cx);
+                })),
+            )
+        })
+        .when(
+            self.vault_status.configured && self.vault_status.locked,
+            |card| {
+                card.child(vault_input(
+                    self.tr("vault-password-label"),
+                    &self.vault_password,
+                ))
+                .child(
+                    components::button(
+                        "settings-unlock-vault-password",
+                        self.tr("vault-unlock-password-action"),
+                        Some(IconName::Eye),
+                        true,
+                    )
+                    .mt_3()
+                    .disabled(working)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.unlock_vault_with_password(window, cx);
+                    })),
+                )
+                .child(vault_input(
+                    self.tr("vault-recovery-key-label"),
+                    &self.vault_recovery_key,
+                ))
+                .child(
+                    components::button(
+                        "settings-unlock-vault-recovery",
+                        self.tr("vault-unlock-recovery-action"),
+                        Some(IconName::Asterisk),
+                        false,
+                    )
+                    .mt_3()
+                    .disabled(working)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.unlock_vault_with_recovery(window, cx);
+                    })),
+                )
+            },
+        )
+        .when(
+            self.vault_status.configured && !self.vault_status.locked,
+            |card| {
+                card.child(vault_input(
+                    self.tr("vault-new-password-label"),
+                    &self.vault_password,
+                ))
+                .child(vault_input(
+                    self.tr("vault-confirm-password-label"),
+                    &self.vault_new_password,
+                ))
+                .child(
+                    div()
+                        .mt_3()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            components::button(
+                                "settings-change-vault-password",
+                                self.tr("vault-change-password"),
+                                Some(IconName::Asterisk),
+                                false,
+                            )
+                            .disabled(working)
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.change_vault_password(window, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            components::button(
+                                "settings-rotate-vault-recovery",
+                                self.tr("vault-rotate-recovery-action"),
+                                Some(IconName::Redo2),
+                                false,
+                            )
+                            .disabled(working)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rotate_vault_recovery_key(cx);
+                            })),
+                        )
+                        .child(
+                            components::button(
+                                "settings-lock-vault-now",
+                                self.tr("settings-vault-lock-now-action"),
+                                Some(IconName::EyeOff),
+                                true,
+                            )
+                            .disabled(working)
+                            .on_click(cx.listener(|this, _, _, cx| this.lock_vault(cx))),
+                        ),
+                )
+            },
+        )
+        .when_some(
+            self.vault_recovery_secret
+                .as_ref()
+                .filter(|_| self.recovery_visible),
+            |card, secret| {
+                card.child(
+                    div()
+                        .mt_4()
+                        .p_4()
+                        .rounded(theme::RADIUS_MEDIUM)
+                        .border_1()
+                        .border_color(theme::amber())
+                        .bg(theme::amber_soft())
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.tr("vault-recovery-save-now-title")),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("vault-recovery-save-now-description")),
+                        )
+                        .child(
+                            div()
+                                .mt_3()
+                                .p_3()
+                                .rounded(theme::RADIUS_SMALL)
+                                .bg(theme::surface())
+                                .text_xs()
+                                .child(secret.clone()),
+                        )
+                        .child(
+                            div()
+                                .mt_3()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    components::button(
+                                        "settings-export-vault-recovery",
+                                        self.tr("vault-export-recovery"),
+                                        Some(IconName::ExternalLink),
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.export_vault_recovery_key(cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        "settings-hide-vault-recovery",
+                                        self.tr("vault-hide-recovery"),
+                                        Some(IconName::EyeOff),
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.hide_vault_recovery_key(cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+            },
+        )
+        .child(
+            div()
+                .mt_4()
+                .p_4()
+                .rounded(theme::RADIUS_MEDIUM)
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::border_subtle())
+                .opacity(0.55)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::Asterisk).text_color(theme::text_muted()))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.tr("vault-os-credential-title")),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("vault-os-credential-development-note")),
+                ),
         )
         .child(div().mt_4().child(preference_row(
             "settings-lock-vault-when-hidden",
@@ -750,21 +1087,16 @@ impl TeleArkApp {
             }),
         )))
         .child(
-            div().mt_4().child(
-                components::button(
-                    "settings-lock-vault-now",
-                    self.tr("settings-vault-lock-now-action"),
-                    Some(IconName::Asterisk),
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.vault_locked = true;
-                    this.recovery_visible = false;
-                    cx.notify();
-                })),
-            ),
-        )
-        .into_any_element()
+            div()
+                .mt_4()
+                .p_3()
+                .rounded(theme::RADIUS_SMALL)
+                .bg(theme::red_soft())
+                .text_sm()
+                .text_color(theme::red())
+                .child(self.tr("vault-key-loss-warning")),
+        );
+        card.into_any_element()
     }
 
     fn render_indexing_settings(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1486,6 +1818,46 @@ fn preference_row(
                 .child(div().size(px(16.0)).rounded_full().bg(theme::surface())),
         )
         .into_any_element()
+}
+
+fn vault_input(label: SharedString, input: &Entity<InputState>) -> AnyElement {
+    div()
+        .mt_4()
+        .child(
+            div()
+                .mb_2()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(label),
+        )
+        .child(Input::new(input).mask_toggle().h(px(38.0)))
+        .into_any_element()
+}
+
+fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
+    match app.vault_activity {
+        VaultActivity::Idle | VaultActivity::Working => None,
+        VaultActivity::Succeeded => Some((app.tr("vault-operation-succeeded"), Tone::Green)),
+        VaultActivity::Failed(kind) => {
+            let id = match kind {
+                teleark_core::ApplicationErrorKind::InvalidRequest => "vault-error-invalid-request",
+                teleark_core::ApplicationErrorKind::Authorization => "vault-error-authorization",
+                teleark_core::ApplicationErrorKind::SourceMissing => "vault-error-source-missing",
+                teleark_core::ApplicationErrorKind::PermissionDenied => {
+                    "vault-error-permission-denied"
+                }
+                teleark_core::ApplicationErrorKind::Network => "vault-error-network",
+                teleark_core::ApplicationErrorKind::NotFound => "vault-error-not-found",
+                teleark_core::ApplicationErrorKind::Conflict => "vault-error-conflict",
+                teleark_core::ApplicationErrorKind::Capacity => "vault-error-capacity",
+                teleark_core::ApplicationErrorKind::Cancelled => "vault-error-cancelled",
+                teleark_core::ApplicationErrorKind::Persistence
+                | teleark_core::ApplicationErrorKind::SourceChanged => "vault-error-persistence",
+                _ => "vault-error-persistence",
+            };
+            Some((app.tr(id), Tone::Red))
+        }
+    }
 }
 
 #[cfg(test)]

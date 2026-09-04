@@ -5,10 +5,13 @@ use teleark_core::{
 
 use super::{Database, id_from_sql, transaction, unsigned_to_sql, upsert_logical_file_on};
 use crate::error::{InputReason, InvariantViolation};
-use crate::model::{LogicalFileRecord, RemoteFileUpsert, RemoteObjectRecord};
+use crate::model::{
+    CachedTelegramFileRecord, LogicalFileRecord, RemoteFileUpsert, RemoteObjectRecord,
+};
 use crate::{StorageError, StorageResult};
 
 const MAX_REMOTE_KEY_BYTES: usize = 16 * 1024;
+const MAX_CACHED_TELEGRAM_FILES: usize = 5_000;
 
 impl Database {
     /// Atomically upserts a Telegram identity and its file-centric projection.
@@ -192,6 +195,63 @@ WHERE account_id = ?1 AND chat_id = ?2 AND message_id = ?3
             })
             .transpose()
     }
+
+    /// Returns the newest cached files for one Telegram source without making
+    /// any claim that the source history is fully indexed.
+    pub fn cached_telegram_files(
+        &self,
+        account_id: teleark_core::AccountId,
+        chat_id: teleark_core::ChatId,
+        limit: usize,
+    ) -> StorageResult<Vec<CachedTelegramFileRecord>> {
+        if limit == 0 || limit > MAX_CACHED_TELEGRAM_FILES {
+            return Err(StorageError::InvalidInput {
+                field: "cached_telegram_files.limit",
+                reason: InputReason::OutOfRange,
+            });
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+SELECT ro.message_id, f.name, f.caption, f.mime_type, f.size_bytes,
+       COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0),
+       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0)
+FROM remote_objects ro
+JOIN logical_files f ON f.id = ro.logical_file_id
+WHERE ro.account_id = ?1 AND ro.chat_id = ?2
+ORDER BY COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0) DESC,
+         ro.message_id DESC
+LIMIT ?3
+"#,
+        )?;
+        let limit = i64::try_from(limit).map_err(|_| StorageError::InvalidInput {
+            field: "cached_telegram_files.limit",
+            reason: InputReason::OutOfRange,
+        })?;
+        let rows = statement.query_map(params![account_id.get(), chat_id.get(), limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (message_id, file_name, caption, mime_type, size, sent_at, modified_at) = row?;
+            Ok(CachedTelegramFileRecord {
+                message_id: teleark_core::MessageId::new(message_id),
+                file_name,
+                caption,
+                mime_type,
+                size_bytes: stored_u64("encoded_size_bytes", size)?,
+                sent_at_unix_ms: sent_at,
+                modified_at_unix_ms: modified_at,
+            })
+        })
+        .collect()
+    }
 }
 
 fn validate_remote_file(file: &RemoteFileUpsert) -> StorageResult<()> {
@@ -234,7 +294,7 @@ fn logical_record(id: LogicalFileId, incoming: &RemoteFileUpsert) -> LogicalFile
         caption: incoming.caption.clone(),
         source_account_id: Some(incoming.account_id),
         source_chat_id: Some(incoming.chat_id),
-        created_at_unix_ms: Some(incoming.modified_at_unix_ms),
+        created_at_unix_ms: Some(incoming.sent_at_unix_ms),
         modified_at_unix_ms: Some(incoming.modified_at_unix_ms),
         remote_state: RemoteState::Uploaded,
         encryption_state: EncryptionState::Unencrypted,

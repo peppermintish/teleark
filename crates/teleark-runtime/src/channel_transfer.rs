@@ -15,9 +15,20 @@ use teleark_storage::{
     NativeDownloadTaskRecord, NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord,
     StoredNativeDownloadState, StoredNativeDownloadVerification,
 };
-use teleark_telegram::{DownloadControl, DownloadObserver};
+use teleark_telegram::{
+    DOWNLOAD_PART_SIZE_BYTES, DownloadControl, DownloadObserver, DownloadPartEvent,
+    DownloadPartState,
+};
+use teleark_transfer::{
+    AdaptiveControllerConfig, AdaptiveTransferController, ControllerPhase, MemoryCounters,
+    ParameterBounds, PartCounters, PerformanceSample, QueueCounters, TransferBottleneck,
+    TransferControlParameters, TransferTelemetrySnapshot,
+};
 
-use crate::{DesktopLibrary, DesktopTelegram};
+use crate::{
+    DesktopLibrary, DesktopTelegram,
+    vault::{TransferSessionKind, TransferSessionLog},
+};
 
 const CHANNEL_DOWNLOAD_QUEUE_CAPACITY: usize = 32;
 const CHANNEL_DOWNLOAD_BATCH_CAPACITY: usize = 5_000;
@@ -128,6 +139,16 @@ pub struct ChannelDownloadEvent {
     pub failure_kind: Option<ApplicationErrorKind>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChannelDownloadPartEvent {
+    pub part_index: u64,
+    pub offset_bytes: u64,
+    pub length_bytes: u64,
+    pub state: DownloadPartState,
+    pub attempt: u32,
+    pub elapsed_millis: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelDownloadSnapshot {
     pub id: u64,
@@ -154,6 +175,9 @@ pub struct ChannelDownloadSnapshot {
     pub attempts: u32,
     pub failure: Option<ChannelDownloadFailure>,
     pub events: Vec<ChannelDownloadEvent>,
+    pub part_events: Vec<ChannelDownloadPartEvent>,
+    pub session_log_path: Option<PathBuf>,
+    pub telemetry: TransferTelemetrySnapshot,
 }
 
 #[derive(Clone)]
@@ -232,6 +256,23 @@ struct RuntimeDownloadObserver {
     previous_duration_ms: u64,
     sample: Mutex<ProgressSample>,
     last_persisted: Mutex<Instant>,
+    controller: Mutex<AdaptiveTransferController>,
+    session_log: Mutex<Option<TransferSessionLog>>,
+}
+
+impl RuntimeDownloadObserver {
+    fn finish_session_log(&self, elapsed_ms: u64, error_kind: Option<ApplicationErrorKind>) {
+        let telemetry = self
+            .controller
+            .lock()
+            .map(|controller| controller.snapshot())
+            .unwrap_or_else(|_| empty_download_telemetry());
+        if let Ok(mut log) = self.session_log.lock()
+            && let Some(log) = log.as_mut()
+        {
+            let _ = log.append_finished(elapsed_ms, error_kind, &telemetry);
+        }
+    }
 }
 
 impl DownloadObserver for RuntimeDownloadObserver {
@@ -292,6 +333,137 @@ impl DownloadObserver for RuntimeDownloadObserver {
             );
         }
     }
+
+    fn desired_inflight_parts(&self) -> usize {
+        self.controller
+            .lock()
+            .map(|controller| usize::from(controller.parameters().inflight_parts_per_file))
+            .unwrap_or(1)
+    }
+
+    fn part_event(&self, event: DownloadPartEvent) {
+        let part_event = ChannelDownloadPartEvent {
+            part_index: event.part_index,
+            offset_bytes: event.offset_bytes,
+            length_bytes: event.length_bytes,
+            state: event.state,
+            attempt: event.attempt,
+            elapsed_millis: event.elapsed_millis,
+        };
+        let snapshot = update_snapshot(&self.snapshots, self.id, |snapshot| {
+            if snapshot.part_events.len() >= 8_192 {
+                snapshot.part_events.remove(0);
+            }
+            snapshot.part_events.push(part_event);
+            snapshot.telemetry.parts = current_part_counters(
+                &snapshot.part_events,
+                snapshot.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES),
+                0,
+            );
+        });
+        if event.state != DownloadPartState::Completed {
+            return;
+        }
+        let elapsed_ms = elapsed_millis(self.started.elapsed()).max(1);
+        let current_speed = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.current_bytes_per_second)
+            .unwrap_or_default();
+        let completed_parts = snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.telemetry.parts.completed_parts);
+        let total_parts = self.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES);
+        let completed_parts_per_second_milli = completed_parts
+            .saturating_mul(1_000_000)
+            .checked_div(elapsed_ms)
+            .unwrap_or_default();
+        let part_counters = snapshot.as_ref().map_or_else(
+            || PartCounters {
+                total_parts,
+                completed_parts,
+                missing_parts: total_parts.saturating_sub(completed_parts),
+                completed_parts_per_second_milli,
+                ..PartCounters::default()
+            },
+            |snapshot| {
+                current_part_counters(
+                    &snapshot.part_events,
+                    total_parts,
+                    completed_parts_per_second_milli,
+                )
+            },
+        );
+        let mut controller = match self.controller.lock() {
+            Ok(controller) => controller,
+            Err(_) => return,
+        };
+        let inflight_parts_per_file = controller.parameters().inflight_parts_per_file;
+        let decision = controller.observe(PerformanceSample {
+            observed_at_millis: elapsed_ms,
+            goodput_bytes_per_second: current_speed,
+            disk_bytes_per_second: current_speed,
+            round_trip_time_p95_millis: event.elapsed_millis,
+            inflight_bytes: DOWNLOAD_PART_SIZE_BYTES
+                .saturating_mul(u64::from(inflight_parts_per_file)),
+            active_large_files: 1,
+            parts: part_counters,
+            queues: QueueCounters {
+                large_files_active: 1,
+                large_queue_weight: 100,
+                ..QueueCounters::default()
+            },
+            memory: MemoryCounters {
+                network_inflight_bytes: DOWNLOAD_PART_SIZE_BYTES
+                    .saturating_mul(u64::from(inflight_parts_per_file)),
+                writer_queue_bytes: event.length_bytes,
+                ..MemoryCounters::default()
+            },
+            ..PerformanceSample::default()
+        });
+        let telemetry = controller.snapshot();
+        drop(controller);
+        if let Ok(mut log) = self.session_log.lock()
+            && let Some(log) = log.as_mut()
+        {
+            let _ = log.append_part_confirmed(
+                u32::try_from(event.part_index).unwrap_or(u32::MAX),
+                elapsed_ms,
+                event.length_bytes,
+                &decision,
+                &telemetry,
+            );
+        }
+        let _ = update_snapshot(&self.snapshots, self.id, |snapshot| {
+            snapshot.telemetry = telemetry;
+        });
+    }
+}
+
+fn current_part_counters(
+    events: &[ChannelDownloadPartEvent],
+    total_parts: u64,
+    completed_parts_per_second_milli: u64,
+) -> PartCounters {
+    let mut current_states = BTreeMap::new();
+    for event in events {
+        current_states.insert(event.part_index, event.state);
+    }
+    let count = |state| {
+        current_states
+            .values()
+            .filter(|current| **current == state)
+            .count() as u64
+    };
+    let completed_parts = count(DownloadPartState::Completed);
+    PartCounters {
+        total_parts,
+        completed_parts,
+        inflight_parts: count(DownloadPartState::Inflight),
+        retry_parts: count(DownloadPartState::Retry),
+        failed_parts: count(DownloadPartState::Failed),
+        missing_parts: total_parts.saturating_sub(completed_parts),
+        completed_parts_per_second_milli,
+    }
 }
 
 impl DesktopTransfers {
@@ -308,10 +480,16 @@ impl DesktopTransfers {
     ) -> Result<Self, ApplicationError> {
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_DOWNLOAD_QUEUE_CAPACITY);
         let restored = library.native_downloads()?;
+        let transfer_log_directory = library.managed_directories()?.logs.join("Transfers");
         let mut snapshots = Vec::with_capacity(restored.len());
         let mut controls = BTreeMap::new();
         for record in restored {
             let mut snapshot = snapshot_from_record(record);
+            let session_log_path =
+                transfer_log_directory.join(format!("native-download-{}.jsonl", snapshot.id));
+            if session_log_path.is_file() {
+                snapshot.session_log_path = Some(session_log_path);
+            }
             if snapshot.state == ChannelDownloadState::Running {
                 snapshot.state = ChannelDownloadState::Queued;
                 snapshot.current_bytes_per_second = None;
@@ -808,6 +986,60 @@ impl Drop for TransferWorkerInner {
     }
 }
 
+fn new_download_controller(
+    soft_limit_policy: teleark_transfer::SoftLimitPolicy,
+) -> Result<AdaptiveTransferController, ApplicationError> {
+    let available_parallelism = thread::available_parallelism()
+        .ok()
+        .and_then(|count| u16::try_from(count.get()).ok())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let mut config =
+        AdaptiveControllerConfig::maximum_throughput(512 * 1024 * 1024, available_parallelism)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.transfer_connections = ParameterBounds::new(1, 1, 1)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.inflight_rpcs_per_connection = ParameterBounds::new(1, 1, 1)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.active_files = ParameterBounds::new(1, 1, 1)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.soft_limit_policy = soft_limit_policy;
+    let initial_parameters = TransferControlParameters {
+        inflight_rpcs_per_connection: 1,
+        ..TransferControlParameters::conservative_download()
+    };
+    AdaptiveTransferController::with_initial_parameters(config, false, initial_parameters)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))
+}
+
+fn empty_download_telemetry() -> TransferTelemetrySnapshot {
+    TransferTelemetrySnapshot {
+        phase: ControllerPhase::Ramp,
+        parameters: TransferControlParameters {
+            inflight_rpcs_per_connection: 1,
+            ..TransferControlParameters::conservative_download()
+        },
+        goodput_bytes_per_second: 0,
+        encryption_bytes_per_second: 0,
+        disk_bytes_per_second: 0,
+        round_trip_time_p95_millis: 0,
+        estimated_bdp_bytes: 0,
+        inflight_bytes: 0,
+        target_inflight_bytes: 0,
+        cpu_utilization_basis_points: 0,
+        encrypted_queue_length: 0,
+        network_waiting_for_encryption_millis: 0,
+        encryption_waiting_for_network_millis: 0,
+        bottleneck: TransferBottleneck::Unknown,
+        parts: PartCounters::default(),
+        queues: QueueCounters::default(),
+        memory: MemoryCounters::default(),
+        memory_budget_bytes: 512 * 1024 * 1024,
+        lanes: Vec::new(),
+        decisions: Vec::new(),
+    }
+}
+
 fn validate_request(request: &ChannelDownloadRequest) -> Result<(), ApplicationError> {
     if request.chat_id <= 0
         || request.message_id <= 0
@@ -902,7 +1134,66 @@ fn run_download(
     );
     let started = Instant::now();
     let previous_duration_ms = snapshot.duration_ms.unwrap_or(0);
-    let observer: Arc<dyn DownloadObserver> = Arc::new(RuntimeDownloadObserver {
+    let controller = match library
+        .preferences()
+        .and_then(|preferences| new_download_controller(preferences.transfer_soft_limit_policy))
+    {
+        Ok(controller) => controller,
+        Err(error) => {
+            fail_download(
+                snapshots,
+                library,
+                &snapshot,
+                error,
+                queue_wait_ms,
+                previous_duration_ms,
+                started_at_unix_ms,
+            );
+            return;
+        }
+    };
+    let mut session_log =
+        match TransferSessionLog::create(library, TransferSessionKind::NativeDownload, snapshot.id)
+        {
+            Ok(log) => log,
+            Err(error) => {
+                fail_download(
+                    snapshots,
+                    library,
+                    &snapshot,
+                    error,
+                    queue_wait_ms,
+                    previous_duration_ms,
+                    started_at_unix_ms,
+                );
+                return;
+            }
+        };
+    if let Err(error) = session_log.append_started(
+        false,
+        started_at_unix_ms.unwrap_or(snapshot.queued_at_unix_ms),
+        snapshot.size_bytes,
+        u32::try_from(snapshot.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES)).unwrap_or(u32::MAX),
+        &controller.snapshot(),
+    ) {
+        fail_download(
+            snapshots,
+            library,
+            &snapshot,
+            error,
+            queue_wait_ms,
+            previous_duration_ms,
+            started_at_unix_ms,
+        );
+        return;
+    }
+    let session_log_path = Some(session_log.path.clone());
+    let initial_telemetry = controller.snapshot();
+    let _ = update_snapshot(snapshots, snapshot.id, |current| {
+        current.session_log_path = session_log_path;
+        current.telemetry = initial_telemetry;
+    });
+    let observer = Arc::new(RuntimeDownloadObserver {
         id: snapshot.id,
         size_bytes: snapshot.size_bytes,
         control: Arc::clone(&control),
@@ -916,15 +1207,22 @@ fn run_download(
             measured_at: started,
         }),
         last_persisted: Mutex::new(started),
+        controller: Mutex::new(controller),
+        session_log: Mutex::new(Some(session_log)),
     });
+    let backend_observer: Arc<dyn DownloadObserver> = observer.clone();
     let result = backend.download(
         snapshot.chat_id,
         snapshot.message_id,
         &snapshot.destination,
-        observer,
+        backend_observer,
     );
     let duration_ms = previous_duration_ms.saturating_add(elapsed_millis(started.elapsed()));
     let finished_at_unix_ms = unix_time_millis().ok();
+    observer.finish_session_log(
+        duration_ms,
+        result.as_ref().err().map(ApplicationError::kind),
+    );
     match result {
         Ok(()) if control.load(Ordering::Acquire) == CONTROL_CANCELLED => {
             let cancelled = update_snapshot(snapshots, snapshot.id, |current| {
@@ -1202,6 +1500,9 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
         attempts: record.attempts,
         failure,
         events,
+        part_events: Vec::new(),
+        session_log_path: None,
+        telemetry: empty_download_telemetry(),
     }
 }
 
@@ -1363,6 +1664,44 @@ mod tests {
                 .kind(),
             ApplicationErrorKind::Capacity
         );
+    }
+
+    #[test]
+    fn part_counters_use_each_parts_latest_state() {
+        let events = [
+            ChannelDownloadPartEvent {
+                part_index: 0,
+                offset_bytes: 0,
+                length_bytes: DOWNLOAD_PART_SIZE_BYTES,
+                state: DownloadPartState::Inflight,
+                attempt: 1,
+                elapsed_millis: 0,
+            },
+            ChannelDownloadPartEvent {
+                part_index: 0,
+                offset_bytes: 0,
+                length_bytes: DOWNLOAD_PART_SIZE_BYTES,
+                state: DownloadPartState::Completed,
+                attempt: 1,
+                elapsed_millis: 25,
+            },
+            ChannelDownloadPartEvent {
+                part_index: 1,
+                offset_bytes: DOWNLOAD_PART_SIZE_BYTES,
+                length_bytes: DOWNLOAD_PART_SIZE_BYTES,
+                state: DownloadPartState::Failed,
+                attempt: 1,
+                elapsed_millis: 40,
+            },
+        ];
+
+        let counters = current_part_counters(&events, 3, 1_500);
+
+        assert_eq!(counters.completed_parts, 1);
+        assert_eq!(counters.inflight_parts, 0);
+        assert_eq!(counters.failed_parts, 1);
+        assert_eq!(counters.missing_parts, 2);
+        assert_eq!(counters.completed_parts_per_second_milli, 1_500);
     }
 
     struct FakeBackend {

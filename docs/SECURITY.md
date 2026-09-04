@@ -1,6 +1,6 @@
 # Security Model
 
-Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, authenticated Manifest publication, production filesystem/Telegram adapters, and fake-remote database-loss recovery exist. A production Key Vault/unlock service, credential storage, independent review, and the encrypted desktop workflow do not. TeleArk must not yet be used to protect valuable data.
+Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, authenticated Manifest publication, production filesystem/Telegram adapters, a retained desktop Vault owner, explicit recovery-bundle export/restore, and the encrypted Saved Messages upload/scan/download workflow now exist. OS credential storage, independent review, durable encrypted-transfer checkpoints and controls, and credentialed crash/system evidence do not. TeleArk must not yet be used to protect valuable data.
 
 ## Security goals
 
@@ -78,6 +78,8 @@ File Key ----------------------------> content frames + manifest metadata
 
 Changing a password rewraps the Vault Master Key; it does not re-encrypt all file content. OS Keychain integration is a convenience adapter, not the durable recovery authority. A Recovery Key must be generated from secure randomness, displayed/exported through an explicit protected flow, and never silently uploaded alongside the material it unlocks.
 
+The desktop exports a self-contained, exact-version recovery bundle containing the checksummed Recovery Key text and its authenticated Recovery Wrap. That bundle is sufficient to reconstruct local Vault metadata and set a new password after the Library database is lost. Recovery rotation replaces the active local recovery record, so an old bundle cannot unlock the current local record through the ordinary unlock flow. It cannot cryptographically revoke an already exported old bundle: because that bundle still unwraps the same Master Key, it remains capable of disaster recovery against retained ciphertext. Users must protect or securely destroy superseded exports.
+
 Loss of every valid password/recovery/keychain path makes encrypted data unrecoverable by design. TeleArk has no backdoor. The UI must state this clearly before enabling Vault storage and should encourage an offline recovery-key backup.
 
 ## Secret handling
@@ -95,7 +97,7 @@ them only in memory, redacts them from adapter/runtime `Debug` output, refreshes
 them on Telegram's login-token update or expiry, and never writes them to the
 Library database, session file, ordinary logs, or fixtures.
 
-The candidate crate uses redacted secret and manifest metadata `Debug` implementations, zeroizing key/password/plaintext buffers where practical, OS randomness in production, and deterministic randomness only behind test support. Its mandatory in-memory AEAD-usage registry is a safety invariant, not durable storage: a future Vault service must own it and hydrate all existing identities before any post-restart encryption.
+The candidate crate uses redacted secret and manifest metadata `Debug` implementations, zeroizing key/password/plaintext buffers where practical, OS randomness in production, and deterministic randomness only behind test support. The desktop Vault serializes sensitive operations on one bounded owner thread and retains only the unwrapped Master Key there while unlocked. Each package writer owns an AEAD-usage registry for its immutable File Key and fresh identities. Full restart-time hydration of all prior remote identities remains required before the candidate format can be stabilized for production.
 
 ## Parser and output safety
 
@@ -106,8 +108,11 @@ Downloads write only to a controlled `.partial` destination. Authentication fail
 Native, non-Vault Telegram downloads use the same publication rule but currently
 verify only the exact byte count declared by Telegram. They create a private
 collision-resistant application partial name, reject an existing final path,
-flush before atomic no-replace publication, and remove the partial on an observed failure. This
-is truncation/finalization safety, not cryptographic content authentication.
+write one-mebibyte logical parts at explicit offsets, persist a strict versioned
+completion bitmap, flush before atomic no-replace publication, and remove the
+partial and bitmap on explicit cancellation. Interruption retains both for
+missing-part-only resume. This is truncation/finalization safety, not
+cryptographic content authentication.
 
 Path metadata is untrusted: prevent traversal, absolute-path escape, reserved-name abuse, separator confusion, and overwrite without explicit policy.
 
@@ -142,10 +147,18 @@ Telegram and SQLite cannot participate in one transaction. Idempotent package/pa
 
 The generic Transfer engine exercises ambiguous-success and checkpoint-failure
 reconciliation against deterministic fakes, including no-duplicate remote
-parts, and the runtime composes it with real Telegram and SQLite adapters. A
-separate bounded native-download worker is connected to the desktop. Native
-download queue entries are currently in-memory and do not resume after restart;
-credentialed Telegram crash/system testing still remains.
+parts, and the runtime composes it with real Telegram and SQLite adapters. The
+connected encrypted Saved Messages path uploads and verifies every encrypted
+part before publishing its authenticated manifest, discovers managed files by
+authenticating manifests, and downloads through a private partial file before
+whole-file verification and atomic publication. Its queue/progress is currently
+in memory, it has no pause/cancel/retry controls, scanning is bounded to 1,000
+manifest candidates, and interruption before manifest publication can leave
+unreferenced ciphertext objects. A separate bounded native-download worker is
+also connected to the desktop; its SQLite task rows and private versioned part
+bitmap resume missing ranges after restart. Both paths create privacy-reviewed
+per-transfer session logs before moving data. Credentialed Telegram crash/system
+testing still remains.
 
 ## Dependency and clean-room security
 

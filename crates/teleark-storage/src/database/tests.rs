@@ -17,7 +17,7 @@ use crate::model::{
     NewNativeDownloadTaskRecord, RemoteFileUpsert, SearchQuery, SettingRecord, StoredIndexCoverage,
     StoredIndexJobState, StoredNativeDownloadState, StoredNativeDownloadVerification,
     StoredPartState, StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord,
-    TransferPartCheckpoint, TransferTaskRecord,
+    TransferPartCheckpoint, TransferTaskRecord, VaultMetadataRecord,
 };
 
 fn account(id: i64) -> AccountRecord {
@@ -75,6 +75,30 @@ fn empty_database_migrates_and_configures_connection() -> Result<(), Box<dyn Err
     assert_eq!(database.journal_mode()?.to_lowercase(), "wal");
     assert!(database.foreign_keys_enabled()?);
     database.quick_check()?;
+    Ok(())
+}
+
+#[test]
+fn vault_metadata_round_trips_and_replaces_atomically() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    assert_eq!(database.vault_metadata()?, None);
+    let mut record = VaultMetadataRecord {
+        vault_id: [7; 16],
+        password_wrap: vec![1; 124],
+        recovery_wrap: vec![2; 88],
+        password_generation: 1,
+        recovery_generation: 1,
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 10,
+    };
+    database.save_vault_metadata(&record)?;
+    assert_eq!(database.vault_metadata()?, Some(record.clone()));
+
+    record.password_wrap = vec![3; 132];
+    record.password_generation = 2;
+    record.updated_at_unix_ms = 20;
+    database.save_vault_metadata(&record)?;
+    assert_eq!(database.vault_metadata()?, Some(record));
     Ok(())
 }
 
@@ -690,6 +714,7 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
         kind: FileKind::Document,
         mime_type: Some("application/pdf".to_owned()),
         caption: Some("source caption".to_owned()),
+        sent_at_unix_ms: 900,
         modified_at_unix_ms: 1_000,
     };
 
@@ -697,6 +722,19 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
     let (same_file, same_remote) = database.upsert_remote_file(&incoming)?;
     assert_eq!(same_file, first_file);
     assert_eq!(same_remote, first_remote);
+    let cached = database.cached_telegram_files(incoming.account_id, incoming.chat_id, 10)?;
+    assert_eq!(cached.len(), 1);
+    assert_eq!(cached[0].message_id, incoming.message_id);
+    assert_eq!(cached[0].file_name, incoming.name);
+    assert_eq!(cached[0].caption, incoming.caption);
+    assert_eq!(cached[0].mime_type, incoming.mime_type);
+    assert_eq!(cached[0].size_bytes, incoming.size_bytes);
+    assert_eq!(cached[0].sent_at_unix_ms, incoming.sent_at_unix_ms);
+    assert!(
+        database
+            .cached_telegram_files(incoming.account_id, incoming.chat_id, 0)
+            .is_err()
+    );
     assert_eq!(
         database.remote_object_by_source(
             incoming.account_id,

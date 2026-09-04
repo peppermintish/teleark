@@ -76,6 +76,13 @@ The GUI coverage map is derived from these stored ranges, not mock percentages o
 
 ## Initial and incremental indexing
 
+Interactive source browsing reuses the file projection as a cache but does not
+reuse or advance `telegram_index_state`. Previously projected rows can be shown
+before the network responds, and newly browsed rows are idempotently upserted,
+but only a committed indexing page provides cursor/coverage evidence. This
+separation prevents a partially viewed 200-message chunk from being presented
+as complete history coverage.
+
 ### Historical scan
 
 1. Validate account/chat access and requested scope/policy.

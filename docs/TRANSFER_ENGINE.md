@@ -1,14 +1,17 @@
 # Transfer Engine
 
-Status: deterministic frontend-neutral encrypted engine and concrete native-file,
-SQLite, crypto, and Telegram byte-object adapters are implemented and tested.
+Status: deterministic frontend-neutral encrypted engine, adaptive goodput
+controller, bounded encryption pipeline, and concrete native-file, SQLite,
+crypto, and Telegram byte-object adapters are implemented and tested.
 Runtime integration covers encrypted upload, checkpoint restart, Manifest
 publication, fresh-database File Key/layout recovery, authenticated download,
 whole-file equality, and atomic finalization against a deterministic fake
-remote. The desktop additionally owns a bounded real Telegram-native download
-queue and renders its durable, controllable task snapshots. Encrypted desktop
-ownership, credentialed Telegram system tests, bandwidth control, and
-large-file encrypted streaming remain.
+remote. The desktop owns both a bounded durable Telegram-native download queue
+and a serialized alpha Vault owner connected to Saved Messages encrypted
+upload, authenticated scan, and restore download. Credentialed Telegram system
+tests, physical multi-connection media-DC ownership, durable encrypted-task
+controls/checkpoints, bandwidth control, and large-file encrypted streaming
+remain.
 
 ## Scope
 
@@ -53,13 +56,73 @@ ownership by a bounded runtime worker. Their operations are synchronous and do
 not contain network awaits. The Telegram byte-object adapter uses the retained
 Telegram worker. Native channel downloads use a separate retained worker with a
 bounded queue and locked snapshots; it never holds the snapshot lock during a
-network operation. This native path is intentionally distinct from encrypted
-`LogicalFile` package transfer until the desktop Vault service can supply keys
-and manifests.
+network operation. Encrypted Saved Messages work is serialized by the retained
+Vault owner, which alone holds unwrapped keys and exposes frontend-neutral
+snapshots. That alpha path does not yet reuse the generic engine's durable
+checkpoint/control lifecycle.
+
+## Adaptive goodput controller
+
+`AdaptiveTransferController` owns a measured parameter envelope per DC:
+
+```text
+C = transfer connections
+W = inflight RPCs per connection
+F = active files
+P = inflight logical parts per file
+E = encryption workers
+Qe = encrypted-part queue depth
+```
+
+It starts conservatively, changes one eligible parameter per probe, and records
+the complete before/after decision. A gain of at least 3% is kept, 1–3% is
+confirmed with another sample, less than 1% marks a platform and restores the
+previous value, and a regression rolls back into recovery. RTT is evidence for
+BDP and diagnostics but never causes a rollback while goodput still materially
+improves. Target inflight bytes are 1.75 times the estimated BDP.
+
+Memory use is one global byte budget subdivided into plaintext, encrypted,
+network-inflight, and writer queues. Budget pressure reduces concurrency.
+Network starvation by encryption prefers more encryption workers; a nearly full
+encrypted queue reduces them. Soft active-file guidance is an explicit
+`Respect`, `AdaptiveOverride`, or `Ignore` policy, and crossing it produces a
+first-class decision event. Structured FloodWait observations pause only the
+affected known lane until the exact deadline and emit a separate resume event.
+
+Runtime adapters advertise truthful bounds. The native grammers download path
+currently varies P in real time from the controller, while C, W, and F are
+clamped to the single owner/connection envelope actually exposed by the
+adapter. Physical media-DC lane identities remain unavailable from the current
+grammers abstraction and are never fabricated in telemetry.
+
+## Encrypted Saved Messages desktop path
+
+The connected upload path validates one local source, generates a fresh package
+and File Key, then runs a bounded reader → encryption-worker pool → encrypted
+part queue → uploader pipeline. The Reader updates the whole-file BLAKE3 while
+reading each range, avoiding a separate full-file pre-scan. Encryption of following parts overlaps network
+upload of the current part; queue capacity and worker count are explicit and
+included in telemetry. Each bounded 60 MiB-or-smaller part is re-downloaded for
+verification, and the authenticated Manifest is published only after all parts
+verify. The managed Saved Messages view scans at
+most 1,000 exact-caption candidates, rejects unauthenticated or malformed
+manifests, and presents only reconstructed logical-file metadata. Restore
+downloads use manifest-bound locators, decrypt into one controlled private
+partial, verify the whole-file BLAKE3 digest, flush, and atomically publish to a
+runtime-allocated non-overwriting destination.
+
+Progress snapshots include direction, logical bytes, part counts, elapsed time,
+average throughput, destination, package identity, crypto suite, structured
+failure state, adaptive parameters, rates, queues, memory, and controller
+decisions. A schema-versioned session log permanently records these safe events.
+Vault task snapshots themselves remain memory-only and offer no pause, cancel,
+retry, priority, or restart resume. A process/network failure before Manifest
+publication can leave orphan encrypted parts for a future reconciliation and
+cleanup flow.
 
 ## Native channel-download path
 
-The Telegram Sources screen queries the selected dialog in exclusive-cursor
+The named Channels sidebar and raw Saved Messages view query the selected dialog in exclusive-cursor
 pages and keeps source/message identity on every row. A runtime-allocated path
 under the configured managed `Downloads` directory becomes a bounded runtime
 request. The adapter refetches the document by chat
@@ -68,12 +131,14 @@ checks the declared byte count, flushes, and atomically publishes the final
 path. Existing destinations are never silently overwritten.
 
 The task snapshots exposed to GPUI are `Queued`, `Running`, `Paused`,
-`Completed`, structured `Failed`, or `Cancelled`. Every 512 KiB Telegram chunk
-updates transferred bytes, current speed, and ETA. The adapter preserves a
-private partial at a complete chunk boundary across network/process
-interruption; explicit cancel removes it. Pause interrupts at the next chunk
-boundary so another queued task may run, while resume skips already written
-chunks. A per-channel batch request scans at most 50,000 messages, retains at
+`Completed`, structured `Failed`, or `Cancelled`. The adapter schedules missing
+1 MiB logical parts concurrently and fills each with the required 512 KiB
+Telegram requests. Out-of-order completions use positional writes and update a
+strict `TARKDPM1` completion bitmap. Transferred bytes, current speed, ETA, part
+states, and the controller's desired P update live. The adapter preserves the
+private partial and bitmap across network/process interruption; explicit cancel
+removes both. Pause interrupts at a safe request boundary, while resume requests
+only missing parts. A per-channel batch request scans at most 50,000 messages, retains at
 most 2,000 matching files, and can filter inclusively by sent-time range and
 file kind. SQLite schema v7 persists bounded task history, progress, timing,
 attempt, verification, failure data, source message metadata, and an optional
@@ -82,9 +147,9 @@ renders the batch as one aggregate transfer row and expands its child tasks on
 request; individual task controls still target the durable child identity.
 Startup restores every retained row,
 normalizes interrupted running work to queued, and resumes it after Telegram
-authorization/dialog discovery. The path remains sequential and verifies
-Telegram's declared byte size rather than a content hash. Matching structured
-tracing events omit filenames and paths.
+authorization/dialog discovery. The path verifies Telegram's declared byte
+size rather than a content hash. Matching structured tracing and session events
+omit filenames and paths.
 
 Application shutdown first persists the latest observed byte checkpoint and
 signals the observer, but never waits indefinitely for Telegram to deliver one

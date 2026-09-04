@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 7;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 8;
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -383,6 +383,21 @@ CREATE INDEX native_download_tasks_batch
     ON native_download_tasks (batch_id, id);
 CREATE INDEX native_download_batches_history
     ON native_download_batches (created_at_unix_ms DESC, id DESC);
+"#,
+    },
+    Migration {
+        version: 8,
+        sql: r#"
+CREATE TABLE vault_metadata (
+    singleton_id            INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    vault_id                BLOB NOT NULL UNIQUE CHECK (length(vault_id) = 16),
+    password_wrap           BLOB NOT NULL CHECK (length(password_wrap) BETWEEN 124 AND 172),
+    recovery_wrap           BLOB NOT NULL CHECK (length(recovery_wrap) = 88),
+    password_generation     INTEGER NOT NULL CHECK (password_generation > 0),
+    recovery_generation     INTEGER NOT NULL CHECK (recovery_generation > 0),
+    created_at_unix_ms      INTEGER NOT NULL,
+    updated_at_unix_ms      INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)
+) STRICT;
 "#,
     },
 ];

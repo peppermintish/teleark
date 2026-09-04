@@ -3,14 +3,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use teleark_core::{ApplicationError, ApplicationErrorKind, FileKind};
 use teleark_telegram::{
     DownloadObserver, PasswordChallenge, PasswordOutcome, PendingLogin, QrLoginOutcome,
-    SignInOutcome, TelegramAccount, TelegramChat, TelegramChatKind, TelegramConfig,
-    TelegramConnection, TelegramError, TelegramErrorKind,
+    ScanCancellation, SignInOutcome, TelegramAccount, TelegramChat, TelegramChatKind,
+    TelegramConfig, TelegramConnection, TelegramError, TelegramErrorKind,
 };
 use zeroize::Zeroizing;
 
@@ -23,6 +23,9 @@ const TELEGRAM_QUEUE_CAPACITY: usize = 32;
 const MAX_DIALOGS: usize = 10_000;
 const MAX_BATCH_SCAN_MESSAGES: usize = 50_000;
 const MAX_BATCH_FILES: usize = 2_000;
+const SCAN_PAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub type TelegramScanCancellation = ScanCancellation;
 
 pub fn default_telegram_session_path() -> Option<PathBuf> {
     super::default_database_path().map(|path| path.with_file_name("telegram.session"))
@@ -146,6 +149,7 @@ enum TelegramRequest {
         chat_id: i64,
         before_message_id: Option<i64>,
         limit: usize,
+        cancellation: TelegramScanCancellation,
         reply: mpsc::SyncSender<Result<TelegramFilePage, ApplicationError>>,
     },
     ScanFilteredFiles {
@@ -402,10 +406,26 @@ impl DesktopTelegram {
         before_message_id: Option<i64>,
         limit: usize,
     ) -> Result<TelegramFilePage, ApplicationError> {
+        self.scan_file_page_cancellable(
+            chat_id,
+            before_message_id,
+            limit,
+            TelegramScanCancellation::new(),
+        )
+    }
+
+    pub fn scan_file_page_cancellable(
+        &self,
+        chat_id: i64,
+        before_message_id: Option<i64>,
+        limit: usize,
+        cancellation: TelegramScanCancellation,
+    ) -> Result<TelegramFilePage, ApplicationError> {
         self.request("scan_file_page", |reply| TelegramRequest::ScanPage {
             chat_id,
             before_message_id,
             limit,
+            cancellation,
             reply,
         })
     }
@@ -603,9 +623,11 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 chat_id,
                 before_message_id,
                 limit,
+                cancellation,
                 reply,
             } => {
-                let result = scan_page(&state, chat_id, before_message_id, limit).await;
+                let result =
+                    scan_page(&state, chat_id, before_message_id, limit, &cancellation).await;
                 let _ = reply.send(result);
             }
             TelegramRequest::ScanFilteredFiles {
@@ -873,15 +895,24 @@ async fn scan_page(
     chat_id: i64,
     before_message_id: Option<i64>,
     limit: usize,
+    cancellation: &TelegramScanCancellation,
 ) -> Result<TelegramFilePage, ApplicationError> {
     let chat = state
         .chats
         .get(&chat_id)
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-    let page = connection_ref(state)?
-        .scan_file_page(chat, before_message_id, limit)
-        .await
-        .map_err(map_telegram_error)?;
+    let page = tokio::time::timeout(
+        SCAN_PAGE_TIMEOUT,
+        connection_ref(state)?.scan_file_page_cancellable(
+            chat,
+            before_message_id,
+            limit,
+            cancellation,
+        ),
+    )
+    .await
+    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?
+    .map_err(map_telegram_error)?;
     let (files, next_before_message_id, exhausted, examined_messages) = page.into_parts();
     Ok(TelegramFilePage {
         files: files
@@ -914,7 +945,14 @@ async fn scan_filtered_files(
     let mut matches = Vec::new();
     while examined < MAX_BATCH_SCAN_MESSAGES && matches.len() < MAX_BATCH_FILES {
         let limit = 1_000.min(MAX_BATCH_SCAN_MESSAGES - examined);
-        let page = scan_page(state, chat_id, cursor, limit).await?;
+        let page = scan_page(
+            state,
+            chat_id,
+            cursor,
+            limit,
+            &TelegramScanCancellation::new(),
+        )
+        .await?;
         examined = examined.saturating_add(
             usize::try_from(page.examined_messages)
                 .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?,

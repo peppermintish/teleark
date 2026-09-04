@@ -10,6 +10,7 @@ use gpui_component::{
     checkbox::Checkbox,
     input::Input,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
     table::{Column, Table, TableDelegate, TableState},
     tooltip::Tooltip,
 };
@@ -19,11 +20,13 @@ use teleark_i18n::{
     MessageArgs,
     format::{format_bytes, format_integer, format_unix_millis},
 };
-use teleark_runtime::{ChannelDownloadState, TelegramAuthState, TelegramFileSummary};
+use teleark_runtime::{
+    ChannelDownloadState, ManagedVaultFile, TelegramAuthState, TelegramFileSummary,
+};
 
 use crate::{
     app::{
-        ChannelBatchActivity, ChannelBatchPeriod, TeleArkApp, TelegramActivity,
+        ChannelBatchActivity, ChannelBatchPeriod, SavedMessagesView, TeleArkApp, TelegramActivity,
         telegram_login_controls_enabled,
     },
     components::{self, Tone},
@@ -31,7 +34,10 @@ use crate::{
     theme,
 };
 
-pub(crate) const CHANNEL_FILE_PAGE_SIZE: usize = 5_000;
+pub(crate) const CHANNEL_FILE_LIST_CAPACITY: usize = 5_000;
+pub(crate) const CHANNEL_FILE_INITIAL_SCAN: usize = 200;
+pub(crate) const CHANNEL_FILE_LOAD_MORE_SCAN: usize = 1_000;
+pub(crate) const CHANNEL_FILE_SCAN_CHUNK: usize = 200;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChannelFileTableRow {
@@ -52,6 +58,12 @@ pub(crate) struct ChannelFileTableDelegate {
     select_file_label: SharedString,
     download_label: SharedString,
     empty_label: SharedString,
+    loading_label: SharedString,
+    slow_label: SharedString,
+    cancel_label: SharedString,
+    retry_label: SharedString,
+    slow: bool,
+    failed: bool,
 }
 
 impl ChannelFileTableDelegate {
@@ -66,6 +78,12 @@ impl ChannelFileTableDelegate {
             select_file_label: "".into(),
             download_label: "".into(),
             empty_label: "".into(),
+            loading_label: "".into(),
+            slow_label: "".into(),
+            cancel_label: "".into(),
+            retry_label: "".into(),
+            slow: false,
+            failed: false,
         }
     }
 
@@ -223,15 +241,66 @@ impl TableDelegate for ChannelFileTableDelegate {
         div()
             .size_full()
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
+            .gap_2()
             .text_sm()
             .text_color(theme::text_secondary())
-            .child(self.empty_label.clone())
+            .when(self.loading, |content| {
+                let owner = self.owner.clone();
+                content
+                    .child(Spinner::new().small().color(theme::blue().into()))
+                    .child(self.loading_label.clone())
+                    .when(self.slow, |content| {
+                        content.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(self.slow_label.clone()),
+                        )
+                    })
+                    .child(
+                        components::button(
+                            "channel-files-cancel-empty",
+                            self.cancel_label.clone(),
+                            None,
+                            false,
+                        )
+                        .on_click(move |_, _, cx| {
+                            if let Some(owner) = owner.as_ref() {
+                                let _ = owner.update(cx, |app, cx| {
+                                    app.cancel_telegram_file_load(cx);
+                                });
+                            }
+                        }),
+                    )
+            })
+            .when(!self.loading, |content| {
+                content.child(self.empty_label.clone())
+            })
+            .when(self.failed, |content| {
+                let owner = self.owner.clone();
+                content.child(
+                    components::button(
+                        "channel-files-retry-empty",
+                        self.retry_label.clone(),
+                        Some(IconName::Redo2),
+                        false,
+                    )
+                    .on_click(move |_, _, cx| {
+                        if let Some(owner) = owner.as_ref() {
+                            let _ = owner.update(cx, |app, cx| {
+                                app.retry_telegram_file_load(cx);
+                            });
+                        }
+                    }),
+                )
+            })
     }
 
     fn loading(&self, _cx: &App) -> bool {
-        self.loading && self.rows.is_empty()
+        false
     }
 
     fn is_eof(&self, _cx: &App) -> bool {
@@ -295,9 +364,28 @@ impl TeleArkApp {
         let download_label = self.tr("telegram-file-download-action");
         let empty_label = self.tr(if loading {
             "telegram-files-loading"
+        } else if matches!(self.telegram_activity, TelegramActivity::Failed(_)) {
+            "telegram-files-load-failed"
         } else {
             "telegram-files-empty"
         });
+        let loading_label = self.tr_with(
+            "telegram-files-fetching-progress",
+            MessageArgs::new()
+                .with(
+                    "scanned",
+                    format_integer(self.locale(), self.telegram_files_scanned),
+                )
+                .with(
+                    "target",
+                    format_integer(self.locale(), self.telegram_files_scan_target),
+                ),
+        );
+        let slow_label = self.tr("telegram-files-fetching-slow");
+        let cancel_label = self.tr("telegram-files-cancel-action");
+        let retry_label = self.tr("telegram-files-retry-action");
+        let slow = self.telegram_files_slow;
+        let failed = matches!(self.telegram_activity, TelegramActivity::Failed(_));
         self.channel_file_table.update(cx, |table, table_cx| {
             let delegate = table.delegate_mut();
             delegate.rows = rows;
@@ -309,6 +397,12 @@ impl TeleArkApp {
             delegate.select_file_label = select_file_label;
             delegate.download_label = download_label;
             delegate.empty_label = empty_label;
+            delegate.loading_label = loading_label;
+            delegate.slow_label = slow_label;
+            delegate.cancel_label = cancel_label;
+            delegate.retry_label = retry_label;
+            delegate.slow = slow;
+            delegate.failed = failed;
             table.refresh(table_cx);
         });
     }
@@ -389,6 +483,11 @@ impl TeleArkApp {
             }
             TelegramAuthState::Authorized(_) => self.render_telegram_channels(layout, cx),
         };
+        let title = if self.viewing_saved_messages() {
+            self.tr("saved-messages-title")
+        } else {
+            self.tr("nav-channels")
+        };
         let content = div()
             .flex_1()
             .min_h_0()
@@ -413,7 +512,7 @@ impl TeleArkApp {
                     .px(px(padding))
                     .flex()
                     .items_center()
-                    .child(components::section_title(self.tr("telegram-library-title")))
+                    .child(components::section_title(title))
                     .child(div().flex_1())
                     .child(self.telegram_status_badge()),
             )
@@ -692,53 +791,21 @@ impl TeleArkApp {
     }
 
     fn render_telegram_channels(&self, layout: LayoutPolicy, cx: &mut Context<Self>) -> AnyElement {
-        let list = components::card()
-            .when(layout.is_compact(), |list| list.w_full())
-            .when(!layout.is_compact(), |list| list.w(px(220.0)).flex_none())
-            .p_1()
-            .when(layout.is_compact(), |list| list.max_h(px(220.0)))
-            .when(!layout.is_compact(), |list| list.h_full().min_h_0())
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(self.tr("telegram-channel-select-title")),
-            )
-            .children(self.telegram_chats.iter().map(|chat| {
-                let id = chat.id;
-                let selected = self.selected_chat_id == Some(id);
-                let name = if chat.name.is_empty() {
-                    chat.username.clone().unwrap_or_else(|| chat.id.to_string())
-                } else {
-                    chat.name.clone()
-                };
-                div()
-                    .id(("telegram-chat", id.unsigned_abs()))
-                    .h(px(34.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(theme::RADIUS_SMALL)
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(theme::blue_soft()))
-                    .hover(|row| row.bg(theme::blue_pale()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_telegram_chat(id, cx);
-                    }))
-                    .child(Icon::new(IconName::Inbox).text_color(theme::purple()))
-                    .child(div().min_w_0().flex_1().truncate().text_sm().child(name))
-            }));
+        if self.viewing_saved_messages()
+            && self.saved_messages_view == SavedMessagesView::TeleArkFiles
+        {
+            return self.render_saved_messages_managed(layout, cx);
+        }
 
-        let selected_name = self
-            .selected_chat_id
-            .and_then(|id| self.telegram_chats.iter().find(|chat| chat.id == id))
-            .map(|chat| chat.name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.tr("telegram-no-channel-selected").to_string());
+        let selected_name = if self.viewing_saved_messages() {
+            self.tr("saved-messages-title").to_string()
+        } else {
+            self.selected_chat_id
+                .and_then(|id| self.telegram_chats.iter().find(|chat| chat.id == id))
+                .map(|chat| chat.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| self.tr("telegram-no-channel-selected").to_string())
+        };
         let detail = components::card()
             .flex_1()
             .min_w_0()
@@ -751,6 +818,9 @@ impl TeleArkApp {
                     .overflow_hidden()
             })
             .p_3()
+            .when(self.viewing_saved_messages(), |detail| {
+                detail.child(self.render_saved_messages_tabs(cx))
+            })
             .child(
                 div()
                     .flex()
@@ -816,9 +886,314 @@ impl TeleArkApp {
             .flex()
             .when(!layout.is_compact(), |body| body.h_full().min_h_0())
             .when(layout.is_compact(), |body| body.flex_col())
-            .gap_4()
-            .child(list)
             .child(detail)
+            .into_any_element()
+    }
+
+    fn render_saved_messages_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .mb_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                components::button(
+                    "saved-messages-tab-telegram",
+                    self.tr("saved-messages-telegram-files"),
+                    Some(IconName::Inbox),
+                    self.saved_messages_view == SavedMessagesView::TelegramFiles,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.select_saved_messages(SavedMessagesView::TelegramFiles, cx);
+                })),
+            )
+            .child(
+                components::button(
+                    "saved-messages-tab-teleark",
+                    self.tr("saved-messages-teleark-files"),
+                    Some(IconName::FolderOpen),
+                    self.saved_messages_view == SavedMessagesView::TeleArkFiles,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.select_saved_messages(SavedMessagesView::TeleArkFiles, cx);
+                })),
+            )
+            .child(div().flex_1())
+            .child(
+                components::button(
+                    "saved-messages-upload",
+                    self.tr("saved-messages-upload-action"),
+                    Some(IconName::ArrowUp),
+                    true,
+                )
+                .disabled(self.vault_status.locked)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_upload = true;
+                    this.vault_activity = crate::app::VaultActivity::Idle;
+                    cx.notify();
+                })),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(self.tr("saved-messages-tabs-description")),
+            )
+            .into_any_element()
+    }
+
+    fn render_saved_messages_managed(
+        &self,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let packages = &self.managed_vault_files;
+        let selected_package = self
+            .selected_telegram_message_id
+            .and_then(|message_id| {
+                packages
+                    .iter()
+                    .find(|file| file.manifest_message_id == message_id)
+            })
+            .or_else(|| packages.first());
+
+        let browser = components::card()
+            .flex_1()
+            .min_w_0()
+            .when(!layout.is_compact(), |browser| browser.h_full().min_h_0())
+            .p_3()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(self.render_saved_messages_tabs(cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(components::section_title(
+                        self.tr("saved-messages-managed-title"),
+                    )))
+                    .child(
+                        components::icon_button(
+                            "saved-messages-managed-refresh",
+                            IconName::Redo2,
+                            self.tr("telegram-files-refresh-action"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.scan_managed_vault_files(cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::amber_soft())
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr(if self.vault_status.locked {
+                        "saved-messages-managed-vault-locked"
+                    } else {
+                        "saved-messages-managed-runtime-ready"
+                    })),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .h(px(30.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .bg(theme::sidebar())
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(div().flex_1().child(self.tr("table-name")))
+                    .child(div().w(px(90.0)).child(self.tr("table-parts")))
+                    .child(div().w(px(110.0)).child(self.tr("table-size"))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .border_x_1()
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .overflow_y_scrollbar()
+                    .when(packages.is_empty(), |list| {
+                        list.flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("saved-messages-managed-empty"))
+                    })
+                    .children(packages.iter().map(|package| {
+                        let reference_message_id = package.manifest_message_id;
+                        let selected = selected_package.is_some_and(|selected| {
+                            selected.package_numeric_id == package.package_numeric_id
+                        });
+                        div()
+                            .id(("saved-managed-package", reference_message_id.unsigned_abs()))
+                            .h(px(40.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme::border_subtle())
+                            .cursor_pointer()
+                            .when(selected, |row| row.bg(theme::blue_pale()))
+                            .hover(|row| row.bg(theme::blue_pale()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected_telegram_message_id = Some(reference_message_id);
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::FolderOpen).text_color(theme::blue()))
+                            .child(
+                                div()
+                                    .ml_2()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(package.logical_name.clone()),
+                            )
+                            .child(
+                                div().w(px(90.0)).text_xs().child(format_integer(
+                                    self.locale(),
+                                    package.part_count as u64,
+                                )),
+                            )
+                            .child(
+                                div()
+                                    .w(px(110.0))
+                                    .text_xs()
+                                    .child(format_bytes(self.locale(), package.encoded_size_bytes)),
+                            )
+                    })),
+            )
+            .when(self.telegram_files_loading, |browser| {
+                browser.child(self.render_telegram_fetch_footer(cx))
+            })
+            .when(
+                !self.telegram_files_loading && !self.telegram_files_exhausted,
+                |browser| {
+                    browser.child(
+                        div().pt_3().flex().justify_center().child(
+                            components::button(
+                                "saved-messages-managed-load-more",
+                                self.tr("action-load-more"),
+                                Some(IconName::ChevronDown),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_selected_telegram_files(true, cx);
+                            })),
+                        ),
+                    )
+                },
+            );
+
+        let inspector = self.render_saved_package_detail(selected_package, layout, cx);
+        div()
+            .flex()
+            .when(!layout.is_compact(), |body| body.h_full().min_h_0().gap_3())
+            .when(layout.is_compact(), |body| body.flex_col())
+            .child(browser)
+            .child(inspector)
+            .into_any_element()
+    }
+
+    fn render_saved_package_detail(
+        &self,
+        package: Option<&ManagedVaultFile>,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let detail = components::card()
+            .when(!layout.is_compact(), |detail| {
+                detail.w(px(320.0)).h_full().flex_none()
+            })
+            .when(layout.is_compact(), |detail| detail.mt_3())
+            .p_3()
+            .overflow_y_scrollbar()
+            .child(components::section_title(
+                self.tr("saved-messages-managed-detail-title"),
+            ));
+        let Some(package) = package else {
+            return detail
+                .child(
+                    div()
+                        .mt_4()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("saved-messages-managed-detail-empty")),
+                )
+                .into_any_element();
+        };
+        detail
+            .child(message_detail_row(
+                self.tr("saved-messages-package-id"),
+                package.package_id.clone().into(),
+            ))
+            .child(message_detail_row(
+                self.tr("saved-messages-logical-name"),
+                package.logical_name.clone().into(),
+            ))
+            .child(message_detail_row(
+                self.tr("saved-messages-manifest-state"),
+                self.tr("saved-messages-manifest-authenticated"),
+            ))
+            .child(message_detail_row(
+                self.tr("table-parts"),
+                format_integer(self.locale(), package.part_count as u64).into(),
+            ))
+            .child(message_detail_row(
+                self.tr("saved-messages-encoded-size"),
+                format_bytes(self.locale(), package.encoded_size_bytes).into(),
+            ))
+            .child(message_detail_row(
+                self.tr("saved-messages-restore-state"),
+                self.tr("saved-messages-restore-ready"),
+            ))
+            .child(
+                div()
+                    .mt_4()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(self.tr("saved-messages-related-files")),
+            )
+            .children(package.related_remote_names.iter().map(|file| {
+                div()
+                    .mt_2()
+                    .p_2()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::sidebar())
+                    .text_xs()
+                    .child(file.clone())
+            }))
+            .child(
+                components::button(
+                    "saved-messages-download-managed",
+                    self.tr("saved-messages-download-restored-action"),
+                    Some(IconName::ArrowDown),
+                    true,
+                )
+                .mt_4()
+                .disabled(
+                    self.vault_status.locked
+                        || self.vault_activity == crate::app::VaultActivity::Working,
+                )
+                .on_click({
+                    let package_id = package.package_numeric_id;
+                    cx.listener(move |this, _, _, cx| {
+                        this.download_managed_vault_file(package_id, cx);
+                    })
+                }),
+            )
             .into_any_element()
     }
 
@@ -1049,7 +1424,7 @@ impl TeleArkApp {
     fn render_telegram_file_list(
         &self,
         layout: LayoutPolicy,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected_message = self.selected_telegram_message_id.and_then(|message_id| {
             self.telegram_files
@@ -1066,11 +1441,25 @@ impl TeleArkApp {
             .border_color(theme::border())
             .rounded(theme::RADIUS_SMALL)
             .overflow_hidden()
+            .flex()
+            .flex_col()
             .child(
-                Table::new(&self.channel_file_table)
-                    .small()
-                    .bordered(false)
-                    .scrollbar_visible(true, false),
+                div().flex_1().min_h_0().child(
+                    Table::new(&self.channel_file_table)
+                        .small()
+                        .bordered(false)
+                        .scrollbar_visible(true, false),
+                ),
+            )
+            .when(
+                self.telegram_files_loading && !self.telegram_files.is_empty(),
+                |table| table.child(self.render_telegram_fetch_footer(cx)),
+            )
+            .when(
+                !self.telegram_files_loading
+                    && !self.telegram_files.is_empty()
+                    && matches!(self.telegram_activity, TelegramActivity::Failed(_)),
+                |table| table.child(self.render_telegram_retry_footer(cx)),
             );
         div()
             .mt_2()
@@ -1080,6 +1469,92 @@ impl TeleArkApp {
             .when(layout.is_compact(), |browser| browser.flex().flex_col())
             .child(table)
             .child(self.render_telegram_message_detail(selected_message, layout))
+            .into_any_element()
+    }
+
+    fn render_telegram_fetch_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .min_h(px(42.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::surface())
+            .child(Spinner::new().small().color(theme::blue().into()))
+            .child(
+                div().text_xs().text_color(theme::text_secondary()).child(
+                    self.tr_with(
+                        "telegram-files-fetching-progress",
+                        MessageArgs::new()
+                            .with(
+                                "scanned",
+                                format_integer(self.locale(), self.telegram_files_scanned),
+                            )
+                            .with(
+                                "target",
+                                format_integer(self.locale(), self.telegram_files_scan_target),
+                            ),
+                    ),
+                ),
+            )
+            .when(self.telegram_files_slow, |footer| {
+                footer.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("telegram-files-fetching-slow")),
+                )
+            })
+            .when(!self.telegram_files_slow, |footer| {
+                footer.child(div().flex_1())
+            })
+            .child(
+                components::button(
+                    "channel-files-cancel-footer",
+                    self.tr("telegram-files-cancel-action"),
+                    None,
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.cancel_telegram_file_load(cx);
+                })),
+            )
+            .into_any_element()
+    }
+
+    fn render_telegram_retry_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .min_h(px(42.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::surface())
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(theme::red())
+                    .child(self.tr("telegram-files-load-failed")),
+            )
+            .child(
+                components::button(
+                    "channel-files-retry-footer",
+                    self.tr("telegram-files-retry-action"),
+                    Some(IconName::Redo2),
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.retry_telegram_file_load(cx);
+                })),
+            )
             .into_any_element()
     }
 
@@ -1114,6 +1589,16 @@ impl TeleArkApp {
         } else {
             file.caption.clone().into()
         };
+        let teleark_descriptor = teleark_remote_file(&file.file_name, &file.caption);
+        let related_files = teleark_descriptor.as_ref().map(|descriptor| {
+            self.telegram_files
+                .iter()
+                .filter(|candidate| {
+                    teleark_remote_file(&candidate.file_name, &candidate.caption)
+                        .is_some_and(|candidate| candidate.package_id == descriptor.package_id)
+                })
+                .collect::<Vec<_>>()
+        });
         detail
             .child(message_detail_row(
                 self.tr("telegram-message-file-name"),
@@ -1153,6 +1638,58 @@ impl TeleArkApp {
                     .child(self.tr("telegram-message-caption")),
             )
             .child(div().mt_2().text_sm().whitespace_normal().child(caption))
+            .when_some(teleark_descriptor, |detail, descriptor| {
+                let (role, explanation) = match descriptor.role {
+                    TeleArkRemoteRole::Manifest => (
+                        self.tr("saved-messages-role-manifest"),
+                        self.tr("saved-messages-manifest-explanation"),
+                    ),
+                    TeleArkRemoteRole::Part(index) => (
+                        self.tr_with(
+                            "saved-messages-role-part",
+                            MessageArgs::new()
+                                .with("index", format_integer(self.locale(), u64::from(index) + 1)),
+                        ),
+                        self.tr("saved-messages-part-explanation"),
+                    ),
+                };
+                detail
+                    .child(message_detail_row(
+                        self.tr("saved-messages-file-role"),
+                        role,
+                    ))
+                    .child(message_detail_row(
+                        self.tr("saved-messages-why-file-exists"),
+                        explanation,
+                    ))
+                    .child(message_detail_row(
+                        self.tr("saved-messages-package-id"),
+                        descriptor.package_id.into(),
+                    ))
+                    .child(message_detail_row(
+                        self.tr("saved-messages-logical-name"),
+                        self.tr("saved-messages-managed-name-locked"),
+                    ))
+            })
+            .when_some(related_files, |detail, related| {
+                detail
+                    .child(
+                        div()
+                            .mt_4()
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(self.tr("saved-messages-related-files")),
+                    )
+                    .children(related.into_iter().map(|related| {
+                        div()
+                            .mt_2()
+                            .p_2()
+                            .rounded(theme::RADIUS_SMALL)
+                            .bg(theme::sidebar())
+                            .text_xs()
+                            .child(related.file_name.clone())
+                    }))
+            })
             .into_any_element()
     }
 
@@ -1212,6 +1749,91 @@ fn current_unix_millis() -> i64 {
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or_default()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeleArkRemoteRole {
+    Manifest,
+    Part(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TeleArkRemoteFile {
+    package_id: String,
+    role: TeleArkRemoteRole,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SavedPackageFile {
+    file_name: String,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SavedMessagePackage {
+    package_id: String,
+    reference_message_id: i64,
+    has_manifest: bool,
+    part_count: usize,
+    encoded_size: u64,
+    files: Vec<SavedPackageFile>,
+}
+
+fn teleark_remote_file(file_name: &str, caption: &str) -> Option<TeleArkRemoteFile> {
+    let (package_id, suffix) = file_name.split_once(".v1.")?;
+    if package_id.len() != 32 || !package_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let role = if suffix == "manifest.tam" && caption == "teleark-manifest-v1" {
+        TeleArkRemoteRole::Manifest
+    } else {
+        let index = suffix.strip_suffix(".part.tav")?.parse::<u32>().ok()?;
+        let expected_caption = format!("teleark-object-v1-{package_id}-{index:08x}");
+        if caption != expected_caption {
+            return None;
+        }
+        TeleArkRemoteRole::Part(index)
+    };
+    Some(TeleArkRemoteFile {
+        package_id: package_id.to_owned(),
+        role,
+    })
+}
+
+#[cfg(test)]
+fn saved_message_packages(files: &[TelegramFileSummary]) -> Vec<SavedMessagePackage> {
+    let mut packages: std::collections::BTreeMap<String, SavedMessagePackage> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        let Some(descriptor) = teleark_remote_file(&file.file_name, &file.caption) else {
+            continue;
+        };
+        let package = packages
+            .entry(descriptor.package_id.clone())
+            .or_insert_with(|| SavedMessagePackage {
+                package_id: descriptor.package_id,
+                reference_message_id: file.message_id,
+                has_manifest: false,
+                part_count: 0,
+                encoded_size: 0,
+                files: Vec::new(),
+            });
+        package.encoded_size = package.encoded_size.saturating_add(file.size_bytes);
+        match descriptor.role {
+            TeleArkRemoteRole::Manifest => {
+                package.has_manifest = true;
+                package.reference_message_id = file.message_id;
+            }
+            TeleArkRemoteRole::Part(_) => package.part_count = package.part_count.saturating_add(1),
+        }
+        package.files.push(SavedPackageFile {
+            file_name: file.file_name.clone(),
+        });
+    }
+    let mut packages: Vec<_> = packages.into_values().collect();
+    packages.sort_by_key(|package| std::cmp::Reverse(package.reference_message_id));
+    packages
 }
 
 fn channel_file_matches_filters(
@@ -1464,7 +2086,7 @@ mod tests {
     #[test]
     fn one_channel_page_supports_five_thousand_filtered_rows() {
         let now = 2_000_000_000_000;
-        let files = (0..CHANNEL_FILE_PAGE_SIZE)
+        let files = (0..CHANNEL_FILE_LIST_CAPACITY)
             .map(|message_id| TelegramFileSummary {
                 message_id: message_id as i64,
                 modified_at_unix_ms: now - 1_000,
@@ -1486,7 +2108,82 @@ mod tests {
                     now,
                 ))
                 .count(),
-            CHANNEL_FILE_PAGE_SIZE
+            CHANNEL_FILE_LIST_CAPACITY
         );
+    }
+
+    #[test]
+    fn source_browser_separates_render_capacity_from_network_batch_sizes() {
+        assert_eq!(CHANNEL_FILE_INITIAL_SCAN, CHANNEL_FILE_SCAN_CHUNK);
+        assert_eq!(CHANNEL_FILE_INITIAL_SCAN, 200);
+        assert_eq!(CHANNEL_FILE_LOAD_MORE_SCAN, 1_000);
+        assert_eq!(CHANNEL_FILE_LIST_CAPACITY, 5_000);
+        assert_eq!(CHANNEL_FILE_LOAD_MORE_SCAN % CHANNEL_FILE_SCAN_CHUNK, 0);
+    }
+
+    #[test]
+    fn saved_messages_recognizes_only_versioned_teleark_remote_names() {
+        let package = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            teleark_remote_file(&format!("{package}.v1.manifest.tam"), "teleark-manifest-v1"),
+            Some(TeleArkRemoteFile {
+                package_id: package.to_owned(),
+                role: TeleArkRemoteRole::Manifest,
+            })
+        );
+        assert_eq!(
+            teleark_remote_file(
+                &format!("{package}.v1.000004.part.tav"),
+                &format!("teleark-object-v1-{package}-00000004"),
+            ),
+            Some(TeleArkRemoteFile {
+                package_id: package.to_owned(),
+                role: TeleArkRemoteRole::Part(4),
+            })
+        );
+        assert!(teleark_remote_file("report.v1.manifest.tam", "teleark-manifest-v1").is_none());
+        assert!(
+            teleark_remote_file(&format!("{package}.v2.manifest.tam"), "teleark-manifest-v1")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_messages_groups_manifest_and_parts_without_claiming_recovery() {
+        let package = "0123456789abcdef0123456789abcdef";
+        let files = [
+            (
+                1,
+                format!("{package}.v1.000000.part.tav"),
+                format!("teleark-object-v1-{package}-00000000"),
+                40,
+            ),
+            (
+                2,
+                format!("{package}.v1.manifest.tam"),
+                "teleark-manifest-v1".to_owned(),
+                10,
+            ),
+            (3, "ordinary.pdf".to_owned(), String::new(), 20),
+        ]
+        .into_iter()
+        .map(
+            |(message_id, file_name, caption, size_bytes)| TelegramFileSummary {
+                message_id,
+                sent_at_unix_ms: 0,
+                modified_at_unix_ms: 0,
+                file_name,
+                caption,
+                mime_type: None,
+                size_bytes,
+            },
+        )
+        .collect::<Vec<_>>();
+        let packages = saved_message_packages(&files);
+        assert_eq!(packages.len(), 1);
+        assert!(packages[0].has_manifest);
+        assert_eq!(packages[0].part_count, 1);
+        assert_eq!(packages[0].encoded_size, 50);
+        assert_eq!(packages[0].files.len(), 2);
     }
 }

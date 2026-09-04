@@ -55,6 +55,20 @@ pub struct RemoteFileUpsert {
     pub kind: FileKind,
     pub mime_type: Option<String>,
     pub caption: Option<String>,
+    pub sent_at_unix_ms: i64,
+    pub modified_at_unix_ms: i64,
+}
+
+/// Cached Telegram-native file metadata projected from an already examined
+/// source message. This does not imply complete index coverage for the chat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CachedTelegramFileRecord {
+    pub message_id: MessageId,
+    pub file_name: String,
+    pub caption: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub sent_at_unix_ms: i64,
     pub modified_at_unix_ms: i64,
 }
 
@@ -66,6 +80,19 @@ pub struct TelegramIndexStateRecord {
     pub exhausted: bool,
     pub messages_scanned: u64,
     pub files_indexed: u64,
+    pub updated_at_unix_ms: i64,
+}
+
+/// Non-secret Vault metadata and explicitly encoded key-wrap records.
+/// Unwrapped keys and user secrets never cross this storage boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultMetadataRecord {
+    pub vault_id: [u8; 16],
+    pub password_wrap: Vec<u8>,
+    pub recovery_wrap: Vec<u8>,
+    pub password_generation: u32,
+    pub recovery_generation: u32,
+    pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
 

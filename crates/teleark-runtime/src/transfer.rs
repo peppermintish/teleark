@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -32,6 +33,13 @@ const MAX_RECONCILIATION_RESULTS: usize = 1_000;
 const MANIFEST_CAPTION: &str = "teleark-manifest-v1";
 const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"TARKCP01";
+
+/// Current conservative plaintext ceiling used by the connected encrypted
+/// Saved Messages workflow. This is deliberately exposed for frontend-neutral
+/// presentation so the GUI never advertises a size the runtime will ignore.
+pub const fn encrypted_part_plaintext_limit() -> u64 {
+    ENCRYPTED_PART_PLAINTEXT_BYTES
+}
 
 /// Splits a non-empty logical file into bounded plaintext ranges whose encoded
 /// containers fit the Telegram object's in-memory safety cap.
@@ -191,7 +199,7 @@ pub struct EncryptedRemoteTransport<S> {
     chat_id: i64,
     package_id: PackageId,
     package_bytes: [u8; 16],
-    file_key: FileKey,
+    file_key: Arc<FileKey>,
     logical_file_size: u64,
     part_sizes: Vec<u64>,
     limits: PartLimits,
@@ -207,6 +215,30 @@ pub struct EncryptedRemoteTransport<S> {
 struct ManifestPublication {
     master_key: VaultMasterKey,
     request: ManifestPublishRequest,
+}
+
+#[derive(Clone)]
+pub(crate) struct PartEncryptionContext {
+    file_key: Arc<FileKey>,
+    limits: PartLimits,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PartEncryptionPlan {
+    key: RemotePartKey,
+    chat_id: i64,
+    header: PartHeader,
+    expected_digest: Option<ContentDigest>,
+    expected_encoded_size: u64,
+    remote_name: String,
+}
+
+pub(crate) struct PreparedEncryptedPart {
+    pub(crate) key: RemotePartKey,
+    pub(crate) encoded: Vec<u8>,
+    pub(crate) manifest_part: ManifestPart,
+    pub(crate) plaintext_digest: ContentDigest,
+    pub(crate) encryption_duration_micros: u64,
 }
 
 impl<S> EncryptedRemoteTransport<S> {
@@ -226,7 +258,7 @@ impl<S> EncryptedRemoteTransport<S> {
             chat_id,
             package_id,
             package_bytes: package_bytes(package_id),
-            file_key,
+            file_key: Arc::new(file_key),
             logical_file_size,
             part_sizes,
             limits: PartLimits::default(),
@@ -331,22 +363,31 @@ impl<S> EncryptedRemoteTransport<S> {
         remote_part_name(&self.package_bytes, key.part_index.get())
     }
 
-    fn encrypt(
+    pub(crate) fn encryption_context(&self) -> PartEncryptionContext {
+        PartEncryptionContext {
+            file_key: Arc::clone(&self.file_key),
+            limits: self.limits,
+        }
+    }
+
+    pub(crate) fn plan_part_encryption(
         &mut self,
         key: RemotePartKey,
-        plaintext: &[u8],
-        expected_digest: ContentDigest,
-    ) -> Result<(Vec<u8>, ManifestPart), TransferError> {
+        expected_digest: Option<ContentDigest>,
+    ) -> Result<PartEncryptionPlan, TransferError> {
         let position = self.validate_key(key)?;
         let expected_size = self.part_sizes[position];
-        if plaintext.len() as u64 != expected_size
-            || Blake3Digest.digest(plaintext) != expected_digest
-        {
-            return Err(TransferError::SourceChanged);
-        }
         let instance_id = self
             .instances
             .generate(&mut OsRandom)
+            .map_err(map_crypto_error)?;
+        self.usage
+            .reserve_existing_part(
+                &self.file_key,
+                &self.package_bytes,
+                key.part_index.get(),
+                instance_id,
+            )
             .map_err(map_crypto_error)?;
         let header = PartHeader::new(
             self.package_bytes,
@@ -360,29 +401,59 @@ impl<S> EncryptedRemoteTransport<S> {
             self.limits,
         )
         .map_err(map_crypto_error)?;
-        let encoded_size = header.expected_encoded_length().map_err(map_crypto_error)?;
-        if encoded_size > MAX_TRANSFER_OBJECT_BYTES as u64 {
+        let expected_encoded_size = header.expected_encoded_length().map_err(map_crypto_error)?;
+        if expected_encoded_size > MAX_TRANSFER_OBJECT_BYTES as u64 {
             return Err(TransferError::ManifestCorrupted);
         }
-        let capacity =
-            usize::try_from(encoded_size).map_err(|_| TransferError::ManifestCorrupted)?;
+        Ok(PartEncryptionPlan {
+            key,
+            chat_id: self.chat_id,
+            header,
+            expected_digest,
+            expected_encoded_size,
+            remote_name: self.name(key),
+        })
+    }
+
+    pub(crate) fn encrypt_planned_part(
+        context: &PartEncryptionContext,
+        plan: PartEncryptionPlan,
+        plaintext: Vec<u8>,
+    ) -> Result<PreparedEncryptedPart, TransferError> {
+        let plaintext_digest = Blake3Digest.digest(&plaintext);
+        if plaintext.len() as u64 != plan.header.plaintext_length
+            || plan
+                .expected_digest
+                .is_some_and(|expected| expected != plaintext_digest)
+        {
+            return Err(TransferError::SourceChanged);
+        }
+        let capacity = usize::try_from(plan.expected_encoded_size)
+            .map_err(|_| TransferError::ManifestCorrupted)?;
         let mut encoded = Vec::with_capacity(capacity);
+        let mut worker_usage = AeadUsageRegistry::new();
+        let encryption_started = std::time::Instant::now();
         let summary = encrypt_part(
             &mut Cursor::new(plaintext),
             &mut encoded,
-            &header,
-            &self.file_key,
-            self.limits,
-            &mut self.usage,
+            &plan.header,
+            &context.file_key,
+            context.limits,
+            &mut worker_usage,
         )
         .map_err(map_crypto_error)?;
-        if summary.encoded_length != encoded_size || encoded.len() != capacity {
+        let encryption_duration_micros =
+            u64::try_from(encryption_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if summary.encoded_length != plan.expected_encoded_size || encoded.len() != capacity {
             return Err(TransferError::ManifestCorrupted);
         }
-        Ok((
+        Ok(PreparedEncryptedPart {
+            key: plan.key,
             encoded,
-            ManifestPart {
-                part_index: key.part_index.get(),
+            plaintext_digest,
+            encryption_duration_micros,
+            manifest_part: ManifestPart {
+                part_index: plan.key.part_index.get(),
                 part_instance_id: summary.header.part_instance_id.0,
                 plaintext_offset: summary.header.plaintext_offset,
                 plaintext_length: summary.header.plaintext_length,
@@ -391,15 +462,67 @@ impl<S> EncryptedRemoteTransport<S> {
                 plaintext_blake3: summary.plaintext_blake3,
                 encoded_ciphertext_blake3: summary.encoded_blake3,
                 remote_locator: RemoteLocator {
-                    account_id: self.account_id.get(),
-                    chat_id: self.chat_id,
+                    account_id: plan.key.account_id.get(),
+                    chat_id: plan.chat_id,
                     message_id: 0,
-                    remote_name: self.name(key),
+                    remote_name: plan.remote_name,
                     locator_version: 1,
                     locator_extension: None,
                 },
             },
-        ))
+        })
+    }
+
+    fn encrypt(
+        &mut self,
+        key: RemotePartKey,
+        plaintext: &[u8],
+        expected_digest: ContentDigest,
+    ) -> Result<(Vec<u8>, ManifestPart), TransferError> {
+        let plan = self.plan_part_encryption(key, Some(expected_digest))?;
+        let context = self.encryption_context();
+        let prepared = Self::encrypt_planned_part(&context, plan, plaintext.to_vec())?;
+        Ok((prepared.encoded, prepared.manifest_part))
+    }
+
+    pub(crate) fn upload_prepared_part(
+        &mut self,
+        mut prepared: PreparedEncryptedPart,
+    ) -> Result<RemoteObject, TransferError>
+    where
+        S: RemoteObjectStore,
+    {
+        let expected_plaintext_size = prepared.manifest_part.plaintext_length;
+        let caption = self.caption(prepared.key);
+        let object = self
+            .store
+            .upload(
+                &prepared.manifest_part.remote_locator.remote_name,
+                &caption,
+                prepared.encoded,
+            )
+            .map_err(|error| match error {
+                UploadError::Definite(error) => error,
+                UploadError::AmbiguousSuccess => TransferError::Network,
+            })?;
+        self.hydrated_objects.insert(object.object_id);
+        prepared.manifest_part.remote_locator.message_id =
+            i64::try_from(object.object_id).map_err(|_| TransferError::ManifestCorrupted)?;
+        self.manifest_parts
+            .insert(prepared.key.part_index.get(), prepared.manifest_part);
+        let remote_object = RemoteObject {
+            object_id: object.object_id,
+            key: prepared.key,
+            plaintext_size: expected_plaintext_size,
+            encoded_size: object.encoded_size,
+            digest: prepared.plaintext_digest,
+        };
+        self.verify_remote(
+            &remote_object,
+            expected_plaintext_size,
+            prepared.plaintext_digest,
+        )?;
+        Ok(remote_object)
     }
 
     fn decode(
@@ -1370,7 +1493,7 @@ fn package_bytes(package_id: PackageId) -> [u8; 16] {
     bytes
 }
 
-fn package_id_from_bytes(bytes: [u8; 16]) -> Result<PackageId, TransferError> {
+pub(crate) fn package_id_from_bytes(bytes: [u8; 16]) -> Result<PackageId, TransferError> {
     if bytes[..8] != *b"TARKPKG1" {
         return Err(TransferError::ManifestCorrupted);
     }
@@ -1381,7 +1504,7 @@ fn package_id_from_bytes(bytes: [u8; 16]) -> Result<PackageId, TransferError> {
     Ok(PackageId::new(value))
 }
 
-fn hex_id(bytes: &[u8; 16]) -> String {
+pub(crate) fn hex_id(bytes: &[u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(32);
     for byte in bytes {
@@ -1436,8 +1559,9 @@ mod tests {
     };
     use teleark_storage::{AccountRecord, NewLogicalFileRecord};
     use teleark_transfer::{
-        Clock, DownloadSpec, JitterSource, ProgressConfig, RetryPolicy, SchedulerConfig,
-        TransferEngine, TransferEngineConfig, UploadSpec,
+        Clock, DownloadSpec, EncryptionPipelineConfig, JitterSource, PipelinePart, ProgressConfig,
+        RetryPolicy, SchedulerConfig, TransferEngine, TransferEngineConfig, UploadSpec,
+        run_encryption_upload_pipeline,
     };
 
     use super::*;
@@ -1530,6 +1654,74 @@ mod tests {
             package_id: PackageId::new(11),
             part_index: PartIndex::new(0),
         }
+    }
+
+    #[test]
+    fn prepared_parts_use_the_bounded_parallel_encryption_pipeline() -> Result<(), TransferError> {
+        let store = FakeStore::default();
+        let part_bytes = [vec![1_u8; 32 * 1024], vec![2_u8; 24 * 1024]];
+        let part_sizes = part_bytes
+            .iter()
+            .map(|bytes| bytes.len() as u64)
+            .collect::<Vec<_>>();
+        let total_bytes = part_sizes.iter().sum();
+        let mut remote = EncryptedRemoteTransport::new(
+            store.clone(),
+            AccountId::new(9),
+            99,
+            PackageId::new(11),
+            FileKey::from_bytes([7; 32]),
+            total_bytes,
+            part_sizes.clone(),
+        )?;
+        let mut offset = 0_u64;
+        let mut descriptors = Vec::new();
+        let mut plans = Vec::new();
+        for (position, plaintext_length) in part_sizes.iter().copied().enumerate() {
+            let part_index = u32::try_from(position).map_err(|_| TransferError::SourceChanged)?;
+            let key = RemotePartKey {
+                account_id: AccountId::new(9),
+                package_id: PackageId::new(11),
+                part_index: PartIndex::new(part_index),
+            };
+            descriptors.push(PipelinePart {
+                part_index,
+                plaintext_offset: offset,
+                plaintext_length,
+            });
+            plans.push(remote.plan_part_encryption(key, None)?);
+            offset = offset.saturating_add(plaintext_length);
+        }
+        let context = remote.encryption_context();
+        let report = run_encryption_upload_pipeline(
+            EncryptionPipelineConfig::new(2, 1, 2).map_err(|_| TransferError::SourceChanged)?,
+            &descriptors,
+            |descriptor| {
+                part_bytes
+                    .get(descriptor.part_index as usize)
+                    .cloned()
+                    .ok_or(TransferError::SourceChanged)
+            },
+            |descriptor, plaintext| {
+                let plan = plans
+                    .get(descriptor.part_index as usize)
+                    .cloned()
+                    .ok_or(TransferError::SourceChanged)?;
+                EncryptedRemoteTransport::<FakeStore>::encrypt_planned_part(
+                    &context, plan, plaintext,
+                )
+            },
+            |_, prepared| remote.upload_prepared_part(prepared).map(|_| ()),
+        )
+        .map_err(|error| match error {
+            teleark_transfer::EncryptionPipelineError::Read { source, .. }
+            | teleark_transfer::EncryptionPipelineError::Encrypt { source, .. }
+            | teleark_transfer::EncryptionPipelineError::Upload { source, .. } => source,
+            _ => TransferError::Network,
+        })?;
+        assert_eq!(report.completed_parts, 2);
+        assert_eq!(store.object_count(), 2);
+        Ok(())
     }
 
     #[test]

@@ -15,12 +15,12 @@ pub use error::{
     CursorError, EntityKind, InputReason, InvariantViolation, StorageError, StorageResult,
 };
 pub use model::{
-    AccountRecord, ChatRecord, CollectionKind, CollectionRecord, FileSearchFacets, IndexBatch,
-    IndexJobRecord, IndexRangeRecord, LibraryStatisticsRecord, LogicalFileRecord,
-    NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
+    AccountRecord, CachedTelegramFileRecord, ChatRecord, CollectionKind, CollectionRecord,
+    FileSearchFacets, IndexBatch, IndexJobRecord, IndexRangeRecord, LibraryStatisticsRecord,
+    LogicalFileRecord, NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
     NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
     RemoteObjectRecord, SearchPage, SearchQuery, SettingRecord, StoredIndexCoverage,
     StoredIndexJobState, StoredNativeDownloadState, StoredNativeDownloadVerification,
     StoredPartState, StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord,
-    TransferPartCheckpoint, TransferTaskRecord,
+    TransferPartCheckpoint, TransferTaskRecord, VaultMetadataRecord,
 };

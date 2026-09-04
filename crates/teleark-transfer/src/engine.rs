@@ -141,6 +141,16 @@ impl TransferEngine {
         self.crash_once = Some(point);
     }
 
+    /// Applies a new scheduler envelope selected by an adaptive controller.
+    /// Existing work finishes under its already-held permits; the next
+    /// dispatch observes the new limits.
+    pub fn reconfigure_scheduler(
+        &mut self,
+        scheduler: SchedulerConfig,
+    ) -> Result<(), TransferEngineError> {
+        self.scheduler.reconfigure(scheduler)
+    }
+
     pub fn enqueue_upload(
         &mut self,
         io: &mut impl TransferIo,

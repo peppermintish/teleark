@@ -1,8 +1,9 @@
 # Diagnostics and Performance Tracing
 
-Status: implemented for desktop startup, runtime storage operations, Telegram
-operations, and native Telegram downloads. Encrypted transfer and Index-engine
-event coverage will expand when those owners are connected to the desktop.
+Status: process diagnostics are implemented for desktop startup, runtime
+storage, Telegram, native download, and encrypted transfer operations. Real
+transfers additionally write schema-versioned session logs for complete
+controller replay; Index-engine event coverage remains incomplete.
 
 ## User-visible behavior
 
@@ -19,6 +20,29 @@ reason with retry/user-action guidance. Pause, resume, cancel, retry,
 interruption, and checkpoint failures are separately traced. Transfer failure
 and verification failure are separate: a network or permission failure says
 that verification was not reached.
+
+The transfer inspector has Live and Replay presentations for typed controller
+telemetry. It shows C/W/F/P/E/Qe, goodput, encryption and disk rates, estimated
+BDP and target inflight bytes, buffer/memory pressure, part states, bottleneck
+classification, soft-limit and FloodWait outcomes, and the before/after/reason
+for every retained decision. Unknown physical media-DC lanes are shown as
+unavailable rather than filled with preview data.
+
+## Transfer session logs
+
+Every real native or Vault transfer creates an owner-only
+`Logs/Transfers/native-download-<id>.jsonl` or
+`Logs/Transfers/vault-transfer-<id>.jsonl` file before data movement. Schema 1 uses
+newline-delimited `session_started`, `part_confirmed`, and `session_finished`
+records. Writes are flushed at decision boundaries so a completed task can be
+replayed even when the general diagnostics writer dropped unrelated events.
+The format, bounds, and compatibility rules are governed by ADR 0009.
+
+Session logs contain numeric IDs, offsets, sizes, rates, timings, memory/queue
+counters, parameter transitions, and structured enum names. They do not contain
+source or destination paths, filenames, captions, content, secrets, or raw
+adapter error text. The GUI may show the local log path because it is already
+user-owned local metadata; the path itself is never written into the log.
 
 ## Writer policy
 
@@ -65,6 +89,12 @@ elapsed milliseconds, and structured result kind. Authentication operations do
 not record their phone/code/password/API Hash arguments. Download events omit
 the filename and destination even though those values are available in the
 local GUI snapshot.
+
+Interactive `scan_file_page` operations are bounded to 200-message transport
+chunks. Completion/failure timing therefore identifies a slow individual
+network chunk instead of hiding a multi-minute 5,000-message aggregate.
+Timeout and user cancellation terminate the adapter future and are recorded
+through the existing structured failure event without source content.
 
 ## Dependency decision
 

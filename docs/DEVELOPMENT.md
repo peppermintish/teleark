@@ -144,9 +144,9 @@ User/source content—filenames, captions, channel titles, paths, collection nam
 
 The supplied reference images are the visual source of truth. Implement against centralized design tokens and reusable controls, then run and capture the actual app at reference-like dimensions. Compare geometry, typography, spacing, borders, radii, tables, status colors, progress bars, and three-locale text expansion. Stock components may be replaced with custom GPUI components when necessary for fidelity or virtualization.
 
-Preview data must be clearly separated from Core contracts and must not be represented as backend integration. The Library route consumes the persistent Runtime/Core API; other routes remain Preview until their services are composed. Heavy I/O, SQLite, hashing, crypto, and Telegram calls never run on the GPUI thread.
+Preview data must be clearly separated from Core contracts and must not be represented as backend integration. Connected routes consume frontend-neutral Runtime/Core APIs; any remaining demonstration rows stay explicitly isolated. Heavy I/O, SQLite, hashing, crypto, and Telegram calls never run on the GPUI thread.
 
-Use the reproducible desktop matrix from `UI_GUIDELINES.md`: all seven routes,
+Use the reproducible desktop matrix from `UI_GUIDELINES.md`: all six routes,
 all three locales, and compact/standard/spacious sizes. `--window-size=960x640`,
 `1360x760`, and `1920x1080` are the current smoke targets, with `900x600` as
 the hard supported minimum. A successful process launch is not a screenshot

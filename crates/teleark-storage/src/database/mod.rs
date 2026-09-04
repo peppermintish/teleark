@@ -18,6 +18,7 @@ use teleark_core::{
 
 use crate::error::InputReason;
 use crate::migration;
+use crate::model::VaultMetadataRecord;
 use crate::model::{
     AccountRecord, ChatRecord, LibraryStatisticsRecord, LogicalFileRecord, NewLogicalFileRecord,
     encryption_state_code, file_kind_code, remote_state_code, verification_state_code,
@@ -118,6 +119,96 @@ impl Database {
                 value: result,
             })
         }
+    }
+
+    /// Returns the single configured Vault record, if one exists.
+    pub fn vault_metadata(&self) -> StorageResult<Option<VaultMetadataRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+SELECT vault_id, password_wrap, recovery_wrap, password_generation,
+       recovery_generation, created_at_unix_ms, updated_at_unix_ms
+FROM vault_metadata WHERE singleton_id = 1
+"#,
+        )?;
+        let mut rows = statement.query([])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let vault_id: Vec<u8> = row.get(0)?;
+        let vault_id = vault_id
+            .try_into()
+            .map_err(|value: Vec<u8>| StorageError::CorruptData {
+                entity: "vault_metadata",
+                field: "vault_id",
+                value: value.len().to_string(),
+            })?;
+        let password_generation =
+            u32::try_from(row.get::<_, i64>(3)?).map_err(|_| StorageError::CorruptData {
+                entity: "vault_metadata",
+                field: "password_generation",
+                value: "out_of_range".to_owned(),
+            })?;
+        let recovery_generation =
+            u32::try_from(row.get::<_, i64>(4)?).map_err(|_| StorageError::CorruptData {
+                entity: "vault_metadata",
+                field: "recovery_generation",
+                value: "out_of_range".to_owned(),
+            })?;
+        Ok(Some(VaultMetadataRecord {
+            vault_id,
+            password_wrap: row.get(1)?,
+            recovery_wrap: row.get(2)?,
+            password_generation,
+            recovery_generation,
+            created_at_unix_ms: row.get(5)?,
+            updated_at_unix_ms: row.get(6)?,
+        }))
+    }
+
+    /// Atomically creates or replaces the single Vault metadata record.
+    pub fn save_vault_metadata(&mut self, record: &VaultMetadataRecord) -> StorageResult<()> {
+        if record.password_wrap.len() < 124
+            || record.password_wrap.len() > 172
+            || record.recovery_wrap.len() != 88
+            || record.password_generation == 0
+            || record.recovery_generation == 0
+            || record.updated_at_unix_ms < record.created_at_unix_ms
+        {
+            return Err(StorageError::InvalidInput {
+                field: "vault_metadata",
+                reason: InputReason::InvalidCombination,
+            });
+        }
+        let password_generation = i64::from(record.password_generation);
+        let recovery_generation = i64::from(record.recovery_generation);
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            r#"
+INSERT INTO vault_metadata (
+    singleton_id, vault_id, password_wrap, recovery_wrap, password_generation,
+    recovery_generation, created_at_unix_ms, updated_at_unix_ms
+) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(singleton_id) DO UPDATE SET
+    vault_id = excluded.vault_id,
+    password_wrap = excluded.password_wrap,
+    recovery_wrap = excluded.recovery_wrap,
+    password_generation = excluded.password_generation,
+    recovery_generation = excluded.recovery_generation,
+    created_at_unix_ms = excluded.created_at_unix_ms,
+    updated_at_unix_ms = excluded.updated_at_unix_ms
+"#,
+            params![
+                record.vault_id.as_slice(),
+                record.password_wrap,
+                record.recovery_wrap,
+                password_generation,
+                recovery_generation,
+                record.created_at_unix_ms,
+                record.updated_at_unix_ms,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn upsert_account(&mut self, account: &AccountRecord) -> StorageResult<()> {

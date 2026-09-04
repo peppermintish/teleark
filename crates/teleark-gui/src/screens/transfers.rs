@@ -7,12 +7,16 @@ use gpui_component::{Disableable as _, Icon, IconName, scroll::ScrollableElement
 use teleark_i18n::{
     MessageArgs,
     format::{
-        format_bytes, format_duration_millis, format_integer, format_speed, format_unix_millis,
+        format_bytes, format_decimal, format_duration_millis, format_integer, format_percent,
+        format_speed, format_unix_millis,
     },
 };
 use teleark_runtime::{
     ChannelDownloadEventKind, ChannelDownloadSnapshot, ChannelDownloadState,
-    ChannelDownloadVerification,
+    ChannelDownloadVerification, ControllerDecision, ControllerDecisionOutcome,
+    ControllerDecisionReason, ControllerPhase, DownloadPartState, TransferBottleneck,
+    TransferControlParameters, TransferTelemetrySnapshot, TunableParameter, VaultTransferDirection,
+    VaultTransferSnapshot, VaultTransferState,
 };
 
 use crate::{
@@ -20,8 +24,8 @@ use crate::{
     components::{self, Tone},
     layout::LayoutPolicy,
     mock::{
-        ActivityLog, ConnectionRow, TransferRow, TransferState, activity_logs, connections,
-        transfers,
+        ActivityLog, ConnectionRow, TransferDirection, TransferRow, TransferState, activity_logs,
+        connections, transfers,
     },
     theme,
 };
@@ -31,7 +35,7 @@ const CONNECTION_CLIENT_WIDTH: f32 = 82.0;
 const CONNECTION_LATENCY_WIDTH: f32 = 72.0;
 
 impl TeleArkApp {
-    fn transfer_rows(&self) -> Vec<TransferRow> {
+    pub(crate) fn transfer_rows(&self) -> Vec<TransferRow> {
         let Some(transfers_runtime) = self.transfers.as_ref() else {
             return transfers(self.upload_queued);
         };
@@ -63,7 +67,92 @@ impl TeleArkApp {
                 );
             }
         }
+        if let Some(vault) = self.vault.as_ref() {
+            rows.splice(
+                0..0,
+                vault
+                    .transfers()
+                    .into_iter()
+                    .rev()
+                    .map(|snapshot| self.transfer_row_from_vault_snapshot(&snapshot)),
+            );
+        }
+        if self.upload_queued
+            && let Some(preview) = transfers(true).into_iter().find(|row| {
+                row.direction == TransferDirection::Upload && row.state == TransferState::Waiting
+            })
+        {
+            rows.insert(0, preview);
+        }
         rows
+    }
+
+    fn transfer_row_from_vault_snapshot(&self, snapshot: &VaultTransferSnapshot) -> TransferRow {
+        let state = match snapshot.state {
+            VaultTransferState::Running => match snapshot.direction {
+                VaultTransferDirection::Upload => TransferState::Uploading,
+                VaultTransferDirection::Download => TransferState::Downloading,
+            },
+            VaultTransferState::Completed => TransferState::Completed,
+            VaultTransferState::Failed(_) => TransferState::Failed,
+        };
+        let direction = match snapshot.direction {
+            VaultTransferDirection::Upload => TransferDirection::Upload,
+            VaultTransferDirection::Download => TransferDirection::Download,
+        };
+        let destination = match snapshot.direction {
+            VaultTransferDirection::Upload => self.tr("transfer-vault-saved-messages"),
+            VaultTransferDirection::Download => snapshot
+                .destination
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned().into())
+                .unwrap_or_else(|| self.tr("transfer-value-unavailable")),
+        };
+        TransferRow {
+            runtime_task_id: None,
+            vault_transfer_id: Some(snapshot.id),
+            runtime_batch_id: None,
+            batch_child: false,
+            message_id: None,
+            message_sent_at_unix_ms: None,
+            caption: snapshot.package_id.clone().map(Into::into),
+            mime_type: Some(self.tr("transfer-vault-encrypted-type")),
+            name: snapshot.file_name.clone().into(),
+            source: self.tr("saved-messages-title"),
+            direction,
+            size: format_bytes(self.locale(), snapshot.size_bytes).into(),
+            transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
+            progress: transfer_progress(
+                snapshot.transferred_bytes,
+                snapshot.size_bytes,
+                state == TransferState::Completed,
+            ),
+            speed: snapshot
+                .average_bytes_per_second
+                .map(|speed| format_speed(self.locale(), speed).into())
+                .unwrap_or_else(|| self.tr("transfer-value-unavailable")),
+            eta: self.tr("transfer-value-unavailable"),
+            connections: self.tr_with(
+                "transfer-controller-connections-value",
+                MessageArgs::new()
+                    .with(
+                        "connections",
+                        format_integer(
+                            self.locale(),
+                            u64::from(snapshot.telemetry.parameters.transfer_connection_count),
+                        ),
+                    )
+                    .with(
+                        "rpcs",
+                        format_integer(
+                            self.locale(),
+                            u64::from(snapshot.telemetry.parameters.inflight_rpcs_per_connection),
+                        ),
+                    ),
+            ),
+            state,
+            destination,
+        }
     }
 
     fn transfer_row_from_snapshot(
@@ -85,6 +174,7 @@ impl TeleArkApp {
         let source = self.telegram_source_name(snapshot.chat_id);
         TransferRow {
             runtime_task_id: Some(snapshot.id),
+            vault_transfer_id: None,
             runtime_batch_id: snapshot.batch_id,
             batch_child,
             message_id: Some(snapshot.message_id),
@@ -93,6 +183,7 @@ impl TeleArkApp {
             mime_type: snapshot.mime_type.clone().map(Into::into),
             name: snapshot.file_name.clone().into(),
             source: source.into(),
+            direction: TransferDirection::Download,
             size: format_bytes(self.locale(), snapshot.size_bytes).into(),
             transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
             progress,
@@ -102,7 +193,24 @@ impl TeleArkApp {
                 .map(|eta| format_duration_millis(self.locale(), eta))
                 .unwrap_or_else(|| self.tr("transfer-value-unavailable").to_string())
                 .into(),
-            connections: self.tr("transfer-value-unavailable"),
+            connections: self.tr_with(
+                "transfer-controller-connections-value",
+                MessageArgs::new()
+                    .with(
+                        "connections",
+                        format_integer(
+                            self.locale(),
+                            u64::from(snapshot.telemetry.parameters.transfer_connection_count),
+                        ),
+                    )
+                    .with(
+                        "rpcs",
+                        format_integer(
+                            self.locale(),
+                            u64::from(snapshot.telemetry.parameters.inflight_rpcs_per_connection),
+                        ),
+                    ),
+            ),
             state,
             destination: snapshot.destination.to_string_lossy().into_owned().into(),
         }
@@ -138,6 +246,7 @@ impl TeleArkApp {
             .unwrap_or_default();
         TransferRow {
             runtime_task_id: None,
+            vault_transfer_id: None,
             runtime_batch_id: Some(batch_id),
             batch_child: false,
             message_id: None,
@@ -149,6 +258,7 @@ impl TeleArkApp {
                 MessageArgs::new().with("count", format_integer(self.locale(), items.len() as u64)),
             ),
             source: source.into(),
+            direction: TransferDirection::Download,
             size: format_bytes(self.locale(), total_bytes).into(),
             transferred: format_bytes(self.locale(), transferred_bytes).into(),
             progress: transfer_progress(
@@ -194,6 +304,14 @@ impl TeleArkApp {
             .find(|snapshot| snapshot.id == id)
     }
 
+    fn vault_transfer_snapshot(&self, id: u64) -> Option<VaultTransferSnapshot> {
+        self.vault
+            .as_ref()?
+            .transfers()
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+    }
+
     pub(crate) fn render_transfers(
         &self,
         _window: &mut Window,
@@ -204,6 +322,11 @@ impl TeleArkApp {
         let query = self.search_input.read(cx).value().to_lowercase();
         let runtime_backed = self.transfers.is_some();
         let all_transfer_rows = self.transfer_rows();
+        let uploading = all_transfer_rows
+            .iter()
+            .filter(|transfer| !transfer.batch_child)
+            .filter(|transfer| transfer.state == TransferState::Uploading)
+            .count();
         let downloading = all_transfer_rows
             .iter()
             .filter(|transfer| !transfer.batch_child)
@@ -243,18 +366,11 @@ impl TeleArkApp {
             .filter(|snapshot| snapshot.state == ChannelDownloadState::Running)
             .filter_map(|snapshot| snapshot.current_bytes_per_second)
             .fold(0_u64, u64::saturating_add);
-        let completed_bytes = self
-            .transfers
-            .as_ref()
-            .and_then(|transfers| transfers.snapshots().ok())
-            .into_iter()
-            .flatten()
-            .filter(|snapshot| snapshot.state == ChannelDownloadState::Completed)
-            .map(|snapshot| snapshot.size_bytes)
-            .sum();
         let transfer_rows: Vec<_> = all_transfer_rows
             .into_iter()
-            .filter(|transfer| transfer_matches_nav(self.nav_selection, transfer.state))
+            .filter(|transfer| {
+                transfer_matches_nav(self.nav_selection, transfer.state, transfer.direction)
+            })
             .filter(|transfer| {
                 query.is_empty()
                     || transfer.name.to_lowercase().contains(&query)
@@ -401,6 +517,17 @@ impl TeleArkApp {
                 px(8.0)
             })
             .child(summary_card(
+                IconName::ArrowUp,
+                self.tr("transfer-summary-uploading"),
+                format_integer(self.locale(), uploading as u64),
+                self.tr_with(
+                    "transfer-summary-task-count",
+                    MessageArgs::new()
+                        .with("count", format_integer(self.locale(), uploading as u64)),
+                ),
+                Tone::Purple,
+            ))
+            .child(summary_card(
                 IconName::ArrowDown,
                 self.tr("transfer-summary-downloading"),
                 format_integer(self.locale(), downloading as u64),
@@ -442,13 +569,6 @@ impl TeleArkApp {
                 },
                 self.tr("transfer-summary-live-runtime"),
                 Tone::Blue,
-            ))
-            .child(summary_card(
-                IconName::Inbox,
-                self.tr("transfer-summary-today-data"),
-                format_bytes(self.locale(), completed_bytes),
-                self.tr("transfer-summary-completed-data"),
-                Tone::Purple,
             ));
 
         let toolbar = div()
@@ -612,7 +732,9 @@ impl TeleArkApp {
             )
             .child(transfer_header(self.tr("table-name"), None))
             .when(layout.shows_transfer_source(), |header| {
-                header.child(transfer_header(self.tr("table-source"), Some(108.0)))
+                header
+                    .child(transfer_header(self.tr("table-source"), Some(108.0)))
+                    .child(transfer_header(self.tr("detail-direction"), Some(76.0)))
             })
             .child(transfer_header(self.tr("table-size"), Some(76.0)))
             .child(transfer_header(self.tr("table-progress"), Some(112.0)))
@@ -843,6 +965,13 @@ impl TeleArkApp {
             )
             .when(layout.shows_transfer_source(), |row| {
                 row.child(transfer_cell(transfer.source, 108.0))
+                    .child(transfer_cell(
+                        self.tr(match transfer.direction {
+                            TransferDirection::Upload => "detail-direction-upload",
+                            TransferDirection::Download => "detail-direction-download",
+                        }),
+                        76.0,
+                    ))
             })
             .child(transfer_cell(transfer.size, 76.0))
             .child(
@@ -897,6 +1026,377 @@ impl TeleArkApp {
                     .px_3()
                     .py_1()
                     .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_transfer_telemetry(
+        &self,
+        telemetry: TransferTelemetrySnapshot,
+        transfer_is_active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let replay_mode = self.transfer_inspector_replay || !transfer_is_active;
+        let decision_count = telemetry.decisions.len();
+        let replay_cursor = self
+            .transfer_replay_cursor
+            .min(decision_count.saturating_sub(1));
+        let decisions: Vec<_> = if replay_mode {
+            telemetry
+                .decisions
+                .get(replay_cursor)
+                .copied()
+                .into_iter()
+                .collect()
+        } else {
+            telemetry
+                .decisions
+                .iter()
+                .rev()
+                .take(8)
+                .rev()
+                .copied()
+                .collect()
+        };
+        let decision_rows = decisions
+            .into_iter()
+            .map(|decision| self.render_controller_decision(decision));
+        let live_button = components::button(
+            "transfer-telemetry-live",
+            self.tr("transfer-mode-live"),
+            Some(IconName::ChartPie),
+            !replay_mode,
+        )
+        .disabled(!transfer_is_active)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.transfer_inspector_replay = false;
+            cx.notify();
+        }));
+        let replay_button = components::button(
+            "transfer-telemetry-replay",
+            self.tr("transfer-mode-replay"),
+            Some(IconName::Redo),
+            replay_mode,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.transfer_inspector_replay = true;
+            this.transfer_replay_cursor = decision_count.saturating_sub(1);
+            cx.notify();
+        }));
+        let previous_button = components::button(
+            "transfer-replay-previous",
+            self.tr("transfer-replay-previous"),
+            Some(IconName::ChevronLeft),
+            false,
+        )
+        .disabled(!replay_mode || replay_cursor == 0 || decision_count == 0)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.transfer_replay_cursor = this.transfer_replay_cursor.saturating_sub(1);
+            cx.notify();
+        }));
+        let next_button = components::button(
+            "transfer-replay-next",
+            self.tr("transfer-replay-next"),
+            Some(IconName::ChevronRight),
+            false,
+        )
+        .disabled(!replay_mode || replay_cursor.saturating_add(1) >= decision_count)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.transfer_replay_cursor = this
+                .transfer_replay_cursor
+                .saturating_add(1)
+                .min(decision_count.saturating_sub(1));
+            cx.notify();
+        }));
+        let lane_rows: Vec<AnyElement> = telemetry
+            .lanes
+            .iter()
+            .map(|lane| {
+                let status = if lane.paused_until_millis.is_some() {
+                    self.tr("transfer-lane-paused")
+                } else {
+                    self.tr("transfer-lane-active")
+                };
+                div()
+                    .py_1()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(
+                        self.tr_with(
+                            "transfer-lane-value",
+                            MessageArgs::new()
+                                .with(
+                                    "dc",
+                                    format_integer(
+                                        self.locale(),
+                                        lane.data_center_id.max(0) as u64,
+                                    ),
+                                )
+                                .with(
+                                    "lane",
+                                    format_integer(self.locale(), u64::from(lane.lane_id)),
+                                )
+                                .with(
+                                    "inflight",
+                                    format_integer(
+                                        self.locale(),
+                                        u64::from(lane.inflight_rpc_count),
+                                    ),
+                                )
+                                .with(
+                                    "speed",
+                                    format_speed(self.locale(), lane.throughput_bytes_per_second),
+                                )
+                                .with(
+                                    "rtt",
+                                    format_duration_millis(
+                                        self.locale(),
+                                        lane.round_trip_time_p95_millis,
+                                    ),
+                                )
+                                .with("status", status.to_string()),
+                        ),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        components::card()
+            .mt_2()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.tr("transfer-controller-title")),
+                    )
+                    .child(div().flex().gap_2().child(live_button).child(replay_button)),
+            )
+            .child(
+                div().text_xs().text_color(theme::text_secondary()).child(
+                    self.tr_with(
+                        "transfer-controller-queue-waits-value",
+                        MessageArgs::new()
+                            .with(
+                                "network",
+                                format_duration_millis(
+                                    self.locale(),
+                                    telemetry.network_waiting_for_encryption_millis,
+                                ),
+                            )
+                            .with(
+                                "encryption",
+                                format_duration_millis(
+                                    self.locale(),
+                                    telemetry.encryption_waiting_for_network_millis,
+                                ),
+                            )
+                            .with(
+                                "parts",
+                                format_decimal(
+                                    self.locale(),
+                                    telemetry.parts.completed_parts_per_second_milli as f64
+                                        / 1_000.0,
+                                    2,
+                                ),
+                            ),
+                    ),
+                ),
+            )
+            .child(
+                div().text_xs().text_color(theme::text_secondary()).child(
+                    self.tr_with(
+                        "transfer-controller-buffers-value",
+                        MessageArgs::new()
+                            .with(
+                                "plaintext",
+                                format_bytes(
+                                    self.locale(),
+                                    telemetry.memory.plaintext_buffer_bytes,
+                                ),
+                            )
+                            .with(
+                                "encrypted",
+                                format_bytes(
+                                    self.locale(),
+                                    telemetry.memory.encrypted_buffer_bytes,
+                                ),
+                            )
+                            .with(
+                                "network",
+                                format_bytes(
+                                    self.locale(),
+                                    telemetry.memory.network_inflight_bytes,
+                                ),
+                            )
+                            .with(
+                                "writer",
+                                format_bytes(self.locale(), telemetry.memory.writer_queue_bytes),
+                            ),
+                    ),
+                ),
+            )
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr("transfer-controller-decisions")),
+            )
+            .when(decision_count == 0, |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("transfer-controller-no-decisions")),
+                )
+            })
+            .children(decision_rows)
+            .when(replay_mode && decision_count != 0, |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(previous_button)
+                        .child(
+                            div().text_xs().text_color(theme::text_muted()).child(
+                                self.tr_with(
+                                    "transfer-replay-position",
+                                    MessageArgs::new()
+                                        .with(
+                                            "current",
+                                            format_integer(
+                                                self.locale(),
+                                                replay_cursor.saturating_add(1) as u64,
+                                            ),
+                                        )
+                                        .with(
+                                            "total",
+                                            format_integer(self.locale(), decision_count as u64),
+                                        ),
+                                ),
+                            ),
+                        )
+                        .child(next_button),
+                )
+            })
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr("transfer-controller-lanes")),
+            )
+            .when(lane_rows.is_empty(), |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("transfer-controller-lanes-unavailable")),
+                )
+            })
+            .children(lane_rows)
+            .into_any_element()
+    }
+
+    fn render_controller_decision(&self, decision: ControllerDecision) -> AnyElement {
+        let parameter = decision.parameter.map_or_else(
+            || self.tr("transfer-controller-no-parameter"),
+            |parameter| self.tr(parameter_message_id(parameter)),
+        );
+        let before_value = decision
+            .parameter
+            .map(|parameter| control_parameter_value(decision.before, parameter));
+        let after_value = decision
+            .parameter
+            .map(|parameter| control_parameter_value(decision.after, parameter));
+        let change = match (before_value, after_value) {
+            (Some(before), Some(after)) => format!("{parameter}: {before} → {after}"),
+            _ => parameter.to_string(),
+        };
+        let outcome = decision_outcome_message_id(decision.outcome);
+        let tone = match decision.outcome {
+            ControllerDecisionOutcome::Keep
+            | ControllerDecisionOutcome::OverrideSoftLimit
+            | ControllerDecisionOutcome::ResumeLane => Tone::Green,
+            ControllerDecisionOutcome::Rollback | ControllerDecisionOutcome::PauseLane => Tone::Red,
+            ControllerDecisionOutcome::Confirm
+            | ControllerDecisionOutcome::Recover
+            | ControllerDecisionOutcome::RespectSoftLimit => Tone::Amber,
+            _ => Tone::Blue,
+        };
+        div()
+            .p_2()
+            .rounded(theme::RADIUS_SMALL)
+            .bg(theme::canvas())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                        "{} · {}",
+                        self.tr(controller_phase_message_id(decision.phase)),
+                        change
+                    )))
+                    .child(components::badge(self.tr(outcome), tone)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr(decision_reason_message_id(decision.reason))),
+            )
+            .child(
+                div().text_xs().text_color(theme::text_muted()).child(
+                    self.tr_with(
+                        "transfer-decision-throughput-value",
+                        MessageArgs::new()
+                            .with(
+                                "before",
+                                format_speed(
+                                    self.locale(),
+                                    decision.baseline_goodput_bytes_per_second,
+                                ),
+                            )
+                            .with(
+                                "after",
+                                format_speed(
+                                    self.locale(),
+                                    decision.observed_goodput_bytes_per_second,
+                                ),
+                            )
+                            .with(
+                                "change",
+                                format_percent(
+                                    self.locale(),
+                                    f64::from(decision.goodput_change_basis_points) / 10_000.0,
+                                    1,
+                                ),
+                            )
+                            .with(
+                                "elapsed",
+                                format_duration_millis(self.locale(), decision.observed_at_millis),
+                            ),
+                    ),
+                ),
             )
             .into_any_element()
     }
@@ -960,56 +1460,87 @@ impl TeleArkApp {
         let completed = transfer.state == TransferState::Completed;
         let failed = transfer.state == TransferState::Failed;
         let runtime_backed = transfer.runtime_task_id.is_some();
+        let vault_backed = transfer.vault_transfer_id.is_some();
+        let upload = transfer.direction == TransferDirection::Upload;
+        let preview_upload = upload && !runtime_backed && !vault_backed;
         let runtime_snapshot = transfer
             .runtime_task_id
             .and_then(|id| self.runtime_transfer_snapshot(id));
+        let vault_snapshot = transfer
+            .vault_transfer_id
+            .and_then(|id| self.vault_transfer_snapshot(id));
+        let telemetry = vault_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.telemetry.clone())
+            .or_else(|| {
+                runtime_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.telemetry.clone())
+            });
         let unavailable = self.tr("transfer-value-unavailable");
         let remote_message_id = if let Some(message_id) = transfer.message_id {
             message_id.to_string().into()
-        } else if waiting {
+        } else if waiting || vault_backed {
             unavailable.clone()
         } else {
             SharedString::from("1876543210897")
         };
-        let created_at = runtime_snapshot.as_ref().map_or_else(
+        let created_at = vault_snapshot.as_ref().map_or_else(
             || {
-                if runtime_backed {
-                    unavailable.clone()
-                } else {
-                    SharedString::from("2026-08-23 20:48:31")
-                }
+                runtime_snapshot.as_ref().map_or_else(
+                    || {
+                        if runtime_backed {
+                            unavailable.clone()
+                        } else {
+                            SharedString::from("2026-08-23 20:48:31")
+                        }
+                    },
+                    |snapshot| format_unix_millis(self.locale(), snapshot.queued_at_unix_ms).into(),
+                )
             },
-            |snapshot| format_unix_millis(self.locale(), snapshot.queued_at_unix_ms).into(),
+            |snapshot| format_unix_millis(self.locale(), snapshot.started_at_unix_ms).into(),
         );
-        let started_at = runtime_snapshot.as_ref().map_or_else(
+        let started_at = vault_snapshot.as_ref().map_or_else(
             || {
-                if runtime_backed || waiting {
-                    unavailable.clone()
-                } else {
-                    SharedString::from("2026-08-23 20:49:02")
-                }
+                runtime_snapshot.as_ref().map_or_else(
+                    || {
+                        if runtime_backed || waiting {
+                            unavailable.clone()
+                        } else {
+                            SharedString::from("2026-08-23 20:49:02")
+                        }
+                    },
+                    |snapshot| {
+                        snapshot
+                            .started_at_unix_ms
+                            .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
+                            .unwrap_or_else(|| unavailable.clone())
+                    },
+                )
             },
-            |snapshot| {
-                snapshot
-                    .started_at_unix_ms
-                    .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
-                    .unwrap_or_else(|| unavailable.clone())
-            },
+            |snapshot| format_unix_millis(self.locale(), snapshot.started_at_unix_ms).into(),
         );
         let finished_at = runtime_snapshot.as_ref().and_then(|snapshot| {
             snapshot
                 .finished_at_unix_ms
                 .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
         });
-        let elapsed_ms = runtime_snapshot.as_ref().and_then(|snapshot| {
-            snapshot.duration_ms.or_else(|| {
-                snapshot.started_at_unix_ms.and_then(|started| {
-                    current_unix_millis()
-                        .and_then(|now| now.checked_sub(started))
-                        .and_then(|elapsed| u64::try_from(elapsed).ok())
+        let elapsed_ms = runtime_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.duration_ms.or_else(|| {
+                    snapshot.started_at_unix_ms.and_then(|started| {
+                        current_unix_millis()
+                            .and_then(|now| now.checked_sub(started))
+                            .and_then(|elapsed| u64::try_from(elapsed).ok())
+                    })
                 })
             })
-        });
+            .or_else(|| {
+                vault_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.duration_ms)
+            });
         let transfer_icon = match transfer.state {
             TransferState::Downloading => IconName::ArrowDown,
             TransferState::Uploading => IconName::ArrowUp,
@@ -1020,6 +1551,14 @@ impl TeleArkApp {
             TransferState::Cancelled => IconName::CircleX,
         };
         let mut details = vec![
+            (
+                self.tr("detail-direction"),
+                self.tr(if upload {
+                    "detail-direction-upload"
+                } else {
+                    "detail-direction-download"
+                }),
+            ),
             (self.tr("detail-source-channel"), transfer.source.clone()),
             (self.tr("detail-message-id"), remote_message_id),
             (self.tr("detail-local-path"), transfer.destination.clone()),
@@ -1034,49 +1573,112 @@ impl TeleArkApp {
             ),
             (
                 self.tr("detail-workers"),
-                runtime_snapshot.as_ref().map_or_else(
+                vault_snapshot.as_ref().map_or_else(
                     || {
-                        SharedString::from(if runtime_backed {
-                            "—"
-                        } else if active {
-                            "16"
-                        } else {
-                            "—"
-                        })
+                        runtime_snapshot.as_ref().map_or_else(
+                            || {
+                                SharedString::from(if runtime_backed {
+                                    "—"
+                                } else if active {
+                                    "16"
+                                } else {
+                                    "—"
+                                })
+                            },
+                            |snapshot| {
+                                if snapshot.started_at_unix_ms.is_some() {
+                                    format_integer(self.locale(), 1).into()
+                                } else {
+                                    unavailable.clone()
+                                }
+                            },
+                        )
                     },
-                    |snapshot| {
-                        if snapshot.started_at_unix_ms.is_some() {
-                            format_integer(self.locale(), 1).into()
-                        } else {
-                            unavailable.clone()
-                        }
-                    },
+                    |_| format_integer(self.locale(), 1).into(),
                 ),
             ),
             (
                 self.tr("detail-retries"),
-                runtime_snapshot.as_ref().map_or_else(
+                vault_snapshot.as_ref().map_or_else(
                     || {
-                        SharedString::from(if runtime_backed {
-                            "—"
-                        } else if failed {
-                            "3"
-                        } else {
-                            "0"
-                        })
-                    },
-                    |snapshot| {
-                        format_integer(
-                            self.locale(),
-                            u64::from(snapshot.attempts.saturating_sub(1)),
+                        runtime_snapshot.as_ref().map_or_else(
+                            || {
+                                SharedString::from(if runtime_backed {
+                                    "—"
+                                } else if failed {
+                                    "3"
+                                } else {
+                                    "0"
+                                })
+                            },
+                            |snapshot| {
+                                format_integer(
+                                    self.locale(),
+                                    u64::from(snapshot.attempts.saturating_sub(1)),
+                                )
+                                .into()
+                            },
                         )
-                        .into()
                     },
+                    |_| unavailable.clone(),
                 ),
             ),
             (self.tr("detail-created"), created_at),
             (self.tr("detail-started"), started_at),
         ];
+        details.push((
+            self.tr("detail-storage-format"),
+            self.tr(if upload || vault_backed {
+                "detail-storage-format-teleark"
+            } else {
+                "detail-storage-format-native"
+            }),
+        ));
+        details.push((
+            self.tr("detail-content-protection"),
+            self.tr(
+                if vault_backed || (upload && self.preferences.upload_encrypt_content) {
+                    "detail-content-protection-aes"
+                } else {
+                    "detail-content-protection-none"
+                },
+            ),
+        ));
+        details.push((
+            self.tr("detail-integrity-codec"),
+            self.tr(if upload || vault_backed {
+                "detail-integrity-teleark"
+            } else {
+                "detail-integrity-native"
+            }),
+        ));
+        if upload || vault_backed {
+            details.push((
+                self.tr("upload-part-size"),
+                if vault_backed {
+                    format_bytes(
+                        self.locale(),
+                        teleark_runtime::encrypted_part_plaintext_limit(),
+                    )
+                    .into()
+                } else {
+                    self.tr_with(
+                        "upload-part-size-mib",
+                        MessageArgs::new().with(
+                            "size",
+                            format_integer(
+                                self.locale(),
+                                u64::from(self.preferences.upload_part_size_mib),
+                            ),
+                        ),
+                    )
+                },
+            ));
+            details.push((
+                self.tr("detail-manifest-codec"),
+                self.tr("detail-manifest-codec-value"),
+            ));
+        }
         if let Some(sent_at) = transfer.message_sent_at_unix_ms {
             details.push((
                 self.tr("telegram-message-sent-at"),
@@ -1121,6 +1723,147 @@ impl TeleArkApp {
             if let Some(finished_at) = finished_at {
                 details.push((self.tr("detail-finished"), finished_at));
             }
+        }
+        if let Some(snapshot) = vault_snapshot.as_ref() {
+            details.push((
+                self.tr("detail-trace-id"),
+                SharedString::from(format!("VAULT-{}", snapshot.id)),
+            ));
+            details.push((
+                self.tr("detail-elapsed"),
+                elapsed_ms
+                    .map(|duration| format_duration_millis(self.locale(), duration).into())
+                    .unwrap_or_else(|| unavailable.clone()),
+            ));
+            details.push((
+                self.tr("detail-average-speed"),
+                snapshot
+                    .average_bytes_per_second
+                    .map(|speed| format_speed(self.locale(), speed).into())
+                    .unwrap_or_else(|| unavailable.clone()),
+            ));
+            details.push((
+                self.tr("detail-vault-lifecycle"),
+                self.tr("detail-vault-lifecycle-memory-only"),
+            ));
+        }
+        if let Some(telemetry) = telemetry.as_ref() {
+            let parameters = telemetry.parameters;
+            details.extend([
+                (
+                    self.tr("transfer-controller-phase"),
+                    self.tr(controller_phase_message_id(telemetry.phase)),
+                ),
+                (
+                    self.tr("transfer-controller-parameters"),
+                    format_control_parameters(parameters).into(),
+                ),
+                (
+                    self.tr("transfer-controller-goodput"),
+                    format_speed(self.locale(), telemetry.goodput_bytes_per_second).into(),
+                ),
+                (
+                    self.tr("transfer-controller-encryption-throughput"),
+                    format_speed(self.locale(), telemetry.encryption_bytes_per_second).into(),
+                ),
+                (
+                    self.tr("transfer-controller-disk-throughput"),
+                    format_speed(self.locale(), telemetry.disk_bytes_per_second).into(),
+                ),
+                (
+                    self.tr("transfer-controller-bdp"),
+                    format_bytes(self.locale(), telemetry.estimated_bdp_bytes).into(),
+                ),
+                (
+                    self.tr("transfer-controller-rtt"),
+                    format_duration_millis(self.locale(), telemetry.round_trip_time_p95_millis)
+                        .into(),
+                ),
+                (
+                    self.tr("transfer-controller-inflight"),
+                    self.tr_with(
+                        "transfer-controller-inflight-value",
+                        MessageArgs::new()
+                            .with(
+                                "current",
+                                format_bytes(self.locale(), telemetry.inflight_bytes),
+                            )
+                            .with(
+                                "target",
+                                format_bytes(self.locale(), telemetry.target_inflight_bytes),
+                            ),
+                    ),
+                ),
+                (
+                    self.tr("transfer-controller-cpu"),
+                    format_percent(
+                        self.locale(),
+                        f64::from(telemetry.cpu_utilization_basis_points) / 10_000.0,
+                        1,
+                    )
+                    .into(),
+                ),
+                (
+                    self.tr("transfer-controller-bottleneck"),
+                    self.tr(bottleneck_message_id(telemetry.bottleneck)),
+                ),
+                (
+                    self.tr("transfer-controller-memory"),
+                    self.tr_with(
+                        "transfer-controller-memory-value",
+                        MessageArgs::new()
+                            .with(
+                                "used",
+                                format_bytes(self.locale(), telemetry.memory.total_bytes()),
+                            )
+                            .with(
+                                "budget",
+                                format_bytes(self.locale(), telemetry.memory_budget_bytes),
+                            ),
+                    ),
+                ),
+                (
+                    self.tr("transfer-controller-part-map"),
+                    self.tr_with(
+                        "transfer-controller-part-map-value",
+                        MessageArgs::new()
+                            .with(
+                                "completed",
+                                format_integer(self.locale(), telemetry.parts.completed_parts),
+                            )
+                            .with(
+                                "inflight",
+                                format_integer(self.locale(), telemetry.parts.inflight_parts),
+                            )
+                            .with(
+                                "retry",
+                                format_integer(self.locale(), telemetry.parts.retry_parts),
+                            )
+                            .with(
+                                "failed",
+                                format_integer(self.locale(), telemetry.parts.failed_parts),
+                            )
+                            .with(
+                                "missing",
+                                format_integer(self.locale(), telemetry.parts.missing_parts),
+                            ),
+                    ),
+                ),
+            ]);
+        }
+        if let Some(path) = vault_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.session_log_path.as_ref())
+            .or_else(|| {
+                runtime_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.session_log_path.as_ref())
+            })
+        {
+            details.push((
+                self.tr("transfer-session-log"),
+                path.to_string_lossy().into_owned().into(),
+            ));
         }
 
         let (verification, verification_tone, verification_icon) =
@@ -1175,9 +1918,21 @@ impl TeleArkApp {
                         "detail-failure-terminal"
                     }),
                 )
+            })
+            .or_else(|| {
+                vault_snapshot.as_ref().and_then(|snapshot| {
+                    if let VaultTransferState::Failed(kind) = snapshot.state {
+                        Some((
+                            self.tr(native_download_error_message_id(kind)),
+                            self.tr("detail-failure-terminal"),
+                        ))
+                    } else {
+                        None
+                    }
+                })
             });
 
-        let primary_action = if runtime_backed && completed {
+        let primary_action = if (runtime_backed || (vault_backed && !upload)) && completed {
             let destination = std::path::PathBuf::from(transfer.destination.as_ref());
             components::button(
                 "detail-open",
@@ -1240,6 +1995,26 @@ impl TeleArkApp {
                 )
                 .disabled(true),
             }
+        } else if vault_backed {
+            components::button(
+                "detail-vault-state",
+                self.tr(if completed {
+                    "transfer.state.completed"
+                } else if failed {
+                    "transfer.state.failed"
+                } else {
+                    "detail-vault-controls-unavailable"
+                }),
+                Some(if completed {
+                    IconName::CircleCheck
+                } else if failed {
+                    IconName::CircleX
+                } else {
+                    IconName::LoaderCircle
+                }),
+                true,
+            )
+            .disabled(true)
         } else {
             match transfer.state {
                 TransferState::Downloading | TransferState::Uploading => components::button(
@@ -1260,6 +2035,13 @@ impl TeleArkApp {
                     this.transfer_paused = !this.transfer_paused;
                     cx.notify();
                 })),
+                TransferState::Waiting if preview_upload => components::button(
+                    "detail-upload-preview",
+                    self.tr("prototype-demo-badge"),
+                    Some(IconName::ArrowUp),
+                    true,
+                )
+                .disabled(true),
                 TransferState::Waiting => components::button(
                     "detail-start",
                     self.tr("action-start"),
@@ -1293,7 +2075,7 @@ impl TeleArkApp {
                 .disabled(true),
             }
         };
-        let reveal_action = if runtime_backed && completed {
+        let reveal_action = if (runtime_backed || (vault_backed && !upload)) && completed {
             let destination = std::path::PathBuf::from(transfer.destination.as_ref());
             Some(
                 components::button(
@@ -1447,6 +2229,18 @@ impl TeleArkApp {
                             .into_iter()
                             .map(|(label, value)| detail_row(label, value)),
                     )
+                    .when(preview_upload, |details| {
+                        details.child(
+                            div()
+                                .mt_1()
+                                .p_3()
+                                .rounded(theme::RADIUS_SMALL)
+                                .bg(theme::amber_soft())
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("transfer-preview-upload-note")),
+                        )
+                    })
                     .child(
                         div()
                             .mt_1()
@@ -1489,6 +2283,9 @@ impl TeleArkApp {
                                 .child(div().text_color(theme::text_secondary()).child(guidance)),
                         )
                     })
+                    .when_some(telemetry, |details, telemetry| {
+                        details.child(self.render_transfer_telemetry(telemetry, active, cx))
+                    })
                     .when_some(runtime_snapshot, |details, snapshot| {
                         let events = snapshot.events.into_iter().map(|event| {
                             let label = self.tr(match event.kind {
@@ -1528,21 +2325,87 @@ impl TeleArkApp {
                                 )
                                 .child(div().text_color(theme::text_muted()).child(elapsed))
                         });
-                        details.child(
-                            div()
-                                .mt_2()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(theme::border())
-                                .child(
-                                    div()
-                                        .mb_1()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(self.tr("detail-trace-timeline")),
-                                )
-                                .children(events),
-                        )
+                        let part_events =
+                            snapshot
+                                .part_events
+                                .into_iter()
+                                .rev()
+                                .take(20)
+                                .map(|event| {
+                                    let state = self.tr(match event.state {
+                                        DownloadPartState::Inflight => "transfer-part-inflight",
+                                        DownloadPartState::Completed => "transfer-part-completed",
+                                        DownloadPartState::Retry => "transfer-part-retry",
+                                        DownloadPartState::Failed => "transfer-part-failed",
+                                    });
+                                    div().py_1().flex().flex_col().gap_1().text_xs().child(
+                                        self.tr_with(
+                                            "transfer-part-event-value",
+                                            MessageArgs::new()
+                                                .with(
+                                                    "part",
+                                                    format_integer(self.locale(), event.part_index),
+                                                )
+                                                .with(
+                                                    "offset",
+                                                    format_integer(
+                                                        self.locale(),
+                                                        event.offset_bytes,
+                                                    ),
+                                                )
+                                                .with(
+                                                    "length",
+                                                    format_bytes(self.locale(), event.length_bytes),
+                                                )
+                                                .with("state", state.to_string())
+                                                .with(
+                                                    "attempt",
+                                                    format_integer(
+                                                        self.locale(),
+                                                        u64::from(event.attempt),
+                                                    ),
+                                                )
+                                                .with(
+                                                    "elapsed",
+                                                    format_duration_millis(
+                                                        self.locale(),
+                                                        event.elapsed_millis,
+                                                    ),
+                                                ),
+                                        ),
+                                    )
+                                });
+                        details
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(theme::border())
+                                    .child(
+                                        div()
+                                            .mb_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(self.tr("detail-trace-timeline")),
+                                    )
+                                    .children(events),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(theme::border())
+                                    .child(
+                                        div()
+                                            .mb_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(self.tr("transfer-part-timeline")),
+                                    )
+                                    .children(part_events),
+                            )
                     }),
             )
             .child(
@@ -1645,6 +2508,101 @@ fn transfer_tone(state: TransferState) -> Tone {
         TransferState::Waiting | TransferState::Paused => Tone::Amber,
         TransferState::Completed => Tone::Green,
         TransferState::Failed | TransferState::Cancelled => Tone::Red,
+    }
+}
+
+fn format_control_parameters(parameters: TransferControlParameters) -> String {
+    format!(
+        "C={} · W={} · F={} · P={} · E={} · Qe={}",
+        parameters.transfer_connection_count,
+        parameters.inflight_rpcs_per_connection,
+        parameters.active_file_count,
+        parameters.inflight_parts_per_file,
+        parameters.encryption_worker_count,
+        parameters.encrypted_part_queue_depth,
+    )
+}
+
+fn control_parameter_value(
+    parameters: TransferControlParameters,
+    parameter: TunableParameter,
+) -> u16 {
+    match parameter {
+        TunableParameter::TransferConnections => parameters.transfer_connection_count,
+        TunableParameter::InflightRpcsPerConnection => parameters.inflight_rpcs_per_connection,
+        TunableParameter::ActiveFiles => parameters.active_file_count,
+        TunableParameter::InflightPartsPerFile => parameters.inflight_parts_per_file,
+        TunableParameter::EncryptionWorkers => parameters.encryption_worker_count,
+        TunableParameter::EncryptedQueueDepth => parameters.encrypted_part_queue_depth,
+    }
+}
+
+const fn controller_phase_message_id(phase: ControllerPhase) -> &'static str {
+    match phase {
+        ControllerPhase::Ramp => "transfer-phase-ramp",
+        ControllerPhase::Probe => "transfer-phase-probe",
+        ControllerPhase::Stable => "transfer-phase-stable",
+        ControllerPhase::Recover => "transfer-phase-recover",
+    }
+}
+
+const fn bottleneck_message_id(bottleneck: TransferBottleneck) -> &'static str {
+    match bottleneck {
+        TransferBottleneck::Unknown => "transfer-bottleneck-unknown",
+        TransferBottleneck::EncryptionCpu => "transfer-bottleneck-encryption",
+        TransferBottleneck::TelegramOrNetwork => "transfer-bottleneck-network",
+        TransferBottleneck::Disk => "transfer-bottleneck-disk",
+        TransferBottleneck::Memory => "transfer-bottleneck-memory",
+    }
+}
+
+const fn parameter_message_id(parameter: TunableParameter) -> &'static str {
+    match parameter {
+        TunableParameter::TransferConnections => "transfer-parameter-connections",
+        TunableParameter::InflightRpcsPerConnection => "transfer-parameter-rpcs",
+        TunableParameter::ActiveFiles => "transfer-parameter-files",
+        TunableParameter::InflightPartsPerFile => "transfer-parameter-parts",
+        TunableParameter::EncryptionWorkers => "transfer-parameter-encryption-workers",
+        TunableParameter::EncryptedQueueDepth => "transfer-parameter-encrypted-queue",
+    }
+}
+
+const fn decision_outcome_message_id(outcome: ControllerDecisionOutcome) -> &'static str {
+    match outcome {
+        ControllerDecisionOutcome::Probe => "transfer-decision-probe",
+        ControllerDecisionOutcome::Keep => "transfer-decision-keep",
+        ControllerDecisionOutcome::Confirm => "transfer-decision-confirm",
+        ControllerDecisionOutcome::Platform => "transfer-decision-platform",
+        ControllerDecisionOutcome::Rollback => "transfer-decision-rollback",
+        ControllerDecisionOutcome::Recover => "transfer-decision-recover",
+        ControllerDecisionOutcome::RespectSoftLimit => "transfer-decision-respect-soft-limit",
+        ControllerDecisionOutcome::OverrideSoftLimit => "transfer-decision-override-soft-limit",
+        ControllerDecisionOutcome::IgnoreSoftLimit => "transfer-decision-ignore-soft-limit",
+        ControllerDecisionOutcome::PauseLane => "transfer-decision-pause-lane",
+        ControllerDecisionOutcome::ResumeLane => "transfer-decision-resume-lane",
+    }
+}
+
+const fn decision_reason_message_id(reason: ControllerDecisionReason) -> &'static str {
+    match reason {
+        ControllerDecisionReason::InitialRamp => "transfer-reason-initial-ramp",
+        ControllerDecisionReason::InflightBelowBdpTarget => "transfer-reason-bdp",
+        ControllerDecisionReason::ThroughputImproved => "transfer-reason-improved",
+        ControllerDecisionReason::ThroughputNeedsConfirmation => "transfer-reason-confirm",
+        ControllerDecisionReason::ThroughputGainBelowThreshold => "transfer-reason-platform",
+        ControllerDecisionReason::ThroughputRegressed => "transfer-reason-regressed",
+        ControllerDecisionReason::EncryptionStarvedNetwork => "transfer-reason-encryption-starved",
+        ControllerDecisionReason::NetworkBackpressuredEncryption => {
+            "transfer-reason-network-backpressure"
+        }
+        ControllerDecisionReason::SmallFileQueueNeedsSlots => "transfer-reason-small-files",
+        ControllerDecisionReason::LargeFilePipelineNeedsParts => "transfer-reason-large-file",
+        ControllerDecisionReason::MemoryBudgetPressure => "transfer-reason-memory",
+        ControllerDecisionReason::DiskLimited => "transfer-reason-disk",
+        ControllerDecisionReason::FloodWaitRequired => "transfer-reason-flood-wait",
+        ControllerDecisionReason::FloodWaitExpired => "transfer-reason-flood-wait-expired",
+        ControllerDecisionReason::TelegramSoftLimitConflict => "transfer-reason-soft-limit",
+        ControllerDecisionReason::AllParametersAtPlatform => "transfer-reason-all-platform",
     }
 }
 
@@ -1845,8 +2803,14 @@ fn toggle_visible_selection(
     }
 }
 
-fn transfer_matches_nav(selection: &str, state: TransferState) -> bool {
+fn transfer_matches_nav(
+    selection: &str,
+    state: TransferState,
+    direction: TransferDirection,
+) -> bool {
     match selection {
+        "nav-uploads" => direction == TransferDirection::Upload,
+        "nav-downloads" => direction == TransferDirection::Download,
         "nav-completed" => state == TransferState::Completed,
         "nav-failed" => matches!(state, TransferState::Failed | TransferState::Cancelled),
         _ => true,
@@ -1901,16 +2865,33 @@ mod tests {
     fn transfer_sidebar_facets_match_only_the_requested_state() {
         assert!(transfer_matches_nav(
             "nav-completed",
-            TransferState::Completed
+            TransferState::Completed,
+            TransferDirection::Download,
         ));
         assert!(!transfer_matches_nav(
             "nav-completed",
-            TransferState::Failed
+            TransferState::Failed,
+            TransferDirection::Download,
         ));
-        assert!(transfer_matches_nav("nav-failed", TransferState::Failed));
+        assert!(transfer_matches_nav(
+            "nav-failed",
+            TransferState::Failed,
+            TransferDirection::Download,
+        ));
         assert!(transfer_matches_nav(
             "nav-transfers-all",
-            TransferState::Waiting
+            TransferState::Waiting,
+            TransferDirection::Upload,
+        ));
+        assert!(transfer_matches_nav(
+            "nav-uploads",
+            TransferState::Waiting,
+            TransferDirection::Upload,
+        ));
+        assert!(!transfer_matches_nav(
+            "nav-uploads",
+            TransferState::Downloading,
+            TransferDirection::Download,
         ));
     }
 

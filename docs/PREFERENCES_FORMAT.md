@@ -21,10 +21,11 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `download_directory` | retired UTF-8 path or empty | empty |
 | `ask_download_destination` | retired boolean | `false` |
 | `reveal_completed_downloads` | boolean | `false` |
-| `upload_part_size_mib` | `1024` or `1900` | `1900` |
-| `upload_encrypt_content` | boolean | `true` |
-| `upload_hide_file_name` | boolean | `true` |
-| `upload_encrypt_metadata` | boolean | `true` |
+| `upload_part_size_mib` | retained legacy value: `1024` or `1900` | `1900` |
+| `upload_encrypt_content` | retained legacy boolean | `true` |
+| `upload_hide_file_name` | retained legacy boolean | `true` |
+| `upload_encrypt_metadata` | retained legacy boolean | `true` |
+| `transfer_soft_limit_policy` | `respect`, `adaptive_override`, or `ignore` | `adaptive_override` |
 | `lock_vault_when_hidden` | boolean | `true` |
 | `index_batch_size` | `200`, `500`, or `1000` | `1000` |
 | `notify_download_completed` | boolean | `true` |
@@ -45,6 +46,21 @@ compatibility. A malformed active known key makes the runtime report a
 structured persistence error; the desktop falls back to defaults and shows
 that settings could not be loaded or saved. A future incompatible encoding
 must use a new namespace and migration rather than changing version 1 in place.
+
+The four retained `upload_*` keys remain parseable so existing version-1
+preferences do not break, but the connected Saved Messages writer does not use
+them. Vault uploads currently require encryption of content, original name, and
+manifest metadata and use the runtime's conservative 60 MiB plaintext-part
+ceiling. Those protections are presented only in the Saved Messages upload
+flow; Settings no longer exposes inactive controls that would imply otherwise.
+
+`transfer_soft_limit_policy` affects only official conservative guidance, never
+Telegram protocol limits or structured FloodWait deadlines. `respect` refuses
+to cross a known soft active-file limit, `adaptive_override` probes across it
+and keeps the change only when measured goodput justifies it, and `ignore`
+allows the normal probe order to cross it. Every conflict is a typed controller
+decision and a session-log event. Missing older values adopt the recommended
+`adaptive_override` default.
 
 The managed root is not a permission grant. The runtime creates only its
 `Downloads`, `Cache`, and `Logs` children, validates requested filenames, refuses path

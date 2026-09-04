@@ -1,12 +1,12 @@
 # UI Guidelines
 
-Status: design contract for a persistent local Library plus real Telegram login/source selection/bounded indexing. The two supplied reference images are the visual source of truth. Transfer, encrypted recovery, and Vault routes remain preview-only and must not imply an end-to-end workflow that is not implemented.
+Status: design contract for a persistent local Library plus real Telegram login/source selection/bounded indexing, native transfers, and the connected alpha Vault/Saved Messages encrypted workflow. The two supplied reference images are the visual source of truth. Provisional crypto and incomplete transfer lifecycle controls must remain visibly honest.
 
 ## Product abstraction and branding
 
 Use **TeleArk** consistently. Never reintroduce “Telegram Drive,” “Telegram Vault,” or “tdl GUI” as user-facing names. Every library row, detail panel, collection, and transfer task represents a `LogicalFile`. Multipart part names, message IDs, DC IDs, file references, and MTProto details appear only in intentionally advanced diagnostics.
 
-No UI behavior may depend on Telegram Premium. The upload dialog shows one compatibility-oriented strategy, such as “Automatic multipart” and an exact “1900 MiB compatibility mode.” Do not show a Premium part-size option or imply premium speed/limits.
+No UI behavior may depend on Telegram Premium. The upload dialog shows automatic multipart and the runtime's actual current safe plaintext-part ceiling (60 MiB in this alpha), not a preference the connected writer ignores. Do not show a Premium part-size option or imply premium speed/limits. The long-term compatibility target remains a streaming concern rather than a selectable promise.
 
 ## Reference composition
 
@@ -22,25 +22,31 @@ Treat the images as geometry targets, not loose inspiration. Measure layout from
 ## Application information architecture
 
 ```text
-LIBRARY
-  All Files, Recent, Videos, Documents, Archives, Images, Audio, Other
-
 CHANNELS
-  Saved Messages and indexed channels
+  One item per real Telegram channel, using the original channel name
 
-COLLECTIONS
-  Manual and Smart Collections
+SAVED MESSAGES
+  Telegram Files, TeleArk Files
 
 TRANSFERS
   All, Uploads, Downloads, Waiting, Completed, Failed
 
 STORAGE
-  Telegram Storage, Index, Key Vault
+  Telegram Storage, Index
 
 SETTINGS
+  Key Vault
 ```
 
-Navigation labels use i18n message IDs. Dynamic channel/collection/file names preserve original source/user text.
+The persistent local Library remains an internal Core/catalog abstraction and
+legacy diagnostic route, but it is not a primary sidebar destination. The
+sidebar does not add a generic “Telegram Sources” indirection or a Collections
+section. After authorization, channel names appear directly under Channels;
+before authorization the same area contains the sign-in entry. Saved Messages
+is separated because it is the only upload target that offers TeleArk
+client-side encryption.
+
+Navigation labels use i18n message IDs. Dynamic channel and file names preserve original source/user text.
 
 ## Design tokens
 
@@ -119,16 +125,39 @@ configuration. Long localized notices wrap inside their card at the supported
 minimum width. Downloads always use the runtime-owned managed `Downloads`
 directory without a per-file prompt and avoid overwriting an existing file.
 The managed root and its `Downloads`, `Cache`, and `Logs` children are shown
-together. Upload defaults,
-Key Vault auto-lock, indexing batch size, in-app transfer notifications, and
-light/dark/system appearance are typed, validated, and atomically persisted by
-the frontend-neutral runtime. Upload defaults configure the current desktop
-upload form; they do not imply that the preview encrypted-upload workflow is
-production-ready.
+together. Key Vault auto-lock, indexing batch size, in-app transfer
+notifications, and light/dark/system appearance are typed, validated, and
+atomically persisted by the frontend-neutral runtime. Legacy upload-default
+keys remain readable for preferences compatibility but are not exposed as
+controls: the connected Saved Messages writer always applies the Vault
+protections and current runtime part limit shown in its upload dialog.
 
 ### Upload dialog
 
-Shows selected logical file, account/storage target, automatic multipart compatibility strategy, exact part-size unit, expected part count/total, and security options. Original-name hiding and encrypted metadata are understandable but not overclaimed. “Add to upload queue” creates a Core command only after backend integration; the mock milestone labels/isolates demo behavior.
+Shows the selected real local file, account/Saved Messages target, automatic multipart strategy, actual current part-size limit, expected values when known, and mandatory Vault security properties. Original-name hiding and encrypted metadata are understandable but not overclaimed. The primary action is available only with an authenticated Saved Messages target, an unlocked Vault, and a selected file; it sends a typed request to the retained runtime owner.
+Client-side encryption, filename hiding, encrypted metadata, multipart package,
+and manifest options appear only when the destination is the user's Telegram
+Saved Messages. Uploading to an ordinary channel remains a native Telegram
+upload and must not silently introduce TeleArk encoding.
+
+### Saved Messages
+
+The Telegram Files view deliberately mirrors what another Telegram client
+shows: every native document, TeleArk manifest, and opaque application part is
+visible as its own message-backed file. Selecting a TeleArk object explains why
+it exists, identifies its package and role, and lists the related manifest and
+parts. If protected metadata cannot be opened, the inspector says the original
+name is locked rather than guessing it.
+
+The TeleArk Files view is a Finder-like logical-file browser derived from
+authenticated manifests. It presents one logical file, not a set of Telegram
+messages; its inspector owns original metadata, package/part layout, crypto and
+integrity fields, remote locators, recovery state, and activity. The retained
+desktop Vault owner scans bounded exact-caption candidates, authenticates them
+with a valid unlocked key, rejects damaged candidates, and reconstructs a
+selected file through a controlled partial plus whole-file verification. When
+the Vault is locked or no authenticated Manifest exists, the view says so and
+does not infer protected metadata from opaque names.
 
 ### Transfers
 
@@ -151,17 +180,48 @@ Runtime-backed transfer details show safe performance timings, average speed,
 Trace ID, lifecycle events, verification state, and a localized failure reason
 with action guidance. A transfer that fails before verification must say
 verification was not reached rather than claiming integrity verification failed.
+The queue and sidebar expose Uploads and Downloads as first-class direction
+facets. Each row carries an explicit direction, and the detail inspector shows
+the storage encoding, content protection, integrity/framing scheme, part size,
+manifest version, live/current and average speed, ETA, queue time, elapsed time,
+workers, attempts, and verification status when those values exist. The
+retained Vault owner provides real upload/download snapshots; because they are
+currently memory-only and lack controls, the inspector states that pause,
+cancel, retry, and restart resume are unavailable instead of rendering working
+controls.
 Running native downloads update transferred bytes, current speed, progress,
 and ETA from real chunk events. Pause, resume, retry, and cancel controls invoke
 runtime commands. Persisted rows remain visible after restart; interrupted work
 stays queued until Telegram authorization is restored.
 
+Every real transfer inspector includes Live and Replay modes backed by typed
+runtime telemetry and its permanent session log. Live shows the current
+C/W/F/P/E/Qe envelope, controller phase, measured goodput, BDP/inflight target,
+encryption/disk/CPU and queue waits, buffer budget, part map, bottleneck, and
+latest decisions. Replay selects recorded decisions chronologically and shows
+the exact before/after value, reason, outcome, and measured goodput change.
+Telegram soft-limit overrides and FloodWait lane pauses must be visually
+explicit. A transport that cannot expose physical DC/lane identity renders an
+honest unavailable state; preview connection rows must never appear for a real
+task.
+
+Uploads settings exposes the three soft-limit policies as `Respect`,
+`Adaptive Override`, and `Ignore`, with Adaptive Override selected by default
+for Maximum Throughput. The warning makes clear that this preference never
+weakens protocol limits or FloodWait deadlines.
+
 Each Telegram source offers bounded batch download controls for sent-time and
 multi-select file-kind filters. Filters operate directly on the loaded file
 table, and changing them clears stale row selection. The filters start collapsed
 so the table retains the primary vertical space. The table uses the verified
-gpui-component virtualized `Table` API and requests up to 5,000 messages per
-page; scrolling near the end prefetches the next bounded page. Its first column
+gpui-component virtualized `Table` API. It shows cached indexed/browsed rows
+immediately, requests 200 messages for the first remote view, and prefetches up
+to 1,000 messages near the end in independently rendered 200-message chunks.
+The virtual table retains at most 5,000 rows. Every active fetch has a visible
+spinner, examined-message progress, and cancellation; an empty first view uses
+a centered loading state, while a populated view keeps its rows and uses a
+bottom loading bar. Slow and failed requests expose localized guidance and a
+retry action. Its first column
 supports per-row selection and select-all for the current filtered result, while
 the final column retains direct single-file download. Clicking a row opens the
 fixed right-side message inspector without changing its checkbox state.
@@ -187,7 +247,9 @@ Presents one logical file. Parts tab may expose application parts and remote loc
 
 ### Key Vault
 
-Clearly distinguishes password unlock, OS credential convenience, Recovery Key backup, and irreversible key-loss warning. Never display secrets by default or include them in screenshots/logs. Prototype controls must not imply encryption exists before it does.
+Key Vault is entered only through Settings; it is not a primary navigation destination or command-line preview route. The panel distinguishes initial creation, password unlock/change, Recovery Bundle unlock/restore/rotation/export, manual/automatic lock, and irreversible key-loss warning. The OS Credential choice is dimmed, non-interactive, and labeled as under development until a reviewed platform adapter exists.
+
+Never display secrets by default or include them in screenshots/logs. A newly generated self-contained Recovery Bundle is shown only until the user explicitly exports or hides it. The warning must state that replacing the current recovery record does not revoke older exported disaster-recovery bundles. Leaving the Key Vault settings section locks the retained key owner when the corresponding preference is enabled.
 
 ### Channel index detail
 
@@ -246,17 +308,18 @@ Record a reproducible window size, display scale, OS/theme, locale, and mock fix
 Smoke-test this matrix at minimum:
 
 ```text
-Library, Upload, Transfers, File Detail, Key Vault,
-Channel Index Detail, Settings
+Library, Upload, Transfers, File Detail, Channel Index Detail, Settings
 x en-US, zh-CN, ja-JP
 ```
 
 Check clipped primary controls, overlaps, broken rows, missing focus, and misleading state. If automated GPUI snapshots are not practical, retain a documented manual capture checklist and attach comparison artifacts to review. Functional similarity without visual verification is not completion.
 
-The current reproducible launch matrix uses `960x640`, `1360x760`, and
-`1920x1080` for each of the seven routes and three locales (63 launches). Unit
-tests additionally exercise the `900x600` supported minimum and breakpoint
-budgets. Passing these checks establishes startup and layout-policy coverage,
-not pixel fidelity. The window launcher fits oversized requests to the active
-display before centering; the remaining captured comparison work covers the
-full route/locale matrix and authenticated Telegram states.
+The previously recorded 63-launch matrix included a standalone Key Vault route.
+That route has now been removed; Key Vault coverage belongs to the Settings
+route. The revised six-route, three-locale, three-size matrix requires a fresh
+recorded run. Unit tests additionally exercise the `900x600` supported minimum
+and breakpoint budgets. Passing these checks establishes startup and
+layout-policy coverage, not pixel fidelity. The window launcher fits oversized
+requests to the active display before centering; the remaining captured
+comparison work covers the full route/locale matrix and authenticated Telegram
+states.

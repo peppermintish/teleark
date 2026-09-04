@@ -18,7 +18,9 @@ use gpui_component::Root;
 use gpui_component_assets::Assets;
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
-use teleark_runtime::{DesktopLibrary, DesktopTelegram, DesktopTransfers, initialize_diagnostics};
+use teleark_runtime::{
+    DesktopLibrary, DesktopTelegram, DesktopTransfers, DesktopVault, initialize_diagnostics,
+};
 
 gpui::actions!(
     teleark,
@@ -51,6 +53,10 @@ fn main() {
             ApplicationErrorKind::Persistence => ApplicationErrorKind::Persistence,
             _ => ApplicationErrorKind::Network,
         })),
+    };
+    let vault = match (telegram.as_ref(), library.as_ref()) {
+        (Ok(telegram), Ok(library)) => DesktopVault::new(telegram.clone(), library.clone()),
+        (Err(error), _) | (_, Err(error)) => Err(ApplicationError::new(error.kind())),
     };
     let mut launch = LaunchOptions::from_env(system_locale);
     let persisted_locale = library
@@ -110,6 +116,7 @@ fn main() {
                             library,
                             telegram,
                             transfers,
+                            vault,
                         },
                         AppStartup {
                             page: launch.page,
@@ -226,7 +233,7 @@ impl LaunchOptions {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut page = Page::Library;
+        let mut page = Page::Channel;
         let mut show_upload = false;
         let mut explicit_locale = None;
         let mut window_size = (1360, 760);
@@ -239,11 +246,10 @@ impl LaunchOptions {
                     "library" => page = Page::Library,
                     "transfers" => page = Page::Transfers,
                     "file" => page = Page::FileDetail,
-                    "vault" => page = Page::Vault,
                     "channel" => page = Page::Channel,
                     "settings" => page = Page::Settings,
                     "upload" => {
-                        page = Page::Library;
+                        page = Page::Channel;
                         show_upload = true;
                     }
                     _ => {}
@@ -359,10 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn upload_launch_uses_the_library_overlay() {
+    fn upload_launch_uses_the_channel_overlay() {
         let options = LaunchOptions::from_args(["--screen=upload"], SupportedLocale::JaJp);
 
-        assert_eq!(options.page, Page::Library);
+        assert_eq!(options.page, Page::Channel);
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.show_upload);
         assert!(!options.locale_from_command_line);
@@ -378,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_values_preserve_the_last_valid_choice() {
+    fn removed_vault_and_unknown_routes_preserve_the_default_choice() {
         let options = LaunchOptions::from_args(
             [
                 "--screen=vault",
@@ -389,7 +395,7 @@ mod tests {
             SupportedLocale::EnUs,
         );
 
-        assert_eq!(options.page, Page::Vault);
+        assert_eq!(options.page, Page::Channel);
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.locale_from_command_line);
         assert!(!options.show_upload);

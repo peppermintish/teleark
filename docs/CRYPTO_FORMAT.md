@@ -10,7 +10,7 @@ It does not hide ciphertext size, part count, upload timing, account/channel rel
 
 Application parts (target default 1900 MiB plaintext) are distinct from crypto frames (proposed default 8 MiB plaintext) and MTProto upload parts. Implementations stream frames; they must not allocate an application part or create giant plaintext/ciphertext temporary part files.
 
-The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. It is a codec/cryptographic primitive crate, not yet an operational Vault service or transfer pipeline. The eventual service must retain one `AeadUsageRegistry`, hydrate it from every existing wrap/manifest/part identity after restart, and reject duplicate durable identities or derived encryption keys before writing new ciphertext.
+The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected Saved Messages upload/recovery path. Each fresh package writer tracks its AEAD identities; full restart-time hydration from every existing wrap/manifest/part identity remains a stabilization requirement before production output may be claimed.
 
 ## Primitive suite
 
@@ -62,9 +62,23 @@ Password, recovery, and file-key wrap records use AES-256-GCM. Their derivations
 
 ### Recovery wrapping
 
-Recovery Key material is 32 random bytes represented to the user with a checksummed human-safe encoding defined separately from the raw key. The provisional Recovery KEK is HKDF-SHA-256 with `salt = vault_id` and `info = "teleark/vault-master/recovery-wrap/v1"`. The immutable recovery record uses a zero nonce and AAD binding vault ID and recovery generation. Rotating recovery creates new random key material/generation.
+Recovery Key material is 32 random bytes. Its exact provisional canonical text is:
 
-The encoded Recovery Key, checksum, grouping, and input normalization require a separate reviewed specification before release; implementations must never invent lossy normalization.
+```text
+"TARK-RK1-" || UPPER_HEX(key[32]) || "-" || UPPER_HEX(checksum[4])
+```
+
+`checksum` is the first four bytes of BLAKE3 over the literal domain `teleark/recovery-key/text/v1` followed by the 32 raw key bytes. The encoded length is exactly 82 ASCII bytes. Parsers accept only this uppercase canonical form; they do not trim whitespace, fold case, or normalize punctuation.
+
+The provisional Recovery KEK is HKDF-SHA-256 with `salt = vault_id` and `info = "teleark/vault-master/recovery-wrap/v1"`. The immutable recovery record uses a zero nonce and AAD binding vault ID and recovery generation. Rotating recovery creates new random key material/generation.
+
+For database-loss recovery, the desktop exports an exact self-contained bundle:
+
+```text
+"TARK-RB1-" || recovery_key_text[82] || "-" || UPPER_HEX(recovery_wrap_codec[88])
+```
+
+The bundle is exactly 268 ASCII bytes. The embedded 88-byte Recovery Wrap is the existing `TARKRWK` codec and authenticates the Vault ID, recovery generation, and wrapped Master Key when opened with the embedded Recovery Key. Parsing is exact and non-normalizing. The bundle is secret material and must never be logged or uploaded with the ciphertext it unlocks. Recovery rotation replaces the locally active wrap but cannot revoke previously exported bundles that wrap the same Master Key.
 
 ### File-key wrapping
 
