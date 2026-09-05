@@ -70,6 +70,7 @@ pub enum ControllerDecisionReason {
     LargeFilePipelineNeedsParts,
     MemoryBudgetPressure,
     DiskLimited,
+    PartRetryRequired,
     FloodWaitRequired,
     FloodWaitExpired,
     TelegramSoftLimitConflict,
@@ -165,6 +166,7 @@ pub struct AdaptiveControllerConfig {
     pub encrypted_queue_depth: ParameterBounds,
     pub keep_gain_basis_points: u16,
     pub confirm_gain_basis_points: u16,
+    pub probe_settle_millis: u64,
     pub target_bdp_multiplier_milli: u16,
     pub memory_budget_bytes: u64,
     pub decision_history_capacity: usize,
@@ -191,6 +193,7 @@ impl AdaptiveControllerConfig {
             encrypted_queue_depth: ParameterBounds::new(1, 64, 2)?,
             keep_gain_basis_points: 300,
             confirm_gain_basis_points: 100,
+            probe_settle_millis: 1_000,
             target_bdp_multiplier_milli: 1_750,
             memory_budget_bytes,
             decision_history_capacity: 2_048,
@@ -202,6 +205,7 @@ impl AdaptiveControllerConfig {
     pub fn validate(self) -> Result<Self, ConfigurationError> {
         if self.confirm_gain_basis_points > self.keep_gain_basis_points
             || self.keep_gain_basis_points > 10_000
+            || self.probe_settle_millis == 0
             || !(1_500..=2_000).contains(&self.target_bdp_multiplier_milli)
             || self.memory_budget_bytes < DOWNLOAD_PART_SIZE_BYTES
             || self.decision_history_capacity == 0
@@ -357,6 +361,7 @@ struct PendingProbe {
     before: TransferControlParameters,
     baseline_goodput_bytes_per_second: u64,
     confirmation_count: u8,
+    started_at_millis: u64,
 }
 
 /// Per-DC goodput controller. It treats RTT as diagnostic evidence and never
@@ -555,6 +560,26 @@ impl AdaptiveTransferController {
         )
     }
 
+    pub fn recover_from_part_retry(&mut self, sample: PerformanceSample) -> ControllerDecision {
+        self.latest_sample = sample;
+        self.phase = ControllerPhase::Recover;
+        let before = self.parameters;
+        self.decrease(TunableParameter::InflightPartsPerFile);
+        self.pending_probe = None;
+        self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
+        self.record_decision(
+            Some(TunableParameter::InflightPartsPerFile),
+            before,
+            self.parameters,
+            sample.goodput_bytes_per_second,
+            sample.goodput_bytes_per_second,
+            ControllerDecisionOutcome::Recover,
+            ControllerDecisionReason::PartRetryRequired,
+            sample.affected_lane,
+            sample.flood_wait_seconds,
+        )
+    }
+
     pub fn update_lane(&mut self, telemetry: LaneTelemetry) {
         self.lanes.insert(telemetry.lane_id, telemetry);
     }
@@ -623,6 +648,7 @@ impl AdaptiveTransferController {
             before,
             baseline_goodput_bytes_per_second: sample.goodput_bytes_per_second,
             confirmation_count: 0,
+            started_at_millis: sample.observed_at_millis,
         });
         let crosses_soft_limit = parameter == TunableParameter::ActiveFiles
             && self
@@ -656,6 +682,24 @@ impl AdaptiveTransferController {
         pending: PendingProbe,
         sample: PerformanceSample,
     ) -> ControllerDecision {
+        if sample.observed_at_millis
+            < pending
+                .started_at_millis
+                .saturating_add(self.config.probe_settle_millis)
+        {
+            self.phase = ControllerPhase::Probe;
+            return self.record_decision(
+                Some(pending.parameter),
+                pending.before,
+                self.parameters,
+                pending.baseline_goodput_bytes_per_second,
+                sample.goodput_bytes_per_second,
+                ControllerDecisionOutcome::Confirm,
+                ControllerDecisionReason::ThroughputNeedsConfirmation,
+                None,
+                None,
+            );
+        }
         let change = percentage_change_basis_points(
             pending.baseline_goodput_bytes_per_second,
             sample.goodput_bytes_per_second,
@@ -999,6 +1043,35 @@ mod tests {
         assert_eq!(result.outcome, ControllerDecisionOutcome::Keep);
         assert_eq!(result.goodput_change_basis_points, 300);
         assert_eq!(controller.parameters(), probe.after);
+    }
+
+    #[test]
+    fn a_probe_waits_for_its_settle_window_before_evaluation() {
+        let mut controller = controller(false);
+        let probe = controller.observe(sample(0, 100_000_000));
+        let early = controller.observe(sample(999, 150_000_000));
+        assert_eq!(early.outcome, ControllerDecisionOutcome::Confirm);
+        assert_eq!(controller.parameters(), probe.after);
+        let settled = controller.observe(sample(1_000, 103_000_000));
+        assert_eq!(settled.outcome, ControllerDecisionOutcome::Keep);
+    }
+
+    #[test]
+    fn a_part_retry_immediately_reduces_per_file_inflight() {
+        let mut config = AdaptiveControllerConfig::maximum_throughput(64 * 1024 * 1024, 4)
+            .expect("valid config");
+        config.transfer_connections = ParameterBounds::new(1, 1, 1).expect("fixed connections");
+        config.inflight_rpcs_per_connection = ParameterBounds::new(4, 4, 1).expect("fixed RPCs");
+        config.active_files = ParameterBounds::new(1, 1, 1).expect("fixed active files");
+        let mut controller = AdaptiveTransferController::new(config, false).expect("controller");
+        let mut initial_sample = sample(0, 100_000_000);
+        initial_sample.active_large_files = 1;
+        let probe = controller.observe(initial_sample);
+        assert!(probe.after.inflight_parts_per_file > probe.before.inflight_parts_per_file);
+        let decision = controller.recover_from_part_retry(sample(500, 80_000_000));
+        assert_eq!(decision.outcome, ControllerDecisionOutcome::Recover);
+        assert_eq!(decision.reason, ControllerDecisionReason::PartRetryRequired);
+        assert_eq!(controller.parameters(), probe.before);
     }
 
     #[test]

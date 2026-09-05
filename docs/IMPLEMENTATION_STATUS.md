@@ -26,7 +26,13 @@ structured failures persist in SQLite; missing 1 MiB logical parts are fetched
 concurrently through Telegram-compatible 512 KiB requests, written at their
 offsets, and tracked by a versioned bitmap for restart continuation. Live part
 events drive progress, current speed, ETA, pause/resume/cancel/retry, and an
-adaptive per-file inflight target.
+adaptive per-file inflight target. Native part failures now receive bounded
+local retry with exact FloodWait delays, force an observable RECOVER reduction,
+and no longer terminate an entire task on the first transient error. Rolling
+goodput and a probe settle window prevent burst samples from driving runaway
+concurrency. Retryable failures keep only useful valid resume pairs; other
+failed artifacts are cleaned. Users can delete terminal tasks and their
+TeleArk-owned history/recovery/log data without deleting completed files.
 Desktop shutdown writes the latest active byte checkpoint without waiting on
 an indefinitely stalled Telegram network read.
 
@@ -66,13 +72,13 @@ retry, priority, bandwidth policy, or restart resume.
 | Area | Current evidence | Deliberate limit |
 | --- | --- | --- |
 | Core application API | Typed Library queries, imports, pages, statistics, repository port, structured errors; 25 Core tests total | Transfer/Index/Vault services are separate foundations, not one application command bus |
-| Persistent Library | SQLite migrations v1-v8, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, encrypted transfer checkpoints, durable native-download history/progress/message metadata, atomic batch creation and credential settings, plus one strict singleton wrapped Vault-metadata row | Vault package/manifest tables, collection editor, and million-row benchmark remain; authenticated Telegram manifests are the current managed-file authority |
-| Desktop runtime | Existing bounded storage/Telegram/native-download workers plus a retained bounded Vault owner; persisted password/recovery wraps; create/unlock/lock/password-change/recovery-rotation/database-loss restore; concurrent 1 MiB native parts with bitmap resume; bounded overlapping encryption/upload pipeline; adaptive telemetry and required session logs; real encrypted Saved Messages upload, authenticated manifest scan, and verified atomic restore download | Vault transfer snapshots/controls/checkpoints are memory-only; encrypted parts temporarily buffer at 60 MiB; the current grammers adapter does not expose physical media-DC lanes or multiple owned transfer connections; OS credential integration, orphan cleanup, full identity hydration, and credentialed system tests remain |
+| Persistent Library | SQLite migrations v1-v8, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, encrypted transfer checkpoints, durable native-download history/progress/message metadata, atomic batch creation/deletion and credential settings, plus one strict singleton wrapped Vault-metadata row | Vault package/manifest tables, collection editor, and million-row benchmark remain; authenticated Telegram manifests are the current managed-file authority |
+| Desktop runtime | Existing bounded storage/Telegram/native-download workers plus a retained bounded Vault owner; persisted password/recovery wraps; create/unlock/lock/password-change/recovery-rotation/database-loss restore; concurrent 1 MiB native parts with bitmap resume, bounded local retry, failure-artifact retention policy, and terminal-task deletion; bounded overlapping encryption/upload pipeline; adaptive telemetry and required session logs; real encrypted Saved Messages upload, authenticated manifest scan, and verified atomic restore download | Vault transfer snapshots/controls/checkpoints are memory-only; encrypted parts temporarily buffer at 60 MiB; the current grammers adapter does not expose physical media-DC lanes or multiple owned transfer connections; encrypted-upload orphan cleanup, full identity hydration, and credentialed system tests remain |
 | GPUI desktop | Existing Telegram/channel/native-transfer UI plus direct named-channel navigation, separate raw and authenticated managed Saved Messages views, real encrypted upload/restore actions, controller Live/Replay with C/W/F/P/E/Qe, rates, BDP, buffers, part state, decisions and session-log path, a persisted Respect/Adaptive Override/Ignore soft-limit selector, and Key Vault lifecycle controls only inside Settings; OS Credential is visibly disabled | Physical DC/lane rows honestly remain unavailable through the current grammers abstraction; the hidden legacy Library route remains paged; Vault accessibility/pixel review and encrypted pause/cancel/retry controls remain |
 | Localization | Complete synchronized Fluent catalogs for `en-US`, `zh-CN`, and `ja-JP`; live switching, persistent explicit override, System Default; 21 tests | Native-speaker, assistive-technology, and pixel-level locale review remain |
-| Telegram adapter | `grammers` 0.10 connection, short-lived QR login with DC migration, code/2FA, dialogs, refetch by message identity, bounded cancellable cursor scans, upload/download, structured errors, concurrent 1 MiB logical downloads over 512 KiB requests, positional writes, strict `TARKDPM1` resume bitmap, part observer/control, atomic no-replace publication, and a versioned atomic `0600` session cache; 16 tests | Native download checks Telegram's byte length rather than a content hash; physical DC/lane identity is not exposed; ordinary tests use no live credentials and OS credential-store UX remains |
+| Telegram adapter | `grammers` 0.10 connection, short-lived QR login with DC migration, code/2FA, dialogs, refetch by message identity, bounded cancellable cursor scans, upload/download, structured errors, concurrent 1 MiB logical downloads over 512 KiB requests, positional writes, strict `TARKDPM1` resume bitmap, bounded part retry, failed-artifact validation/cleanup, part observer/control, atomic no-replace publication, and a versioned atomic `0600` session cache; 18 tests | Native download checks Telegram's byte length rather than a content hash; physical DC/lane identity is not exposed; ordinary tests use no live credentials and OS credential-store UX remains |
 | Historical Index Engine | Desktop Telegram-to-SQLite bounded scan with durable cursor plus the separate CAS/range coordinator and its 12 deterministic tests | Full coordinator repository mapping, live updates, retry owner, pause/cancel UI, and range compaction remain |
-| Transfer Engine | Bounded encrypted scheduler, reconfigurable concurrency envelope, adaptive C/W/F/P/E/Qe goodput controller with BDP/soft-limit/FloodWait decisions, bounded encryption pipeline, native positional files, BLAKE3, SQLite checkpoints, reconciliation and safe `.partial` finalization; 36 engine tests plus runtime integration | Current production adapters vary native-download P but truthfully clamp unavailable physical C/W/F and fixed upload E/Qe; encrypted engine still buffers one application part (temporarily capped at 60 MiB); physical media connection pool, true large-part streaming, and bandwidth control remain |
+| Transfer Engine | Bounded encrypted scheduler, reconfigurable concurrency envelope, adaptive C/W/F/P/E/Qe goodput controller with probe settling and BDP/soft-limit/FloodWait/retry recovery decisions, bounded encryption pipeline, native positional files, BLAKE3, SQLite checkpoints, reconciliation and safe `.partial` finalization; 38 engine tests plus runtime integration | Current production adapters vary native-download P but truthfully clamp unavailable physical C/W/F and fixed upload E/Qe; encrypted engine still buffers one application part (temporarily capped at 60 MiB); physical media connection pool, true large-part streaming, and bandwidth control remain |
 | Crypto/manifest candidate | Explicit bounded codecs, canonical checksummed Recovery Key text, self-contained versioned Recovery Bundle, authenticated remote Manifest publication/discovery, File Key recovery, and locator-bound download after fresh-SQLite recovery; two libFuzzer targets and daily fuzz workflow remain | Formats remain provisional: no independent review, long campaign evidence, full identity hydration/generation-conflict policy, or compatibility promise |
 | Packaging | Local macOS development build and baseline release workflow | No signed/notarized installer or production platform-support claim |
 
@@ -156,8 +162,8 @@ cargo deny check
 git diff --check
 ```
 
-The workspace test suite contains 259 deterministic tests: Core 25, Crypto 36,
-GUI 48, i18n 21, Index 12, Runtime 44, Storage 21, Telegram 16, and Transfer 36.
+The workspace test suite contains 266 deterministic tests: Core 25, Crypto 36,
+GUI 48, i18n 21, Index 12, Runtime 46, Storage 22, Telegram 18, and Transfer 38.
 The current gate passes format, workspace check, strict Clippy, all workspace
 tests, warning-denied documentation, dependency policy, and diff validation.
 
@@ -193,8 +199,9 @@ transitive package was introduced.
   system tests, orphan reconciliation, and more finalization crash injection.
   Both paths permanently write safe controller session logs. The real
   native-download worker now has byte/part progress, out-of-order bitmap resume,
-  adaptive P, pause/resume/cancel/retry, but still lacks automatic retry policy,
-  physical multi-connection/DC-lane ownership, bandwidth control, and a content
+  adaptive P, pause/resume/cancel/retry, bounded automatic part retry, recovery
+  cleanup, and terminal-task deletion, but still lacks physical
+  multi-connection/DC-lane ownership, bandwidth control, and a content
   hash. The current upload transport is serialized, so its fixed E/Qe and
   connection bounds are reported honestly rather than presented as adaptive.
 - Crypto/manifest/recovery-bundle candidate vectors are not a stable released

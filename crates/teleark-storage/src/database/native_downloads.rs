@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rusqlite::{Connection, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, Row, TransactionBehavior, params};
 
 use super::{Database, corrupt, nonnegative_from_sql, unsigned_to_sql};
 use crate::error::{EntityKind, InputReason};
@@ -143,6 +143,38 @@ WHERE id = ?1
         }
         tasks.reverse();
         Ok(tasks)
+    }
+
+    pub fn delete_native_download(&mut self, task_id: u64) -> StorageResult<()> {
+        let sql_task_id = unsigned_to_sql("native_download.id", task_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let batch_id = transaction
+            .query_row(
+                "SELECT batch_id FROM native_download_tasks WHERE id = ?1",
+                [sql_task_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        let Some(batch_id) = batch_id else {
+            return Err(StorageError::NotFound {
+                entity: EntityKind::NativeDownload,
+                id: sql_task_id,
+            });
+        };
+        transaction.execute(
+            "DELETE FROM native_download_tasks WHERE id = ?1",
+            [sql_task_id],
+        )?;
+        if let Some(batch_id) = batch_id {
+            transaction.execute(
+                "DELETE FROM native_download_batches WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM native_download_tasks WHERE batch_id = ?1)",
+                [batch_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     fn native_download_by_sql_id(

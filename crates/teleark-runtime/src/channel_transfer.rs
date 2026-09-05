@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -222,6 +222,15 @@ trait ChannelDownloadBackend: Send + Sync + 'static {
     fn discard_partial(&self, _destination: &Path) -> Result<(), ApplicationError> {
         Ok(())
     }
+
+    fn cleanup_failed_partial(
+        &self,
+        _destination: &Path,
+        _expected_bytes: u64,
+        _retain_for_resume: bool,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
 }
 
 impl ChannelDownloadBackend for DesktopTelegram {
@@ -238,11 +247,19 @@ impl ChannelDownloadBackend for DesktopTelegram {
     fn discard_partial(&self, destination: &Path) -> Result<(), ApplicationError> {
         self.discard_partial_download(destination)
     }
+
+    fn cleanup_failed_partial(
+        &self,
+        destination: &Path,
+        expected_bytes: u64,
+        retain_for_resume: bool,
+    ) -> Result<(), ApplicationError> {
+        self.cleanup_failed_partial_download(destination, expected_bytes, retain_for_resume)
+    }
 }
 
 struct ProgressSample {
-    transferred_bytes: u64,
-    measured_at: Instant,
+    observations: VecDeque<(u64, Instant)>,
 }
 
 struct RuntimeDownloadObserver {
@@ -290,11 +307,19 @@ impl DownloadObserver for RuntimeDownloadObserver {
     fn progressed(&self, transferred_bytes: u64) {
         let now = Instant::now();
         let current_speed = self.sample.lock().ok().and_then(|mut sample| {
-            let elapsed = now.duration_since(sample.measured_at);
-            let delta = transferred_bytes.saturating_sub(sample.transferred_bytes);
-            sample.transferred_bytes = transferred_bytes;
-            sample.measured_at = now;
-            rate_for(delta, elapsed)
+            sample.observations.push_back((transferred_bytes, now));
+            while sample.observations.len() > 2
+                && sample.observations.get(1).is_some_and(|(_, measured_at)| {
+                    now.duration_since(*measured_at) >= Duration::from_secs(5)
+                })
+            {
+                sample.observations.pop_front();
+            }
+            let (earliest_bytes, earliest_time) = sample.observations.front().copied()?;
+            rate_for(
+                transferred_bytes.saturating_sub(earliest_bytes),
+                now.duration_since(earliest_time),
+            )
         });
         let eta_ms = current_speed.and_then(|speed| {
             self.size_bytes
@@ -361,6 +386,63 @@ impl DownloadObserver for RuntimeDownloadObserver {
                 0,
             );
         });
+        if event.state != DownloadPartState::Completed
+            && let Ok(mut log) = self.session_log.lock()
+            && let Some(log) = log.as_mut()
+        {
+            let _ =
+                log.append_native_part_state(event, elapsed_millis(self.started.elapsed()).max(1));
+        }
+        if event.state == DownloadPartState::Retry {
+            let elapsed_ms = elapsed_millis(self.started.elapsed()).max(1);
+            let current_speed = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current_bytes_per_second)
+                .unwrap_or_default();
+            let part_counters = snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.telemetry.parts)
+                .unwrap_or_default();
+            if let Ok(mut controller) = self.controller.lock() {
+                let inflight_parts_per_file = controller.parameters().inflight_parts_per_file;
+                let decision = controller.recover_from_part_retry(PerformanceSample {
+                    observed_at_millis: elapsed_ms,
+                    goodput_bytes_per_second: current_speed,
+                    disk_bytes_per_second: current_speed,
+                    round_trip_time_p95_millis: event.elapsed_millis,
+                    inflight_bytes: DOWNLOAD_PART_SIZE_BYTES
+                        .saturating_mul(u64::from(inflight_parts_per_file)),
+                    active_large_files: 1,
+                    parts: part_counters,
+                    queues: QueueCounters {
+                        large_files_active: 1,
+                        large_queue_weight: 100,
+                        ..QueueCounters::default()
+                    },
+                    memory: MemoryCounters {
+                        network_inflight_bytes: DOWNLOAD_PART_SIZE_BYTES
+                            .saturating_mul(u64::from(inflight_parts_per_file)),
+                        ..MemoryCounters::default()
+                    },
+                    ..PerformanceSample::default()
+                });
+                let telemetry = controller.snapshot();
+                drop(controller);
+                if let Ok(mut log) = self.session_log.lock()
+                    && let Some(log) = log.as_mut()
+                {
+                    let _ = log.append_native_retry_decision(
+                        event.part_index,
+                        elapsed_ms,
+                        &decision,
+                        &telemetry,
+                    );
+                }
+                let _ = update_snapshot(&self.snapshots, self.id, |snapshot| {
+                    snapshot.telemetry = telemetry;
+                });
+            }
+        }
         if event.state != DownloadPartState::Completed {
             return;
         }
@@ -824,6 +906,63 @@ impl DesktopTransfers {
         self.try_schedule(snapshot, control)
     }
 
+    /// Deletes one terminal task's history and TeleArk-owned recovery data.
+    /// A successfully downloaded destination is user data and is never removed.
+    pub fn delete(&self, id: u64) -> Result<(), ApplicationError> {
+        let snapshot = self
+            .snapshots()?
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        if !is_terminal(snapshot.state)
+            || self
+                .inner
+                .scheduled
+                .lock()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .contains(&id)
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+
+        self.inner.library.delete_native_download(id)?;
+        self.inner
+            .snapshots
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .retain(|snapshot| snapshot.id != id);
+        self.inner
+            .controls
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .remove(&id);
+
+        if let Err(error) = self.inner.backend.discard_partial(&snapshot.destination) {
+            tracing::warn!(
+                event = "transfer.download.deleted_partial_cleanup_failed",
+                task_id = id,
+                error_kind = ?error.kind(),
+                "deleted task partial cleanup could not be completed"
+            );
+        }
+        if let Some(session_log_path) = snapshot.session_log_path.as_deref()
+            && let Err(error) = remove_file_if_present(session_log_path)
+        {
+            tracing::warn!(
+                event = "transfer.download.deleted_log_cleanup_failed",
+                task_id = id,
+                error_kind = ?error.kind(),
+                "deleted task session log cleanup could not be completed"
+            );
+        }
+        tracing::info!(
+            event = "transfer.download.deleted",
+            task_id = id,
+            "terminal download task and recovery data deleted"
+        );
+        Ok(())
+    }
+
     pub fn snapshots(&self) -> Result<Vec<ChannelDownloadSnapshot>, ApplicationError> {
         self.inner
             .snapshots
@@ -1003,6 +1142,12 @@ fn new_download_controller(
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
     config.active_files = ParameterBounds::new(1, 1, 1)
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    // One grammers client currently multiplexes every request through one
+    // physical owner. Session telemetry from the native adapter showed that
+    // values above 24 increased latency without improving sustained goodput.
+    config.inflight_parts_per_file = ParameterBounds::new(4, 24, 4)
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.probe_settle_millis = 2_000;
     config.soft_limit_policy = soft_limit_policy;
     let initial_parameters = TransferControlParameters {
         inflight_rpcs_per_connection: 1,
@@ -1141,9 +1286,12 @@ fn run_download(
         Ok(controller) => controller,
         Err(error) => {
             fail_download(
-                snapshots,
-                library,
-                &snapshot,
+                FailedDownloadOwner {
+                    backend,
+                    snapshots,
+                    library,
+                    snapshot: &snapshot,
+                },
                 error,
                 queue_wait_ms,
                 previous_duration_ms,
@@ -1158,9 +1306,12 @@ fn run_download(
             Ok(log) => log,
             Err(error) => {
                 fail_download(
-                    snapshots,
-                    library,
-                    &snapshot,
+                    FailedDownloadOwner {
+                        backend,
+                        snapshots,
+                        library,
+                        snapshot: &snapshot,
+                    },
                     error,
                     queue_wait_ms,
                     previous_duration_ms,
@@ -1177,9 +1328,12 @@ fn run_download(
         &controller.snapshot(),
     ) {
         fail_download(
-            snapshots,
-            library,
-            &snapshot,
+            FailedDownloadOwner {
+                backend,
+                snapshots,
+                library,
+                snapshot: &snapshot,
+            },
             error,
             queue_wait_ms,
             previous_duration_ms,
@@ -1203,8 +1357,7 @@ fn run_download(
         started,
         previous_duration_ms,
         sample: Mutex::new(ProgressSample {
-            transferred_bytes: snapshot.transferred_bytes,
-            measured_at: started,
+            observations: VecDeque::from([(snapshot.transferred_bytes, started)]),
         }),
         last_persisted: Mutex::new(started),
         controller: Mutex::new(controller),
@@ -1303,9 +1456,12 @@ fn run_download(
             }
         }
         Err(error) => fail_download(
-            snapshots,
-            library,
-            &snapshot,
+            FailedDownloadOwner {
+                backend,
+                snapshots,
+                library,
+                snapshot: &snapshot,
+            },
             error,
             queue_wait_ms,
             duration_ms,
@@ -1364,15 +1520,26 @@ fn complete_download(
     );
 }
 
+struct FailedDownloadOwner<'a> {
+    backend: &'a dyn ChannelDownloadBackend,
+    snapshots: &'a Mutex<Vec<ChannelDownloadSnapshot>>,
+    library: &'a DesktopLibrary,
+    snapshot: &'a ChannelDownloadSnapshot,
+}
+
 fn fail_download(
-    snapshots: &Mutex<Vec<ChannelDownloadSnapshot>>,
-    library: &DesktopLibrary,
-    snapshot: &ChannelDownloadSnapshot,
+    owner: FailedDownloadOwner<'_>,
     error: ApplicationError,
     queue_wait_ms: u64,
     duration_ms: u64,
     finished_at_unix_ms: Option<i64>,
 ) {
+    let FailedDownloadOwner {
+        backend,
+        snapshots,
+        library,
+        snapshot,
+    } = owner;
     let failure = failure_diagnostic(error.kind());
     let failed = update_snapshot(snapshots, snapshot.id, |current| {
         current.state = ChannelDownloadState::Failed(error.kind());
@@ -1391,6 +1558,19 @@ fn fail_download(
     });
     if let Some(failed) = failed {
         let _ = persist_snapshot(library, &failed);
+    }
+    if let Err(cleanup_error) = backend.cleanup_failed_partial(
+        &snapshot.destination,
+        snapshot.size_bytes,
+        failure.retryable,
+    ) {
+        tracing::warn!(
+            event = "transfer.download.failed_partial_cleanup_failed",
+            task_id = snapshot.id,
+            error_kind = ?cleanup_error.kind(),
+            retain_for_resume = failure.retryable,
+            "failed download partial cleanup could not be completed"
+        );
     }
     tracing::error!(
         event = "transfer.download.failed",
@@ -1568,6 +1748,17 @@ fn rate_for(bytes: u64, duration: Duration) -> Option<u64> {
     (bytes > 0 && millis > 0)
         .then(|| bytes.saturating_mul(1_000) / millis)
         .filter(|speed| *speed > 0)
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), ApplicationError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(
+            ApplicationError::new(ApplicationErrorKind::PermissionDenied),
+        ),
+        Err(_) => Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+    }
 }
 
 fn average_rate(size_bytes: u64, duration_ms: u64) -> Option<u64> {
@@ -1895,6 +2086,118 @@ mod tests {
             restored[0].state,
             ChannelDownloadState::Failed(ApplicationErrorKind::Network)
         );
+    }
+
+    #[test]
+    fn deleting_a_terminal_task_removes_history_and_log_but_preserves_output() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let destination = directory.path().join("archive.zip");
+        let library = library(&directory);
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers =
+            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("enqueue");
+        let completed = wait_for_terminal(&transfers, id);
+        let session_log_path = completed.session_log_path.expect("session log path");
+        assert!(session_log_path.is_file());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match transfers.delete(id) {
+                Ok(()) => break,
+                Err(error) if error.kind() == ApplicationErrorKind::Conflict => {
+                    assert!(Instant::now() < deadline, "worker did not release task");
+                    thread::yield_now();
+                }
+                Err(error) => panic!("unexpected delete failure: {error}"),
+            }
+        }
+        assert!(transfers.snapshots().expect("snapshots").is_empty());
+        assert!(
+            destination.is_file(),
+            "completed user file must be preserved"
+        );
+        assert!(!session_log_path.exists());
+        drop(transfers);
+        assert!(
+            DesktopTransfers::with_backend(backend, library)
+                .expect("restored worker")
+                .snapshots()
+                .expect("restored snapshots")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_download_cleanup_retains_only_retryable_recovery_data() {
+        struct CleanupRecordingBackend {
+            failure_kind: ApplicationErrorKind,
+            cleanup_calls: StdMutex<Vec<bool>>,
+        }
+        impl ChannelDownloadBackend for CleanupRecordingBackend {
+            fn download(
+                &self,
+                _chat_id: i64,
+                _message_id: i64,
+                _destination: &Path,
+                _observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                Err(ApplicationError::new(self.failure_kind))
+            }
+
+            fn cleanup_failed_partial(
+                &self,
+                _destination: &Path,
+                _expected_bytes: u64,
+                retain_for_resume: bool,
+            ) -> Result<(), ApplicationError> {
+                self.cleanup_calls
+                    .lock()
+                    .expect("cleanup calls")
+                    .push(retain_for_resume);
+                Ok(())
+            }
+        }
+
+        for (failure_kind, expected_retention) in [
+            (ApplicationErrorKind::Network, true),
+            (ApplicationErrorKind::PermissionDenied, false),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let backend = Arc::new(CleanupRecordingBackend {
+                failure_kind,
+                cleanup_calls: StdMutex::new(Vec::new()),
+            });
+            let transfers = DesktopTransfers::with_backend(backend.clone(), library(&directory))
+                .expect("worker");
+            let id = transfers
+                .enqueue_channel_download(request(directory.path().join("failure.bin")))
+                .expect("enqueue");
+            wait_for_terminal(&transfers, id);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while backend
+                .cleanup_calls
+                .lock()
+                .expect("cleanup calls")
+                .is_empty()
+            {
+                assert!(Instant::now() < deadline, "cleanup was not observed");
+                thread::yield_now();
+            }
+            assert_eq!(
+                backend
+                    .cleanup_calls
+                    .lock()
+                    .expect("cleanup calls")
+                    .as_slice(),
+                &[expected_retention]
+            );
+        }
     }
 
     #[test]

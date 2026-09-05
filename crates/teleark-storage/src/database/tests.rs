@@ -291,6 +291,46 @@ fn native_download_batch_is_atomic_and_restores_message_metadata() -> Result<(),
     Ok(())
 }
 
+#[test]
+fn native_download_deletion_removes_the_last_empty_batch() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    let task = |message_id, name: &str| NewNativeDownloadTaskRecord {
+        chat_id: 101,
+        message_id,
+        message_sent_at_unix_ms: None,
+        file_name: name.to_owned(),
+        caption: None,
+        mime_type: None,
+        size_bytes: 100,
+        destination: std::env::temp_dir().join("TeleArk").join(name),
+        created_at_unix_ms: 10,
+    };
+    let (batch, inserted) = database.insert_native_download_batch(
+        &NewNativeDownloadBatchRecord {
+            chat_id: 101,
+            created_at_unix_ms: 10,
+        },
+        &[task(201, "first.bin"), task(202, "second.bin")],
+    )?;
+
+    database.delete_native_download(inserted[0].id)?;
+    assert_eq!(database.native_downloads()?, vec![inserted[1].clone()]);
+    database.delete_native_download(inserted[1].id)?;
+    assert!(database.native_downloads()?.is_empty());
+    assert!(matches!(
+        database.delete_native_download(inserted[1].id),
+        Err(StorageError::NotFound { .. })
+    ));
+
+    let remaining_batches: i64 = database.connection.query_row(
+        "SELECT COUNT(*) FROM native_download_batches WHERE id = ?1",
+        [i64::try_from(batch.id)?],
+        |row| row.get(0),
+    )?;
+    assert_eq!(remaining_batches, 0);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_local_path_round_trips_without_loss() -> Result<(), Box<dyn Error>> {

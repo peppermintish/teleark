@@ -74,8 +74,9 @@ E = encryption workers
 Qe = encrypted-part queue depth
 ```
 
-It starts conservatively, changes one eligible parameter per probe, and records
-the complete before/after decision. A gain of at least 3% is kept, 1–3% is
+It starts conservatively, changes one eligible parameter per probe, waits for a
+configured settle interval, and records the complete before/after decision. A
+gain of at least 3% is kept, 1–3% is
 confirmed with another sample, less than 1% marks a platform and restores the
 previous value, and a regression rolls back into recovery. RTT is evidence for
 BDP and diagnostics but never causes a rollback while goodput still materially
@@ -92,7 +93,10 @@ affected known lane until the exact deadline and emit a separate resume event.
 Runtime adapters advertise truthful bounds. The native grammers download path
 currently varies P in real time from the controller, while C, W, and F are
 clamped to the single owner/connection envelope actually exposed by the
-adapter. Physical media-DC lane identities remain unavailable from the current
+adapter. Its current single-owner P envelope is 4–24, based on recorded session
+evidence that higher multiplexing increased latency without sustained-goodput
+gain; samples use a five-second rolling window and probes settle for two seconds.
+Physical media-DC lane identities remain unavailable from the current
 grammers abstraction and are never fabricated in telemetry.
 
 ## Encrypted Saved Messages desktop path
@@ -138,13 +142,23 @@ strict `TARKDPM1` completion bitmap. Transferred bytes, current speed, ETA, part
 states, and the controller's desired P update live. The adapter preserves the
 private partial and bitmap across network/process interruption; explicit cancel
 removes both. Pause interrupts at a safe request boundary, while resume requests
-only missing parts. A per-channel batch request scans at most 50,000 messages, retains at
+only missing parts. Transient network failures and FloodWait responses retry the
+affected logical part up to four total attempts with bounded backoff; FloodWait
+uses the server delay. A retry moves the controller into RECOVER and reduces P
+instead of terminating the whole file immediately. Retry and recovery decisions
+are written to the session log. A per-channel batch request scans at most 50,000 messages, retains at
 most 2,000 matching files, and can filter inclusively by sent-time range and
 file kind. SQLite schema v7 persists bounded task history, progress, timing,
 attempt, verification, failure data, source message metadata, and an optional
 batch identity. The batch and all child tasks are inserted atomically. GPUI
 renders the batch as one aggregate transfer row and expands its child tasks on
 request; individual task controls still target the durable child identity.
+Users can delete a terminal native task after an explicit second-click
+confirmation. Deletion removes its database history, session log, partial, and
+bitmap but never removes a successfully downloaded user file. Retryable failures
+retain only a valid bitmap/partial pair with completed data; zero-progress,
+incomplete, corrupt, non-retryable, cancelled, and user-deleted artifacts are
+removed.
 Startup restores every retained row,
 normalizes interrupted running work to queued, and resumes it after Telegram
 authorization/dialog discovery. The path verifies Telegram's declared byte

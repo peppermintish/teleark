@@ -459,6 +459,10 @@ impl DesktopLibrary {
         self.worker.native_downloads()
     }
 
+    pub(crate) fn delete_native_download(&self, task_id: u64) -> Result<(), ApplicationError> {
+        self.worker.delete_native_download(task_id)
+    }
+
     pub(crate) fn stored_telegram_credentials(
         &self,
     ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
@@ -683,6 +687,10 @@ enum StorageRequest {
     NativeDownloads {
         reply: SyncSender<Result<Vec<NativeDownloadTaskRecord>, ApplicationError>>,
     },
+    DeleteNativeDownload {
+        task_id: u64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     Shutdown,
 }
 
@@ -816,6 +824,12 @@ impl StorageWorker {
     fn native_downloads(&self) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
         self.request("native_downloads", |reply| {
             StorageRequest::NativeDownloads { reply }
+        })
+    }
+
+    fn delete_native_download(&self, task_id: u64) -> Result<(), ApplicationError> {
+        self.request("delete_native_download", |reply| {
+            StorageRequest::DeleteNativeDownload { task_id, reply }
         })
     }
 
@@ -1176,6 +1190,12 @@ fn storage_loop(
             }
             StorageRequest::NativeDownloads { reply } => {
                 let result = database.native_downloads().map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
+            StorageRequest::DeleteNativeDownload { task_id, reply } => {
+                let result = database
+                    .delete_native_download(task_id)
+                    .map_err(map_storage_error);
                 let _ = reply.send(result);
             }
             StorageRequest::Shutdown => break,

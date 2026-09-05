@@ -484,6 +484,20 @@ impl DesktopTelegram {
         teleark_telegram::discard_partial_download(destination).map_err(map_telegram_error)
     }
 
+    pub(crate) fn cleanup_failed_partial_download(
+        &self,
+        destination: impl AsRef<Path>,
+        expected_bytes: u64,
+        retain_for_resume: bool,
+    ) -> Result<(), ApplicationError> {
+        teleark_telegram::cleanup_failed_partial_download(
+            destination,
+            expected_bytes,
+            retain_for_resume,
+        )
+        .map_err(map_telegram_error)
+    }
+
     pub fn download_bytes(
         &self,
         chat_id: i64,

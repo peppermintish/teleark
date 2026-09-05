@@ -42,6 +42,8 @@ pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const DOWNLOAD_CHUNK_SIZE: u64 = 512 * 1024;
 pub const DOWNLOAD_PART_SIZE_BYTES: u64 = 1024 * 1024;
 const MAX_DOWNLOAD_INFLIGHT_PARTS: usize = 64;
+const MAX_DOWNLOAD_PART_ATTEMPTS: u32 = 4;
+const DOWNLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DownloadPartState {
@@ -780,7 +782,14 @@ impl TelegramConnection {
                 .open(&partial)
                 .await
                 .map_err(map_io)?;
-            let mut missing_parts = part_map.missing_parts();
+            let mut missing_parts = part_map
+                .missing_parts()
+                .into_iter()
+                .map(|part_index| PendingDownloadPart {
+                    part_index,
+                    attempt: 1,
+                })
+                .collect::<VecDeque<_>>();
             let mut inflight_downloads = JoinSet::new();
             loop {
                 check_download_control(observer)?;
@@ -788,21 +797,23 @@ impl TelegramConnection {
                     .desired_inflight_parts()
                     .clamp(1, MAX_DOWNLOAD_INFLIGHT_PARTS);
                 while inflight_downloads.len() < desired_inflight {
-                    let Some(part_index) = missing_parts.pop_front() else {
+                    let Some(pending_part) = missing_parts.pop_front() else {
                         break;
                     };
+                    let part_index = pending_part.part_index;
                     let (offset_bytes, length_bytes) = part_map.part_range(part_index)?;
                     observer.part_event(DownloadPartEvent {
                         part_index,
                         offset_bytes,
                         length_bytes,
                         state: DownloadPartState::Inflight,
-                        attempt: 1,
+                        attempt: pending_part.attempt,
                         elapsed_millis: 0,
                     });
                     let client = self.client.clone();
                     let document = file.document.clone();
                     inflight_downloads.spawn(async move {
+                        let attempt_started = Instant::now();
                         let result = download_logical_part(
                             client,
                             document,
@@ -811,13 +822,28 @@ impl TelegramConnection {
                             length_bytes,
                         )
                         .await;
-                        (part_index, offset_bytes, length_bytes, result)
+                        (
+                            part_index,
+                            offset_bytes,
+                            length_bytes,
+                            pending_part.attempt,
+                            u64::try_from(attempt_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                            result,
+                        )
                     });
                 }
                 if inflight_downloads.is_empty() {
                     break;
                 }
-                let (part_index, offset_bytes, length_bytes, joined) = inflight_downloads
+                let (
+                    part_index,
+                    offset_bytes,
+                    length_bytes,
+                    attempt,
+                    attempt_elapsed_millis,
+                    joined,
+                ) = inflight_downloads
                     .join_next()
                     .await
                     .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?
@@ -825,13 +851,29 @@ impl TelegramConnection {
                 let downloaded = match joined {
                     Ok(downloaded) => downloaded,
                     Err(error) => {
+                        if let Some(retry_delay) = download_part_retry_delay(&error, attempt) {
+                            observer.part_event(DownloadPartEvent {
+                                part_index,
+                                offset_bytes,
+                                length_bytes,
+                                state: DownloadPartState::Retry,
+                                attempt,
+                                elapsed_millis: attempt_elapsed_millis,
+                            });
+                            wait_for_download_retry(observer, retry_delay).await?;
+                            missing_parts.push_front(PendingDownloadPart {
+                                part_index,
+                                attempt: attempt.saturating_add(1),
+                            });
+                            continue;
+                        }
                         observer.part_event(DownloadPartEvent {
                             part_index,
                             offset_bytes,
                             length_bytes,
                             state: DownloadPartState::Failed,
-                            attempt: 1,
-                            elapsed_millis: 0,
+                            attempt,
+                            elapsed_millis: attempt_elapsed_millis,
                         });
                         inflight_downloads.abort_all();
                         while inflight_downloads.join_next().await.is_some() {}
@@ -853,7 +895,7 @@ impl TelegramConnection {
                     offset_bytes: downloaded.offset_bytes,
                     length_bytes: downloaded.bytes.len() as u64,
                     state: DownloadPartState::Completed,
-                    attempt: 1,
+                    attempt,
                     elapsed_millis: downloaded.elapsed_millis,
                 });
             }
@@ -1017,11 +1059,45 @@ fn check_download_control(observer: &dyn DownloadObserver) -> Result<(), Telegra
     }
 }
 
+fn download_part_retry_delay(error: &TelegramError, attempt: u32) -> Option<Duration> {
+    if attempt >= MAX_DOWNLOAD_PART_ATTEMPTS {
+        return None;
+    }
+    match error.kind() {
+        TelegramErrorKind::FloodWait => error.retry_after(),
+        TelegramErrorKind::Network => Some(
+            DOWNLOAD_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.saturating_sub(1).min(8)),
+        ),
+        _ => None,
+    }
+}
+
+async fn wait_for_download_retry(
+    observer: &dyn DownloadObserver,
+    retry_delay: Duration,
+) -> Result<(), TelegramError> {
+    let retry_deadline = tokio::time::Instant::now() + retry_delay;
+    loop {
+        check_download_control(observer)?;
+        let now = tokio::time::Instant::now();
+        if now >= retry_deadline {
+            return Ok(());
+        }
+        tokio::time::sleep((retry_deadline - now).min(Duration::from_millis(250))).await;
+    }
+}
+
 struct DownloadedLogicalPart {
     part_index: u64,
     offset_bytes: u64,
     bytes: Vec<u8>,
     elapsed_millis: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PendingDownloadPart {
+    part_index: u64,
+    attempt: u32,
 }
 
 async fn download_logical_part(
@@ -1378,6 +1454,42 @@ pub fn discard_partial_download(destination: impl AsRef<Path>) -> Result<(), Tel
     Ok(())
 }
 
+/// Retains only a valid, useful resume pair after a failed native download.
+/// Terminal failures and incomplete/corrupt pairs are removed so they cannot
+/// accumulate as unreachable managed data.
+pub fn cleanup_failed_partial_download(
+    destination: impl AsRef<Path>,
+    expected_bytes: u64,
+    retain_for_resume: bool,
+) -> Result<(), TelegramError> {
+    let destination = destination.as_ref();
+    if !retain_for_resume {
+        return discard_partial_download(destination);
+    }
+    let partial = partial_download_path(destination)?;
+    let map = partial_download_map_path(destination)?;
+    let resume_pair_is_useful = match (std::fs::symlink_metadata(&partial), std::fs::read(&map)) {
+        (Ok(metadata), Ok(encoded_map)) => {
+            metadata.file_type().is_file()
+                && metadata.len() == expected_bytes
+                && DownloadPartMap::decode(&encoded_map, expected_bytes)
+                    .is_ok_and(|part_map| part_map.completed_bytes() > 0)
+        }
+        (Err(error), _) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(map_io(error));
+        }
+        (_, Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(map_io(error));
+        }
+        _ => false,
+    };
+    if resume_pair_is_useful {
+        Ok(())
+    } else {
+        discard_partial_download(destination)
+    }
+}
+
 async fn publish_partial(partial: &Path, destination: &Path) -> Result<(), TelegramError> {
     // Both paths are siblings, so a hard link provides atomic no-replace
     // publication on supported desktop filesystems. Unlike rename, it cannot
@@ -1549,6 +1661,28 @@ mod tests {
         }));
         assert_eq!(error.kind(), TelegramErrorKind::FloodWait);
         assert_eq!(error.retry_after(), Some(Duration::from_secs(17)));
+        assert_eq!(
+            download_part_retry_delay(&error, 1),
+            Some(Duration::from_secs(17))
+        );
+    }
+
+    #[test]
+    fn network_part_retry_is_bounded_with_exponential_backoff() {
+        let network = TelegramError::new(TelegramErrorKind::Network);
+        assert_eq!(
+            download_part_retry_delay(&network, 1),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            download_part_retry_delay(&network, 2),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(download_part_retry_delay(&network, 4), None);
+        assert_eq!(
+            download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Authorization), 1),
+            None
+        );
     }
 
     #[test]
@@ -1699,6 +1833,44 @@ mod tests {
         assert_eq!(decoded.completed_bytes(), DOWNLOAD_PART_SIZE_BYTES + 17);
         assert_eq!(decoded.missing_parts(), VecDeque::from([1]));
         assert!(!decoded.is_complete());
+    }
+
+    #[test]
+    fn failed_partial_cleanup_keeps_only_a_useful_valid_resume_pair() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let destination = directory.path().join("resume.bin");
+        let partial = partial_download_path(&destination).expect("partial path");
+        let map_path = partial_download_map_path(&destination).expect("map path");
+        let expected_bytes = DOWNLOAD_PART_SIZE_BYTES * 2;
+        let partial_file = std::fs::File::create(&partial).expect("create partial");
+        partial_file
+            .set_len(expected_bytes)
+            .expect("size partial fixture");
+        let empty_map = DownloadPartMap::new(expected_bytes).expect("empty map");
+        std::fs::write(&map_path, empty_map.encode().expect("encode empty map"))
+            .expect("write empty map");
+        cleanup_failed_partial_download(&destination, expected_bytes, true)
+            .expect("discard zero-progress pair");
+        assert!(!partial.exists());
+        assert!(!map_path.exists());
+
+        let partial_file = std::fs::File::create(&partial).expect("recreate partial");
+        partial_file
+            .set_len(expected_bytes)
+            .expect("resize partial fixture");
+        let mut useful_map = DownloadPartMap::new(expected_bytes).expect("useful map");
+        useful_map.mark_completed(1).expect("mark completed part");
+        std::fs::write(&map_path, useful_map.encode().expect("encode useful map"))
+            .expect("write useful map");
+        cleanup_failed_partial_download(&destination, expected_bytes, true)
+            .expect("retain useful pair");
+        assert!(partial.exists());
+        assert!(map_path.exists());
+
+        cleanup_failed_partial_download(&destination, expected_bytes, false)
+            .expect("terminal cleanup");
+        assert!(!partial.exists());
+        assert!(!map_path.exists());
     }
 
     #[test]

@@ -193,6 +193,9 @@ Running native downloads update transferred bytes, current speed, progress,
 and ETA from real chunk events. Pause, resume, retry, and cancel controls invoke
 runtime commands. Persisted rows remain visible after restart; interrupted work
 stays queued until Telegram authorization is restored.
+Terminal native tasks expose a two-step Delete Task action. The confirmation
+states that the completed user file is kept; deletion removes only TeleArk task
+history, its session log, and resumable partial/bitmap data.
 
 Every real transfer inspector includes Live and Replay modes backed by typed
 runtime telemetry and its permanent session log. Live shows the current

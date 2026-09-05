@@ -1307,6 +1307,50 @@ impl TransferSessionLog {
         self.writer.flush().map_err(map_log_io)
     }
 
+    pub(crate) fn append_native_part_state(
+        &mut self,
+        event: teleark_telegram::DownloadPartEvent,
+        elapsed_ms: u64,
+    ) -> Result<(), ApplicationError> {
+        writeln!(
+            self.writer,
+            "{{\"schema\":1,\"event\":\"part_state\",\"elapsed_ms\":{elapsed_ms},\"part_index\":{},\"offset_bytes\":{},\"length_bytes\":{},\"state\":\"{:?}\",\"attempt\":{},\"attempt_elapsed_ms\":{}}}",
+            event.part_index,
+            event.offset_bytes,
+            event.length_bytes,
+            event.state,
+            event.attempt,
+            event.elapsed_millis,
+        )
+        .map_err(map_log_io)?;
+        self.writer.flush().map_err(map_log_io)
+    }
+
+    pub(crate) fn append_native_retry_decision(
+        &mut self,
+        part_index: u64,
+        elapsed_ms: u64,
+        decision: &teleark_transfer::ControllerDecision,
+        telemetry: &TransferTelemetrySnapshot,
+    ) -> Result<(), ApplicationError> {
+        writeln!(
+            self.writer,
+            "{{\"schema\":1,\"event\":\"controller_decision\",\"trigger\":\"part_retry\",\"elapsed_ms\":{elapsed_ms},\"part_index\":{part_index},\"phase\":\"{:?}\",\"parameter\":\"{:?}\",\"outcome\":\"{:?}\",\"reason\":\"{:?}\",\"goodput_before\":{},\"goodput_after\":{},\"before_parts_per_file\":{},\"after_parts_per_file\":{},\"retry_parts\":{},\"failed_parts\":{}}}",
+            decision.phase,
+            decision.parameter,
+            decision.outcome,
+            decision.reason,
+            decision.baseline_goodput_bytes_per_second,
+            decision.observed_goodput_bytes_per_second,
+            decision.before.inflight_parts_per_file,
+            decision.after.inflight_parts_per_file,
+            telemetry.parts.retry_parts,
+            telemetry.parts.failed_parts,
+        )
+        .map_err(map_log_io)?;
+        self.writer.flush().map_err(map_log_io)
+    }
+
     pub(crate) fn append_finished(
         &mut self,
         elapsed_ms: u64,

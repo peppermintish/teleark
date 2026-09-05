@@ -913,6 +913,7 @@ impl TeleArkApp {
                     }
                 } else {
                     this.selected_file = index;
+                    this.pending_transfer_delete = None;
                 }
                 cx.notify();
             }))
@@ -924,6 +925,7 @@ impl TeleArkApp {
                         }
                     } else {
                         this.selected_file = index;
+                        this.pending_transfer_delete = None;
                     }
                     cx.notify();
                 }
@@ -2112,6 +2114,42 @@ impl TeleArkApp {
                 }))
             })
         });
+        let delete_action = runtime_snapshot.as_ref().and_then(|snapshot| {
+            matches!(
+                snapshot.state,
+                ChannelDownloadState::Completed
+                    | ChannelDownloadState::Failed(_)
+                    | ChannelDownloadState::Cancelled
+            )
+            .then(|| {
+                let id = snapshot.id;
+                let awaiting_confirmation = self.pending_transfer_delete == Some(id);
+                components::button(
+                    "detail-runtime-delete",
+                    self.tr(if awaiting_confirmation {
+                        "action-confirm-delete-task"
+                    } else {
+                        "action-delete-task"
+                    }),
+                    Some(IconName::Delete),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.pending_transfer_delete == Some(id) {
+                        if let Some(transfers) = this.transfers.as_ref()
+                            && transfers.delete(id).is_ok()
+                        {
+                            this.pending_transfer_delete = None;
+                            this.selected_transfer_keys.clear();
+                            this.selected_file = 0;
+                        }
+                    } else {
+                        this.pending_transfer_delete = Some(id);
+                    }
+                    cx.notify();
+                }))
+            })
+        });
 
         div()
             .w(px(layout.transfer_inspector_width()))
@@ -2420,6 +2458,7 @@ impl TeleArkApp {
                             .gap_2()
                             .child(primary_action.flex_1())
                             .when_some(cancel_action, |actions, cancel| actions.child(cancel))
+                            .when_some(delete_action, |actions, delete| actions.child(delete))
                             .when_some(reveal_action, |actions, reveal| actions.child(reveal)),
                     ),
             )
@@ -2599,6 +2638,7 @@ const fn decision_reason_message_id(reason: ControllerDecisionReason) -> &'stati
         ControllerDecisionReason::LargeFilePipelineNeedsParts => "transfer-reason-large-file",
         ControllerDecisionReason::MemoryBudgetPressure => "transfer-reason-memory",
         ControllerDecisionReason::DiskLimited => "transfer-reason-disk",
+        ControllerDecisionReason::PartRetryRequired => "transfer-reason-part-retry",
         ControllerDecisionReason::FloodWaitRequired => "transfer-reason-flood-wait",
         ControllerDecisionReason::FloodWaitExpired => "transfer-reason-flood-wait-expired",
         ControllerDecisionReason::TelegramSoftLimitConflict => "transfer-reason-soft-limit",
