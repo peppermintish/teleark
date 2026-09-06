@@ -193,7 +193,7 @@ Running native downloads update transferred bytes, current speed, progress,
 and ETA from real chunk events. Pause, resume, retry, and cancel controls invoke
 runtime commands. Persisted rows remain visible after restart; interrupted work
 stays queued until Telegram authorization is restored.
-Native task rows expose pause/resume/retry, cancel, terminal-task deletion, completed-file open/reveal, and Details according to their actual state. Bulk resume/pause/retry/cancel/delete stay above the table. With no visible selection they apply to the current filtered list; otherwise they apply only to selected visible rows. A collapsed batch checkbox includes its child tasks, with IDs deduplicated when expanded children are also selected. Unsupported actions are disabled. Errors remain visible in the toolbar.
+Native task rows expose pause/resume/retry, cancel, terminal-task deletion, completed-file open/reveal, and Details according to their actual state. Bulk resume/pause/retry/cancel/delete stay above the table. With no visible selection they apply to the current filtered list; otherwise they apply only to selected visible rows. A collapsed batch checkbox includes its child tasks, with IDs deduplicated when expanded children are also selected. Retry is available for both failed and cancelled native downloads, individually or through the scoped bulk toolbar. Unsupported actions are disabled. Errors remain visible in the toolbar.
 
 Terminal native tasks expose a two-step Delete Task action in the main list toolbar. The confirmation
 states that the completed user file is kept; deletion removes only TeleArk task

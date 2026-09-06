@@ -172,7 +172,13 @@ Telegram requests. Out-of-order completions use positional writes and update a
 strict `TARKDPM1` completion bitmap. Transferred bytes, current speed, ETA, part
 states, and the controller's desired P update live. The adapter preserves the
 private partial and bitmap across network/process interruption; explicit cancel
-removes both. Pause interrupts at a safe request boundary, while resume requests
+removes both. Explicit retry accepts both failed and cancelled native tasks,
+retains their task/source/destination identity, and clears cancelled progress.
+If the cancelled owner is still active, retry keeps its cancellation signal
+until it releases its requests and files, then starts a fresh attempt on the
+same retained worker. Restored cancelled rows also support retry. This native
+lifecycle is separate from the encrypted Core state machine below.
+Pause interrupts at a safe request boundary, while resume requests
 only missing parts. Transient network failures and FloodWait responses retry the
 affected logical part up to four (Balanced) or eight (Max Throughput) total
 attempts with bounded backoff; FloodWait uses the server delay. Recovery

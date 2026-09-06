@@ -37,6 +37,7 @@ const CONTROL_RUNNING: u8 = 0;
 const CONTROL_PAUSED: u8 = 1;
 const CONTROL_CANCELLED: u8 = 2;
 const CONTROL_RESUME_PENDING: u8 = 3;
+const CONTROL_RETRY_PENDING: u8 = 4;
 
 pub fn available_download_destination(
     directory: &Path,
@@ -300,7 +301,7 @@ impl DownloadObserver for RuntimeDownloadObserver {
         }
         match self.control.load(Ordering::Acquire) {
             CONTROL_PAUSED | CONTROL_RESUME_PENDING => DownloadControl::Pause,
-            CONTROL_CANCELLED => DownloadControl::Cancel,
+            CONTROL_CANCELLED | CONTROL_RETRY_PENDING => DownloadControl::Cancel,
             _ => DownloadControl::Continue,
         }
     }
@@ -892,11 +893,26 @@ impl DesktopTransfers {
     }
 
     pub fn retry(&self, id: u64) -> Result<(), ApplicationError> {
-        if !matches!(self.snapshot_state(id)?, ChannelDownloadState::Failed(_)) {
+        // Serialize with worker retirement so a retry cannot revive an attempt
+        // that still owns the cancelled partial and outstanding requests.
+        let scheduled = self
+            .inner
+            .scheduled
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        if !matches!(
+            self.snapshot_state(id)?,
+            ChannelDownloadState::Failed(_) | ChannelDownloadState::Cancelled
+        ) {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
+        let cancelled = self.snapshot_state(id)? == ChannelDownloadState::Cancelled;
         let now = unix_time_millis()?;
         let snapshot = update_snapshot(&self.inner.snapshots, id, |snapshot| {
+            if cancelled {
+                snapshot.transferred_bytes = 0;
+                snapshot.telemetry = empty_download_telemetry();
+            }
             snapshot.state = ChannelDownloadState::Queued;
             snapshot.verification = ChannelDownloadVerification::Pending;
             snapshot.finished_at_unix_ms = None;
@@ -923,7 +939,12 @@ impl DesktopTransfers {
                 .or_insert_with(|| Arc::new(AtomicU8::new(CONTROL_RUNNING)))
                 .clone()
         };
+        if scheduled.contains(&id) {
+            control.store(CONTROL_RETRY_PENDING, Ordering::Release);
+            return Ok(());
+        }
         control.store(CONTROL_RUNNING, Ordering::Release);
+        drop(scheduled);
         self.try_schedule(snapshot, control)
     }
 
@@ -1241,35 +1262,77 @@ fn transfer_loop(
     while let Ok(command) = receiver.recv() {
         match command {
             TransferCommand::Download {
-                snapshot,
-                queued_at,
+                mut snapshot,
+                mut queued_at,
                 control,
             } => {
                 let id = snapshot.id;
-                run_download(
-                    &*backend, &snapshots, &shutdown, &library, snapshot, queued_at, control,
-                );
-                if let Ok(mut scheduled) = scheduled.lock() {
+                loop {
+                    run_download(
+                        &*backend,
+                        DownloadWorkerState {
+                            snapshots: &snapshots,
+                            scheduled: &scheduled,
+                        },
+                        &shutdown,
+                        &library,
+                        snapshot,
+                        queued_at,
+                        Arc::clone(&control),
+                    );
+                    let Ok(mut scheduled) = scheduled.lock() else {
+                        break;
+                    };
+                    if control.load(Ordering::Acquire) == CONTROL_RETRY_PENDING
+                        && !shutdown.load(Ordering::Acquire)
+                    {
+                        // The previous backend has now released all request/file
+                        // ownership. Use fresh progress for the replacement attempt.
+                        if let Some(retry) = update_snapshot(&snapshots, id, |current| {
+                            current.state = ChannelDownloadState::Queued;
+                            current.transferred_bytes = 0;
+                            current.telemetry = empty_download_telemetry();
+                            current.verification = ChannelDownloadVerification::Pending;
+                            current.finished_at_unix_ms = None;
+                            current.failure = None;
+                        }) {
+                            let _ = persist_snapshot(&library, &retry);
+                            control.store(CONTROL_RUNNING, Ordering::Release);
+                            snapshot = retry;
+                            queued_at = Instant::now();
+                            continue;
+                        }
+                    }
                     scheduled.remove(&id);
+                    break;
                 }
             }
         }
     }
 }
 
+struct DownloadWorkerState<'a> {
+    snapshots: &'a Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    scheduled: &'a Mutex<BTreeSet<u64>>,
+}
+
 fn run_download(
     backend: &dyn ChannelDownloadBackend,
-    snapshots: &Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    state: DownloadWorkerState<'_>,
     shutdown: &Arc<AtomicBool>,
     library: &DesktopLibrary,
     snapshot: ChannelDownloadSnapshot,
     queued_at: Instant,
     control: Arc<AtomicU8>,
 ) {
+    let snapshots = state.snapshots;
     let queue_wait_ms = elapsed_millis(queued_at.elapsed());
     let started_at_unix_ms = unix_time_millis().ok();
     let initial_control = control.load(Ordering::Acquire);
-    let initial_state = if initial_control == CONTROL_RESUME_PENDING {
+    let initial_state = if matches!(
+        initial_control,
+        CONTROL_RESUME_PENDING | CONTROL_RETRY_PENDING
+    ) {
         control.store(CONTROL_RUNNING, Ordering::Release);
         ChannelDownloadState::Running
     } else if initial_control == CONTROL_PAUSED {
@@ -1406,7 +1469,15 @@ fn run_download(
         duration_ms,
         result.as_ref().err().map(ApplicationError::kind),
     );
+    // Serialize terminal publication with retry: an old cancellation must not
+    // overwrite the queued replacement after the retry command has returned.
+    let Ok(_retirement) = state.scheduled.lock() else {
+        return;
+    };
     match result {
+        _ if control.load(Ordering::Acquire) == CONTROL_RETRY_PENDING => {
+            // transfer_loop starts the replacement only after this owner exits.
+        }
         Ok(()) if control.load(Ordering::Acquire) == CONTROL_CANCELLED => {
             let cancelled = update_snapshot(snapshots, snapshot.id, |current| {
                 current.state = ChannelDownloadState::Cancelled;
@@ -2403,6 +2474,116 @@ mod tests {
             ChannelDownloadState::Cancelled
         );
         assert_eq!(backend.discarded.load(AtomicOrdering::Relaxed), 1);
+        transfers.retry(cancelled_id).expect("retry");
+        assert_eq!(
+            wait_for_terminal(&transfers, cancelled_id).state,
+            ChannelDownloadState::Completed
+        );
+        assert!(backend.attempts.load(AtomicOrdering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn immediate_cancel_retry_waits_for_old_attempt_to_release_ownership() {
+        struct RetryBackend {
+            attempts: AtomicUsize,
+            started: mpsc::SyncSender<()>,
+            release: StdMutex<mpsc::Receiver<()>>,
+        }
+        impl ChannelDownloadBackend for RetryBackend {
+            fn download(
+                &self,
+                _chat_id: i64,
+                _message_id: i64,
+                _destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                if self.attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    observer.progressed(7);
+                    self.started.send(()).expect("started");
+                    self.release
+                        .lock()
+                        .expect("release lock")
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("release");
+                    assert_eq!(observer.control(), DownloadControl::Cancel);
+                    return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                }
+                assert_eq!(observer.control(), DownloadControl::Continue);
+                observer.progressed(14);
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let backend = Arc::new(RetryBackend {
+            attempts: AtomicUsize::new(0),
+            started: started_tx,
+            release: StdMutex::new(release_rx),
+        });
+        let transfers =
+            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("retry.zip")))
+            .expect("enqueue");
+        started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("started");
+        transfers.cancel(id).expect("cancel");
+        transfers.retry(id).expect("immediate retry");
+        let queued = transfers.snapshots().expect("snapshots").remove(0);
+        assert_eq!(queued.state, ChannelDownloadState::Queued);
+        assert_eq!(queued.transferred_bytes, 0);
+        assert_eq!(backend.attempts.load(AtomicOrdering::SeqCst), 1);
+        release_tx.send(()).expect("release");
+        let completed = wait_for_terminal(&transfers, id);
+        assert_eq!(completed.state, ChannelDownloadState::Completed);
+        assert_eq!(completed.attempts, 2);
+        assert_eq!(backend.attempts.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(
+            transfers
+                .retry(id)
+                .expect_err("completed cannot retry")
+                .kind(),
+            ApplicationErrorKind::Conflict
+        );
+    }
+
+    #[test]
+    fn restored_cancelled_download_can_retry_with_the_same_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let backend = Arc::new(FakeBackend {
+            outcome: Err(ApplicationErrorKind::Network),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = DesktopTransfers::with_backend(backend, library.clone()).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("restore.zip")))
+            .expect("enqueue");
+        wait_for_terminal(&transfers, id);
+        let mut cancelled = transfers.snapshots().expect("snapshots").remove(0);
+        cancelled.state = ChannelDownloadState::Cancelled;
+        cancelled.failure = None;
+        cancelled.transferred_bytes = 7;
+        drop(transfers);
+        persist_snapshot(&library, &cancelled).expect("persist cancelled fixture");
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let restored = DesktopTransfers::with_backend(backend.clone(), library).expect("restore");
+        assert_eq!(
+            restored.snapshot_state(id).expect("state"),
+            ChannelDownloadState::Cancelled
+        );
+        restored.retry(id).expect("retry restored cancellation");
+        let completed = wait_for_terminal(&restored, id);
+        assert_eq!(completed.state, ChannelDownloadState::Completed);
+        assert_eq!(completed.id, id);
+        assert_eq!(completed.destination, cancelled.destination);
+        assert_eq!(backend.calls.lock().expect("calls").len(), 1);
     }
 
     #[test]

@@ -2315,7 +2315,7 @@ impl TransferAction {
         match self {
             Self::Resume => state == TransferState::Paused,
             Self::Pause => matches!(state, TransferState::Waiting | TransferState::Downloading),
-            Self::Retry => state == TransferState::Failed,
+            Self::Retry => matches!(state, TransferState::Failed | TransferState::Cancelled),
             Self::Cancel => matches!(
                 state,
                 TransferState::Waiting | TransferState::Downloading | TransferState::Paused
@@ -2783,7 +2783,10 @@ mod tests {
             );
             assert_eq!(
                 TransferAction::Retry.supports(state),
-                matches!(state, ChannelDownloadState::Failed(_))
+                matches!(
+                    state,
+                    ChannelDownloadState::Failed(_) | ChannelDownloadState::Cancelled
+                )
             );
             assert_ne!(
                 TransferAction::Delete.supports(state),

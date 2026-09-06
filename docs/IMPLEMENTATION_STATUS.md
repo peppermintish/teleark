@@ -215,8 +215,8 @@ cargo deny check
 git diff --check
 ```
 
-The v0.3.2 suite passes 293 tests: Core 25, Crypto 36, GUI 53, i18n 21,
-Index 12, Runtime 48, Storage 22, Telegram 22, and Transfer 54.
+The v0.3.3 suite passes 295 tests: Core 25, Crypto 36, GUI 53, i18n 21,
+Index 12, Runtime 50, Storage 22, Telegram 22, and Transfer 54.
 The current gate passes format, workspace check, strict Clippy, all workspace
 tests, warning-denied documentation, dependency policy, and diff validation.
 
@@ -350,3 +350,42 @@ compiled alpha functionality but preclude a commercial-quality release claim.
 - Docs and preference compatibility evidence are synchronized. The commit groups
   this session's list-first transfer UI and native throughput strategy; v0.3.2
   is an alpha source snapshot, not a signed/notarized commercial release.
+
+## v0.3.3 cancelled native-download retry fix
+
+Cancelled native downloads now accept explicit retry through both row controls
+and the scoped bulk toolbar. Retry preserves task/source/destination identity,
+clears cancelled progress, and works for cancelled rows restored from SQLite.
+When the old attempt is still active, it retains its cancellation signal until
+it releases backend ownership; the retained worker then starts the replacement.
+Terminal publication and retry are serialized to prevent the old cancellation
+from overwriting the replacement's queued state. Completed tasks remain
+ineligible for retry. Encrypted Vault controls remain outside this native path.
+
+Regression coverage includes immediate cancel/retry with a channel-controlled
+backend, replacement-attempt counts, completed-task rejection, persisted
+cancelled-row restoration, and the GUI action-state matrix. The existing
+pause/resume/cancel worker regression also exercises retry after cancellation.
+
+Pre-commit verification and scope:
+
+- Passed: `cargo fmt --all --check`, locked workspace/all-target check, strict
+  Clippy, all 295 workspace tests, warning-denied workspace documentation,
+  cargo-deny advisories/bans/licenses/sources, and diff whitespace review.
+- Core/GUI dependency boundaries, repository-owned SQL, adapter-owned Telegram
+  calls, locale-neutral state/error values, and domain terminology are preserved.
+  No new UI text is introduced; existing retry message IDs are reused. The
+  synchronized en-US/zh-CN/ja-JP parse, completeness, variable, fallback,
+  negotiation, formatting, and error-mapping tests pass.
+- State-transition regressions and existing database migration, crypto-vector,
+  and manifest compatibility tests pass. Persistent formats are unchanged.
+  Only TeleArk package versions move to 0.3.3; external dependencies are unchanged.
+- No incompatible source, secret, user document, new production panic, unbounded
+  queue, or unowned task is introduced. The same retained bounded worker owns
+  replacement attempts; retirement locks do not span network calls or awaits.
+- Transfer/UI documentation is synchronized. The commit includes the pre-existing
+  task-related GUI/runtime retry edits and their completed regression fix, under
+  the user's request to fix this issue and create a new tag.
+- Exception: no credentialed Telegram run or new screenshot matrix was performed
+  for this state/control fix. There is no layout or translation change; existing
+  visual/accessibility and live-network limitations remain tracked above.
