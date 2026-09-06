@@ -50,7 +50,6 @@ pub fn card() -> Div {
         .border_1()
         .border_color(theme::border())
         .bg(theme::surface())
-        .shadow_sm()
 }
 
 pub fn button(
@@ -86,7 +85,7 @@ pub fn badge(label: impl Into<SharedString>, tone: Tone) -> Div {
         .px_2()
         .flex()
         .items_center()
-        .rounded_full()
+        .rounded(theme::RADIUS_SMALL)
         .bg(tone.background())
         .text_color(tone.foreground())
         .text_xs()
@@ -103,8 +102,21 @@ pub fn progress(value: f32, tone: Tone) -> Progress {
 
 pub fn section_title(title: impl Into<SharedString>) -> Div {
     div()
-        .text_base()
+        .text_size(px(18.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::text_primary())
         .child(title.into())
+}
+
+/// Fixed page chrome shared by browsing, detail and preference routes.
+pub fn page_toolbar(padding: f32) -> Div {
+    div()
+        .flex_none()
+        .min_h(px(58.0))
+        .px(px(padding))
+        .py_2()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_3()
 }

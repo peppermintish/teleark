@@ -276,7 +276,7 @@ error-transfer-unknown = 传输因未知错误而失败。
 
 ## GPUI 参考界面使用的语义 ID。
 
-search-placeholder = 搜索 2,851,233 个文件，支持关键词、扩展名或频道
+search-placeholder = 搜索文件名、说明或频道
 connection-connected = 已连接
 accounts-count = 3 个账号
 account-standard = 标准账号
@@ -931,4 +931,18 @@ settings-transfer-soft-limit-description = 当实测有效吞吐支持更多活�
 settings-transfer-soft-limit-respect = 遵守
 settings-transfer-soft-limit-adaptive = 自适应突破
 settings-transfer-soft-limit-ignore = 忽略
-settings-transfer-soft-limit-note = Maximum Throughput 推荐“自适应突破”。每次冲突与突破都会显示在实时/回放界面并写入会话日志；Telegram 协议硬限制和 FLOOD_WAIT 始终必须遵守。
+settings-transfer-soft-limit-note = 此策略控制建议性的活跃文件数量限制；下载速度行为请在“下载策略”中单独选择。冲突会显示在实时/回放界面并写入会话日志，Telegram 协议硬限制和 FLOOD_WAIT 始终必须遵守。
+
+transfer-actions = 操作
+transfer-show-details = 查看详情
+transfer-close-details = 关闭详情
+transfer-scope-visible = 当前列表
+transfer-filter-count = { $label } · { $count }
+transfer-delete-confirmation = 删除 { $count } 个任务？已下载的文件会保留，任务记录、日志和未完成的下载数据将被清除。
+transfer-filter-title = 筛选
+transfer-actions-applying = 正在处理任务操作…
+
+settings-download-strategy-title = 下载策略
+settings-download-strategy-balanced = 均衡
+settings-download-strategy-max = 最大吞吐量
+settings-download-strategy-description = 最大吞吐量快速探测至 64 路分片并发，容忍偶发网络错误，会占用更多带宽和内存，仍严格遵守服务器等待时间。原生下载开始或恢复时生效，加密保管库传输不受影响。

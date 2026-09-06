@@ -35,7 +35,12 @@ gpui::actions!(
 
 fn main() {
     let system_locale = detect_system_locale();
-    let library = DesktopLibrary::open_default();
+    let visual_preview = std::env::args().any(|argument| argument == "--preview-ui");
+    let library = if visual_preview {
+        Err(ApplicationError::new(ApplicationErrorKind::NotFound))
+    } else {
+        DesktopLibrary::open_default()
+    };
     let _diagnostics = library
         .as_ref()
         .map_err(|error| ApplicationError::new(error.kind()))
@@ -46,7 +51,11 @@ fn main() {
         version = env!("CARGO_PKG_VERSION"),
         "TeleArk application starting"
     );
-    let telegram = DesktopTelegram::open_default();
+    let telegram = if visual_preview {
+        Err(ApplicationError::new(ApplicationErrorKind::NotFound))
+    } else {
+        DesktopTelegram::open_default()
+    };
     let transfers = match (telegram.as_ref(), library.as_ref()) {
         (Ok(telegram), Ok(library)) => DesktopTransfers::new(telegram.clone(), library.clone()),
         (Err(error), _) | (_, Err(error)) => Err(ApplicationError::new(match error.kind() {
@@ -120,6 +129,7 @@ fn main() {
                         },
                         AppStartup {
                             page: launch.page,
+                            visual_preview,
                             show_upload: launch.show_upload,
                             skip_telegram_api_id_prompt: launch.skip_telegram_api_id_prompt,
                             locale: LocaleStartup {

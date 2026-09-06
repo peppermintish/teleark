@@ -14,8 +14,8 @@ static DARK_PALETTE: AtomicBool = AtomicBool::new(false);
 pub const HEADER_HEIGHT: Pixels = px(58.0);
 pub const ROW_HEIGHT: Pixels = px(42.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);
-pub const RADIUS_MEDIUM: Pixels = px(10.0);
-pub const RADIUS_LARGE: Pixels = px(14.0);
+pub const RADIUS_MEDIUM: Pixels = px(8.0);
+pub const RADIUS_LARGE: Pixels = px(12.0);
 
 pub fn apply_appearance<T>(
     preference: AppearancePreference,
@@ -36,6 +36,14 @@ pub fn apply_appearance<T>(
         AppearancePreference::Light => ComponentTheme::change(ThemeMode::Light, Some(window), cx),
         AppearancePreference::Dark => ComponentTheme::change(ThemeMode::Dark, Some(window), cx),
     }
+    let theme = ComponentTheme::global_mut(cx);
+    theme.colors.primary = blue().into();
+    theme.colors.primary_hover = color(0x1d4ed8, 0x8cb5ff).into();
+    theme.colors.primary_active = color(0x1e40af, 0x5b92ee).into();
+    theme.colors.primary_foreground = color(0xffffff, 0x101522).into();
+    theme.colors.ring = blue().into();
+    theme.colors.border = border().into();
+    theme.radius = RADIUS_SMALL;
 }
 
 fn color(light: u32, dark: u32) -> Rgba {
@@ -47,15 +55,15 @@ fn color(light: u32, dark: u32) -> Rgba {
 }
 
 pub fn canvas() -> Rgba {
-    color(0xf5f7fb, 0x101522)
+    color(0xf6f7f9, 0x11151d)
 }
 
 pub fn surface() -> Rgba {
-    color(0xffffff, 0x182033)
+    color(0xffffff, 0x1b202b)
 }
 
 pub fn sidebar() -> Rgba {
-    color(0xf8fafc, 0x141b2b)
+    color(0xf0f2f5, 0x161b24)
 }
 
 pub fn text_primary() -> Rgba {
@@ -67,7 +75,7 @@ pub fn text_secondary() -> Rgba {
 }
 
 pub fn text_muted() -> Rgba {
-    color(0x98a2b3, 0x7e8aa3)
+    color(0x748094, 0x98a4b8)
 }
 
 pub fn border() -> Rgba {
@@ -79,7 +87,7 @@ pub fn border_subtle() -> Rgba {
 }
 
 pub fn blue() -> Rgba {
-    color(0x1677ff, 0x5aa2ff)
+    color(0x2463eb, 0x76a7ff)
 }
 
 pub fn blue_soft() -> Rgba {

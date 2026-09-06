@@ -48,13 +48,16 @@ pub fn render_upload_overlay(
                 .text_color(theme::blue())
                 .text_2xl()
                 .font_weight(FontWeight::BOLD)
-                .child("▶"),
+                .child(Icon::new(IconName::File).size(px(32.0))),
         )
         .child(
             div()
                 .mt_4()
                 .max_w_full()
-                .truncate()
+                .when(app.upload_source.is_some(), |name| name.truncate())
+                .when(app.upload_source.is_none(), |name| {
+                    name.whitespace_normal().text_center()
+                })
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(source_name),
         )
@@ -306,11 +309,22 @@ pub fn render_upload_overlay(
                 .px_5()
                 .flex()
                 .items_center()
-                .justify_center()
+                .gap_3()
                 .border_b_1()
                 .border_color(theme::border())
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(app.tr("upload-dialog-title")),
+                .child(div().flex_1().child(app.tr("upload-dialog-title")))
+                .child(
+                    components::icon_button(
+                        "upload-close",
+                        IconName::Close,
+                        app.tr("action-cancel"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_upload = false;
+                        cx.notify();
+                    })),
+                ),
         )
         .child(
             div()

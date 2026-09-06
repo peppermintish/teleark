@@ -1103,7 +1103,7 @@ impl TeleArkApp {
             .when(!layout.is_compact(), |body| body.h_full().min_h_0().gap_3())
             .when(layout.is_compact(), |body| body.flex_col())
             .child(browser)
-            .child(inspector)
+            .when(selected_package.is_some(), |body| body.child(inspector))
             .into_any_element()
     }
 
@@ -1213,48 +1213,43 @@ impl TeleArkApp {
             (FileKind::Image, "telegram-batch-kind-image"),
             (FileKind::Other, "telegram-batch-kind-other"),
         ];
-        components::card()
+        div()
             .mt_2()
-            .px_3()
             .py_2()
+            .border_y_1()
+            .border_color(theme::border_subtle())
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(self.tr("telegram-batch-title")),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme::text_secondary())
-                                    .child(self.tr("telegram-batch-description")),
-                            ),
-                    )
-                    .child(
-                        components::icon_button(
+                        components::button(
                             "telegram-batch-toggle",
-                            if self.channel_batch_expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            },
-                            self.tr("telegram-batch-title"),
+                            self.tr("transfer-filter-title"),
+                            Some(IconName::Settings2),
+                            self.channel_batch_expanded,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.channel_batch_expanded = !this.channel_batch_expanded;
                             cx.notify();
                         })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr_with(
+                                "telegram-files-title",
+                                MessageArgs::new().with(
+                                    "count",
+                                    format_integer(
+                                        self.locale(),
+                                        self.channel_filtered_files().len() as u64,
+                                    ),
+                                ),
+                            )),
                     ),
             )
             .when(self.channel_batch_expanded, |card| {
@@ -1360,8 +1355,9 @@ impl TeleArkApp {
             .child(
                 div()
                     .mt_2()
-                    .h(px(40.0))
+                    .min_h(px(40.0))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(components::badge(
@@ -1468,7 +1464,9 @@ impl TeleArkApp {
             })
             .when(layout.is_compact(), |browser| browser.flex().flex_col())
             .child(table)
-            .child(self.render_telegram_message_detail(selected_message, layout))
+            .when_some(selected_message, |browser, message| {
+                browser.child(self.render_telegram_message_detail(Some(message), layout))
+            })
             .into_any_element()
     }
 

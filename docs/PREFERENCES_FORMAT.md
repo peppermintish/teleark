@@ -25,6 +25,7 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `upload_encrypt_content` | retained legacy boolean | `true` |
 | `upload_hide_file_name` | retained legacy boolean | `true` |
 | `upload_encrypt_metadata` | retained legacy boolean | `true` |
+| `download_throughput_strategy` | `balanced` or `max_throughput` | `balanced` |
 | `transfer_soft_limit_policy` | `respect`, `adaptive_override`, or `ignore` | `adaptive_override` |
 | `lock_vault_when_hidden` | boolean | `true` |
 | `index_batch_size` | `200`, `500`, or `1000` | `1000` |
@@ -68,3 +69,14 @@ traversal, and chooses a unique `name (n).extension` download destination
 instead of replacing an existing file. SQLite and the Telegram session stay in
 the platform application-data directory so changing this preference cannot
 move files that are open by live workers.
+
+`download_throughput_strategy` is an additive v1 key, independent of the soft
+active-file policy. Missing legacy values retain Balanced (P4–24); older readers
+ignore the new key. Max Throughput starts native downloads at P4 (search range P1–64) and probes
+with one-second settling for strong gains and five-second confirmation otherwise:
+initial steps up to 16 shrink near a measured
+throughput/error boundary, down to one part. The preference is captured once
+when a native task starts/resumes/retries; it does not change an already running
+owner or the encrypted Vault pipeline. Unknown values fail as structured
+persistence errors. Tests cover literal legacy rows, invalid values, and a
+Max Throughput save/reopen round trip. See ADR 0010.

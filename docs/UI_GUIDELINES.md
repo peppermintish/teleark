@@ -1,6 +1,6 @@
 # UI Guidelines
 
-Status: design contract for a persistent local Library plus real Telegram login/source selection/bounded indexing, native transfers, and the connected alpha Vault/Saved Messages encrypted workflow. The two supplied reference images are the visual source of truth. Provisional crypto and incomplete transfer lifecycle controls must remain visibly honest.
+Status: design contract for a persistent local Library plus real Telegram login/source selection/bounded indexing, native transfers, and the connected alpha Vault/Saved Messages encrypted workflow. The original reference images establish the base visual language; the September 2026 list-first revision below governs action placement. Provisional crypto and incomplete transfer lifecycle controls must remain visibly honest.
 
 ## Product abstraction and branding
 
@@ -17,7 +17,7 @@ The references establish two closely related desktop compositions:
 
 Additional required views reuse that visual language: file detail with overview/parts/details/activity tabs, key-vault settings, channel index detail, and a real non-contiguous index coverage map.
 
-Treat the images as geometry targets, not loose inspiration. Measure layout from screenshots while accounting for source-image scale; do not mistake bitmap pixels for GPUI logical pixels. Preserve hierarchy, whitespace rhythm, table density, control size, borders, radii, progress thickness, tab treatment, badge shape, and restrained status colors.
+Use the images as visual references, with the list-first action placement below taking precedence. Measure layout from screenshots while accounting for source-image scale; do not mistake bitmap pixels for GPUI logical pixels. Preserve hierarchy, whitespace rhythm, table density, control size, borders, radii, progress thickness, tab treatment, badge shape, and restrained status colors.
 
 ## Application information architecture
 
@@ -161,7 +161,7 @@ does not infer protected metadata from opaque names.
 
 ### Transfers
 
-Summary cards, queue controls/table, speed totals, logs/connections tabs, and inspector mirror the reference. State, verified parts, direction, speed, ETA, concurrency, retry, pause, and failure cause use real Core snapshots when integrated. A 100% byte bar is not “Completed” until verification succeeds.
+A compact page title and live speed sit above state/direction filters, a permanent scope-aware action toolbar, and the full-width task list. Do not restore the six large summary cards or a permanently open inspector. State, verified parts, direction, speed, ETA, concurrency, retry, pause, and failure cause use real Core snapshots when integrated. A 100% byte bar is not “Completed” until verification succeeds.
 The first table column supports row selection and select-all for the current
 filtered result. Completed native downloads expose both Open and Show in
 Finder actions. Tables and Telegram source/file panes own bounded internal
@@ -193,11 +193,13 @@ Running native downloads update transferred bytes, current speed, progress,
 and ETA from real chunk events. Pause, resume, retry, and cancel controls invoke
 runtime commands. Persisted rows remain visible after restart; interrupted work
 stays queued until Telegram authorization is restored.
-Terminal native tasks expose a two-step Delete Task action. The confirmation
+Native task rows expose pause/resume/retry, cancel, terminal-task deletion, completed-file open/reveal, and Details according to their actual state. Bulk resume/pause/retry/cancel/delete stay above the table. With no visible selection they apply to the current filtered list; otherwise they apply only to selected visible rows. A collapsed batch checkbox includes its child tasks, with IDs deduplicated when expanded children are also selected. Unsupported actions are disabled. Errors remain visible in the toolbar.
+
+Terminal native tasks expose a two-step Delete Task action in the main list toolbar. The confirmation
 states that the completed user file is kept; deletion removes only TeleArk task
 history, its session log, and resumable partial/bitmap data.
 
-Every real transfer inspector includes Live and Replay modes backed by typed
+Details is an explicitly opened, closable modeless overlay with independent scrolling; it does not reduce the main table width or own task operation buttons. Escape dismisses it outside full screen. Every real transfer inspector includes Live and Replay modes backed by typed
 runtime telemetry and its permanent session log. Live shows the current
 C/W/F/P/E/Qe envelope, controller phase, measured goodput, BDP/inflight target,
 encryption/disk/CPU and queue waits, buffer budget, part map, bottleneck, and
@@ -209,8 +211,10 @@ honest unavailable state; preview connection rows must never appear for a real
 task.
 
 Uploads settings exposes the three soft-limit policies as `Respect`,
-`Adaptive Override`, and `Ignore`, with Adaptive Override selected by default
-for Maximum Throughput. The warning makes clear that this preference never
+`Adaptive Override`, and `Ignore`, with Adaptive Override selected by default.
+Download settings separately offers Balanced and Max Throughput, explains that
+the latter applies to native downloads at start/resume, and retains wrapping
+controls in all three locales. The warning makes clear that this preference never
 weakens protocol limits or FloodWait deadlines.
 
 Each Telegram source offers bounded batch download controls for sent-time and
@@ -227,7 +231,7 @@ bottom loading bar. Slow and failed requests expose localized guidance and a
 retry action. Its first column
 supports per-row selection and select-all for the current filtered result, while
 the final column retains direct single-file download. Clicking a row opens the
-fixed right-side message inspector without changing its checkbox state.
+right-side message inspector, shown only after a message is selected without changing its checkbox state.
 
 One batch occupies one Transfers row; activating the row
 expands its individual files without losing their independent controls or
@@ -326,3 +330,27 @@ layout-policy coverage, not pixel fidelity. The window launcher fits oversized
 requests to the active display before centering; the remaining captured
 comparison work covers the full route/locale matrix and authenticated Telegram
 states.
+
+## September 2026 list-first visual revision
+
+- Shared neutral surfaces, subtle borders, 6/8/12 px radii and a blue primary
+  component palette apply to every route and dialog, including Settings/Vault.
+  Ordinary cards do not cast individual shadows. Main page titles use 18 px
+  semibold text, while field labels and table metadata remain subordinate.
+- Library, file detail and Settings share a fixed, wrapping page toolbar.
+  Settings navigation is visually separate from content cards, with no extra
+  enclosing card. Upload has a left-aligned title and explicit close action.
+- Channel/Saved Messages browsing keeps filters compact and collapsible, with
+  selection/download controls immediately above the table. Empty inspectors do
+  not reserve table width. User/source names remain untouched.
+- Transfers reserves 152 px for row actions, keeps current speed at the 900 px
+  minimum, and progressively adds ETA and source/direction columns. Its 52 px
+  rows leave room for touch targets, filenames and progress. Checkbox controls
+  use the component library's keyboard-capable stateful control.
+- Search prompts never advertise a fabricated catalog size. Preview-only speed
+  totals, logs and connection tables have been removed from the queue footer.
+- Reference: the public product UI on https://pc.xunlei.com/ (reviewed
+  2026-09-06). Borrow task-list hierarchy and proximity of controls, without
+  copying implementation, assets, branding or promotional panels.
+
+See `UI_REVIEW.md` for verification evidence and remaining visual checks.

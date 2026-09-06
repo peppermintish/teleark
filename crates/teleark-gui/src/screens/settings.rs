@@ -13,8 +13,9 @@ use teleark_i18n::{
     format::{format_bytes, format_integer},
 };
 use teleark_runtime::{
-    AppearancePreference, SoftLimitPolicy, TelegramCredentialSource, default_database_path,
-    default_managed_directories, diagnostics_status, encrypted_part_plaintext_limit,
+    AppearancePreference, DownloadThroughputStrategy, SoftLimitPolicy, TelegramCredentialSource,
+    default_database_path, default_managed_directories, diagnostics_status,
+    encrypted_part_plaintext_limit,
 };
 
 use crate::{
@@ -37,11 +38,7 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let padding = layout.content_padding();
-        let toolbar = div()
-            .h(px(58.0))
-            .px(px(padding))
-            .flex()
-            .items_center()
+        let toolbar = components::page_toolbar(padding)
             .child(components::section_title(self.tr("settings-title")))
             .child(div().flex_1())
             .child(components::badge(
@@ -58,7 +55,7 @@ impl TeleArkApp {
                 },
             ));
 
-        let settings_nav = components::card()
+        let settings_nav = div()
             .w(px(layout.local_navigation_width()))
             .h_full()
             .flex_none()
@@ -399,7 +396,7 @@ impl TeleArkApp {
             .bg(if selected {
                 theme::blue_soft()
             } else {
-                theme::surface()
+                theme::canvas()
             })
             .text_color(if selected {
                 theme::blue()
@@ -542,6 +539,58 @@ impl TeleArkApp {
         let mut card = settings_card(
             self.tr("settings-download-title"),
             self.tr("settings-download-description"),
+        );
+        card = card.child(
+            div()
+                .mb_4()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.tr("settings-download-strategy-title")),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            components::button(
+                                "download-strategy-balanced",
+                                self.tr("settings-download-strategy-balanced"),
+                                None,
+                                self.preferences.download_throughput_strategy
+                                    == DownloadThroughputStrategy::Balanced,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.download_throughput_strategy =
+                                    DownloadThroughputStrategy::Balanced;
+                                this.persist_preferences(cx);
+                            })),
+                        )
+                        .child(
+                            components::button(
+                                "download-strategy-max",
+                                self.tr("settings-download-strategy-max"),
+                                None,
+                                self.preferences.download_throughput_strategy
+                                    == DownloadThroughputStrategy::MaxThroughput,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preferences.download_throughput_strategy =
+                                    DownloadThroughputStrategy::MaxThroughput;
+                                this.persist_preferences(cx);
+                            })),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("settings-download-strategy-description")),
+                ),
         );
         if let Some(directories) = directories {
             card = card

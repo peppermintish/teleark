@@ -137,14 +137,7 @@ impl TeleArkApp {
             |path| SharedString::from(path.to_string_lossy().into_owned()),
         );
 
-        let toolbar = div()
-            .min_h(px(58.0))
-            .px(px(padding))
-            .py_2()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_3()
+        let toolbar = components::page_toolbar(padding)
             .child(
                 components::icon_button(
                     "file-detail-back",

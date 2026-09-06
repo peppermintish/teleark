@@ -42,9 +42,9 @@ pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnost
 pub use teleark_telegram::DownloadPartState;
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
-    DOWNLOAD_PART_SIZE_BYTES, LaneTelemetry, MemoryCounters, ParameterBounds, PartCounters,
-    QueueCounters, SoftLimitPolicy, TransferBottleneck, TransferControlParameters,
-    TransferTelemetrySnapshot, TunableParameter,
+    DOWNLOAD_PART_SIZE_BYTES, DownloadThroughputStrategy, LaneTelemetry, MemoryCounters,
+    ParameterBounds, PartCounters, QueueCounters, SoftLimitPolicy, TransferBottleneck,
+    TransferControlParameters, TransferTelemetrySnapshot, TunableParameter,
 };
 pub use telegram::{
     DesktopTelegram, TelegramAuthState, TelegramChatSummary, TelegramFileFilter, TelegramFilePage,
@@ -84,6 +84,7 @@ pub struct DesktopPreferences {
     pub upload_hide_file_name: bool,
     pub upload_encrypt_metadata: bool,
     pub transfer_soft_limit_policy: SoftLimitPolicy,
+    pub download_throughput_strategy: DownloadThroughputStrategy,
     pub lock_vault_when_hidden: bool,
     pub index_batch_size: u16,
     pub notify_download_completed: bool,
@@ -101,6 +102,7 @@ impl Default for DesktopPreferences {
             upload_hide_file_name: true,
             upload_encrypt_metadata: true,
             transfer_soft_limit_policy: SoftLimitPolicy::AdaptiveOverride,
+            download_throughput_strategy: DownloadThroughputStrategy::Balanced,
             lock_vault_when_hidden: true,
             index_batch_size: 1_000,
             notify_download_completed: true,
@@ -1396,6 +1398,13 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
             "upload_encrypt_metadata" => {
                 preferences.upload_encrypt_metadata = parse_bool_setting(&setting.value)?;
             }
+            "download_throughput_strategy" => {
+                preferences.download_throughput_strategy = match setting.value.as_str() {
+                    "balanced" => DownloadThroughputStrategy::Balanced,
+                    "max_throughput" => DownloadThroughputStrategy::MaxThroughput,
+                    _ => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+                };
+            }
             "transfer_soft_limit_policy" => {
                 preferences.transfer_soft_limit_policy = match setting.value.as_str() {
                     "respect" => SoftLimitPolicy::Respect,
@@ -1476,7 +1485,12 @@ fn store_preferences(
         SoftLimitPolicy::AdaptiveOverride => "adaptive_override",
         SoftLimitPolicy::Ignore => "ignore",
     };
+    let download_strategy = match preferences.download_throughput_strategy {
+        DownloadThroughputStrategy::Balanced => "balanced",
+        DownloadThroughputStrategy::MaxThroughput => "max_throughput",
+    };
     let values = [
+        ("download_throughput_strategy", download_strategy.to_owned()),
         ("managed_files_root", managed_root.to_owned()),
         // Clear the retired values so older releases cannot reopen a stale
         // per-download prompt configuration after this version has run.
@@ -1808,6 +1822,39 @@ mod tests {
     }
 
     #[test]
+    fn throughput_preference_accepts_legacy_missing_and_rejects_unknown_values() {
+        let directory = tempfile::tempdir().expect("valid test fixture");
+        let mut database = Database::open(directory.path().join("preferences.sqlite3"))
+            .expect("valid test fixture");
+        database
+            .set_setting(&SettingRecord {
+                key: "preferences.v1.transfer_soft_limit_policy".to_owned(),
+                value: "ignore".to_owned(),
+                updated_at_unix_ms: 0,
+            })
+            .expect("valid test fixture");
+        let legacy = load_preferences(&database).expect("valid test fixture");
+        assert_eq!(
+            legacy.download_throughput_strategy,
+            DownloadThroughputStrategy::Balanced
+        );
+        assert_eq!(legacy.transfer_soft_limit_policy, SoftLimitPolicy::Ignore);
+        database
+            .set_setting(&SettingRecord {
+                key: "preferences.v1.download_throughput_strategy".to_owned(),
+                value: "unlimited".to_owned(),
+                updated_at_unix_ms: 0,
+            })
+            .expect("valid test fixture");
+        assert_eq!(
+            load_preferences(&database)
+                .expect_err("fixture must fail")
+                .kind(),
+            ApplicationErrorKind::Persistence
+        );
+    }
+
+    #[test]
     fn desktop_preferences_round_trip_as_one_validated_versioned_set() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database_path = directory.path().join("library.sqlite3");
@@ -1826,6 +1873,7 @@ mod tests {
             upload_hide_file_name: false,
             upload_encrypt_metadata: false,
             transfer_soft_limit_policy: SoftLimitPolicy::Ignore,
+            download_throughput_strategy: DownloadThroughputStrategy::MaxThroughput,
             lock_vault_when_hidden: false,
             index_batch_size: 500,
             notify_download_completed: false,

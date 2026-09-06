@@ -189,6 +189,7 @@ pub struct LocaleStartup {
 
 pub struct AppStartup {
     pub page: Page,
+    pub visual_preview: bool,
     pub show_upload: bool,
     pub skip_telegram_api_id_prompt: bool,
     pub locale: LocaleStartup,
@@ -220,14 +221,18 @@ struct CompactNavItem {
 
 pub struct TeleArkApp {
     pub(crate) page: Page,
+    visual_preview: bool,
     pub(crate) localizer: Localizer,
     pub(crate) search_input: Entity<InputState>,
     pub(crate) show_upload: bool,
     pub(crate) upload_queued: bool,
-    pub(crate) transfer_paused: bool,
     pub(crate) selected_file: usize,
     pub(crate) selected_transfer_keys: BTreeSet<u64>,
     pub(crate) pending_transfer_delete: Option<u64>,
+    pub(crate) pending_transfer_bulk_delete: Vec<u64>,
+    pub(crate) transfer_action_error: Option<teleark_core::ApplicationErrorKind>,
+    pub(crate) transfer_action_job: Option<screens::transfers::TransferActionJob>,
+    pub(crate) show_transfer_detail: bool,
     pub(crate) expanded_transfer_batches: BTreeSet<u64>,
     pub(crate) transfer_inspector_replay: bool,
     pub(crate) transfer_replay_cursor: usize,
@@ -329,6 +334,7 @@ impl TeleArkApp {
     ) -> Self {
         let AppStartup {
             page,
+            visual_preview,
             show_upload,
             skip_telegram_api_id_prompt,
             locale: locale_startup,
@@ -483,14 +489,18 @@ impl TeleArkApp {
             });
         let mut app = Self {
             page,
+            visual_preview,
             localizer,
             search_input,
             show_upload,
             upload_queued: false,
-            transfer_paused: false,
             selected_file: 0,
             selected_transfer_keys: BTreeSet::new(),
             pending_transfer_delete: None,
+            pending_transfer_bulk_delete: Vec::new(),
+            transfer_action_error: None,
+            transfer_action_job: None,
+            show_transfer_detail: false,
             expanded_transfer_batches: BTreeSet::new(),
             transfer_inspector_replay: false,
             transfer_replay_cursor: 0,
@@ -1498,6 +1508,10 @@ impl TeleArkApp {
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.show_transfer_detail = false;
+        self.pending_transfer_delete = None;
+        self.pending_transfer_bulk_delete.clear();
+        self.selected_transfer_keys.clear();
         if self.page == Page::Channel && page != Page::Channel {
             self.cancel_telegram_file_load(cx);
         }
@@ -2430,7 +2444,8 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let preview_backed = self.show_upload
+        let preview_backed = self.visual_preview
+            || self.show_upload
             || (self.page == Page::Transfers && self.transfers.is_none())
             || (self.page == Page::Library && is_preview_library_selection(self.nav_selection));
         let brand = div()
@@ -2439,7 +2454,7 @@ impl TeleArkApp {
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(if layout.is_compact() { 20.0 } else { 54.0 }))
+            .pl(px(20.0))
             .pr_4()
             .gap_2()
             .border_r_1()
@@ -2597,7 +2612,7 @@ impl TeleArkApp {
         let selected = self.nav_selection == id;
         div()
             .id(id)
-            .h(px(32.0))
+            .h(px(36.0))
             .mx_2()
             .px_3()
             .flex()
@@ -2655,7 +2670,7 @@ impl TeleArkApp {
         };
         div()
             .id(("sidebar-channel", chat_id.unsigned_abs()))
-            .h(px(32.0))
+            .h(px(36.0))
             .mx_2()
             .px_3()
             .flex()
@@ -2706,7 +2721,7 @@ impl TeleArkApp {
         let available = self.saved_messages_chat_id().is_some();
         div()
             .id(id)
-            .h(px(32.0))
+            .h(px(36.0))
             .mx_2()
             .px_3()
             .flex()
@@ -2776,7 +2791,7 @@ impl TeleArkApp {
                 .into_iter()
                 .filter(|snapshot| snapshot.state == teleark_runtime::VaultTransferState::Running)
             {
-                let speed = snapshot.average_bytes_per_second.unwrap_or(0);
+                let speed = snapshot.telemetry.goodput_bytes_per_second;
                 match snapshot.direction {
                     teleark_runtime::VaultTransferDirection::Upload => {
                         rates.upload_bytes_per_second =
@@ -3283,7 +3298,12 @@ impl Render for TeleArkApp {
                     EscapeBehavior::DismissTelegramApiIdPrompt => {
                         this.skip_telegram_api_id_prompt(cx);
                     }
-                    EscapeBehavior::Ignore => {}
+                    EscapeBehavior::Ignore => {
+                        this.show_transfer_detail = false;
+                        this.pending_transfer_delete = None;
+                        this.pending_transfer_bulk_delete.clear();
+                        cx.notify();
+                    }
                 }
             }))
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| {

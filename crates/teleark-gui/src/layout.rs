@@ -94,9 +94,9 @@ impl LayoutPolicy {
 
     pub(crate) fn transfer_inspector_width(self) -> f32 {
         match self.class {
-            WindowClass::Compact => 276.0,
-            WindowClass::Standard => 300.0,
-            WindowClass::Spacious => 340.0,
+            WindowClass::Compact => 400.0,
+            WindowClass::Standard => 420.0,
+            WindowClass::Spacious => 440.0,
         }
     }
 
@@ -105,11 +105,7 @@ impl LayoutPolicy {
     }
 
     pub(crate) fn shows_transfer_speed(self) -> bool {
-        !self.is_compact()
-    }
-
-    pub(crate) fn shows_transfer_destination(self) -> bool {
-        self.is_spacious()
+        true
     }
 
     pub(crate) fn local_navigation_width(self) -> f32 {
@@ -207,33 +203,29 @@ impl LayoutPolicy {
 
     #[cfg(test)]
     pub(crate) fn transfer_main_width(self) -> f32 {
-        self.route_width() - self.transfer_inspector_width()
+        self.route_width()
     }
 
     #[cfg(test)]
     pub(crate) fn transfer_filename_width(self) -> f32 {
         let optional_columns = if self.shows_transfer_source() {
-            108.0
+            108.0 + 76.0
         } else {
             0.0
         } + if self.shows_transfer_speed() {
-            82.0 + 64.0
-        } else {
-            0.0
-        } + if self.shows_transfer_destination() {
-            118.0
+            82.0 + if self.is_compact() { 0.0 } else { 64.0 }
         } else {
             0.0
         };
-        let fixed_columns = 28.0 + 76.0 + 112.0 + self.transfer_status_width() + optional_columns;
+        let fixed_columns =
+            28.0 + 76.0 + 112.0 + 152.0 + self.transfer_status_width() + optional_columns;
         self.transfer_main_width() - self.content_padding() * 2.0 - 24.0 - fixed_columns
     }
 
     #[cfg(test)]
     pub(crate) fn transfer_visible_rows_height(self) -> f32 {
-        let summary = if self.is_spacious() { 120.0 } else { 202.0 };
-        // The production transfer runtime omits preview-only diagnostics.
-        let bottom = 0.0;
+        let summary = 94.0;
+        let bottom = self.content_padding();
         let toolbar = 50.0;
         let table_chrome = 34.0 + if self.is_compact() { 58.0 } else { 38.0 };
         self.route_height() - summary - bottom - toolbar - table_chrome
@@ -241,9 +233,8 @@ impl LayoutPolicy {
 
     #[cfg(test)]
     pub(crate) fn transfer_inspector_scroll_height(self) -> f32 {
-        // Header/status block, tabs, and footer action remain fixed around the
-        // inspector's independently scrolling property list.
-        self.route_height() - 236.0 - 42.0 - 66.0
+        // Only header/status and tabs surround the scrollable diagnostic panel.
+        self.route_height() - 236.0 - 42.0
     }
 
     pub(crate) fn file_detail_parts_width(self) -> f32 {
@@ -355,14 +346,11 @@ mod tests {
         let large = LayoutPolicy::from_size(1920.0, 1080.0);
 
         assert!(!compact.shows_transfer_source());
-        assert!(!compact.shows_transfer_speed());
-        assert!(!compact.shows_transfer_destination());
+        assert!(compact.shows_transfer_speed());
         assert!(!default.shows_transfer_source());
         assert!(default.shows_transfer_speed());
-        assert!(!default.shows_transfer_destination());
         assert!(large.shows_transfer_source());
         assert!(large.shows_transfer_speed());
-        assert!(large.shows_transfer_destination());
     }
 
     #[test]
@@ -409,7 +397,7 @@ mod tests {
                 "transfers at {width}x{height}"
             );
             assert!(
-                policy.transfer_visible_rows_height() >= 38.0,
+                policy.transfer_visible_rows_height() >= 240.0,
                 "transfer table at {width}x{height}"
             );
             assert!(

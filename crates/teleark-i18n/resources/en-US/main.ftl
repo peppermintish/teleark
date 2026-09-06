@@ -304,7 +304,7 @@ error-transfer-unknown = The transfer failed because of an unknown error.
 
 ## Semantic IDs consumed by the GPUI reference screens.
 
-search-placeholder = Search 2,851,233 files by keyword, extension, or channel
+search-placeholder = Search filenames, captions, or channels
 connection-connected = Connected
 accounts-count = 3 accounts
 account-standard = Standard account
@@ -959,4 +959,18 @@ settings-transfer-soft-limit-description = Choose how the adaptive controller ha
 settings-transfer-soft-limit-respect = Respect
 settings-transfer-soft-limit-adaptive = Adaptive Override
 settings-transfer-soft-limit-ignore = Ignore
-settings-transfer-soft-limit-note = Maximum Throughput recommends Adaptive Override. Every conflict and override is shown in Live/Replay and written to the session log; Telegram protocol limits and FLOOD_WAIT remain mandatory.
+settings-transfer-soft-limit-note = This policy controls advisory active-file limits. Select download speed behavior separately under Download strategy. Conflicts are recorded in Live/Replay and the session log; Telegram protocol limits and FLOOD_WAIT remain mandatory.
+
+transfer-actions = Actions
+transfer-show-details = Details
+transfer-close-details = Close details
+transfer-scope-visible = Current list
+transfer-filter-count = { $label } · { $count }
+transfer-delete-confirmation = Delete { $count } tasks? Downloaded files will be kept. Task history, logs and partial downloads will be removed.
+transfer-filter-title = Filters
+transfer-actions-applying = Applying task actions…
+
+settings-download-strategy-title = Download strategy
+settings-download-strategy-balanced = Balanced
+settings-download-strategy-max = Max Throughput
+settings-download-strategy-description = Max Throughput quickly probes up to 64 parallel parts and tolerates transient errors. It can use more bandwidth and memory; server wait times remain mandatory. Applies when a native download starts or resumes. Encrypted Vault transfers are unchanged.

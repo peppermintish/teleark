@@ -51,14 +51,7 @@ impl TeleArkApp {
             IconName::LoaderCircle
         };
 
-        let toolbar = div()
-            .min_h(px(58.0))
-            .px(px(padding))
-            .py_2()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_3()
+        let toolbar = components::page_toolbar(padding)
             .child(
                 div()
                     .flex_1()
@@ -67,12 +60,14 @@ impl TeleArkApp {
                     .items_baseline()
                     .gap_3()
                     .child(components::section_title(self.tr("library-title")))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(result_label),
-                    ),
+                    .when(self.library_content.snapshot().is_some(), |title| {
+                        title.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(result_label),
+                        )
+                    }),
             )
             .child(
                 components::button("library-import", import_label, Some(import_icon), true)
@@ -103,6 +98,7 @@ impl TeleArkApp {
             });
 
         let categories = div()
+            .flex_none()
             .min_h(px(42.0))
             .px(px(padding))
             .py_1()
@@ -111,7 +107,7 @@ impl TeleArkApp {
             .gap_2()
             .border_t_1()
             .border_color(theme::border_subtle())
-            .overflow_x_scrollbar()
+            .flex_wrap()
             .children([
                 self.library_category_button("nav-all", "nav-all-files", cx),
                 self.library_category_button("nav-recent", "nav-recent", cx),

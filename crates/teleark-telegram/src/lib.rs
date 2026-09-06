@@ -85,6 +85,14 @@ pub trait DownloadObserver: Send + Sync {
         4
     }
 
+    fn max_part_attempts(&self) -> u32 {
+        MAX_DOWNLOAD_PART_ATTEMPTS
+    }
+
+    fn part_retry(&self, event: DownloadPartEvent, _server_wait: Option<Duration>) {
+        self.part_event(event);
+    }
+
     fn part_event(&self, _event: DownloadPartEvent) {}
 }
 
@@ -383,6 +391,7 @@ pub struct TelegramConnection {
     session: Arc<FileSession>,
     api_id: i32,
     qr_login_update: Arc<AtomicBool>,
+    download_flood_gate: Arc<DownloadFloodGate>,
     runner: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
 }
@@ -423,6 +432,7 @@ impl TelegramConnection {
             session,
             api_id: config.api_id,
             qr_login_update,
+            download_flood_gate: Arc::new(DownloadFloodGate::default()),
             runner: Some(runner),
             update_drain: Some(update_drain),
         })
@@ -788,16 +798,18 @@ impl TelegramConnection {
                 .map(|part_index| PendingDownloadPart {
                     part_index,
                     attempt: 1,
+                    ready_at: Instant::now(),
                 })
                 .collect::<VecDeque<_>>();
             let mut inflight_downloads = JoinSet::new();
+            let flood_gate = Arc::clone(&self.download_flood_gate);
             loop {
                 check_download_control(observer)?;
                 let desired_inflight = observer
                     .desired_inflight_parts()
                     .clamp(1, MAX_DOWNLOAD_INFLIGHT_PARTS);
-                while inflight_downloads.len() < desired_inflight {
-                    let Some(pending_part) = missing_parts.pop_front() else {
+                while inflight_downloads.len() < desired_inflight && flood_gate.remaining().is_zero() {
+                    let Some(pending_part) = take_ready_part(&mut missing_parts, Instant::now()) else {
                         break;
                     };
                     let part_index = pending_part.part_index;
@@ -812,6 +824,7 @@ impl TelegramConnection {
                     });
                     let client = self.client.clone();
                     let document = file.document.clone();
+                    let flood_gate = Arc::clone(&flood_gate);
                     inflight_downloads.spawn(async move {
                         let attempt_started = Instant::now();
                         let result = download_logical_part(
@@ -820,6 +833,7 @@ impl TelegramConnection {
                             part_index,
                             offset_bytes,
                             length_bytes,
+                            flood_gate,
                         )
                         .await;
                         (
@@ -833,9 +847,13 @@ impl TelegramConnection {
                         )
                     });
                 }
-                if inflight_downloads.is_empty() {
-                    break;
-                }
+                if inflight_downloads.is_empty() && missing_parts.is_empty() { break; }
+                // Keep cancellation responsive and drain healthy completions while a
+                // failed part backs off. The queue and JoinSet remain bounded.
+                let completion = tokio::select! {
+                    joined = inflight_downloads.join_next(), if !inflight_downloads.is_empty() => joined,
+                    () = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                };
                 let (
                     part_index,
                     offset_bytes,
@@ -843,27 +861,25 @@ impl TelegramConnection {
                     attempt,
                     attempt_elapsed_millis,
                     joined,
-                ) = inflight_downloads
-                    .join_next()
-                    .await
+                ) = completion
                     .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?
                     .map_err(|_| TelegramError::new(TelegramErrorKind::Network))?;
                 let downloaded = match joined {
                     Ok(downloaded) => downloaded,
                     Err(error) => {
-                        if let Some(retry_delay) = download_part_retry_delay(&error, attempt) {
-                            observer.part_event(DownloadPartEvent {
+                        if let Some(retry_delay) = download_part_retry_delay(&error, attempt, observer.max_part_attempts()) {
+                            observer.part_retry(DownloadPartEvent {
                                 part_index,
                                 offset_bytes,
                                 length_bytes,
                                 state: DownloadPartState::Retry,
                                 attempt,
                                 elapsed_millis: attempt_elapsed_millis,
-                            });
-                            wait_for_download_retry(observer, retry_delay).await?;
+                            }, error.retry_after());
                             missing_parts.push_front(PendingDownloadPart {
                                 part_index,
                                 attempt: attempt.saturating_add(1),
+                                ready_at: Instant::now() + retry_delay,
                             });
                             continue;
                         }
@@ -1059,31 +1075,55 @@ fn check_download_control(observer: &dyn DownloadObserver) -> Result<(), Telegra
     }
 }
 
-fn download_part_retry_delay(error: &TelegramError, attempt: u32) -> Option<Duration> {
-    if attempt >= MAX_DOWNLOAD_PART_ATTEMPTS {
+fn download_part_retry_delay(
+    error: &TelegramError,
+    attempt: u32,
+    max_attempts: u32,
+) -> Option<Duration> {
+    if attempt >= max_attempts.clamp(1, 8) {
         return None;
     }
     match error.kind() {
         TelegramErrorKind::FloodWait => error.retry_after(),
         TelegramErrorKind::Network => Some(
-            DOWNLOAD_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.saturating_sub(1).min(8)),
+            DOWNLOAD_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.saturating_sub(1).min(5)),
         ),
         _ => None,
     }
 }
 
-async fn wait_for_download_retry(
-    observer: &dyn DownloadObserver,
-    retry_delay: Duration,
-) -> Result<(), TelegramError> {
-    let retry_deadline = tokio::time::Instant::now() + retry_delay;
-    loop {
-        check_download_control(observer)?;
-        let now = tokio::time::Instant::now();
-        if now >= retry_deadline {
-            return Ok(());
+/// Shared by every chunk in this native download. A server wait extends the
+/// deadline immediately in the worker that receives it, before joining results.
+#[derive(Default)]
+struct DownloadFloodGate(std::sync::Mutex<Option<Instant>>);
+
+impl DownloadFloodGate {
+    fn extend(&self, delay: Duration) {
+        let mut deadline = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = Instant::now() + delay;
+        *deadline = Some(deadline.map_or(next, |old| old.max(next)));
+    }
+
+    fn remaining(&self) -> Duration {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_or(Duration::ZERO, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            })
+    }
+
+    async fn wait(&self) {
+        loop {
+            let delay = self.remaining();
+            if delay.is_zero() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
         }
-        tokio::time::sleep((retry_deadline - now).min(Duration::from_millis(250))).await;
     }
 }
 
@@ -1098,6 +1138,15 @@ struct DownloadedLogicalPart {
 struct PendingDownloadPart {
     part_index: u64,
     attempt: u32,
+    ready_at: Instant,
+}
+
+fn take_ready_part(
+    queue: &mut VecDeque<PendingDownloadPart>,
+    now: Instant,
+) -> Option<PendingDownloadPart> {
+    let position = queue.iter().position(|part| part.ready_at <= now)?;
+    queue.remove(position)
 }
 
 async fn download_logical_part(
@@ -1106,6 +1155,7 @@ async fn download_logical_part(
     part_index: u64,
     offset_bytes: u64,
     length_bytes: u64,
+    flood_gate: Arc<DownloadFloodGate>,
 ) -> Result<DownloadedLogicalPart, TelegramError> {
     let skipped_chunks = i32::try_from(offset_bytes / DOWNLOAD_CHUNK_SIZE)
         .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
@@ -1118,10 +1168,17 @@ async fn download_logical_part(
         .chunk_size(DOWNLOAD_CHUNK_SIZE as i32)
         .skip_chunks(skipped_chunks);
     while bytes.len() < expected_length {
+        flood_gate.wait().await;
         let chunk = download
             .next()
             .await
-            .map_err(map_invocation)?
+            .map_err(|error| {
+                let error = map_invocation(error);
+                if let Some(delay) = error.retry_after() {
+                    flood_gate.extend(delay);
+                }
+                error
+            })?
             .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?;
         let remaining = expected_length.saturating_sub(bytes.len());
         if chunk.len() > remaining {
@@ -1662,25 +1719,106 @@ mod tests {
         assert_eq!(error.kind(), TelegramErrorKind::FloodWait);
         assert_eq!(error.retry_after(), Some(Duration::from_secs(17)));
         assert_eq!(
-            download_part_retry_delay(&error, 1),
+            download_part_retry_delay(&error, 1, 4),
             Some(Duration::from_secs(17))
         );
+    }
+
+    #[test]
+    fn delayed_retry_does_not_block_ready_parts_or_run_before_deadline() {
+        let now = Instant::now();
+        let mut queue = VecDeque::from([
+            PendingDownloadPart {
+                part_index: 0,
+                attempt: 2,
+                ready_at: now + Duration::from_secs(2),
+            },
+            PendingDownloadPart {
+                part_index: 1,
+                attempt: 1,
+                ready_at: now,
+            },
+        ]);
+        assert_eq!(
+            take_ready_part(&mut queue, now)
+                .expect("valid test fixture")
+                .part_index,
+            1
+        );
+        assert!(take_ready_part(&mut queue, now + Duration::from_secs(1)).is_none());
+        let retry =
+            take_ready_part(&mut queue, now + Duration::from_secs(2)).expect("valid test fixture");
+        assert_eq!((retry.part_index, retry.attempt), (0, 2));
+        assert!(queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flood_wait_workers_remain_cancellable_without_sending_chunks() {
+        let gate = Arc::new(DownloadFloodGate::default());
+        gate.extend(Duration::from_secs(120));
+        let sent = Arc::new(AtomicBool::new(false));
+        let mut workers = JoinSet::new();
+        for _ in 0..64 {
+            let gate = Arc::clone(&gate);
+            let sent = Arc::clone(&sent);
+            workers.spawn(async move {
+                gate.wait().await;
+                sent.store(true, Ordering::Release);
+            });
+        }
+        tokio::task::yield_now().await;
+        assert!(!sent.load(Ordering::Acquire));
+        workers.abort_all();
+        while let Some(result) = workers.join_next().await {
+            assert!(result.expect_err("fixture must fail").is_cancelled());
+        }
+        assert!(!sent.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn aggressive_retries_are_bounded_and_do_not_override_server_delays() {
+        let network = TelegramError::new(TelegramErrorKind::Network);
+        assert_eq!(
+            download_part_retry_delay(&network, 4, 8),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            download_part_retry_delay(&network, 7, 8),
+            Some(Duration::from_secs(8))
+        );
+        assert_eq!(download_part_retry_delay(&network, 8, 100), None);
+        let flood = TelegramError::flood_wait(Duration::from_secs(120));
+        assert_eq!(
+            download_part_retry_delay(&flood, 7, 8),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(download_part_retry_delay(&flood, 8, 8), None);
+    }
+
+    #[test]
+    fn shared_flood_gate_never_shortens_an_existing_deadline() {
+        let gate = Arc::new(DownloadFloodGate::default());
+        let second_part = Arc::clone(&gate);
+        gate.extend(Duration::from_secs(120));
+        second_part.extend(Duration::from_secs(1));
+        assert!(gate.remaining() > Duration::from_secs(110));
+        assert!(second_part.remaining() > Duration::from_secs(110));
     }
 
     #[test]
     fn network_part_retry_is_bounded_with_exponential_backoff() {
         let network = TelegramError::new(TelegramErrorKind::Network);
         assert_eq!(
-            download_part_retry_delay(&network, 1),
+            download_part_retry_delay(&network, 1, 4),
             Some(Duration::from_millis(250))
         );
         assert_eq!(
-            download_part_retry_delay(&network, 2),
+            download_part_retry_delay(&network, 2, 4),
             Some(Duration::from_millis(500))
         );
-        assert_eq!(download_part_retry_delay(&network, 4), None);
+        assert_eq!(download_part_retry_delay(&network, 4, 4), None);
         assert_eq!(
-            download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Authorization), 1),
+            download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Authorization), 1, 8),
             None
         );
     }

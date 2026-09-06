@@ -24,9 +24,9 @@ mod fake;
 pub use adaptive::{
     AdaptiveControllerConfig, AdaptiveTransferController, ControllerDecision,
     ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase, DOWNLOAD_PART_SIZE_BYTES,
-    LaneTelemetry, MemoryCounters, ParameterBounds, PartCounters, PerformanceSample, QueueCounters,
-    SoftLimitPolicy, TransferBottleneck, TransferControlParameters, TransferTelemetrySnapshot,
-    TunableParameter,
+    DownloadThroughputStrategy, LaneTelemetry, MemoryCounters, ParameterBounds, PartCounters,
+    PerformanceSample, QueueCounters, SoftLimitPolicy, TransferBottleneck,
+    TransferControlParameters, TransferTelemetrySnapshot, TunableParameter,
 };
 pub use engine::{
     CrashPoint, DownloadSpec, StepReport, TransferEngine, TransferEngineConfig, UploadSpec,

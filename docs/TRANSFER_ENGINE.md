@@ -93,9 +93,40 @@ affected known lane until the exact deadline and emit a separate resume event.
 Runtime adapters advertise truthful bounds. The native grammers download path
 currently varies P in real time from the controller, while C, W, and F are
 clamped to the single owner/connection envelope actually exposed by the
-adapter. Its current single-owner P envelope is 4–24, based on recorded session
-evidence that higher multiplexing increased latency without sustained-goodput
-gain; samples use a five-second rolling window and probes settle for two seconds.
+adapter. Balanced retains P4–24 with two-second probe settling. A separate native-download
+Max Throughput starts at P4 and searches P1–64. Initial upward increments are
+limited to the current P and 16, so healthy growth is 4 → 8 → 16 → 32 → 48 → 64.
+Useful gains keep or restore fast growth. Steps of up to four parts require at
+least 1% measured gain; larger steps require 3%. Weak gains or regressions get a
+fresh five-second confirmation window before rollback, avoiding decisions from
+overlapping one-second samples of the five-second goodput window. Strong upward
+gains can still settle after one second.
+
+A failed upward probe restores the preceding value and records an exclusive
+upper bound. Further increments bisect the remaining interval down to one part,
+so 48 → 64 (failure) can recover via 56 and 60 instead of oscillating between
+48 and 64. Near an adjacent upper bound, or at P64, the controller also probes
+the lower interval: a successful coarse jump can have skipped a better point
+between its endpoints. Downward probes settle for five seconds; reductions that
+lose more than 0.5% goodput are undone and narrow the lower interval. Equal
+throughput permits fewer requests. Flat throughput therefore stops growth.
+Both directions record actual before/probed/after values for replay.
+
+Three isolated retry events per ten-second window remain tolerated. A burst
+restores the preceding upward probe; a burst without such a probe halves P,
+instead of retreating only one part per cooldown after a large capacity drop.
+The owner suppresses repeated burst reductions for ten seconds. Sustained
+settled goodput losses above 20% trigger downward testing; if a mid-probe rate
+collapse is far larger than the proportional reduction in work, old lower
+bounds are invalidated. This avoids being stranded at an obsolete high P.
+A lower-P probe that hurts throughput is rolled back rather than assuming that
+every link slowdown can be repaired by reducing concurrency.
+
+Learned upper boundaries are rechecked at +1 at least 60 seconds after failure,
+and completed lower-side searches are throttled for 60 seconds. Successful
+rechecks can grow their steps again. Bounds are observations local to an owner,
+not fixed Telegram limits. Native adapters still clamp physical C/W/F to their
+real capabilities and create no additional authorization sessions. See ADR 0011.
 Physical media-DC lane identities remain unavailable from the current
 grammers abstraction and are never fabricated in telemetry.
 
@@ -143,9 +174,10 @@ states, and the controller's desired P update live. The adapter preserves the
 private partial and bitmap across network/process interruption; explicit cancel
 removes both. Pause interrupts at a safe request boundary, while resume requests
 only missing parts. Transient network failures and FloodWait responses retry the
-affected logical part up to four total attempts with bounded backoff; FloodWait
-uses the server delay. A retry moves the controller into RECOVER and reduces P
-instead of terminating the whole file immediately. Retry and recovery decisions
+affected logical part up to four (Balanced) or eight (Max Throughput) total
+attempts with bounded backoff; FloodWait uses the server delay. Recovery
+reduces P according to the selected strategy instead of terminating the whole
+file immediately. Retry and recovery decisions
 are written to the session log. A per-channel batch request scans at most 50,000 messages, retains at
 most 2,000 matching files, and can filter inclusively by sent-time range and
 file kind. SQLite schema v7 persists bounded task history, progress, timing,
@@ -153,8 +185,11 @@ attempt, verification, failure data, source message metadata, and an optional
 batch identity. The batch and all child tasks are inserted atomically. GPUI
 renders the batch as one aggregate transfer row and expands its child tasks on
 request; individual task controls still target the durable child identity.
-Users can delete a terminal native task after an explicit second-click
-confirmation. Deletion removes its database history, session log, partial, and
+The desktop presents native lifecycle controls in each row and a scope-aware
+bulk toolbar. One retained, cancellable background command owner serializes a
+selected batch so persistence does not block the GPUI thread. Unsupported
+actions are disabled and failures are surfaced above the list. Users can delete
+terminal native tasks after an explicit task-count confirmation in that toolbar. Deletion removes its database history, session log, partial, and
 bitmap but never removes a successfully downloaded user file. Retryable failures
 retain only a valid bitmap/partial pair with completed data; zero-progress,
 incomplete, corrupt, non-retryable, cancelled, and user-deleted artifacts are
@@ -351,3 +386,33 @@ Use a fake Telegram transport, temporary checkpoint store, fake clock, controlle
 - complete fake-remote upload, database-loss recovery, and download equality.
 
 Ordinary CI never needs a Telegram account. Protected real-network tests are added only after fake tests pass and must use dedicated credentials outside the repository.
+
+## Native Max Throughput retry scheduling
+
+The throughput strategy is independent of `SoftLimitPolicy`. Native downloads
+capture the persisted strategy at each owner start (including resume/retry).
+Balanced allows four attempts per part; Max Throughput allows eight. Network
+failures back off from 250 ms exponentially to an eight-second ceiling. Delayed
+parts remain in the bounded missing-part queue while successful inflight parts
+continue to complete and write; one retry no longer blocks the entire writer.
+The event loop polls cancellation at most every 50 ms while waiting for parts
+(excluding filesystem work). JoinSet ownership cancels outstanding reads on exit.
+
+Max Throughput tolerates three retry events in a ten-second window, then
+reduces P once and suppresses further reductions/probes for ten seconds during
+that burst. Server waits bypass this tolerance: P reduces immediately and
+probing remains suppressed through the wait plus ten seconds. Every protocol
+chunk checks a shared native-download gate; a received FloodWait immediately
+extends it, never shortens it. The gate lives on the Telegram connection so
+next native tasks/resumes cannot erase it. Already sent RPCs may still finish.
+FloodWait retry durations are never capped by the network backoff ceiling;
+authorization and nonrecoverable failures are never retried. An exhausted
+retry budget terminates the task rather than bypassing a wait. The gate is
+in-memory and does not coordinate independent connections or process restarts.
+
+Bounds remain 64 inflight logical MiB parts and the existing 512 MiB controller
+budget; protocol chunks remain 512 KiB. No persistent part-map, checkpoint, or
+session-log encoding changes. Deterministic tests validate ramp, regression,
+retry tolerance, memory protection, retry bounds and shared deadlines. Real
+Telegram throughput and account-limit incidence still require credentialed
+measurement; synthetic tests are not bandwidth benchmarks.

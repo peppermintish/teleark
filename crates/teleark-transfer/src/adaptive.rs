@@ -15,6 +15,14 @@ pub enum ControllerPhase {
     Recover,
 }
 
+/// Throughput preference is independent of Telegram's advisory active-file limits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DownloadThroughputStrategy {
+    #[default]
+    Balanced,
+    MaxThroughput,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftLimitPolicy {
     Respect,
@@ -158,6 +166,7 @@ impl ParameterBounds {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdaptiveControllerConfig {
+    pub download_strategy: DownloadThroughputStrategy,
     pub transfer_connections: ParameterBounds,
     pub inflight_rpcs_per_connection: ParameterBounds,
     pub active_files: ParameterBounds,
@@ -185,6 +194,7 @@ impl AdaptiveControllerConfig {
             });
         }
         Ok(Self {
+            download_strategy: DownloadThroughputStrategy::Balanced,
             transfer_connections: ParameterBounds::new(1, 16, 1)?,
             inflight_rpcs_per_connection: ParameterBounds::new(1, 32, 4)?,
             active_files: ParameterBounds::new(1, 32, 1)?,
@@ -359,6 +369,7 @@ pub struct TransferTelemetrySnapshot {
 struct PendingProbe {
     parameter: TunableParameter,
     before: TransferControlParameters,
+    probed: TransferControlParameters,
     baseline_goodput_bytes_per_second: u64,
     confirmation_count: u8,
     started_at_millis: u64,
@@ -379,6 +390,16 @@ pub struct AdaptiveTransferController {
     decisions: VecDeque<ControllerDecision>,
     lanes: BTreeMap<u16, LaneTelemetry>,
     latest_sample: PerformanceSample,
+    retry_window_started: u64,
+    retries_in_window: u32,
+    probe_after_millis: u64,
+    download_probe_step: u16,
+    failed_download_parts: Option<u16>,
+    boundary_recheck_at_millis: u64,
+    download_downsearch: bool,
+    stable_drop_since: Option<u64>,
+    download_lower_parts: u16,
+    downsearch_after_millis: u64,
 }
 
 impl AdaptiveTransferController {
@@ -415,6 +436,16 @@ impl AdaptiveTransferController {
             decisions: VecDeque::with_capacity(config.decision_history_capacity),
             lanes: BTreeMap::new(),
             latest_sample: PerformanceSample::default(),
+            retry_window_started: 0,
+            retries_in_window: 0,
+            probe_after_millis: 0,
+            download_probe_step: config.inflight_parts_per_file.probe_step,
+            failed_download_parts: None,
+            boundary_recheck_at_millis: 0,
+            download_downsearch: false,
+            stable_drop_since: None,
+            download_lower_parts: config.inflight_parts_per_file.minimum.saturating_sub(1),
+            downsearch_after_millis: 0,
         })
     }
 
@@ -510,6 +541,32 @@ impl AdaptiveTransferController {
             return self.evaluate_probe(pending, sample);
         }
 
+        if self.aggressive_download() && sample.observed_at_millis >= self.probe_after_millis {
+            let baseline = self.baseline_goodput_bytes_per_second.unwrap_or_default();
+            if baseline > 0
+                && percentage_change_basis_points(baseline, sample.goodput_bytes_per_second)
+                    < -2_000
+            {
+                let since = *self
+                    .stable_drop_since
+                    .get_or_insert(sample.observed_at_millis);
+                if sample.observed_at_millis.saturating_sub(since) >= 5_000 {
+                    // Capacity can shrink even at a settled P without producing errors.
+                    // Test lower P; don't assume every speed drop is congestion.
+                    self.download_downsearch = true;
+                    self.download_lower_parts = self
+                        .config
+                        .inflight_parts_per_file
+                        .minimum
+                        .saturating_sub(1);
+                    self.stable_drop_since = None;
+                }
+            } else {
+                self.stable_drop_since = None;
+                self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
+            }
+        }
+
         if self.baseline_goodput_bytes_per_second.is_none() {
             self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
         }
@@ -562,10 +619,81 @@ impl AdaptiveTransferController {
 
     pub fn recover_from_part_retry(&mut self, sample: PerformanceSample) -> ControllerDecision {
         self.latest_sample = sample;
+        if self.aggressive_download() && sample.flood_wait_seconds.is_none() {
+            if sample
+                .observed_at_millis
+                .saturating_sub(self.retry_window_started)
+                >= 10_000
+            {
+                self.retry_window_started = sample.observed_at_millis;
+                self.retries_in_window = 0;
+            }
+            self.retries_in_window = self.retries_in_window.saturating_add(1);
+            // Isolated failures and a single burst must not reduce P once per part.
+            if self.retries_in_window <= 3 || sample.observed_at_millis < self.probe_after_millis {
+                return self.record_decision(
+                    None,
+                    self.parameters,
+                    self.parameters,
+                    sample.goodput_bytes_per_second,
+                    sample.goodput_bytes_per_second,
+                    ControllerDecisionOutcome::Confirm,
+                    ControllerDecisionReason::PartRetryRequired,
+                    sample.affected_lane,
+                    None,
+                );
+            }
+            self.probe_after_millis = sample.observed_at_millis.saturating_add(10_000);
+        }
+        if let Some(seconds) = sample.flood_wait_seconds {
+            self.probe_after_millis = self.probe_after_millis.max(
+                sample
+                    .observed_at_millis
+                    .saturating_add(u64::from(seconds).saturating_mul(1_000))
+                    .saturating_add(10_000),
+            );
+        }
         self.phase = ControllerPhase::Recover;
         let before = self.parameters;
-        self.decrease(TunableParameter::InflightPartsPerFile);
+        if self.aggressive_download() {
+            let restored = self
+                .pending_probe
+                .filter(|pending| {
+                    pending.parameter == TunableParameter::InflightPartsPerFile
+                        && pending.probed.inflight_parts_per_file
+                            > pending.before.inflight_parts_per_file
+                })
+                .map_or_else(
+                    || {
+                        // A previously safe envelope may now be far too large.
+                        before.inflight_parts_per_file / 2
+                    },
+                    |pending| pending.before.inflight_parts_per_file,
+                )
+                .max(self.config.inflight_parts_per_file.minimum);
+            self.note_download_boundary(
+                before.inflight_parts_per_file,
+                restored,
+                sample.observed_at_millis,
+            );
+            self.parameters.inflight_parts_per_file = restored;
+        } else {
+            self.decrease(TunableParameter::InflightPartsPerFile);
+        }
+        self.download_lower_parts = if self.pending_probe.is_some_and(|pending| {
+            pending.probed.inflight_parts_per_file > pending.before.inflight_parts_per_file
+        }) {
+            self.download_lower_parts
+                .min(self.parameters.inflight_parts_per_file.saturating_sub(1))
+        } else {
+            self.config
+                .inflight_parts_per_file
+                .minimum
+                .saturating_sub(1)
+        };
         self.pending_probe = None;
+        self.download_downsearch = false;
+        self.stable_drop_since = None;
         self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
         self.record_decision(
             Some(TunableParameter::InflightPartsPerFile),
@@ -574,7 +702,11 @@ impl AdaptiveTransferController {
             sample.goodput_bytes_per_second,
             sample.goodput_bytes_per_second,
             ControllerDecisionOutcome::Recover,
-            ControllerDecisionReason::PartRetryRequired,
+            if sample.flood_wait_seconds.is_some() {
+                ControllerDecisionReason::FloodWaitRequired
+            } else {
+                ControllerDecisionReason::PartRetryRequired
+            },
             sample.affected_lane,
             sample.flood_wait_seconds,
         )
@@ -624,7 +756,22 @@ impl AdaptiveTransferController {
         sample: PerformanceSample,
     ) -> ControllerDecision {
         let before = self.parameters;
-        self.increase(parameter);
+        if self.aggressive_download()
+            && self.download_downsearch
+            && parameter == TunableParameter::InflightPartsPerFile
+        {
+            self.parameters.inflight_parts_per_file = self
+                .download_lower_parts
+                .saturating_add(
+                    before
+                        .inflight_parts_per_file
+                        .saturating_sub(self.download_lower_parts)
+                        / 2,
+                )
+                .max(self.config.inflight_parts_per_file.minimum);
+        } else {
+            self.increase(parameter);
+        }
         if before == self.parameters {
             return self.record_decision(
                 Some(parameter),
@@ -646,6 +793,7 @@ impl AdaptiveTransferController {
         self.pending_probe = Some(PendingProbe {
             parameter,
             before,
+            probed: self.parameters,
             baseline_goodput_bytes_per_second: sample.goodput_bytes_per_second,
             confirmation_count: 0,
             started_at_millis: sample.observed_at_millis,
@@ -682,11 +830,14 @@ impl AdaptiveTransferController {
         pending: PendingProbe,
         sample: PerformanceSample,
     ) -> ControllerDecision {
-        if sample.observed_at_millis
-            < pending
-                .started_at_millis
-                .saturating_add(self.config.probe_settle_millis)
-        {
+        let downward =
+            pending.probed.inflight_parts_per_file < pending.before.inflight_parts_per_file;
+        let settle = if self.aggressive_download() && (downward || pending.confirmation_count > 0) {
+            self.config.probe_settle_millis.max(5_000)
+        } else {
+            self.config.probe_settle_millis
+        };
+        if sample.observed_at_millis < pending.started_at_millis.saturating_add(settle) {
             self.phase = ControllerPhase::Probe;
             return self.record_decision(
                 Some(pending.parameter),
@@ -704,6 +855,141 @@ impl AdaptiveTransferController {
             pending.baseline_goodput_bytes_per_second,
             sample.goodput_bytes_per_second,
         );
+        if self.aggressive_download() && pending.parameter == TunableParameter::InflightPartsPerFile
+        {
+            if downward {
+                self.pending_probe = None;
+                self.stable_drop_since = None;
+                if change >= -50 {
+                    // Equal speed with fewer requests permits a further downward test.
+                    self.note_download_boundary(
+                        pending.before.inflight_parts_per_file,
+                        pending.probed.inflight_parts_per_file,
+                        sample.observed_at_millis,
+                    );
+                    self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
+                    self.download_downsearch = self.parameters.inflight_parts_per_file
+                        > self.config.inflight_parts_per_file.minimum
+                        && self.parameters.inflight_parts_per_file
+                            > self.download_lower_parts.saturating_add(1);
+                    if !self.download_downsearch {
+                        self.downsearch_after_millis =
+                            sample.observed_at_millis.saturating_add(60_000);
+                    }
+                    return self.record_decision(
+                        Some(pending.parameter),
+                        pending.before,
+                        self.parameters,
+                        pending.baseline_goodput_bytes_per_second,
+                        sample.goodput_bytes_per_second,
+                        ControllerDecisionOutcome::Keep,
+                        ControllerDecisionReason::ThroughputGainBelowThreshold,
+                        None,
+                        None,
+                    );
+                }
+                // A lower rate at lower P is evidence that reducing requests didn't help.
+                self.parameters = pending.before;
+                let proportional_rate = pending
+                    .baseline_goodput_bytes_per_second
+                    .saturating_mul(u64::from(pending.probed.inflight_parts_per_file))
+                    / u64::from(pending.before.inflight_parts_per_file.max(1));
+                self.download_lower_parts = if percentage_change_basis_points(
+                    proportional_rate,
+                    sample.goodput_bytes_per_second,
+                ) < -5_000
+                {
+                    // A collapse far larger than the reduced work invalidates the
+                    // old lower bound, including when it occurs mid-probe.
+                    self.config
+                        .inflight_parts_per_file
+                        .minimum
+                        .saturating_sub(1)
+                } else {
+                    pending.probed.inflight_parts_per_file
+                };
+                self.download_downsearch = self.parameters.inflight_parts_per_file
+                    > self.download_lower_parts.saturating_add(1);
+                if !self.download_downsearch {
+                    self.downsearch_after_millis = sample.observed_at_millis.saturating_add(60_000);
+                }
+                self.baseline_goodput_bytes_per_second =
+                    Some(pending.baseline_goodput_bytes_per_second);
+                // A failed downward probe is a lower bound, not evidence that
+                // the restored P is an upper bound. Retain the previous upper
+                // interval so upward fine probes can fill its unused capacity.
+                return self.record_decision(
+                    Some(pending.parameter),
+                    pending.probed,
+                    pending.before,
+                    pending.baseline_goodput_bytes_per_second,
+                    sample.goodput_bytes_per_second,
+                    ControllerDecisionOutcome::Rollback,
+                    ControllerDecisionReason::ThroughputRegressed,
+                    None,
+                    None,
+                );
+            }
+            let step = pending
+                .probed
+                .inflight_parts_per_file
+                .saturating_sub(pending.before.inflight_parts_per_file);
+            let useful_gain = if step <= 4 {
+                100
+            } else {
+                i32::from(self.config.keep_gain_basis_points)
+            };
+            if change < useful_gain && pending.confirmation_count == 0 {
+                self.pending_probe = Some(PendingProbe {
+                    confirmation_count: 1,
+                    started_at_millis: sample.observed_at_millis,
+                    ..pending
+                });
+                return self.record_decision(
+                    Some(pending.parameter),
+                    pending.before,
+                    self.parameters,
+                    pending.baseline_goodput_bytes_per_second,
+                    sample.goodput_bytes_per_second,
+                    ControllerDecisionOutcome::Confirm,
+                    ControllerDecisionReason::ThroughputNeedsConfirmation,
+                    None,
+                    None,
+                );
+            }
+            if change >= useful_gain {
+                self.download_lower_parts = pending.before.inflight_parts_per_file;
+                if self.failed_download_parts.is_none() {
+                    self.download_probe_step = self
+                        .download_probe_step
+                        .saturating_mul(2)
+                        .min(self.config.inflight_parts_per_file.probe_step);
+                }
+                self.pending_probe = None;
+                self.stable_drop_since = None;
+                self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
+                return self.record_decision(
+                    Some(pending.parameter),
+                    pending.before,
+                    self.parameters,
+                    pending.baseline_goodput_bytes_per_second,
+                    sample.goodput_bytes_per_second,
+                    ControllerDecisionOutcome::Keep,
+                    ControllerDecisionReason::ThroughputImproved,
+                    None,
+                    None,
+                );
+            }
+            self.note_download_boundary(
+                pending.probed.inflight_parts_per_file,
+                pending.before.inflight_parts_per_file,
+                sample.observed_at_millis,
+            );
+            self.stable_drop_since = None;
+            self.probe_after_millis = sample
+                .observed_at_millis
+                .saturating_add(if change < -1_500 { 10_000 } else { 0 });
+        }
         if change >= i32::from(self.config.keep_gain_basis_points) {
             self.pending_probe = None;
             self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
@@ -749,7 +1035,7 @@ impl AdaptiveTransferController {
         };
         self.record_decision(
             Some(pending.parameter),
-            self.parameters_with_probe_value(pending),
+            pending.probed,
             pending.before,
             pending.baseline_goodput_bytes_per_second,
             sample.goodput_bytes_per_second,
@@ -768,10 +1054,52 @@ impl AdaptiveTransferController {
         )
     }
 
+    fn aggressive_download(&self) -> bool {
+        !self.upload && self.config.download_strategy == DownloadThroughputStrategy::MaxThroughput
+    }
+
     fn next_probe(
         &mut self,
         sample: PerformanceSample,
     ) -> Option<(TunableParameter, ControllerDecisionReason)> {
+        if sample.observed_at_millis < self.probe_after_millis {
+            return None;
+        }
+        if self.aggressive_download()
+            && !self.download_downsearch
+            && sample.observed_at_millis >= self.downsearch_after_millis
+            && (self.failed_download_parts.is_some_and(|upper| {
+                upper <= self.parameters.inflight_parts_per_file.saturating_add(1)
+            }) || self.parameters.inflight_parts_per_file
+                == self.config.inflight_parts_per_file.maximum)
+            && self.parameters.inflight_parts_per_file > self.download_lower_parts.saturating_add(1)
+        {
+            // A coarse successful jump may have skipped a better point on its
+            // left. Refine both sides of the peak, not just the error ceiling.
+            self.download_downsearch = true;
+        }
+        if self.aggressive_download() && self.download_downsearch {
+            if self.parameters.inflight_parts_per_file > self.config.inflight_parts_per_file.minimum
+                && self.parameters.inflight_parts_per_file
+                    > self.download_lower_parts.saturating_add(1)
+            {
+                return Some((
+                    TunableParameter::InflightPartsPerFile,
+                    ControllerDecisionReason::ThroughputRegressed,
+                ));
+            }
+            self.download_downsearch = false;
+            self.baseline_goodput_bytes_per_second = Some(sample.goodput_bytes_per_second);
+        }
+        if self.aggressive_download()
+            && self.failed_download_parts.is_some()
+            && sample.observed_at_millis >= self.boundary_recheck_at_millis
+        {
+            // Old failures are observations, not permanent server limits. Recheck
+            // at one-part resolution instead of restarting the coarse ramp.
+            self.failed_download_parts = None;
+            self.download_probe_step = 1;
+        }
         if self.upload
             && sample.network_waiting_for_encryption_millis
                 > sample
@@ -855,10 +1183,40 @@ impl AdaptiveTransferController {
     }
 
     fn can_increase(&self, parameter: TunableParameter) -> bool {
+        if self.aggressive_download() && parameter == TunableParameter::InflightPartsPerFile {
+            return self.next_download_parts() > self.parameters.inflight_parts_per_file;
+        }
         self.parameters.value(parameter) < self.config.bounds(parameter).maximum
     }
 
+    fn next_download_parts(&self) -> u16 {
+        let current = self.parameters.inflight_parts_per_file;
+        let step = self
+            .failed_download_parts
+            .map_or(self.download_probe_step, |failed| {
+                self.download_probe_step
+                    .min(failed.saturating_sub(current) / 2)
+            })
+            .min(current.max(1));
+        current
+            .saturating_add(step)
+            .min(self.config.inflight_parts_per_file.maximum)
+    }
+
+    fn note_download_boundary(&mut self, failed: u16, restored: u16, observed_at: u64) {
+        self.failed_download_parts = Some(
+            self.failed_download_parts
+                .map_or(failed, |old| old.min(failed)),
+        );
+        self.download_probe_step = (failed.saturating_sub(restored) / 2).max(1);
+        self.boundary_recheck_at_millis = observed_at.saturating_add(60_000);
+    }
+
     fn increase(&mut self, parameter: TunableParameter) {
+        if self.aggressive_download() && parameter == TunableParameter::InflightPartsPerFile {
+            self.parameters.inflight_parts_per_file = self.next_download_parts();
+            return;
+        }
         let bounds = self.config.bounds(parameter);
         let current = self.parameters.value(parameter);
         self.parameters.set_value(
@@ -878,20 +1236,6 @@ impl AdaptiveTransferController {
                 .saturating_sub(bounds.probe_step)
                 .max(bounds.minimum),
         );
-    }
-
-    fn parameters_with_probe_value(&self, pending: PendingProbe) -> TransferControlParameters {
-        let mut probed = pending.before;
-        let bounds = self.config.bounds(pending.parameter);
-        probed.set_value(
-            pending.parameter,
-            pending
-                .before
-                .value(pending.parameter)
-                .saturating_add(bounds.probe_step)
-                .min(bounds.maximum),
-        );
-        probed
     }
 
     fn resume_expired_lane(&mut self, observed_at_millis: u64) -> Option<u16> {
@@ -1032,6 +1376,376 @@ mod tests {
             inflight_bytes: 1024 * 1024,
             ..PerformanceSample::default()
         }
+    }
+
+    fn aggressive_controller() -> AdaptiveTransferController {
+        aggressive_controller_at(16)
+    }
+
+    fn aggressive_controller_at(initial: u16) -> AdaptiveTransferController {
+        let mut config = AdaptiveControllerConfig::maximum_throughput(512 * 1024 * 1024, 8)
+            .expect("valid test fixture");
+        config.download_strategy = DownloadThroughputStrategy::MaxThroughput;
+        config.transfer_connections = ParameterBounds::new(1, 1, 1).expect("fixed connection");
+        config.inflight_rpcs_per_connection =
+            ParameterBounds::new(1, 1, 1).expect("fixed RPC owner");
+        config.active_files = ParameterBounds::new(1, 1, 1).expect("fixed file owner");
+        config.inflight_parts_per_file =
+            ParameterBounds::new(1, 64, 16).expect("valid test fixture");
+        AdaptiveTransferController::with_initial_parameters(
+            config,
+            false,
+            TransferControlParameters {
+                inflight_parts_per_file: initial,
+                ..TransferControlParameters::conservative_download()
+            },
+        )
+        .expect("valid test fixture")
+    }
+
+    fn large_sample(time: u64, speed: u64) -> PerformanceSample {
+        PerformanceSample {
+            active_large_files: 1,
+            ..sample(time, speed)
+        }
+    }
+
+    fn accepted_parts(controller: &AdaptiveTransferController) -> u16 {
+        controller
+            .pending_probe
+            .map_or(controller.parameters.inflight_parts_per_file, |pending| {
+                pending.before.inflight_parts_per_file
+            })
+    }
+
+    // A deterministic capacity model: useful bytes scale with P until the
+    // selected boundary, above which either retry bursts or rate collapse occur.
+    fn capacity_tick(
+        controller: &mut AdaptiveTransferController,
+        time: u64,
+        safe_parts: u16,
+        errors: bool,
+    ) {
+        let parts = controller.parameters().inflight_parts_per_file;
+        if parts > safe_parts && errors {
+            for _ in 0..4 {
+                controller
+                    .recover_from_part_retry(large_sample(time, u64::from(safe_parts) * 1_000_000));
+            }
+        } else {
+            let goodput = if parts > safe_parts {
+                1_000_000
+            } else {
+                u64::from(parts) * 1_000_000
+            };
+            controller.observe(large_sample(time, goodput));
+        }
+    }
+
+    #[test]
+    fn healthy_capacity_still_ramps_quickly_to_64() {
+        let mut controller = aggressive_controller_at(4);
+        for time in 0..=9 {
+            capacity_tick(&mut controller, time * 1_000, 64, false);
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 64);
+        assert_eq!(controller.failed_download_parts, None);
+    }
+
+    #[test]
+    fn retry_boundaries_between_48_and_64_converge_without_repeating_coarse_jumps() {
+        for safe_parts in 49..64 {
+            let mut controller = aggressive_controller();
+            for time in 0..60 {
+                capacity_tick(&mut controller, time * 1_000, safe_parts, true);
+            }
+            assert_eq!(
+                accepted_parts(&controller),
+                safe_parts,
+                "safe P={safe_parts}"
+            );
+            assert_eq!(controller.failed_download_parts, Some(safe_parts + 1));
+            let decisions = controller.snapshot().decisions;
+            assert_eq!(
+                decisions
+                    .iter()
+                    .filter(
+                        |decision| decision.outcome == ControllerDecisionOutcome::Probe
+                            && decision.after.inflight_parts_per_file == 64
+                    )
+                    .count(),
+                1,
+                "must not repeatedly jump back to 64"
+            );
+        }
+    }
+
+    #[test]
+    fn throughput_regression_refines_and_replay_records_actual_probe_values() {
+        let mut controller = aggressive_controller();
+        for time in 0..60 {
+            capacity_tick(&mut controller, time * 1_000, 60, false);
+        }
+        assert_eq!(accepted_parts(&controller), 60);
+        let rollbacks: Vec<_> = controller
+            .snapshot()
+            .decisions
+            .into_iter()
+            .filter(|decision| {
+                decision.outcome == ControllerDecisionOutcome::Rollback
+                    && decision.before.inflight_parts_per_file
+                        > decision.after.inflight_parts_per_file
+            })
+            .map(|decision| {
+                (
+                    decision.before.inflight_parts_per_file,
+                    decision.after.inflight_parts_per_file,
+                )
+            })
+            .collect();
+        assert_eq!(rollbacks, vec![(64, 48), (62, 60), (61, 60)]);
+    }
+
+    #[test]
+    fn learned_boundary_is_rechecked_slowly_and_recovers_when_capacity_improves() {
+        let mut controller = aggressive_controller();
+        for time in 0..60 {
+            capacity_tick(&mut controller, time * 1_000, 60, true);
+        }
+        assert_eq!(accepted_parts(&controller), 60);
+        let recheck = controller.boundary_recheck_at_millis;
+        capacity_tick(&mut controller, recheck - 1, 64, false);
+        assert_eq!(accepted_parts(&controller), 60);
+        capacity_tick(&mut controller, recheck, 64, false);
+        assert_eq!(controller.parameters().inflight_parts_per_file, 61);
+        for time in 1..=8 {
+            capacity_tick(&mut controller, recheck + time * 1_000, 64, false);
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 64);
+    }
+
+    #[test]
+    fn falling_capacity_can_lower_a_previously_learned_boundary() {
+        let mut controller = aggressive_controller();
+        for time in 0..60 {
+            capacity_tick(&mut controller, time * 1_000, 60, true);
+        }
+        for time in 60..120 {
+            capacity_tick(&mut controller, time * 1_000, 56, true);
+        }
+        assert_eq!(accepted_parts(&controller), 56);
+        assert_eq!(controller.failed_download_parts, Some(57));
+    }
+
+    #[test]
+    fn flat_throughput_stops_growth_instead_of_drifting_to_64() {
+        let mut controller = aggressive_controller_at(4);
+        for time in 0..60 {
+            controller.observe(large_sample(time * 1_000, 100_000_000));
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 1);
+        assert_eq!(controller.failed_download_parts, Some(2));
+    }
+
+    #[test]
+    fn a_transient_rate_dip_is_confirmed_over_a_fresh_rolling_window() {
+        let mut controller = aggressive_controller();
+        controller.observe(large_sample(0, 100));
+        assert_eq!(
+            controller.observe(large_sample(1_000, 95)).outcome,
+            ControllerDecisionOutcome::Confirm
+        );
+        assert_eq!(
+            controller.observe(large_sample(5_999, 95)).outcome,
+            ControllerDecisionOutcome::Confirm
+        );
+        assert_eq!(
+            controller.observe(large_sample(6_000, 120)).outcome,
+            ControllerDecisionOutcome::Keep
+        );
+        assert_eq!(controller.failed_download_parts, None);
+    }
+
+    #[test]
+    fn weak_and_fast_network_retry_thresholds_are_found_across_the_whole_envelope() {
+        for safe in 1..=64 {
+            let mut controller = aggressive_controller_at(4);
+            for time in 0..60 {
+                capacity_tick(&mut controller, time * 1_000, safe, true);
+            }
+            assert_eq!(accepted_parts(&controller), safe, "capacity {safe}");
+        }
+    }
+
+    #[test]
+    fn smooth_peaks_inside_coarse_successful_jumps_are_not_skipped() {
+        for optimum in [10, 12, 15, 18, 20, 49, 55, 60] {
+            let mut controller = aggressive_controller_at(4);
+            for time in 0..180 {
+                let parts = u64::from(controller.parameters().inflight_parts_per_file);
+                let peak = u64::from(optimum);
+                let speed = if parts <= peak {
+                    parts * 1_000_000
+                } else {
+                    peak * peak * 1_000_000 / parts
+                };
+                controller.observe(large_sample(time * 1_000, speed));
+            }
+            assert!(
+                controller
+                    .parameters()
+                    .inflight_parts_per_file
+                    .abs_diff(optimum)
+                    <= 1,
+                "peak {optimum}, observed {}",
+                controller.parameters().inflight_parts_per_file
+            );
+        }
+    }
+
+    #[test]
+    fn weak_network_rate_optima_are_found_without_requiring_errors() {
+        for safe in 10..=20 {
+            let mut controller = aggressive_controller_at(4);
+            for time in 0..100 {
+                capacity_tick(&mut controller, time * 1_000, safe, false);
+            }
+            assert_eq!(accepted_parts(&controller), safe, "capacity {safe}");
+        }
+    }
+
+    #[test]
+    fn a_severe_capacity_drop_does_not_decrease_one_part_per_cooldown() {
+        let mut controller = aggressive_controller_at(4);
+        for time in 0..20 {
+            capacity_tick(&mut controller, time * 1_000, 64, true);
+        }
+        for time in 20..100 {
+            capacity_tick(&mut controller, time * 1_000, 12, true);
+        }
+        assert_eq!(
+            accepted_parts(&controller),
+            12,
+            "{:?}",
+            controller
+                .snapshot()
+                .decisions
+                .iter()
+                .filter(|d| d.outcome != ControllerDecisionOutcome::Confirm)
+                .map(|d| (
+                    d.observed_at_millis,
+                    d.before.inflight_parts_per_file,
+                    d.after.inflight_parts_per_file,
+                    d.outcome,
+                    d.observed_goodput_bytes_per_second
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn settled_rate_collapse_searches_downward_and_then_refines() {
+        let mut controller = aggressive_controller_at(4);
+        for time in 0..20 {
+            capacity_tick(&mut controller, time * 1_000, 64, false);
+        }
+        for time in 20..100 {
+            capacity_tick(&mut controller, time * 1_000, 12, false);
+        }
+        assert_eq!(
+            accepted_parts(&controller),
+            12,
+            "{:?}",
+            controller
+                .snapshot()
+                .decisions
+                .iter()
+                .filter(|d| d.outcome != ControllerDecisionOutcome::Confirm)
+                .map(|d| (
+                    d.observed_at_millis,
+                    d.before.inflight_parts_per_file,
+                    d.after.inflight_parts_per_file,
+                    d.outcome,
+                    d.observed_goodput_bytes_per_second
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reduced_link_rate_does_not_keep_halving_when_fewer_requests_hurt() {
+        let mut controller = aggressive_controller_at(4);
+        for time in 0..20 {
+            capacity_tick(&mut controller, time * 1_000, 64, false);
+        }
+        for time in 20..80 {
+            let parts = controller.parameters().inflight_parts_per_file;
+            controller.observe(large_sample(time * 1_000, u64::from(parts) * 100_000));
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 64);
+    }
+
+    #[test]
+    fn max_throughput_confirms_regression_then_cools_down() {
+        let mut controller = aggressive_controller();
+        controller.observe(large_sample(0, 100));
+        assert_eq!(
+            controller.observe(large_sample(1_000, 70)).outcome,
+            ControllerDecisionOutcome::Confirm
+        );
+        assert_eq!(
+            controller.observe(large_sample(1_500, 70)).outcome,
+            ControllerDecisionOutcome::Confirm
+        );
+        assert_eq!(
+            controller.observe(large_sample(6_000, 70)).outcome,
+            ControllerDecisionOutcome::Rollback
+        );
+        assert_eq!(controller.parameters().inflight_parts_per_file, 16);
+        controller.observe(large_sample(15_999, 100));
+        assert_eq!(controller.parameters().inflight_parts_per_file, 16);
+        controller.observe(large_sample(16_000, 100));
+        assert_eq!(controller.parameters().inflight_parts_per_file, 24);
+    }
+
+    #[test]
+    fn max_throughput_tolerates_isolated_retries_but_reduces_once_per_burst() {
+        let mut controller = aggressive_controller();
+        controller.observe(large_sample(0, 100));
+        for time in 1..=3 {
+            controller.recover_from_part_retry(large_sample(time, 100));
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 32);
+        for time in 4..=40 {
+            controller.recover_from_part_retry(large_sample(time, 100));
+        }
+        assert_eq!(controller.parameters().inflight_parts_per_file, 16);
+    }
+
+    #[test]
+    fn max_throughput_preserves_memory_and_server_wait_protections() {
+        let mut controller = aggressive_controller();
+        controller.observe(large_sample(0, 100));
+        let decision = controller.recover_from_part_retry(PerformanceSample {
+            flood_wait_seconds: Some(30),
+            ..large_sample(1, 100)
+        });
+        assert_eq!(decision.reason, ControllerDecisionReason::FloodWaitRequired);
+        assert_eq!(decision.after.inflight_parts_per_file, 16);
+        controller.observe(large_sample(30_000, 100));
+        assert_eq!(controller.parameters().inflight_parts_per_file, 16);
+        let decision = controller.observe(PerformanceSample {
+            memory: MemoryCounters {
+                network_inflight_bytes: 600 * 1024 * 1024,
+                ..MemoryCounters::default()
+            },
+            ..large_sample(31_000, 100)
+        });
+        assert_eq!(
+            decision.reason,
+            ControllerDecisionReason::MemoryBudgetPressure
+        );
+        assert_eq!(decision.after.inflight_parts_per_file, 1);
     }
 
     #[test]

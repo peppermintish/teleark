@@ -171,3 +171,13 @@ Before handing off unfinished work:
 Known unmaintained advisories in the published GPUI 0.2.2/component 0.5.1 transitive graph are maintenance debt rather than reported vulnerabilities. The audit follows cargo-deny's recommended scope by failing unmaintained workspace dependencies, all unsound advisories, all vulnerability advisories, and yanked packages. Re-evaluate the exact GUI pins and this policy together when an upstream permissive release provides a migration path.
 
 `release.yml` is a conservative unsigned macOS bootstrap because supported GPUI platforms and packaging/signing are not yet validated. Tagged releases must pass quality checks before packaging, publish SHA-256 checksums, and use least-privilege permissions. Add platforms only after the GUI is built and tested there; signing and notarization secrets belong in protected GitHub environments.
+
+### Isolated visual review
+
+Use `cargo run -p teleark-gui -- --preview-ui --screen=transfers
+--locale=zh-CN --window-size=1360x760 --skip-telegram-api-id-prompt` on one line.
+`--preview-ui` does not open the local Library, Telegram session, diagnostics
+writer, native transfer owner or Vault owner. Transfers uses explicitly marked
+synthetic rows and disabled lifecycle controls. Other routes show their
+unavailable/empty/onboarding state. Omit this flag only for intentional testing
+against the real local account; real startup can resume queued downloads.

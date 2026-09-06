@@ -26,7 +26,7 @@ use teleark_transfer::{
 };
 
 use crate::{
-    DesktopLibrary, DesktopTelegram,
+    DesktopLibrary, DesktopTelegram, DownloadThroughputStrategy,
     vault::{TransferSessionKind, TransferSessionLog},
 };
 
@@ -274,6 +274,7 @@ struct RuntimeDownloadObserver {
     sample: Mutex<ProgressSample>,
     last_persisted: Mutex<Instant>,
     controller: Mutex<AdaptiveTransferController>,
+    download_strategy: DownloadThroughputStrategy,
     session_log: Mutex<Option<TransferSessionLog>>,
 }
 
@@ -359,6 +360,14 @@ impl DownloadObserver for RuntimeDownloadObserver {
         }
     }
 
+    fn max_part_attempts(&self) -> u32 {
+        if self.download_strategy == DownloadThroughputStrategy::MaxThroughput {
+            8
+        } else {
+            4
+        }
+    }
+
     fn desired_inflight_parts(&self) -> usize {
         self.controller
             .lock()
@@ -366,7 +375,17 @@ impl DownloadObserver for RuntimeDownloadObserver {
             .unwrap_or(1)
     }
 
+    fn part_retry(&self, event: DownloadPartEvent, server_wait: Option<Duration>) {
+        self.process_part_event(event, server_wait);
+    }
+
     fn part_event(&self, event: DownloadPartEvent) {
+        self.process_part_event(event, None);
+    }
+}
+
+impl RuntimeDownloadObserver {
+    fn process_part_event(&self, event: DownloadPartEvent, server_wait: Option<Duration>) {
         let part_event = ChannelDownloadPartEvent {
             part_index: event.part_index,
             offset_bytes: event.offset_bytes,
@@ -406,6 +425,8 @@ impl DownloadObserver for RuntimeDownloadObserver {
             if let Ok(mut controller) = self.controller.lock() {
                 let inflight_parts_per_file = controller.parameters().inflight_parts_per_file;
                 let decision = controller.recover_from_part_retry(PerformanceSample {
+                    flood_wait_seconds: server_wait
+                        .map(|delay| u32::try_from(delay.as_secs()).unwrap_or(u32::MAX)),
                     observed_at_millis: elapsed_ms,
                     goodput_bytes_per_second: current_speed,
                     disk_bytes_per_second: current_speed,
@@ -1127,6 +1148,7 @@ impl Drop for TransferWorkerInner {
 
 fn new_download_controller(
     soft_limit_policy: teleark_transfer::SoftLimitPolicy,
+    strategy: DownloadThroughputStrategy,
 ) -> Result<AdaptiveTransferController, ApplicationError> {
     let available_parallelism = thread::available_parallelism()
         .ok()
@@ -1142,14 +1164,18 @@ fn new_download_controller(
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
     config.active_files = ParameterBounds::new(1, 1, 1)
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    // One grammers client currently multiplexes every request through one
-    // physical owner. Session telemetry from the native adapter showed that
-    // values above 24 increased latency without improving sustained goodput.
-    config.inflight_parts_per_file = ParameterBounds::new(4, 24, 4)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.probe_settle_millis = 2_000;
+    let aggressive = strategy == DownloadThroughputStrategy::MaxThroughput;
+    config.download_strategy = strategy;
+    config.inflight_parts_per_file = ParameterBounds::new(
+        if aggressive { 1 } else { 4 },
+        if aggressive { 64 } else { 24 },
+        if aggressive { 16 } else { 4 },
+    )
+    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    config.probe_settle_millis = if aggressive { 1_000 } else { 2_000 };
     config.soft_limit_policy = soft_limit_policy;
     let initial_parameters = TransferControlParameters {
+        inflight_parts_per_file: 4,
         inflight_rpcs_per_connection: 1,
         ..TransferControlParameters::conservative_download()
     };
@@ -1279,10 +1305,13 @@ fn run_download(
     );
     let started = Instant::now();
     let previous_duration_ms = snapshot.duration_ms.unwrap_or(0);
-    let controller = match library
-        .preferences()
-        .and_then(|preferences| new_download_controller(preferences.transfer_soft_limit_policy))
-    {
+    let (controller, download_strategy) = match library.preferences().and_then(|preferences| {
+        new_download_controller(
+            preferences.transfer_soft_limit_policy,
+            preferences.download_throughput_strategy,
+        )
+        .map(|controller| (controller, preferences.download_throughput_strategy))
+    }) {
         Ok(controller) => controller,
         Err(error) => {
             fail_download(
@@ -1360,6 +1389,7 @@ fn run_download(
             observations: VecDeque::from([(snapshot.transferred_bytes, started)]),
         }),
         last_persisted: Mutex::new(started),
+        download_strategy,
         controller: Mutex::new(controller),
         session_log: Mutex::new(Some(session_log)),
     });
@@ -1845,6 +1875,38 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn native_profiles_change_real_parts_without_inventing_connections() {
+        for (strategy, initial, maximum) in [
+            (DownloadThroughputStrategy::Balanced, 4, 24),
+            (DownloadThroughputStrategy::MaxThroughput, 4, 64),
+        ] {
+            let mut controller =
+                new_download_controller(crate::SoftLimitPolicy::AdaptiveOverride, strategy)
+                    .expect("valid test fixture");
+            assert_eq!(controller.parameters().inflight_parts_per_file, initial);
+            let mut reached_maximum = false;
+            for step in 0..100 {
+                controller.observe(PerformanceSample {
+                    observed_at_millis: step * 2_000,
+                    goodput_bytes_per_second: u64::from(
+                        controller.parameters().inflight_parts_per_file,
+                    ) * 1_000_000,
+                    active_large_files: 1,
+                    ..PerformanceSample::default()
+                });
+                let parts = controller.parameters().inflight_parts_per_file;
+                assert!(parts <= maximum);
+                reached_maximum |= parts == maximum;
+            }
+            assert!(reached_maximum);
+            let parameters = controller.parameters();
+            assert_eq!(parameters.transfer_connection_count, 1);
+            assert_eq!(parameters.inflight_rpcs_per_connection, 1);
+            assert_eq!(parameters.active_file_count, 1);
+        }
+    }
 
     #[test]
     fn batch_capacity_accepts_one_full_channel_page() {

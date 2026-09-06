@@ -276,7 +276,7 @@ error-transfer-unknown = 不明なエラーにより転送に失敗しました�
 
 ## GPUI リファレンス画面で使用するセマンティック ID。
 
-search-placeholder = 2,851,233 ファイルをキーワード、拡張子、チャンネルで検索
+search-placeholder = ファイル名、キャプション、チャンネルを検索
 connection-connected = 接続済み
 accounts-count = 3 アカウント
 account-standard = 標準アカウント
@@ -931,4 +931,18 @@ settings-transfer-soft-limit-description = 実測 goodput がより多いアク�
 settings-transfer-soft-limit-respect = 遵守
 settings-transfer-soft-limit-adaptive = 適応的に上書き
 settings-transfer-soft-limit-ignore = 無視
-settings-transfer-soft-limit-note = Maximum Throughput では「適応的に上書き」を推奨します。競合と上書きはすべてライブ／リプレイに表示され、セッションログへ記録されます。Telegram のプロトコル制限と FLOOD_WAIT は常に必須です。
+settings-transfer-soft-limit-note = この方針は推奨アクティブファイル数を制御します。速度に関する動作は「ダウンロード方針」で別途選択してください。競合はライブ／リプレイとセッションログに記録され、Telegram のプロトコル制限と FLOOD_WAIT は常に厳守されます。
+
+transfer-actions = 操作
+transfer-show-details = 詳細を表示
+transfer-close-details = 詳細を閉じる
+transfer-scope-visible = 現在のリスト
+transfer-filter-count = { $label } · { $count }
+transfer-delete-confirmation = { $count } 件のタスクを削除しますか？ダウンロード済みのファイルは保持されます。履歴、ログ、未完了のデータは削除されます。
+transfer-filter-title = 絞り込み
+transfer-actions-applying = タスクの操作を適用中…
+
+settings-download-strategy-title = ダウンロード方針
+settings-download-strategy-balanced = バランス
+settings-download-strategy-max = 最大スループット
+settings-download-strategy-description = 最大スループットは最大 64 パートの並列処理をすばやく試し、一時的な通信エラーを許容します。帯域とメモリの使用量は増えますが、サーバー指定の待機時間は厳守します。通常のダウンロードの開始・再開時に適用され、暗号化保管庫の転送には影響しません。
