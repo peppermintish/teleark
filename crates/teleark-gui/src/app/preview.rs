@@ -15,6 +15,7 @@ impl TeleArkApp {
         }
         self.preferences.lock_vault_when_hidden = false;
         self.telegram_activity = TelegramActivity::Idle;
+        self.vault_activity = VaultActivity::Idle;
         self.configured_telegram_api_id = Some(12345);
         if state == "login" {
             self.telegram_auth = TelegramAuthState::Unauthorized;

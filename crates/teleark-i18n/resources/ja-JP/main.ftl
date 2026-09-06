@@ -46,7 +46,7 @@ library-disk-images = ディスクイメージ
 library-other = その他
 library-channels = チャンネル
 library-collections = コレクション
-library-storage-channel = 保存済みメッセージ
+library-storage-channel = TeleArk
 library-transfers = 転送
 library-uploads = アップロード
 library-downloads = ダウンロード
@@ -619,9 +619,9 @@ settings-download-ask-each-time-description = Telegram の新しいダウンロ�
 settings-download-reveal-completed = 完了したダウンロードを Finder で表示
 settings-download-reveal-completed-description = 検証に成功したファイルを自動的に Finder で表示します。
 settings-upload-title = アップロードの既定値
-settings-upload-description = 暗号化された Saved Messages アップロードの動作は、アップロード時に管理します。
+settings-upload-description = 暗号化アップロードには専用の TeleArk 非公開チャンネルを使用します。
 settings-upload-vault-managed-title = キー保管庫で管理する暗号化アップロード
-settings-upload-vault-managed-description = Saved Messages へのアップロードでは、解除済みのキー保管庫で内容、ファイル名、メタデータを常に暗号化します。現在の安全な平文パート上限は { $size } です。
+settings-upload-vault-managed-description = TeleArk へのアップロードでは、解除済みのキー保管庫で内容、ファイル名、メタデータを暗号化します。現在の安全な平文パート上限は { $size } です。
 upload-current-part-size = 現在の安全なパート上限
 upload-current-part-size-description = TeleArk は現在、最大 { $size } の暗号化平文パートを作成します。
 settings-vault-title = Key Vault の保護
@@ -746,7 +746,7 @@ settings-diagnostics-dropped-events = 有界書き込みキューが満杯だっ
 settings-diagnostics-open-action = 診断ログを開く
 settings-diagnostics-privacy-note = ログには技術的なタスク、チャンネル、メッセージ ID、バイト数、時間、エラー分類が含まれる場合があります。API Hash、ログイントークン、パスワード、ファイル内容、電話番号、ファイル名、キャプション、ローカルファイルパスは記録しません。
 nav-no-channels = チャンネルが見つかりません
-nav-storage-channel = Saved Messages
+nav-storage-channel = TeleArk
 nav-storage-channel-telegram-files = Telegram ファイル
 nav-storage-channel-teleark-files = TeleArk ファイル
 storage-channel-title = TeleArk ストレージ
@@ -794,7 +794,7 @@ vault-error-conflict = Key Vault はすでに設定されています。
 vault-error-capacity = 操作が対応サイズまたは保存上限を超えました。
 vault-error-cancelled = Vault 操作はキャンセルされました。
 vault-error-persistence = Vault データを安全に読み取り、検証、保存できませんでした。
-upload-file-picker-prompt = Saved Messages に暗号化するファイルを 1 つ選択
+upload-file-picker-prompt = 暗号化して TeleArk にアップロードするファイルを選択
 upload-no-file-selected = ファイルが選択されていません
 upload-select-file-description = ソースファイルを選択してください。元のパスはアップロードされません。
 storage-channel-managed-vault-locked = ロックを解除してファイルを検証し、元の名前を表示します。元のファイル一覧は解除せずに確認できます。
@@ -802,7 +802,7 @@ storage-channel-managed-runtime-ready = 認証済みマニフェストを論理�
 storage-channel-manifest-authenticated = 認証済み
 storage-channel-restore-ready = 復元可能
 storage-channel-download-restored-action = 復元したファイルをダウンロード
-transfer-vault-storage-channel = Telegram / Saved Messages（暗号化済み）
+transfer-vault-storage-channel = Telegram / TeleArk（暗号化済み）
 transfer-vault-encrypted-type = TeleArk 暗号化パッケージ
 transfer-vault-parts-progress = { $completed } / { $total } パート
 detail-vault-lifecycle = タスクの永続性
@@ -824,8 +824,8 @@ storage-channel-role-part = 暗号化アプリケーションパート { $index 
 storage-channel-why-file-exists = このファイルが存在する理由
 storage-channel-manifest-explanation = このマニフェストは、元の論理ファイル、暗号化パート、整合性データ、復元に必要な Telegram メッセージを記述します。
 storage-channel-part-explanation = この不透明ファイルには大きな論理ファイルの暗号化範囲が含まれ、マニフェストに記載された同一パッケージの他のパートと結合されます。
-upload-target-storage-channel = Saved Messages
-upload-storage-channel-security-note = このアップロード先が Saved Messages のため、暗号化オプションを利用できます。
+upload-target-storage-channel = TeleArk 非公開チャンネル
+upload-storage-channel-security-note = 内容、ファイル名、メタデータを暗号化してから、専用の TeleArk 非公開チャンネルにアップロードします。
 detail-direction = 方向
 detail-direction-upload = アップロード
 detail-direction-download = ダウンロード
@@ -1063,6 +1063,7 @@ about-changelog-v040 =
     - 転送と TeleArk はサイドバー上部に固定。チャンネルは独立してスクロールし、更新しても現在のページや選択を変えません。
     - 中央のアカウント画面にアバターと名前を復元し、ログインとアカウント切り替えを表示。新規セッションでは電話番号、QR、確認コード、2段階認証を利用できます。
     - 鍵が必要な場所から解除し、アップロード、ダウンロード、閲覧を続けられます。ページを切り替えても直ちにロックされません。
+    - ロック解除ダイアログは Tab 移動、Return 送信、Escape で閉じる操作に対応し、最小ウィンドウでも説明を読みやすく表示します。
 
     ### 専用のプライベートチャンネル
     - Telegram アカウントが所有する専用チャンネルを作成または再検出。サイドバーには専用の TeleArk 項目を表示。

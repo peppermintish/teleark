@@ -47,6 +47,7 @@ impl TeleArkApp {
                     .child(
                         div()
                             .size(px(44.0))
+                            .flex_shrink_0()
                             .rounded(px(12.0))
                             .bg(theme::blue_soft())
                             .flex()
@@ -61,6 +62,8 @@ impl TeleArkApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
                             .child(
                                 div()
                                     .text_size(px(20.0))

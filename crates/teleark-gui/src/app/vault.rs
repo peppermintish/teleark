@@ -104,6 +104,12 @@ impl TeleArkApp {
             return;
         }
         let password = self.vault_password.read(cx).value().to_string();
+        if password.is_empty() {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        }
         let Some(vault) = self.vault.clone() else {
             return;
         };
@@ -123,6 +129,12 @@ impl TeleArkApp {
             return;
         }
         let recovery = self.vault_recovery_key.read(cx).value().to_string();
+        if recovery.is_empty() {
+            self.vault_activity =
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
+            cx.notify();
+            return;
+        }
         let Some(vault) = self.vault.clone() else {
             return;
         };

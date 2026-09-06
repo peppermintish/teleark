@@ -7,6 +7,7 @@
 - Transfers and TeleArk storage stay at the top of the sidebar. Channels scroll independently, and refreshing never changes your current page or selection.
 - A centered account screen restores your avatar and name, with Log In and Switch Account. New sessions offer phone, QR, code, and two-step verification.
 - Unlock from the place that needs a key and continue your upload, download, or browse action. Changing pages no longer immediately locks the vault.
+- Unlock dialogs support Tab navigation, Return submission, Escape dismissal, and readable text at the smallest window size.
 
 ### Your own private channel
 - Create or rediscover a private channel owned by your Telegram account, with a distinct TeleArk destination in the sidebar.

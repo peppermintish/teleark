@@ -50,7 +50,7 @@ library-disk-images = Disk Images
 library-other = Other
 library-channels = Channels
 library-collections = Collections
-library-storage-channel = Saved Messages
+library-storage-channel = TeleArk
 library-transfers = Transfers
 library-uploads = Uploads
 library-downloads = Downloads
@@ -647,9 +647,9 @@ settings-download-ask-each-time-description = Show a save dialog for every new T
 settings-download-reveal-completed = Show completed downloads in Finder
 settings-download-reveal-completed-description = Reveal the downloaded file automatically after verification succeeds.
 settings-upload-title = Upload defaults
-settings-upload-description = Encrypted Saved Messages upload behavior is controlled at upload time.
+settings-upload-description = Encrypted uploads use your private TeleArk channel.
 settings-upload-vault-managed-title = Vault-managed encrypted uploads
-settings-upload-vault-managed-description = Saved Messages uploads always encrypt content, names, and metadata with the unlocked Key Vault. The current safe plaintext part limit is { $size }.
+settings-upload-vault-managed-description = TeleArk uploads encrypt content, names, and metadata with the unlocked Key Vault. The current safe plaintext part limit is { $size }.
 upload-current-part-size = Current safe part limit
 upload-current-part-size-description = TeleArk currently creates encrypted plaintext parts of at most { $size }.
 settings-vault-title = Key Vault protection
@@ -774,7 +774,7 @@ settings-diagnostics-dropped-events = { $count } diagnostic events dropped becau
 settings-diagnostics-open-action = Open diagnostic logs
 settings-diagnostics-privacy-note = Logs may contain technical task, channel, and message IDs, byte counts, timings, and error categories. They never include API Hashes, login tokens, passwords, file contents, phone numbers, filenames, captions, or local file paths.
 nav-no-channels = No channels found
-nav-storage-channel = Saved Messages
+nav-storage-channel = TeleArk
 nav-storage-channel-telegram-files = Telegram Files
 nav-storage-channel-teleark-files = TeleArk Files
 storage-channel-title = TeleArk Storage
@@ -822,7 +822,7 @@ vault-error-conflict = A Key Vault is already configured.
 vault-error-capacity = The operation exceeded a supported size or storage limit.
 vault-error-cancelled = The Vault operation was cancelled.
 vault-error-persistence = Vault data could not be safely read, verified, or saved.
-upload-file-picker-prompt = Choose one file to encrypt into Saved Messages
+upload-file-picker-prompt = Choose a file to encrypt and upload to TeleArk
 upload-no-file-selected = No file selected
 upload-select-file-description = Select a source file. Its original path is never uploaded.
 storage-channel-managed-vault-locked = Unlock to verify your files and reveal their original names. Raw Files is available without unlocking.
@@ -830,7 +830,7 @@ storage-channel-managed-runtime-ready = Authenticated manifests are shown as log
 storage-channel-manifest-authenticated = Authenticated
 storage-channel-restore-ready = Ready to restore
 storage-channel-download-restored-action = Download restored file
-transfer-vault-storage-channel = Telegram / Saved Messages (encrypted)
+transfer-vault-storage-channel = Telegram / TeleArk (encrypted)
 transfer-vault-encrypted-type = TeleArk encrypted package
 transfer-vault-parts-progress = { $completed } / { $total } parts
 detail-vault-lifecycle = Task durability
@@ -852,8 +852,8 @@ storage-channel-role-part = Encrypted application part { $index }
 storage-channel-why-file-exists = Why this file exists
 storage-channel-manifest-explanation = This manifest describes the original logical file, its encrypted parts, integrity data, and the Telegram messages needed for recovery.
 storage-channel-part-explanation = This opaque file contains one encrypted range of a larger logical file and is combined with the other package parts described by the manifest.
-upload-target-storage-channel = Saved Messages
-upload-storage-channel-security-note = Encryption is available because this upload targets your Saved Messages.
+upload-target-storage-channel = TeleArk private channel
+upload-storage-channel-security-note = Your file, name, and metadata are encrypted before upload to your private TeleArk channel.
 detail-direction = Direction
 detail-direction-upload = Upload
 detail-direction-download = Download
@@ -1091,6 +1091,7 @@ about-changelog-v040 =
     - Transfers and TeleArk storage stay at the top of the sidebar. Channels scroll independently, and refreshing never changes your current page or selection.
     - A centered account screen restores your avatar and name, with Log In and Switch Account. New sessions offer phone, QR, code, and two-step verification.
     - Unlock from the place that needs a key and continue your upload, download, or browse action. Changing pages no longer immediately locks the vault.
+    - Unlock dialogs support Tab navigation, Return submission, Escape dismissal, and readable text at the smallest window size.
 
     ### Your own private channel
     - Create or rediscover a private channel owned by your Telegram account, with a distinct TeleArk destination in the sidebar.

@@ -148,6 +148,7 @@ pub(crate) enum SettingsSection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EscapeBehavior {
     ExitFullscreen,
+    DismissUnlock,
     DismissUpload,
     DismissTelegramApiIdPrompt,
     Ignore,
@@ -155,10 +156,13 @@ enum EscapeBehavior {
 
 fn escape_behavior(
     fullscreen: bool,
+    unlock_visible: bool,
     upload_visible: bool,
     telegram_api_id_prompt_visible: bool,
 ) -> EscapeBehavior {
-    if upload_visible {
+    if unlock_visible {
+        EscapeBehavior::DismissUnlock
+    } else if upload_visible {
         EscapeBehavior::DismissUpload
     } else if telegram_api_id_prompt_visible {
         EscapeBehavior::DismissTelegramApiIdPrompt
@@ -488,6 +492,41 @@ impl TeleArkApp {
                 cx.notify();
             }
         });
+        let mut form_subscriptions = Vec::new();
+        for input in [&vault_password, &vault_new_password] {
+            form_subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. })
+                        && this.unlock_intent.is_some()
+                        && this.vault_recovery_secret.is_none()
+                    {
+                        if this.vault_status.configured {
+                            this.unlock_vault_with_password(window, cx);
+                        } else {
+                            this.initialize_vault(window, cx);
+                        }
+                    }
+                },
+            ));
+        }
+        form_subscriptions.push(cx.subscribe_in(
+            &vault_recovery_key,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. })
+                    && this.unlock_intent.is_some()
+                    && this.vault_recovery_secret.is_none()
+                {
+                    if this.vault_status.configured {
+                        this.unlock_vault_with_recovery(window, cx);
+                    } else {
+                        this.restore_vault_with_recovery(window, cx);
+                    }
+                }
+            },
+        ));
         let channel_table_subscription = cx.subscribe(
             &channel_file_table,
             |this, table, event: &TableEvent, cx| {
@@ -674,6 +713,7 @@ impl TeleArkApp {
                 channel_table_subscription,
             ],
         };
+        app._subscriptions.extend(form_subscriptions);
         if app.library.is_some() && matches!(app.page, Page::Library | Page::FileDetail) {
             app.refresh_library(cx);
         }
@@ -865,10 +905,16 @@ impl Render for TeleArkApp {
             .on_action(cx.listener(|this, _: &DismissOverlay, window, cx| {
                 match escape_behavior(
                     window.is_fullscreen(),
+                    this.unlock_intent.is_some(),
                     this.show_upload,
                     this.show_telegram_api_id_prompt,
                 ) {
                     EscapeBehavior::ExitFullscreen => window.toggle_fullscreen(),
+                    EscapeBehavior::DismissUnlock => {
+                        if this.vault_activity != VaultActivity::Working {
+                            this.dismiss_unlock(window, cx);
+                        }
+                    }
                     EscapeBehavior::DismissUpload => {
                         this.show_upload = false;
                         cx.notify();
@@ -1050,20 +1096,31 @@ mod tests {
     }
 
     #[test]
-    fn escape_prioritizes_leaving_fullscreen_before_dismissing_an_overlay() {
+    fn escape_dismisses_the_topmost_modal_before_leaving_fullscreen() {
         assert_eq!(
-            escape_behavior(true, true, true),
+            escape_behavior(true, true, true, true),
+            EscapeBehavior::DismissUnlock
+        );
+        assert_eq!(
+            escape_behavior(true, false, true, true),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, true, true),
+            escape_behavior(false, false, true, true),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, false, true),
+            escape_behavior(false, false, false, true),
             EscapeBehavior::DismissTelegramApiIdPrompt
         );
-        assert_eq!(escape_behavior(false, false, false), EscapeBehavior::Ignore);
+        assert_eq!(
+            escape_behavior(false, false, false, false),
+            EscapeBehavior::Ignore
+        );
+        assert_eq!(
+            escape_behavior(true, false, false, false),
+            EscapeBehavior::ExitFullscreen
+        );
     }
 
     #[test]
