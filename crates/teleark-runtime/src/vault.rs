@@ -156,7 +156,9 @@ enum VaultCommand {
         reply: mpsc::SyncSender<Result<String, ApplicationError>>,
     },
     Scan {
+        account_id: i64,
         chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
         reply: mpsc::SyncSender<Result<ManagedVaultScan, ApplicationError>>,
     },
     Upload {
@@ -166,6 +168,7 @@ enum VaultCommand {
         reply: mpsc::SyncSender<Result<ManagedVaultFile, ApplicationError>>,
     },
     Download {
+        account_id: i64,
         chat_id: i64,
         package_id: u64,
         reply: mpsc::SyncSender<Result<PathBuf, ApplicationError>>,
@@ -286,11 +289,21 @@ impl DesktopVault {
         self.request(|reply| VaultCommand::RotateRecovery { reply })
     }
 
-    pub fn scan_saved_messages(&self, chat_id: i64) -> Result<ManagedVaultScan, ApplicationError> {
-        self.request(|reply| VaultCommand::Scan { chat_id, reply })
+    pub fn scan_managed_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
+        self.request(|reply| VaultCommand::Scan {
+            account_id,
+            chat_id,
+            cancellation,
+            reply,
+        })
     }
 
-    pub fn upload_saved_message(
+    pub fn upload_file(
         &self,
         account_id: i64,
         chat_id: i64,
@@ -304,12 +317,14 @@ impl DesktopVault {
         })
     }
 
-    pub fn download_saved_message(
+    pub fn download_file(
         &self,
+        account_id: i64,
         chat_id: i64,
         package_id: u64,
     ) -> Result<PathBuf, ApplicationError> {
         self.request(|reply| VaultCommand::Download {
+            account_id,
             chat_id,
             package_id,
             reply,
@@ -387,8 +402,13 @@ impl VaultOwner {
                 VaultCommand::RotateRecovery { reply } => {
                     let _ = reply.send(self.rotate_recovery());
                 }
-                VaultCommand::Scan { chat_id, reply } => {
-                    let _ = reply.send(self.scan(chat_id));
+                VaultCommand::Scan {
+                    account_id,
+                    chat_id,
+                    cancellation,
+                    reply,
+                } => {
+                    let _ = reply.send(self.scan(account_id, chat_id, cancellation));
                 }
                 VaultCommand::Upload {
                     account_id,
@@ -399,11 +419,13 @@ impl VaultOwner {
                     let _ = reply.send(self.upload(account_id, chat_id, &source));
                 }
                 VaultCommand::Download {
+                    account_id,
                     chat_id,
                     package_id,
                     reply,
                 } => {
-                    let _ = reply.send(self.download(chat_id, PackageId::new(package_id)));
+                    let _ =
+                        reply.send(self.download(account_id, chat_id, PackageId::new(package_id)));
                 }
                 VaultCommand::Shutdown => break,
             }
@@ -599,12 +621,18 @@ impl VaultOwner {
         Ok(encode_recovery_bundle(&recovery_key, &wrapped))
     }
 
-    fn scan(&self, chat_id: i64) -> Result<ManagedVaultScan, ApplicationError> {
+    fn scan(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
         let master = self
             .master_key
             .as_ref()
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-        let mut store = TelegramObjectStore::new(self.telegram.clone(), chat_id);
+        let mut store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
+            .with_cancellation(cancellation);
         let report = recover_remote_manifests(&mut store, master, MAX_MANIFEST_SCAN)
             .map_err(map_transfer_error)?;
         let mut files = report
@@ -630,6 +658,16 @@ impl VaultOwner {
         chat_id: i64,
         source: &Path,
     ) -> Result<ManagedVaultFile, ApplicationError> {
+        // Destination policy is enforced before touching plaintext or allocating
+        // keys. A frontend cannot turn Saved Messages or an arbitrary channel
+        // into a TeleArk upload target by supplying its numeric id.
+        if self.library.storage_channel_id(account_id)? != Some(chat_id) {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::PermissionDenied,
+            ));
+        }
+        self.telegram
+            .validate_storage_channel(account_id, chat_id)?;
         let metadata = std::fs::metadata(source).map_err(map_source_io)?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
@@ -689,7 +727,7 @@ impl VaultOwner {
                 .source_identity(source_id)
                 .map_err(map_transfer_error)?;
             let file_key = generate_file_key(&mut OsRandom).map_err(map_crypto_error)?;
-            let store = TelegramObjectStore::new(self.telegram.clone(), chat_id);
+            let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id);
             let mut remote = EncryptedRemoteTransport::new(
                 store,
                 AccountId::new(account_id),
@@ -949,6 +987,7 @@ impl VaultOwner {
 
     fn download(
         &mut self,
+        expected_account_id: i64,
         chat_id: i64,
         package_id: PackageId,
     ) -> Result<PathBuf, ApplicationError> {
@@ -956,7 +995,8 @@ impl VaultOwner {
             .master_key
             .as_ref()
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-        let mut store = TelegramObjectStore::new(self.telegram.clone(), chat_id);
+        let mut store =
+            TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id);
         let mut report = recover_remote_manifests(&mut store, master, MAX_MANIFEST_SCAN)
             .map_err(map_transfer_error)?;
         let position = report
@@ -1016,7 +1056,8 @@ impl VaultOwner {
         });
         let started = Instant::now();
         let result = (|| {
-            let store = TelegramObjectStore::new(self.telegram.clone(), chat_id);
+            let store =
+                TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id);
             let parts = recovered.manifest.metadata.parts.clone();
             let mut remote =
                 EncryptedRemoteTransport::from_opened_manifest(store, recovered.manifest)

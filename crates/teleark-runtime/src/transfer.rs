@@ -124,14 +124,28 @@ pub trait RemoteObjectStore {
 
 /// Real Telegram implementation of the byte-store boundary.
 pub struct TelegramObjectStore {
+    cancellation: Option<crate::TelegramScanCancellation>,
+    account_id: i64,
     telegram: DesktopTelegram,
     chat_id: i64,
 }
 
 impl TelegramObjectStore {
     #[must_use]
-    pub const fn new(telegram: DesktopTelegram, chat_id: i64) -> Self {
-        Self { telegram, chat_id }
+    pub const fn new(telegram: DesktopTelegram, account_id: i64, chat_id: i64) -> Self {
+        Self {
+            telegram,
+            account_id,
+            chat_id,
+            cancellation: None,
+        }
+    }
+}
+
+impl TelegramObjectStore {
+    pub fn with_cancellation(mut self, cancellation: crate::TelegramScanCancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
     }
 }
 
@@ -142,7 +156,13 @@ impl RemoteObjectStore for TelegramObjectStore {
         limit: usize,
     ) -> Result<Vec<RemoteByteObject>, TransferError> {
         self.telegram
-            .search_files_exact_caption(self.chat_id, caption, limit)
+            .search_files_exact_caption(
+                self.account_id,
+                self.chat_id,
+                caption,
+                limit,
+                self.cancellation.clone(),
+            )
             .map_err(map_application_error)
             .and_then(|files| {
                 files
@@ -168,7 +188,7 @@ impl RemoteObjectStore for TelegramObjectStore {
         let encoded_size = bytes.len() as u64;
         match self
             .telegram
-            .upload_bytes(self.chat_id, name, caption, bytes)
+            .upload_bytes(self.account_id, self.chat_id, name, caption, bytes)
         {
             Ok(message_id) => Ok(RemoteByteObject {
                 object_id: u64::try_from(message_id)
@@ -186,7 +206,12 @@ impl RemoteObjectStore for TelegramObjectStore {
     fn download(&mut self, object_id: u64) -> Result<Vec<u8>, TransferError> {
         let message_id = i64::try_from(object_id).map_err(|_| TransferError::RemoteMissing)?;
         self.telegram
-            .download_bytes(self.chat_id, message_id)
+            .download_bytes(
+                self.account_id,
+                self.chat_id,
+                message_id,
+                self.cancellation.clone(),
+            )
             .map_err(map_application_error)
     }
 }
@@ -801,6 +826,7 @@ pub fn recover_remote_manifests<S: RemoteObjectStore>(
             Ok(manifest) => report
                 .recovered
                 .push(RecoveredManifest { object, manifest }),
+            Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
             Err(error) => report.rejected.push(RejectedManifest { object, error }),
         }
     }
@@ -1654,6 +1680,47 @@ mod tests {
             package_id: PackageId::new(11),
             part_index: PartIndex::new(0),
         }
+    }
+
+    #[test]
+    fn cancelling_manifest_recovery_stops_before_the_next_candidate() {
+        struct CancelledStore {
+            downloads: usize,
+        }
+        impl RemoteObjectStore for CancelledStore {
+            fn search_exact_caption(
+                &mut self,
+                _: &str,
+                _: usize,
+            ) -> Result<Vec<RemoteByteObject>, TransferError> {
+                Ok((1..=3)
+                    .map(|object_id| RemoteByteObject {
+                        object_id,
+                        name: "candidate".into(),
+                        encoded_size: 0,
+                    })
+                    .collect())
+            }
+            fn upload(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: Vec<u8>,
+            ) -> Result<RemoteByteObject, UploadError> {
+                unreachable!("read only recovery")
+            }
+            fn download(&mut self, _: u64) -> Result<Vec<u8>, TransferError> {
+                self.downloads += 1;
+                Err(TransferError::Cancelled)
+            }
+        }
+        let mut store = CancelledStore { downloads: 0 };
+        let master = VaultMasterKey::from_bytes([8; 32]);
+        assert!(matches!(
+            recover_remote_manifests(&mut store, &master, 3),
+            Err(TransferError::Cancelled)
+        ));
+        assert_eq!(store.downloads, 1);
     }
 
     #[test]

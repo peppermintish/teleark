@@ -32,6 +32,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
 mod session;
+mod storage_channel;
 
 use session::FileSession;
 
@@ -126,7 +127,7 @@ impl ScanCancellation {
         *self.sender.borrow()
     }
 
-    async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         let mut receiver = self.sender.subscribe();
         while !*receiver.borrow_and_update() {
             if receiver.changed().await.is_err() {
@@ -298,6 +299,7 @@ pub struct TelegramChat {
     username: Option<String>,
     kind: TelegramChatKind,
     peer_ref: PeerRef,
+    owned_private_broadcast: bool,
 }
 
 impl TelegramChat {
@@ -622,6 +624,8 @@ impl TelegramConnection {
                 username: peer.username().map(ToOwned::to_owned),
                 kind,
                 peer_ref: dialog.peer_ref(),
+                owned_private_broadcast: matches!(peer, grammers_client::peer::Peer::Channel(channel)
+                    if storage_channel::is_private_storage_candidate(&channel.raw)),
             });
         }
         Ok(chats)

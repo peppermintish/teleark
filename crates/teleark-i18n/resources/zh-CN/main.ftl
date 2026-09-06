@@ -46,7 +46,7 @@ library-disk-images = 磁盘映像
 library-other = 其他
 library-channels = 频道
 library-collections = 集合
-library-saved-messages = 收藏夹
+library-storage-channel = 收藏夹
 library-transfers = 传输
 library-uploads = 上传
 library-downloads = 下载
@@ -626,8 +626,8 @@ upload-current-part-size = 当前安全分片上限
 upload-current-part-size-description = TeleArk 当前生成的加密明文分片最大为 { $size }。
 settings-vault-title = 密钥库保护
 settings-vault-description = 控制本地加密材料何时锁定。
-settings-vault-lock-when-hidden = 离开密钥库页面时锁定
-settings-vault-lock-when-hidden-description = 离开页面后再次使用密钥库时需要重新解锁。
+settings-vault-lock-when-hidden = TeleArk 失去活动状态时锁定
+settings-vault-lock-when-hidden-description = 切换页面会保持解锁状态。离开应用窗口时会锁定；正在运行的传输可能使用已持有的密钥完成。
 settings-vault-lock-now-action = 立即锁定密钥库
 settings-index-title = Telegram 索引
 settings-index-description = 选择 TeleArk 每次频道索引请求扫描的消息数量。
@@ -746,19 +746,19 @@ settings-diagnostics-dropped-events = 有 { $count } 条诊断事件因有界写
 settings-diagnostics-open-action = 打开诊断日志
 settings-diagnostics-privacy-note = 日志可能包含技术性的任务、频道和消息 ID、字节数、耗时及错误类别。日志不会包含 API Hash、登录令牌、密码、文件内容、手机号、文件名、说明文字或本地文件路径。
 nav-no-channels = 未找到频道
-nav-saved-messages = Saved Messages
-nav-saved-messages-telegram-files = Telegram 文件
-nav-saved-messages-teleark-files = TeleArk 文件
-saved-messages-title = Saved Messages
-saved-messages-telegram-files = Telegram 文件
-saved-messages-teleark-files = TeleArk 文件
-saved-messages-tabs-description = Telegram 原始对象与还原后的逻辑文件
-saved-messages-managed-title = TeleArk 管理的文件
-saved-messages-managed-runtime-note = TeleArk 会在这里识别软件包清单和分片。桌面端连接加密保管库的持有服务后才会提供自动解密和还原；当前 Alpha 不会把已锁定的软件包显示成已还原。
-saved-messages-managed-empty = 已加载的 Saved Messages 历史中没有发现 TeleArk 软件包清单或分片。
-saved-messages-managed-name-locked = 已加密的逻辑文件
-saved-messages-managed-detail-title = 文件详情
-saved-messages-managed-detail-empty = 选择一个受管理文件以查看其软件包。
+nav-storage-channel = Saved Messages
+nav-storage-channel-telegram-files = Telegram 文件
+nav-storage-channel-teleark-files = TeleArk 文件
+storage-channel-title = TeleArk 存储
+storage-channel-telegram-files = 原始文件
+storage-channel-teleark-files = 文件
+storage-channel-tabs-description = Telegram 原始对象与还原后的逻辑文件
+storage-channel-managed-title = TeleArk 管理的文件
+storage-channel-managed-runtime-note = TeleArk 会在这里识别软件包清单和分片。桌面端连接加密保管库的持有服务后才会提供自动解密和还原；当前 Alpha 不会把已锁定的软件包显示成已还原。
+storage-channel-managed-empty = 还没有已认证的文件。上传第一个文件，或刷新以扫描此频道。
+storage-channel-managed-name-locked = 已加密的逻辑文件
+storage-channel-managed-detail-title = 文件详情
+storage-channel-managed-detail-empty = 选择一个受管理文件以查看其软件包。
 vault-password-placeholder = 输入密钥库密码
 vault-new-password-placeholder = 再次输入新密码
 vault-recovery-placeholder = 粘贴完整的恢复密钥
@@ -797,35 +797,35 @@ vault-error-persistence = 无法安全读取、验证或保存密钥库数据。
 upload-file-picker-prompt = 选择一个要加密上传到 Saved Messages 的文件
 upload-no-file-selected = 尚未选择文件
 upload-select-file-description = 请选择源文件；其原始路径不会上传。
-saved-messages-managed-vault-locked = 请先在设置中解锁密钥库，以认证 manifest 并显示还原后的文件名。
-saved-messages-managed-runtime-ready = 经过认证的 manifest 会显示为逻辑文件。下载时先解密到临时文件，完成全文件校验后再发布到 TeleArk Downloads。
-saved-messages-manifest-authenticated = 已认证
-saved-messages-restore-ready = 可以还原
-saved-messages-download-restored-action = 下载还原后的文件
-transfer-vault-saved-messages = Telegram / Saved Messages（已加密）
+storage-channel-managed-vault-locked = 解锁以验证文件并显示原始名称。无需解锁即可查看原始文件。
+storage-channel-managed-runtime-ready = 经过认证的 manifest 会显示为逻辑文件。下载时先解密到临时文件，完成全文件校验后再发布到 TeleArk Downloads。
+storage-channel-manifest-authenticated = 已认证
+storage-channel-restore-ready = 可以还原
+storage-channel-download-restored-action = 下载还原后的文件
+transfer-vault-storage-channel = Telegram / Saved Messages（已加密）
 transfer-vault-encrypted-type = TeleArk 加密软件包
 transfer-vault-parts-progress = { $completed } / { $total } 个分片
 detail-vault-lifecycle = 任务持久性
 detail-vault-lifecycle-memory-only = 仅保存在内存中的快照；暂不支持暂停、取消、重试和重启续传
 detail-vault-controls-unavailable = 运行中 · 暂无控制操作
-saved-messages-upload-action = 上传加密文件
-saved-messages-package-id = 软件包 ID
-saved-messages-logical-name = 原始文件名
-saved-messages-manifest-state = 清单
-saved-messages-manifest-found = 已找到清单
-saved-messages-manifest-missing = 缺少清单
-saved-messages-encoded-size = Telegram 编码后大小
-saved-messages-restore-state = 还原状态
-saved-messages-restore-owner-unavailable = 正在等待桌面端解锁加密保管库并启动恢复服务
-saved-messages-related-files = 关联的 Telegram 文件
-saved-messages-file-role = TeleArk 文件作用
-saved-messages-role-manifest = 自描述清单
-saved-messages-role-part = 加密应用分片 { $index }
-saved-messages-why-file-exists = 此文件为何存在
-saved-messages-manifest-explanation = 此清单描述原始逻辑文件、加密分片、完整性数据，以及恢复所需的 Telegram 消息。
-saved-messages-part-explanation = 此不透明文件包含较大逻辑文件的一段加密区间，需要按清单与同一软件包的其他分片组合。
-upload-target-saved-messages = Saved Messages
-upload-saved-messages-security-note = 由于本次上传的目标是你的 Saved Messages，因此可以使用加密选项。
+storage-channel-upload-action = 上传文件
+storage-channel-package-id = 软件包 ID
+storage-channel-logical-name = 原始文件名
+storage-channel-manifest-state = 清单
+storage-channel-manifest-found = 已找到清单
+storage-channel-manifest-missing = 缺少清单
+storage-channel-encoded-size = Telegram 编码后大小
+storage-channel-restore-state = 还原状态
+storage-channel-restore-owner-unavailable = 正在等待桌面端解锁加密保管库并启动恢复服务
+storage-channel-related-files = 关联的 Telegram 文件
+storage-channel-file-role = TeleArk 文件作用
+storage-channel-role-manifest = 自描述清单
+storage-channel-role-part = 加密应用分片 { $index }
+storage-channel-why-file-exists = 此文件为何存在
+storage-channel-manifest-explanation = 此清单描述原始逻辑文件、加密分片、完整性数据，以及恢复所需的 Telegram 消息。
+storage-channel-part-explanation = 此不透明文件包含较大逻辑文件的一段加密区间，需要按清单与同一软件包的其他分片组合。
+upload-target-storage-channel = Saved Messages
+upload-storage-channel-security-note = 由于本次上传的目标是你的 Saved Messages，因此可以使用加密选项。
 detail-direction = 方向
 detail-direction-upload = 上传
 detail-direction-download = 下载
@@ -946,3 +946,148 @@ settings-download-strategy-title = 下载策略
 settings-download-strategy-balanced = 均衡
 settings-download-strategy-max = 最大吞吐量
 settings-download-strategy-description = 最大吞吐量快速探测至 64 路分片并发，容忍偶发网络错误，会占用更多带宽和内存，仍严格遵守服务器等待时间。原生下载开始或恢复时生效，加密保管库传输不受影响。
+
+account-welcome = 你的文件，你的私人空间。
+
+account-welcome-back = 欢迎回到 TeleArk
+
+account-login = 登录
+
+account-switch = 切换账户
+
+account-restoring = 正在恢复 Telegram 会话…
+
+account-change-method = 使用其他登录方式
+
+account-private-note = Telegram 会话仅保存在这台 Mac 上。
+
+account-switch-description = 切换会退出当前 Telegram 账户并暂停下载。文件与下载进度会保留。
+
+account-switching = 正在暂停下载并退出账户…
+
+account-switch-busy = 请等待当前加密传输完成后再切换账户。
+
+shell-preview = 界面预览
+
+shell-utilities = 工具
+
+shell-local-library = 本地文件库
+
+shell-account = 账户
+
+shell-disk-summary = 可用 { $free } · TeleArk 已用 { $used }
+
+vault-unlock-action = 解锁密钥库
+
+vault-lock-action = 锁定密钥库
+
+unlock-return-note = 解锁后将继续刚才的操作。TeleArk 处于活动状态时，密钥会保留在内存中。
+
+unlock-use-recovery = 使用恢复密钥
+
+unlock-recovery-saved = 已保存恢复密钥，继续
+
+storage-nav-title = TeleArk
+
+storage-private-label = 你的专属私有频道
+
+storage-remote-description = 由 TeleArk 管理的私有加密文件存储。请保留此频道及其中的文件，以便恢复数据。
+
+storage-setup-title = 为文件建立专属空间
+
+storage-setup-description = 创建一个由你拥有的 Telegram 私有频道。TeleArk 会在这里存储并自动识别加密文件，你的 Saved Messages 仍由你自行使用。
+
+storage-create-action = 创建私有频道
+
+storage-discover-action = 查找已有的 TeleArk 频道
+
+storage-loading = 正在检查私有存储…
+
+storage-unavailable = 原来绑定的频道当前不可用。请刷新，或选择下面已有的 TeleArk 频道。应用不会自动替换原频道。
+
+storage-setup-error = 暂时无法验证频道。请刷新重试；中断前的创建操作可能已经成功。
+
+storage-locked-title = 文件已安全锁定
+
+storage-guide-title = 如何使用 TeleArk 存储
+
+storage-guide-done = 知道了
+
+storage-guide-private-title = 1. 仅属于你的频道
+
+storage-guide-private-body = 你拥有这个私有频道。TeleArk 不会添加成员或公开链接。保留频道简介中的标记，重装后即可重新发现它。
+
+storage-guide-files-title = 2. 使用完整文件
+
+storage-guide-files-body = 上传后，TeleArk 会加密文件并按需分片。解锁密钥库后将验证清单并显示原始文件名。下载会先解密、校验，再生成完整文件。
+
+storage-guide-raw-title = 3. 查看原始文件
+
+storage-guide-raw-body = 原始文件模式显示 Telegram 中的普通上传、加密分片与清单。仅凭文件名不能证明真实性。恢复文件所需的清单与全部分片都应保留。
+
+storage-guide-key-title = 4. 保存恢复密钥
+
+storage-guide-key-body = 请将恢复资料安全保存在这台 Mac 之外。Telegram 无法恢复你的加密密钥。高级恢复工具位于“设置 → 密钥库”。
+
+storage-legacy-title = 旧版文件恢复
+
+storage-legacy-description = 从 Saved Messages 恢复原有 TeleArk 文件。新上传的文件会使用专属私有频道。
+
+storage-legacy-action = 从 Saved Messages 恢复…
+
+settings-about = 关于
+
+about-description = 为 Mac 打造的私人文件空间。
+
+about-changelog-title = 更新记录
+
+about-licenses = 开源许可
+
+about-alpha = 预发布版本 · 加密格式仍待独立安全审查。
+
+menu-application-about = 关于 TeleArk
+
+menu-application-settings = 设置…
+
+menu-view-transfers = 传输
+
+menu-view-storage = TeleArk 存储
+
+menu-file-upload = 上传加密文件…
+
+about-changelog-v040 =
+    ## 0.4.0 · 文件的新家
+
+    ### 为 Mac 重新设计
+    - 使用 GPUI Kit 0.6 与配套 gpui-pre 系列重写桌面层，统一原生字体、柔和背景、控件、原创矢量图形以及浅色与深色外观。
+    - 传输与 TeleArk 存储固定在侧栏顶部，频道列表独立滚动。刷新频道不再改变当前页面或选择。
+    - 新的居中账户页展示已登录用户的头像与姓名，并提供“登录”和“切换账户”。新会话支持手机、二维码、验证码及两步验证。
+    - 需要密钥的地方可以直接解锁，并继续上传、下载或浏览操作。切换页面不会立即重新锁定密钥库。
+
+    ### 专属私有频道
+    - 创建或重新发现由当前 Telegram 账户拥有的私有频道，在侧栏中显示独特的 TeleArk 入口。
+    - 文件模式将经过认证的清单呈现为完整文件。原始文件模式保留普通文件、加密分片及清单的原始名称与元数据。
+    - 内置引导说明频道归属、加密方式、原始对象、恢复密钥，以及保留清单和全部分片的原因。
+    - 原来存放在 Saved Messages 中的文件仍可通过“设置 → 密钥库”恢复。新的加密上传使用专属私有频道。
+
+    ### 功能各归其位
+    - 保留传输多选、批次、暂停、继续、取消、重试、安全删除、文件检查，以及实时和回放诊断。高级选项和详情按需展开。
+    - 设置清晰组织日常选项并折叠低频功能。本地导入、搜索、文件操作、索引、存储路径、吞吐策略及完整密钥生命周期均可访问。
+    - 增加原生“关于”和“设置”菜单，以及传输、存储、搜索、刷新和上传快捷键。关于页包含完整的本次更新记录。
+    - 同步更新英语、简体中文与日语。
+
+    ### 可靠性与兼容性
+    - 原生下载历史增加 Telegram 账户归属。切换账户会暂停下载并保留进度，其他账户不能继续或重试这些任务。
+    - 数据库版本 9 保留旧历史。缺少账户信息的任务仅在恢复原有会话时绑定，不会绑定到任意新登录账户。
+    - 专属频道发现会验证所有权、私有状态和简介标记；频道改名后仍保持绑定，多个候选频道由用户明确选择。
+    - 精简贡献者文档，同时保留格式规范、安全约束与架构决策。文档整理前后均有 Git 恢复检查点。
+    - 加密格式仍属临时设计，等待独立安全审查。常规测试不需要真实 Telegram 账户。
+
+upload-choose-file = 选择文件…
+upload-simple-description = TeleArk 会先加密文件内容与文件名，再上传到专属频道。大文件会自动分片，下载时还原为完整文件。
+transfer-manage = 管理
+
+action-close-details = 关闭详情
+storage-scan-summary = { $count } 个文件 · 已跳过 { $rejected } 个未验证清单 · 最近 1,000 个清单
+
+shell-refresh-channels = 刷新频道

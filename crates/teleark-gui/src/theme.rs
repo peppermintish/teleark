@@ -5,8 +5,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::{Context, Pixels, Rgba, Window, WindowAppearance, px, rgb};
-use gpui_component::{Theme as ComponentTheme, ThemeMode};
+use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
+use gpui_kit::{Context, Pixels, Rgba, Window, WindowAppearance, px, rgb};
 use teleark_runtime::AppearancePreference;
 
 static DARK_PALETTE: AtomicBool = AtomicBool::new(false);
@@ -40,10 +40,42 @@ pub fn apply_appearance<T>(
     theme.colors.primary = blue().into();
     theme.colors.primary_hover = color(0x1d4ed8, 0x8cb5ff).into();
     theme.colors.primary_active = color(0x1e40af, 0x5b92ee).into();
-    theme.colors.primary_foreground = color(0xffffff, 0x101522).into();
+    theme.colors.primary_foreground = rgb(0xffffff).into();
     theme.colors.ring = blue().into();
     theme.colors.border = border().into();
+    theme.colors.background = canvas().into();
+    theme.colors.foreground = text_primary().into();
+    theme.colors.sidebar = sidebar().into();
+    theme.colors.button_primary = theme.colors.primary;
+    theme.colors.button_primary_foreground = theme.colors.primary_foreground;
+    theme.colors.button_primary_hover = theme.colors.primary_hover;
+    theme.colors.button_primary_active = theme.colors.primary_active;
+    theme.colors.button = surface().into();
+    theme.colors.button_foreground = text_primary().into();
+    theme.colors.button_hover = canvas().into();
+    theme.colors.button_active = border().into();
+    theme.colors.muted_foreground = text_secondary().into();
+    theme.colors.popover = surface().into();
+    theme.colors.popover_foreground = text_primary().into();
+    theme.colors.progress_bar = blue().into();
+    theme.colors.selection = blue_soft().into();
+    theme.colors.sidebar_accent = blue_soft().into();
+    theme.colors.sidebar_foreground = text_secondary().into();
+    theme.colors.sidebar_accent_foreground = blue().into();
+    theme.colors.table = surface().into();
+    theme.colors.table_head = sidebar().into();
+    theme.colors.table_active = blue_soft().into();
+    theme.colors.table_hover = blue_pale().into();
+    theme.colors.table_active_border = blue_soft().into();
+    theme.colors.table_row_border = border_subtle().into();
+    theme.colors.tab_bar_segmented = sidebar().into();
+    theme.colors.tab_active = surface().into();
+    theme.colors.tab_foreground = text_secondary().into();
+    theme.colors.tab_active_foreground = text_primary().into();
+    theme.colors.switch = blue().into();
+    theme.tokens = gpui_kit::component::ThemeTokens::from(theme.colors);
     theme.radius = RADIUS_SMALL;
+    ComponentTheme::sync_base(cx);
 }
 
 fn color(light: u32, dark: u32) -> Rgba {
@@ -55,43 +87,43 @@ fn color(light: u32, dark: u32) -> Rgba {
 }
 
 pub fn canvas() -> Rgba {
-    color(0xf6f7f9, 0x11151d)
+    color(0xf8f9fb, 0x1c1c1e)
 }
 
 pub fn surface() -> Rgba {
-    color(0xffffff, 0x1b202b)
+    color(0xffffff, 0x262628)
 }
 
 pub fn sidebar() -> Rgba {
-    color(0xf0f2f5, 0x161b24)
+    color(0xf0f1f4, 0x222224)
 }
 
 pub fn text_primary() -> Rgba {
-    color(0x182033, 0xf3f5f7)
+    color(0x202124, 0xf5f5f7)
 }
 
 pub fn text_secondary() -> Rgba {
-    color(0x667085, 0xaab4c8)
+    color(0x6e727b, 0xb3b3bc)
 }
 
 pub fn text_muted() -> Rgba {
-    color(0x748094, 0x98a4b8)
+    color(0x7e838c, 0x9898a2)
 }
 
 pub fn border() -> Rgba {
-    color(0xe2e7ef, 0x2b3549)
+    color(0xe3e5ea, 0x3b3b40)
 }
 
 pub fn border_subtle() -> Rgba {
-    color(0xedf1f6, 0x222c3e)
+    color(0xf0f1f4, 0x303034)
 }
 
 pub fn blue() -> Rgba {
-    color(0x2463eb, 0x76a7ff)
+    color(0x007aff, 0x0a84ff)
 }
 
 pub fn blue_soft() -> Rgba {
-    color(0xeaf3ff, 0x203a5f)
+    color(0xe1edff, 0x17375a)
 }
 
 pub fn blue_pale() -> Rgba {

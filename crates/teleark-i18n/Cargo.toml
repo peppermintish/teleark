@@ -1,6 +1,6 @@
 [package]
 name = "teleark-i18n"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Project Fluent resources, locale negotiation, and UI formatting for TeleArk"
@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 fluent-bundle = "0.16.0"
-teleark-core = { version = "=0.3.3", path = "../teleark-core" }
+teleark-core = { version = "=0.4.0", path = "../teleark-core" }
 unic-langid = { version = "0.9.6", features = ["macros"] }
 
 [lints.rust]

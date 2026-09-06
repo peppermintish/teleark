@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod assets;
 mod components;
 mod layout;
 mod library_state;
@@ -10,22 +11,29 @@ mod screens;
 mod theme;
 
 use app::{AppStartup, LocaleStartup, Page, RuntimeStartup, TeleArkApp};
-use gpui::{
-    App, AppContext as _, Application, Bounds, KeyBinding, Pixels, Size, TitlebarOptions,
-    WindowBounds, WindowOptions, point, px, size,
+use assets::Assets;
+use gpui_kit::component::Root;
+use gpui_kit::{
+    App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
+    WindowOptions, point, px, size,
 };
-use gpui_component::Root;
-use gpui_component_assets::Assets;
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
 use teleark_runtime::{
     DesktopLibrary, DesktopTelegram, DesktopTransfers, DesktopVault, initialize_diagnostics,
 };
 
-gpui::actions!(
+gpui_kit::actions!(
     teleark,
     [
         DismissOverlay,
+        ShowAbout,
+        ShowSettings,
+        ShowTransfers,
+        ShowStorage,
+        UploadFile,
+        FocusSearch,
+        RefreshPage,
         MinimizeWindow,
         Quit,
         ToggleFullscreen,
@@ -75,12 +83,18 @@ fn main() {
         .flatten();
     let follows_system_locale = apply_persisted_locale(&mut launch, persisted_locale.as_deref());
 
-    Application::new()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             cx.bind_keys([
                 KeyBinding::new("escape", DismissOverlay, None),
+                KeyBinding::new("cmd-,", ShowSettings, None),
+                KeyBinding::new("cmd-1", ShowTransfers, None),
+                KeyBinding::new("cmd-2", ShowStorage, None),
+                KeyBinding::new("cmd-u", UploadFile, None),
+                KeyBinding::new("cmd-f", FocusSearch, None),
+                KeyBinding::new("cmd-r", RefreshPage, None),
                 KeyBinding::new("cmd-m", MinimizeWindow, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, None),
@@ -99,7 +113,7 @@ fn main() {
             cx.on_action(toggle_fullscreen);
             cx.on_action(zoom_window);
             cx.set_menus(menus::application_menus(&localizer));
-            cx.on_window_closed(|cx| {
+            cx.on_window_closed(|cx, _| {
                 if should_quit_after_window_close(cx.windows().len()) {
                     cx.quit();
                 }
@@ -131,7 +145,6 @@ fn main() {
                             page: launch.page,
                             visual_preview,
                             show_upload: launch.show_upload,
-                            skip_telegram_api_id_prompt: launch.skip_telegram_api_id_prompt,
                             locale: LocaleStartup {
                                 system_locale,
                                 follows_system_locale,
@@ -243,7 +256,7 @@ impl LaunchOptions {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut page = Page::Channel;
+        let mut page = Page::Account;
         let mut show_upload = false;
         let mut explicit_locale = None;
         let mut window_size = (1360, 760);
@@ -253,13 +266,15 @@ impl LaunchOptions {
             let argument = argument.as_ref();
             if let Some(value) = argument.strip_prefix("--screen=") {
                 match value {
+                    "account" => page = Page::Account,
+                    "storage" => page = Page::Storage,
                     "library" => page = Page::Library,
                     "transfers" => page = Page::Transfers,
                     "file" => page = Page::FileDetail,
                     "channel" => page = Page::Channel,
                     "settings" => page = Page::Settings,
                     "upload" => {
-                        page = Page::Channel;
+                        page = Page::Storage;
                         show_upload = true;
                     }
                     _ => {}
@@ -375,10 +390,10 @@ mod tests {
     }
 
     #[test]
-    fn upload_launch_uses_the_channel_overlay() {
+    fn upload_launch_uses_the_storage_overlay() {
         let options = LaunchOptions::from_args(["--screen=upload"], SupportedLocale::JaJp);
 
-        assert_eq!(options.page, Page::Channel);
+        assert_eq!(options.page, Page::Storage);
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.show_upload);
         assert!(!options.locale_from_command_line);
@@ -405,7 +420,7 @@ mod tests {
             SupportedLocale::EnUs,
         );
 
-        assert_eq!(options.page, Page::Channel);
+        assert_eq!(options.page, Page::Account);
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.locale_from_command_line);
         assert!(!options.show_upload);

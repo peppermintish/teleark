@@ -4,3 +4,7 @@ pub mod library;
 pub mod settings;
 pub mod transfers;
 pub mod upload;
+
+pub mod account;
+pub mod storage;
+pub mod unlock;

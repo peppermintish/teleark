@@ -115,6 +115,7 @@ pub enum StoredNativeDownloadVerification {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewNativeDownloadTaskRecord {
+    pub account_id: i64,
     pub chat_id: i64,
     pub message_id: i64,
     pub message_sent_at_unix_ms: Option<i64>,
@@ -141,6 +142,8 @@ pub struct NativeDownloadBatchRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeDownloadTaskRecord {
+    /// None only for history migrated from schemas before v9.
+    pub account_id: Option<i64>,
     pub id: u64,
     pub batch_id: Option<u64>,
     pub chat_id: i64,

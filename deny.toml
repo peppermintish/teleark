@@ -30,6 +30,8 @@ allow = [
     "Zlib",
 ]
 exceptions = [
+    { allow = ["bzip2-1.0.6"], crate = "libbz2-rs-sys@0.2.5" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
     { allow = ["MPL-2.0"], crate = "cbindgen@0.28.0" },
     { allow = ["MPL-2.0"], crate = "dwrote@0.11.5" },
     { allow = ["MPL-2.0"], crate = "option-ext@0.2.0" },

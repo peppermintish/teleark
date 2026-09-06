@@ -18,10 +18,39 @@ const COLUMNS: &str = r#"
     finished_at_unix_ms, queue_wait_ms, duration_ms,
     average_bytes_per_second, attempts, failure_code,
     created_at_unix_ms, updated_at_unix_ms, batch_id,
-    message_sent_at_unix_ms, caption, mime_type
+    message_sent_at_unix_ms, caption, mime_type, account_id
 "#;
 
 impl Database {
+    /// Resolve pre-v9 history once, before a new login can replace the old session.
+    /// Unknown provenance stays NULL permanently instead of being assigned on a later launch.
+    pub fn resolve_legacy_native_download_accounts(
+        &mut self,
+        restored_account: Option<i64>,
+    ) -> StorageResult<()> {
+        if restored_account.is_some_and(|id| id <= 0) {
+            return Err(StorageError::InvalidInput {
+                field: "native_download.account_id",
+                reason: InputReason::OutOfRange,
+            });
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let done: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'native-download-account-migration.v1')", [], |row| row.get(0))?;
+        if !done {
+            if let Some(account) = restored_account {
+                transaction.execute(
+                    "UPDATE native_download_tasks SET account_id = ?1 WHERE account_id IS NULL",
+                    [account],
+                )?;
+            }
+            transaction.execute("INSERT INTO settings (key, value, updated_at_unix_ms) VALUES ('native-download-account-migration.v1', 'resolved', 0)", [])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn insert_native_download(
         &mut self,
         task: &NewNativeDownloadTaskRecord,
@@ -48,7 +77,7 @@ impl Database {
         }
         for task in tasks {
             validate_new(task)?;
-            if task.chat_id != batch.chat_id {
+            if task.chat_id != batch.chat_id || task.account_id != tasks[0].account_id {
                 return Err(StorageError::InvalidInput {
                     field: "native_download_batch.chat_id",
                     reason: InputReason::InvalidCombination,
@@ -100,8 +129,9 @@ UPDATE native_download_tasks SET
     average_bytes_per_second = ?9,
     attempts = ?10,
     failure_code = ?11,
-    updated_at_unix_ms = ?12
-WHERE id = ?1
+    updated_at_unix_ms = ?12,
+    account_id = ?13
+WHERE id = ?1 AND (account_id IS NULL OR account_id = ?13)
 "#,
             params![
                 id,
@@ -119,6 +149,7 @@ WHERE id = ?1
                 i64::from(task.attempts),
                 task.failure_code,
                 task.updated_at_unix_ms,
+                task.account_id,
             ],
         )?;
         if changed == 0 {
@@ -198,10 +229,10 @@ fn insert_task(
 INSERT INTO native_download_tasks (
     chat_id, message_id, message_sent_at_unix_ms, file_name, caption,
     mime_type, size_bytes, destination_path, batch_id, state, verification,
-    transferred_bytes, attempts, created_at_unix_ms, updated_at_unix_ms
+    transferred_bytes, attempts, created_at_unix_ms, updated_at_unix_ms, account_id
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-    'queued', 'pending', 0, 0, ?10, ?10
+    'queued', 'pending', 0, 0, ?10, ?10, ?11
 )
 "#,
         params![
@@ -215,6 +246,7 @@ INSERT INTO native_download_tasks (
             path_text(&task.destination)?,
             batch_id,
             task.created_at_unix_ms,
+            task.account_id,
         ],
     )?;
     Ok(connection.last_insert_rowid())
@@ -227,6 +259,7 @@ fn new_task_record(
 ) -> NativeDownloadTaskRecord {
     NativeDownloadTaskRecord {
         id,
+        account_id: Some(task.account_id),
         batch_id,
         chat_id: task.chat_id,
         message_id: task.message_id,
@@ -252,7 +285,7 @@ fn new_task_record(
 }
 
 fn validate_new(task: &NewNativeDownloadTaskRecord) -> StorageResult<()> {
-    if task.chat_id <= 0 || task.message_id <= 0 {
+    if task.account_id <= 0 || task.chat_id <= 0 || task.message_id <= 0 {
         return Err(StorageError::InvalidInput {
             field: "native_download.remote_identity",
             reason: InputReason::OutOfRange,
@@ -287,6 +320,12 @@ fn validate_new(task: &NewNativeDownloadTaskRecord) -> StorageResult<()> {
 }
 
 fn validate_task(task: &NativeDownloadTaskRecord) -> StorageResult<()> {
+    if task.account_id.is_some_and(|id| id <= 0) {
+        return Err(StorageError::InvalidInput {
+            field: "native_download.account_id",
+            reason: InputReason::OutOfRange,
+        });
+    }
     unsigned_to_sql("native_download.id", task.id)?;
     unsigned_to_sql("native_download.size_bytes", task.size_bytes)?;
     unsigned_to_sql("native_download.transferred_bytes", task.transferred_bytes)?;
@@ -321,6 +360,7 @@ fn row_to_task(row: &Row<'_>) -> StorageResult<NativeDownloadTaskRecord> {
     let attempts: i64 = row.get(14)?;
     Ok(NativeDownloadTaskRecord {
         id: nonnegative_from_sql("native_download_tasks", "id", id)?,
+        account_id: row.get(22)?,
         batch_id: row
             .get::<_, Option<i64>>(18)?
             .map(|value| nonnegative_from_sql("native_download_tasks", "batch_id", value))

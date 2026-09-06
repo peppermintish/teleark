@@ -1,9 +1,9 @@
-use gpui::{
+use gpui_kit::component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 use teleark_core::{
     ApplicationErrorKind, EncryptionState, FileKind, RemoteState, VerificationState,
 };
@@ -84,9 +84,12 @@ impl TeleArkApp {
             .border_color(theme::border())
             .child(table_header(self.tr("table-name"), None))
             .child(table_header(self.tr("table-size"), Some(90.0)))
-            .child(table_header(self.tr("table-type"), Some(110.0)))
-            .child(table_header(self.tr("table-source"), Some(140.0)))
-            .child(table_header(self.tr("table-modified"), Some(154.0)))
+            .when(!layout.is_compact(), |header| {
+                header
+                    .child(table_header(self.tr("table-type"), Some(110.0)))
+                    .child(table_header(self.tr("table-source"), Some(140.0)))
+                    .child(table_header(self.tr("table-modified"), Some(154.0)))
+            })
             .child(table_header(
                 self.tr("table-status"),
                 Some(layout.library_status_width()),
@@ -490,20 +493,24 @@ impl TeleArkApp {
                 this.selected_file = index;
                 this.set_page(Page::FileDetail, cx);
             }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.selected_file = index;
-                    this.set_page(Page::FileDetail, cx);
-                }
-            }))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.selected_file = index;
+                        this.set_page(Page::FileDetail, cx);
+                    }
+                }),
+            )
             .child(name)
             .child(table_value(
                 format_bytes(self.locale(), file.size_bytes),
                 90.0,
             ))
-            .child(table_value(self.tr(file_kind_message_id(file.kind)), 110.0))
-            .child(table_value(source, 140.0))
-            .child(table_value(modified, 154.0))
+            .when(!layout.is_compact(), |row| {
+                row.child(table_value(self.tr(file_kind_message_id(file.kind)), 110.0))
+                    .child(table_value(source, 140.0))
+                    .child(table_value(modified, 154.0))
+            })
             .child(
                 div()
                     .w(px(layout.library_status_width()))

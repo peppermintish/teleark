@@ -1,3 +1,48 @@
+# Implementation status — v0.4.0 rewrite checkpoint
+
+The desktop rewrite is implemented on `codex/gpui-kit-redesign`: GPUI Kit 0.6.0 /
+gpui-pre 0.3.3, permanent Transfers and TeleArk navigation, private storage setup
+and rediscovery, authenticated/raw views, account welcome/switch, resumable unlock
+intents, progressive settings, localized About changelog and native shortcuts.
+ADR 0012 defines the new dependency, destination and account-migration contracts.
+Schema 9 preserves old history with a one-time, actual-session ownership decision.
+
+Validation on macOS: workspace/all-target check, strict Clippy, all workspace
+tests, all localization tests, rustdoc and cargo-deny pass. There are 296 tests
+including the canonical About/changelog parity test. Crypto candidate fixtures
+and state/migration/recovery tests pass; no live Telegram credentials were used.
+A transitive `block 0.1.6` future-Rust warning remains upstream maintenance debt.
+
+Actual isolated English windows inspected: Transfers with 200 channels,
+authenticated storage, upload modal, returning-account and fresh login.
+Initial visual defects (row width, palette, accessibility labels) were corrected.
+The final keyboard-focus and modal-height fixes compile; remaining visual
+checks are temporarily blocked because the host Mac is locked. No full
+locale/size/backing-scale or screen-reader audit is claimed. Runtime constructors
+are disabled by `--preview-ui`; fixtures never use real sessions or files.
+
+Snapshot exception: the documentation below and other subsystem prose preserve
+the pre-rewrite source material deliberately. Their older GUI/Saved Messages
+workflow and version descriptions are historical, superseded by the above and
+ADR 0012. The immediately following documentation consolidation will replace
+this history with a short current status, reconcile subsystem contracts and keep
+before/after Git checkpoints. This is an explicit user-requested recovery point,
+not a final release gate. Crypto formats remain provisional; encrypted durable
+controls, native credentialed testing and independent review remain open.
+
+Pre-commit review: Core/runtime have no GUI dependency; GUI imports no SQL or
+`grammers`; no incompatible implementation was used. Dependency licenses and
+notices are reviewed in ADR 0012 and cargo-deny. Domain errors/values stay
+structured; all three catalogs, formatting and error mappings pass validation.
+New channel/account/cancellation behavior has deterministic tests; state
+transitions, migrations, crypto vectors and manifest recovery remain passing.
+No production unwrap/panic, unbounded spawning or lock-across-network-await was
+added. Durable changes are the explicit schema-9 column and versioned settings
+above. Formatting, workspace checks, Clippy, tests, rustdoc and diff review pass.
+The justified documentation/visual-review exceptions are recorded above.
+
+---
+
 # Implementation Status
 
 Last updated: 2026-09-06

@@ -81,6 +81,7 @@ pub fn available_download_destination(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelDownloadRequest {
+    pub account_id: i64,
     pub chat_id: i64,
     pub message_id: i64,
     pub message_sent_at_unix_ms: Option<i64>,
@@ -152,6 +153,7 @@ pub struct ChannelDownloadPartEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelDownloadSnapshot {
+    pub account_id: Option<i64>,
     pub id: u64,
     pub batch_id: Option<u64>,
     pub chat_id: i64,
@@ -193,6 +195,7 @@ pub struct TransferRates {
 }
 
 struct TransferWorkerInner {
+    active_account: std::sync::atomic::AtomicI64,
     sender: Mutex<Option<mpsc::SyncSender<TransferCommand>>>,
     snapshots: Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
     controls: Arc<Mutex<BTreeMap<u64, Arc<AtomicU8>>>>,
@@ -214,6 +217,7 @@ enum TransferCommand {
 trait ChannelDownloadBackend: Send + Sync + 'static {
     fn download(
         &self,
+        account_id: Option<i64>,
         chat_id: i64,
         message_id: i64,
         destination: &Path,
@@ -237,12 +241,15 @@ trait ChannelDownloadBackend: Send + Sync + 'static {
 impl ChannelDownloadBackend for DesktopTelegram {
     fn download(
         &self,
+        account_id: Option<i64>,
         chat_id: i64,
         message_id: i64,
         destination: &Path,
         observer: Arc<dyn DownloadObserver>,
     ) -> Result<(), ApplicationError> {
-        self.download_file_observed(chat_id, message_id, destination, observer)
+        let account_id =
+            account_id.ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+        self.download_file_observed(account_id, chat_id, message_id, destination, observer)
     }
 
     fn discard_partial(&self, destination: &Path) -> Result<(), ApplicationError> {
@@ -643,6 +650,7 @@ impl DesktopTransfers {
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
         Ok(Self {
             inner: Arc::new(TransferWorkerInner {
+                active_account: std::sync::atomic::AtomicI64::new(0),
                 sender: Mutex::new(Some(sender)),
                 snapshots,
                 controls,
@@ -660,6 +668,7 @@ impl DesktopTransfers {
         request: ChannelDownloadRequest,
     ) -> Result<u64, ApplicationError> {
         validate_request(&request)?;
+        self.require_active_account(Some(request.account_id))?;
         if self.snapshots()?.iter().any(|snapshot| {
             snapshot.destination == request.destination
                 && matches!(
@@ -676,6 +685,7 @@ impl DesktopTransfers {
             .inner
             .library
             .insert_native_download(NewNativeDownloadTaskRecord {
+                account_id: request.account_id,
                 chat_id: request.chat_id,
                 message_id: request.message_id,
                 message_sent_at_unix_ms: request.message_sent_at_unix_ms,
@@ -718,6 +728,7 @@ impl DesktopTransfers {
         validate_batch_size(requests.len())?;
         for request in &requests {
             validate_request(request)?;
+            self.require_active_account(Some(request.account_id))?;
         }
         let chat_id = requests[0].chat_id;
         if requests.iter().any(|request| request.chat_id != chat_id) {
@@ -744,6 +755,7 @@ impl DesktopTransfers {
         let tasks = requests
             .into_iter()
             .map(|request| NewNativeDownloadTaskRecord {
+                account_id: request.account_id,
                 chat_id: request.chat_id,
                 message_id: request.message_id,
                 message_sent_at_unix_ms: request.message_sent_at_unix_ms,
@@ -787,11 +799,10 @@ impl DesktopTransfers {
     }
 
     pub fn activate_pending_downloads(&self) -> Result<(), ApplicationError> {
-        for snapshot in self
-            .snapshots()?
-            .into_iter()
-            .filter(|snapshot| snapshot.state == ChannelDownloadState::Queued)
-        {
+        for snapshot in self.snapshots()?.into_iter().filter(|snapshot| {
+            snapshot.state == ChannelDownloadState::Queued
+                && self.require_active_account(snapshot.account_id).is_ok()
+        }) {
             let control = self
                 .inner
                 .controls
@@ -822,6 +833,7 @@ impl DesktopTransfers {
     }
 
     pub fn resume(&self, id: u64) -> Result<(), ApplicationError> {
+        self.require_task_account(id)?;
         if self.snapshot_state(id)? != ChannelDownloadState::Paused {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
@@ -893,6 +905,7 @@ impl DesktopTransfers {
     }
 
     pub fn retry(&self, id: u64) -> Result<(), ApplicationError> {
+        self.require_task_account(id)?;
         // Serialize with worker retirement so a retry cannot revive an attempt
         // that still owns the cancelled partial and outstanding requests.
         let scheduled = self
@@ -1027,6 +1040,85 @@ impl DesktopTransfers {
             // owner. Zero is the truthful live rate, not a preview estimate.
             upload_bytes_per_second: 0,
         })
+    }
+
+    /// Enable scheduling after the frontend has refreshed the authorized account's sources.
+    /// Legacy history ownership was resolved durably by the Telegram connection owner.
+    pub fn activate_account(&self, account_id: i64) -> Result<(), ApplicationError> {
+        if account_id <= 0 {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        if self.inner.active_account.load(Ordering::Acquire) == account_id {
+            return Ok(());
+        }
+        if !self
+            .inner
+            .scheduled
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .is_empty()
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        self.inner.active_account.store(0, Ordering::Release);
+        // The serialized Telegram owner already made the durable one-time decision
+        // before returning a configured connection. Refresh only in-memory ownership.
+        for record in self.inner.library.native_downloads()? {
+            update_snapshot(&self.inner.snapshots, record.id, |snapshot| {
+                snapshot.account_id = record.account_id
+            });
+        }
+        self.inner
+            .active_account
+            .store(account_id, Ordering::Release);
+        Ok(())
+    }
+
+    /// Pause active work and wait for its retained workers to close partial files before logout.
+    pub fn suspend_account(&self) -> Result<(), ApplicationError> {
+        self.inner.active_account.store(0, Ordering::Release);
+        for snapshot in self.snapshots()? {
+            if matches!(
+                snapshot.state,
+                ChannelDownloadState::Queued | ChannelDownloadState::Running
+            ) {
+                self.pause(snapshot.id)?;
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self
+                .inner
+                .scheduled
+                .lock()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .is_empty()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn require_active_account(&self, account_id: Option<i64>) -> Result<(), ApplicationError> {
+        let active = self.inner.active_account.load(Ordering::Acquire);
+        if active > 0 && account_id == Some(active) {
+            Ok(())
+        } else {
+            Err(ApplicationError::new(ApplicationErrorKind::Authorization))
+        }
+    }
+
+    fn require_task_account(&self, id: u64) -> Result<(), ApplicationError> {
+        let snapshot = self
+            .snapshots()?
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        self.require_active_account(snapshot.account_id)
     }
 
     fn control(&self, id: u64) -> Result<Arc<AtomicU8>, ApplicationError> {
@@ -1233,7 +1325,8 @@ fn empty_download_telemetry() -> TransferTelemetrySnapshot {
 }
 
 fn validate_request(request: &ChannelDownloadRequest) -> Result<(), ApplicationError> {
-    if request.chat_id <= 0
+    if request.account_id <= 0
+        || request.chat_id <= 0
         || request.message_id <= 0
         || request.file_name.trim().is_empty()
         || request.destination.as_os_str().is_empty()
@@ -1458,6 +1551,7 @@ fn run_download(
     });
     let backend_observer: Arc<dyn DownloadObserver> = observer.clone();
     let result = backend.download(
+        snapshot.account_id,
         snapshot.chat_id,
         snapshot.message_id,
         &snapshot.destination,
@@ -1758,6 +1852,7 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
     }
     ChannelDownloadSnapshot {
         id: record.id,
+        account_id: record.account_id,
         batch_id: record.batch_id,
         chat_id: record.chat_id,
         message_id: record.message_id,
@@ -1806,6 +1901,7 @@ fn persist_snapshot(
     };
     library.save_native_download(NativeDownloadTaskRecord {
         id: snapshot.id,
+        account_id: snapshot.account_id,
         batch_id: snapshot.batch_id,
         chat_id: snapshot.chat_id,
         message_id: snapshot.message_id,
@@ -1948,6 +2044,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn another_account_cannot_enqueue_resume_or_retry_prior_work() {
+        let directory = tempfile::tempdir().expect("directory");
+        let backend = Arc::new(FakeBackend {
+            outcome: Err(ApplicationErrorKind::Network),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend.clone(), library(&directory)).expect("transfers");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("a.zip")))
+            .expect("enqueue");
+        wait_for_terminal(&transfers, id);
+        transfers.suspend_account().expect("suspend");
+        transfers.activate_account(2).expect("switch");
+        assert_eq!(
+            transfers.retry(id).expect_err("other account retry").kind(),
+            ApplicationErrorKind::Authorization
+        );
+        assert_eq!(
+            transfers
+                .resume(id)
+                .expect_err("other account resume")
+                .kind(),
+            ApplicationErrorKind::Authorization
+        );
+        assert_eq!(
+            transfers
+                .enqueue_channel_download(request(directory.path().join("b.zip")))
+                .expect_err("wrong request account")
+                .kind(),
+            ApplicationErrorKind::Authorization
+        );
+        assert_eq!(backend.calls.lock().expect("calls").len(), 1);
+        assert_eq!(
+            transfers.snapshots().expect("history")[0].account_id,
+            Some(1)
+        );
+    }
+
+    #[test]
     fn native_profiles_change_real_parts_without_inventing_connections() {
         for (strategy, initial, maximum) in [
             (DownloadThroughputStrategy::Balanced, 4, 24),
@@ -2028,6 +2163,15 @@ mod tests {
         assert_eq!(counters.completed_parts_per_second_milli, 1_500);
     }
 
+    fn test_transfers(
+        backend: Arc<dyn ChannelDownloadBackend>,
+        library: DesktopLibrary,
+    ) -> Result<DesktopTransfers, ApplicationError> {
+        let transfers = DesktopTransfers::with_backend(backend, library)?;
+        transfers.activate_account(1)?;
+        Ok(transfers)
+    }
+
     struct FakeBackend {
         outcome: Result<(), ApplicationErrorKind>,
         calls: StdMutex<Vec<(i64, i64, PathBuf)>>,
@@ -2036,6 +2180,7 @@ mod tests {
     impl ChannelDownloadBackend for FakeBackend {
         fn download(
             &self,
+            _account_id: Option<i64>,
             chat_id: i64,
             message_id: i64,
             destination: &Path,
@@ -2066,6 +2211,7 @@ mod tests {
 
     fn request(destination: PathBuf) -> ChannelDownloadRequest {
         ChannelDownloadRequest {
+            account_id: 1,
             chat_id: 100,
             message_id: 200,
             message_sent_at_unix_ms: Some(1_700_000_000_000),
@@ -2103,8 +2249,7 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(destination.clone()))
             .expect("enqueue");
@@ -2124,7 +2269,7 @@ mod tests {
             b"telegram bytes"
         );
         drop(transfers);
-        let restored = DesktopTransfers::with_backend(backend, library)
+        let restored = test_transfers(backend, library)
             .expect("restored worker")
             .snapshots()
             .expect("restored snapshots");
@@ -2142,8 +2287,7 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers = DesktopTransfers::with_backend(backend.clone(), library.clone())
-            .expect("download worker");
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("download worker");
         let first = request(directory.path().join("first.zip"));
         let mut second = request(directory.path().join("second.zip"));
         second.message_id = 201;
@@ -2171,7 +2315,7 @@ mod tests {
         assert_eq!(snapshots[1].mime_type.as_deref(), Some("application/zip"));
         drop(transfers);
 
-        let restored = DesktopTransfers::with_backend(backend, library)
+        let restored = test_transfers(backend, library)
             .expect("restored worker")
             .snapshots()
             .expect("restored snapshots");
@@ -2196,8 +2340,7 @@ mod tests {
             outcome: Err(ApplicationErrorKind::Network),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(directory.path().join("failed.zip")))
             .expect("enqueue");
@@ -2211,7 +2354,7 @@ mod tests {
             Some(failure_diagnostic(ApplicationErrorKind::Network))
         );
         drop(transfers);
-        let restored = DesktopTransfers::with_backend(backend, library)
+        let restored = test_transfers(backend, library)
             .expect("restored worker")
             .snapshots()
             .expect("restored snapshots");
@@ -2230,8 +2373,7 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(destination.clone()))
             .expect("enqueue");
@@ -2258,7 +2400,7 @@ mod tests {
         assert!(!session_log_path.exists());
         drop(transfers);
         assert!(
-            DesktopTransfers::with_backend(backend, library)
+            test_transfers(backend, library)
                 .expect("restored worker")
                 .snapshots()
                 .expect("restored snapshots")
@@ -2275,6 +2417,7 @@ mod tests {
         impl ChannelDownloadBackend for CleanupRecordingBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2306,8 +2449,7 @@ mod tests {
                 failure_kind,
                 cleanup_calls: StdMutex::new(Vec::new()),
             });
-            let transfers = DesktopTransfers::with_backend(backend.clone(), library(&directory))
-                .expect("worker");
+            let transfers = test_transfers(backend.clone(), library(&directory)).expect("worker");
             let id = transfers
                 .enqueue_channel_download(request(directory.path().join("failure.bin")))
                 .expect("enqueue");
@@ -2340,13 +2482,13 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library(&directory)).expect("worker");
+        let transfers = test_transfers(backend.clone(), library(&directory)).expect("worker");
         let first = transfers
             .enqueue_channel_download(request(directory.path().join("first.zip")))
             .expect("first enqueue");
         let second = transfers
             .enqueue_channel_download(ChannelDownloadRequest {
+                account_id: 1,
                 chat_id: 101,
                 message_id: 201,
                 message_sent_at_unix_ms: Some(1_700_000_001_000),
@@ -2374,6 +2516,7 @@ mod tests {
         impl ChannelDownloadBackend for ControlledBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2405,8 +2548,7 @@ mod tests {
             attempts: AtomicUsize::new(0),
             discarded: AtomicUsize::new(0),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library(&directory)).expect("worker");
+        let transfers = test_transfers(backend.clone(), library(&directory)).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(directory.path().join("controlled.zip")))
             .expect("enqueue");
@@ -2492,6 +2634,7 @@ mod tests {
         impl ChannelDownloadBackend for RetryBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2522,8 +2665,7 @@ mod tests {
             started: started_tx,
             release: StdMutex::new(release_rx),
         });
-        let transfers =
-            DesktopTransfers::with_backend(backend.clone(), library.clone()).expect("worker");
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(directory.path().join("retry.zip")))
             .expect("enqueue");
@@ -2558,7 +2700,7 @@ mod tests {
             outcome: Err(ApplicationErrorKind::Network),
             calls: StdMutex::new(Vec::new()),
         });
-        let transfers = DesktopTransfers::with_backend(backend, library.clone()).expect("worker");
+        let transfers = test_transfers(backend, library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(directory.path().join("restore.zip")))
             .expect("enqueue");
@@ -2573,7 +2715,7 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let restored = DesktopTransfers::with_backend(backend.clone(), library).expect("restore");
+        let restored = test_transfers(backend.clone(), library).expect("restore");
         assert_eq!(
             restored.snapshot_state(id).expect("state"),
             ChannelDownloadState::Cancelled
@@ -2592,6 +2734,7 @@ mod tests {
         impl ChannelDownloadBackend for ShutdownAwareBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2614,8 +2757,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let library = library(&directory);
         let transfers =
-            DesktopTransfers::with_backend(Arc::new(ShutdownAwareBackend), library.clone())
-                .expect("worker");
+            test_transfers(Arc::new(ShutdownAwareBackend), library.clone()).expect("worker");
         let id = transfers
             .enqueue_channel_download(request(directory.path().join("restart.zip")))
             .expect("enqueue");
@@ -2630,7 +2772,7 @@ mod tests {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
         });
-        let restored = DesktopTransfers::with_backend(backend, library).expect("restored worker");
+        let restored = test_transfers(backend, library).expect("restored worker");
         let checkpoint = restored
             .snapshots()
             .expect("restored snapshots")
@@ -2660,6 +2802,7 @@ mod tests {
         impl ChannelDownloadBackend for StalledBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2678,7 +2821,7 @@ mod tests {
 
         let gate = Arc::new((StdMutex::new((false, false)), Condvar::new()));
         let directory = tempfile::tempdir().expect("temporary directory");
-        let transfers = DesktopTransfers::with_backend(
+        let transfers = test_transfers(
             Arc::new(StalledBackend {
                 gate: Arc::clone(&gate),
             }),
@@ -2715,6 +2858,7 @@ mod tests {
         impl ChannelDownloadBackend for BlockingBackend {
             fn download(
                 &self,
+                _account_id: Option<i64>,
                 _chat_id: i64,
                 _message_id: i64,
                 _destination: &Path,
@@ -2730,7 +2874,7 @@ mod tests {
         }
         let gate = Arc::new((StdMutex::new(false), Condvar::new()));
         let directory = tempfile::tempdir().expect("temporary directory");
-        let transfers = DesktopTransfers::with_backend(
+        let transfers = test_transfers(
             Arc::new(BlockingBackend {
                 gate: Arc::clone(&gate),
             }),
@@ -2746,6 +2890,7 @@ mod tests {
             .expect_err("duplicate active destination must fail");
         assert_eq!(error.kind(), ApplicationErrorKind::Conflict);
         let invalid = ChannelDownloadRequest {
+            account_id: 1,
             chat_id: 0,
             ..request(directory.path().join("invalid.zip"))
         };

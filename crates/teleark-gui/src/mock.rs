@@ -3,7 +3,7 @@
 //! The real adapters deliberately do not live in this crate. These records let
 //! the reference screens be exercised while the Core ports are implemented.
 
-use gpui::SharedString;
+use gpui_kit::SharedString;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferState {
@@ -140,7 +140,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
         },
         transfer_row! {
             name: "Presentation_Final.mov",
-            source: "Saved Messages",
+            source: "TeleArk",
             direction: TransferDirection::Upload,
             size: "9.74 GB",
             transferred: "6.2 GB",
@@ -149,7 +149,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             eta: "6m 12s",
             connections: "16 / 32",
             state: TransferState::Uploading,
-            destination: "Telegram / Saved Messages",
+            destination: "Telegram / TeleArk",
         },
         transfer_row! {
             name: "Design_System.pdf",
@@ -249,7 +249,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             0,
             transfer_row! {
                 name: "Movie_Archive.mkv",
-                source: "Saved Messages",
+                source: "TeleArk",
                 direction: TransferDirection::Upload,
                 size: "73.6 GB",
                 transferred: "0 B",
@@ -258,7 +258,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
                 eta: "—",
                 connections: "—",
                 state: TransferState::Waiting,
-                destination: "Telegram / Saved Messages",
+                destination: "Telegram / TeleArk",
             },
         );
     }

@@ -1,10 +1,14 @@
-use gpui::{
+use gpui_kit::component::{
+    Disableable as _, Icon, IconName,
+    button::ButtonVariants as _,
+    checkbox::Checkbox,
+    scroll::ScrollableElement as _,
+    tab::{Tab, TabBar},
+};
+use gpui_kit::{
     AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
-};
-use gpui_component::{
-    Disableable as _, Icon, IconName, checkbox::Checkbox, scroll::ScrollableElement as _,
 };
 use teleark_i18n::{
     MessageArgs,
@@ -32,7 +36,7 @@ use crate::{
 // The view owns one command batch. Dropping the owner stops at the next task
 // boundary, without interrupting an atomic runtime operation already in progress.
 pub(crate) struct TransferActionJob {
-    _task: gpui::Task<()>,
+    _task: gpui_kit::Task<()>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -46,7 +50,11 @@ impl Drop for TransferActionJob {
 impl TeleArkApp {
     pub(crate) fn transfer_rows(&self) -> Vec<TransferRow> {
         let Some(transfers_runtime) = self.transfers.as_ref() else {
-            return transfers(self.upload_queued);
+            return if self.visual_preview {
+                transfers(self.upload_queued)
+            } else {
+                Vec::new()
+            };
         };
         let Ok(snapshots) = transfers_runtime.snapshots() else {
             return Vec::new();
@@ -86,7 +94,8 @@ impl TeleArkApp {
                     .map(|snapshot| self.transfer_row_from_vault_snapshot(&snapshot)),
             );
         }
-        if self.upload_queued
+        if self.visual_preview
+            && self.upload_queued
             && let Some(preview) = transfers(true).into_iter().find(|row| {
                 row.direction == TransferDirection::Upload && row.state == TransferState::Waiting
             })
@@ -110,7 +119,7 @@ impl TeleArkApp {
             VaultTransferDirection::Download => TransferDirection::Download,
         };
         let destination = match snapshot.direction {
-            VaultTransferDirection::Upload => self.tr("transfer-vault-saved-messages"),
+            VaultTransferDirection::Upload => self.tr("transfer-vault-storage-channel"),
             VaultTransferDirection::Download => snapshot
                 .destination
                 .as_ref()
@@ -127,7 +136,7 @@ impl TeleArkApp {
             caption: snapshot.package_id.clone().map(Into::into),
             mime_type: Some(self.tr("transfer-vault-encrypted-type")),
             name: snapshot.file_name.clone().into(),
-            source: self.tr("saved-messages-title"),
+            source: self.tr("storage-channel-title"),
             direction,
             size: format_bytes(self.locale(), snapshot.size_bytes).into(),
             transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
@@ -330,14 +339,6 @@ impl TeleArkApp {
         let padding = layout.content_padding();
         let query = self.search_input.read(cx).value().to_lowercase();
         let all_transfer_rows = self.transfer_rows();
-        let upload_count = all_transfer_rows
-            .iter()
-            .filter(|row| !row.batch_child && row.direction == TransferDirection::Upload)
-            .count();
-        let download_count = all_transfer_rows
-            .iter()
-            .filter(|row| !row.batch_child && row.direction == TransferDirection::Download)
-            .count();
         let uploading = all_transfer_rows
             .iter()
             .filter(|transfer| !transfer.batch_child)
@@ -403,15 +404,13 @@ impl TeleArkApp {
                     || transfer.destination.to_lowercase().contains(&query)
             })
             .collect();
-        let selected_index = self
-            .selected_file
-            .min(transfer_rows.len().saturating_sub(1));
         let selected = transfer_rows
-            .get(selected_index)
-            .filter(|transfer| {
-                transfer.runtime_task_id.is_some() || transfer.runtime_batch_id.is_none()
+            .iter()
+            .enumerate()
+            .find(|(index, transfer)| {
+                self.focused_transfer_key == Some(transfer_selection_key(transfer, *index))
             })
-            .cloned();
+            .map(|(_, transfer)| transfer.clone());
         let visible_transfer_keys: Vec<_> = transfer_rows
             .iter()
             .enumerate()
@@ -443,7 +442,12 @@ impl TeleArkApp {
             .flex()
             .items_center()
             .gap_3()
-            .child(components::section_title(self.tr("transfer-title")))
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr("transfer-title")),
+            )
             .child(div().flex_1())
             .child(
                 div()
@@ -457,50 +461,71 @@ impl TeleArkApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::blue())
                     .child(format_speed(self.locale(), total_speed)),
+            )
+            .child(
+                components::button(
+                    "transfer-manage",
+                    self.tr("transfer-manage"),
+                    Some(IconName::Settings2),
+                    false,
+                )
+                .ghost()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.transfer_controls_expanded = !this.transfer_controls_expanded;
+                    cx.notify();
+                })),
+            )
+            .child(
+                components::button(
+                    "transfer-upload",
+                    self.tr("storage-channel-upload-action"),
+                    Some(IconName::Plus),
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page = crate::app::Page::Storage;
+                    if this.storage_channel_id().is_some() {
+                        this.request_vault_unlock(crate::app::UnlockIntent::Upload, cx);
+                    } else {
+                        this.select_storage(crate::app::StorageView::Files, cx);
+                    }
+                })),
             );
-        let filters = div()
-            .flex_none()
-            .px(px(padding))
-            .pb_2()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .children(
-                [
-                    (
-                        "nav-transfers-all",
-                        "nav-all-transfers",
-                        uploading + downloading + waiting + completed + failed,
-                    ),
-                    ("nav-uploads", "transfer-uploads", upload_count),
-                    ("nav-downloads", "transfer-downloads", download_count),
-                    ("nav-waiting", "transfer-summary-waiting", waiting),
-                    ("nav-completed", "transfer-summary-completed", completed),
-                    ("nav-failed", "transfer-summary-failed", failed),
-                ]
-                .into_iter()
-                .map(|(id, label, count)| {
-                    components::button(
-                        id,
-                        self.tr_with(
-                            "transfer-filter-count",
-                            MessageArgs::new()
-                                .with("label", self.tr(label).to_string())
-                                .with("count", format_integer(self.locale(), count as u64)),
-                        ),
-                        None,
-                        self.nav_selection == id,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+        let facets = [
+            ("nav-transfers-all", "nav-all-transfers"),
+            ("nav-uploads", "transfer-uploads"),
+            ("nav-downloads", "transfer-downloads"),
+            ("nav-waiting", "transfer-summary-waiting"),
+            ("nav-completed", "transfer-summary-completed"),
+            ("nav-failed", "transfer-summary-failed"),
+        ];
+        let filters = div().flex_none().px(px(padding)).pb_3().child(
+            TabBar::new("transfer-facets")
+                .segmented()
+                .selected_index(
+                    facets
+                        .iter()
+                        .position(|(id, _)| *id == self.nav_selection)
+                        .unwrap_or(0),
+                )
+                .children(
+                    facets
+                        .iter()
+                        .map(|(_, label)| Tab::new().label(self.tr(label))),
+                )
+                .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                    if let Some((id, _)) = facets.get(*index) {
                         this.nav_selection = id;
-                        this.selected_file = 0;
+                        this.focused_transfer_key = None;
                         this.selected_transfer_keys.clear();
                         this.pending_transfer_bulk_delete.clear();
                         this.show_transfer_detail = false;
+                        this.transfer_scroll
+                            .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
                         cx.notify();
-                    }))
-                }),
-            );
+                    }
+                })),
+        );
         let toolbar =
             div()
                 .flex_none()
@@ -666,6 +691,7 @@ impl TeleArkApp {
             .child(
                 div().w(px(28.0)).flex_none().child(
                     Checkbox::new("transfers-select-all")
+                        .accessibility_label(self.tr("telegram-files-select-all"))
                         .checked(all_visible_selected)
                         .on_click(cx.listener({
                             let visible_transfer_keys = visible_transfer_keys.clone();
@@ -681,31 +707,29 @@ impl TeleArkApp {
                 ),
             )
             .child(transfer_header(self.tr("table-name"), None))
-            .when(layout.shows_transfer_source(), |header| {
-                header
-                    .child(transfer_header(self.tr("table-source"), Some(108.0)))
-                    .child(transfer_header(self.tr("detail-direction"), Some(76.0)))
-            })
-            .child(transfer_header(self.tr("table-size"), Some(76.0)))
-            .child(transfer_header(self.tr("table-progress"), Some(112.0)))
-            .when(layout.shows_transfer_speed(), |header| {
-                header
-                    .child(transfer_header(self.tr("table-speed"), Some(82.0)))
-                    .when(!layout.is_compact(), |header| {
-                        header.child(transfer_header(self.tr("table-eta"), Some(64.0)))
-                    })
-            })
-            .child(transfer_header(
-                self.tr("table-status"),
-                Some(layout.transfer_status_width()),
-            ))
-            .child(transfer_header(self.tr("transfer-actions"), Some(152.0)));
+            .child(transfer_header(self.tr("table-progress"), Some(188.0)))
+            .child(transfer_header(self.tr("transfer-actions"), Some(116.0)));
 
         let has_rows = !transfer_rows.is_empty();
-        let rows = transfer_rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, transfer)| self.render_transfer_row(index, transfer, layout, cx));
+        let row_count = transfer_rows.len();
+        let rows = std::sync::Arc::new(transfer_rows);
+        let virtual_rows = gpui_kit::uniform_list(
+            "transfer-list",
+            row_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|index| {
+                        rows.get(index)
+                            .cloned()
+                            .map(|row| this.render_transfer_row(index, row, layout, cx))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.transfer_scroll)
+        .w_full()
+        .flex_1()
+        .min_h_0();
 
         let table_footer = div()
             .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
@@ -762,25 +786,30 @@ impl TeleArkApp {
             .flex()
             .flex_col()
             .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .children(rows)
-                    .when(!has_rows, |body| {
-                        body.child(
+            .when(has_rows, |table| table.child(virtual_rows))
+            .when(!has_rows, |table| {
+                table.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .child(
+                            Icon::new(IconName::ArrowDown)
+                                .size(px(34.0))
+                                .text_color(theme::blue()),
+                        )
+                        .child(
                             div()
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
                                 .text_sm()
                                 .text_color(theme::text_secondary())
                                 .child(self.tr("transfer-empty")),
-                        )
-                    }),
-            )
+                        ),
+                )
+            })
             .child(table_footer);
 
         let main = div()
@@ -791,7 +820,14 @@ impl TeleArkApp {
             .flex_col()
             .child(summary)
             .child(filters)
-            .child(toolbar)
+            .when(
+                self.transfer_controls_expanded
+                    || selection_count > 0
+                    || self.transfer_action_error.is_some()
+                    || self.pending_transfer_delete.is_some()
+                    || !self.pending_transfer_bulk_delete.is_empty(),
+                |main| main.child(toolbar),
+            )
             .child(table)
             .pb(px(padding));
 
@@ -850,7 +886,7 @@ impl TeleArkApp {
             let Some(this) = this.upgrade() else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 if !deleted.is_empty() {
                     this.show_transfer_detail = false;
                 }
@@ -875,8 +911,9 @@ impl TeleArkApp {
         index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let selection_key = transfer_selection_key(transfer, index);
         let mut actions = div()
-            .w(px(152.0))
+            .w(px(116.0))
             .flex_none()
             .flex()
             .justify_end()
@@ -897,7 +934,13 @@ impl TeleArkApp {
                             action.icon(),
                             self.tr(action.label()),
                         )
+                        .ghost()
+                        .h(px(26.0))
+                        .w(px(26.0))
                         .disabled(self.transfer_action_job.is_some())
+                        .ghost()
+                        .h(px(26.0))
+                        .w(px(26.0))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if action == TransferAction::Delete {
@@ -927,6 +970,9 @@ impl TeleArkApp {
                             action.icon(),
                             self.tr(action.label()),
                         )
+                        .ghost()
+                        .h(px(26.0))
+                        .w(px(26.0))
                         .disabled(true),
                     );
                 }
@@ -945,6 +991,9 @@ impl TeleArkApp {
                         IconName::ArrowRight,
                         self.tr("action-open-file"),
                     )
+                    .ghost()
+                    .h(px(26.0))
+                    .w(px(26.0))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         cx.open_with_system(&destination);
@@ -956,6 +1005,9 @@ impl TeleArkApp {
                         IconName::FolderOpen,
                         self.tr("action-show-in-folder"),
                     )
+                    .ghost()
+                    .h(px(26.0))
+                    .w(px(26.0))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         cx.reveal_path(&reveal);
@@ -969,9 +1021,13 @@ impl TeleArkApp {
                     IconName::Info,
                     self.tr("transfer-show-details"),
                 )
+                .ghost()
+                .h(px(26.0))
+                .w(px(26.0))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.selected_file = index;
+                    this.focused_transfer_key = Some(selection_key);
                     this.show_transfer_detail = true;
                     cx.notify();
                 })),
@@ -984,10 +1040,10 @@ impl TeleArkApp {
         &self,
         index: usize,
         transfer: TransferRow,
-        layout: LayoutPolicy,
+        _layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let focused = self.selected_file == index;
+        let focused = self.focused_transfer_key == Some(transfer_selection_key(&transfer, index));
         let selection_key = transfer_selection_key(&transfer, index);
         let selected = self.selected_transfer_keys.contains(&selection_key);
         let tone = transfer_tone(transfer.state);
@@ -999,8 +1055,9 @@ impl TeleArkApp {
             batch_group_id.is_some_and(|id| self.expanded_transfer_batches.contains(&id));
 
         div()
-            .id(("transfer-row", index))
-            .h(px(52.0))
+            .id(("transfer-row", selection_key))
+            .w_full()
+            .h(px(68.0))
             .px_3()
             .flex()
             .items_center()
@@ -1021,26 +1078,31 @@ impl TeleArkApp {
                     }
                 } else {
                     this.selected_file = index;
+                    this.focused_transfer_key = Some(selection_key);
                     this.pending_transfer_delete = None;
                 }
                 cx.notify();
             }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    if let Some(batch_id) = batch_group_id {
-                        if !this.expanded_transfer_batches.insert(batch_id) {
-                            this.expanded_transfer_batches.remove(&batch_id);
+            .on_key_down(
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        if let Some(batch_id) = batch_group_id {
+                            if !this.expanded_transfer_batches.insert(batch_id) {
+                                this.expanded_transfer_batches.remove(&batch_id);
+                            }
+                        } else {
+                            this.selected_file = index;
+                            this.focused_transfer_key = Some(selection_key);
+                            this.pending_transfer_delete = None;
                         }
-                    } else {
-                        this.selected_file = index;
-                        this.pending_transfer_delete = None;
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-            }))
+                }),
+            )
             .child(
                 div().w(px(28.0)).flex_none().child(
                     Checkbox::new(("transfer-select", selection_key))
+                        .accessibility_label(self.tr("telegram-file-select-action"))
                         .checked(selected)
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             cx.stop_propagation();
@@ -1084,49 +1146,63 @@ impl TeleArkApp {
                             },
                         ),
                     )
-                    .child(div().min_w_0().truncate().child(transfer.name)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pr_4()
+                            .child(div().text_size(px(13.0)).truncate().child(transfer.name))
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::text_muted())
+                                    .truncate()
+                                    .child(format!("{} · {}", transfer.size, transfer.source)),
+                            ),
+                    ),
             )
-            .when(layout.shows_transfer_source(), |row| {
-                row.child(transfer_cell(transfer.source, 108.0))
-                    .child(transfer_cell(
-                        self.tr(match transfer.direction {
-                            TransferDirection::Upload => "detail-direction-upload",
-                            TransferDirection::Download => "detail-direction-download",
-                        }),
-                        76.0,
-                    ))
-            })
-            .child(transfer_cell(transfer.size, 76.0))
             .child(
                 div()
-                    .w(px(112.0))
-                    .pr_3()
+                    .w(px(188.0))
+                    .flex_none()
+                    .pr_5()
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .justify_between()
+                            .text_size(px(10.0))
                             .text_color(tone.foreground())
+                            .child(self.tr(transfer.state.message_id()))
                             .child(format_percent(
                                 self.locale(),
                                 f64::from(transfer.progress) / 100.0,
-                                1,
+                                0,
                             )),
                     )
-                    .child(components::progress(transfer.progress, tone)),
-            )
-            .when(layout.shows_transfer_speed(), |row| {
-                row.child(transfer_cell(transfer.speed, 82.0))
-                    .when(!layout.is_compact(), |row| {
-                        row.child(transfer_cell(transfer.eta, 64.0))
-                    })
-            })
-            .child(
-                div()
-                    .w(px(layout.transfer_status_width()))
-                    .child(components::badge(
-                        self.tr(transfer.state.message_id()),
+                    .child(div().mt_1().child(components::progress(
+                        transfer.progress,
                         tone,
-                    )),
+                        self.tr("table-progress"),
+                    )))
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_size(px(10.0))
+                            .text_color(theme::text_muted())
+                            .truncate()
+                            .child(
+                                if matches!(
+                                    transfer.state,
+                                    TransferState::Uploading | TransferState::Downloading
+                                ) {
+                                    transfer.speed
+                                } else {
+                                    transfer.eta
+                                },
+                            ),
+                    ),
             )
             .child(actions)
             .into_any_element()
@@ -2073,11 +2149,11 @@ impl TeleArkApp {
                             .child(self.tr("table-progress"))
                             .child(format!("{:.1}%", transfer.progress)),
                     )
-                    .child(
-                        div()
-                            .mt_2()
-                            .child(components::progress(transfer.progress, tone)),
-                    )
+                    .child(div().mt_2().child(components::progress(
+                        transfer.progress,
+                        tone,
+                        self.tr("table-progress"),
+                    )))
                     .child(
                         div()
                             .mt_4()
@@ -2419,16 +2495,6 @@ fn transfer_header(label: impl Into<SharedString>, width: Option<f32>) -> AnyEle
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::text_secondary())
         .child(label.into())
-        .into_any_element()
-}
-
-fn transfer_cell(value: impl Into<SharedString>, width: f32) -> AnyElement {
-    div()
-        .w(px(width))
-        .min_w_0()
-        .truncate()
-        .text_color(theme::text_secondary())
-        .child(value.into())
         .into_any_element()
 }
 

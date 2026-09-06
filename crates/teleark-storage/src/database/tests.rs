@@ -211,6 +211,7 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
         .join("TeleArk")
         .join("restored-video.mp4");
     let mut task = database.insert_native_download(&NewNativeDownloadTaskRecord {
+        account_id: 1,
         chat_id: 101,
         message_id: 202,
         message_sent_at_unix_ms: Some(9),
@@ -249,6 +250,7 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
 fn native_download_batch_is_atomic_and_restores_message_metadata() -> Result<(), Box<dyn Error>> {
     let mut database = Database::open_in_memory()?;
     let task = |chat_id, message_id, name: &str| NewNativeDownloadTaskRecord {
+        account_id: 1,
         chat_id,
         message_id,
         message_sent_at_unix_ms: Some(1_700_000_000_000 + message_id),
@@ -295,6 +297,7 @@ fn native_download_batch_is_atomic_and_restores_message_metadata() -> Result<(),
 fn native_download_deletion_removes_the_last_empty_batch() -> Result<(), Box<dyn Error>> {
     let mut database = Database::open_in_memory()?;
     let task = |message_id, name: &str| NewNativeDownloadTaskRecord {
+        account_id: 1,
         chat_id: 101,
         message_id,
         message_sent_at_unix_ms: None,
@@ -822,5 +825,39 @@ fn telegram_index_cursor_round_trips_for_restart_resume() -> Result<(), Box<dyn 
         database.telegram_index_state(state.account_id, state.chat_id)?,
         Some(state)
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_download_account_resolution_is_durable_and_never_reassigns_history()
+-> Result<(), Box<dyn Error>> {
+    for restored in [None, Some(41)] {
+        let directory = tempdir()?;
+        let path = directory.path().join("v8.sqlite3");
+        {
+            let connection = Connection::open(&path)?;
+            for migration in MIGRATIONS.iter().filter(|m| m.version <= 8) {
+                connection.execute_batch(migration.sql)?;
+                connection.pragma_update(None, "user_version", migration.version)?;
+            }
+            connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+            connection.execute("INSERT INTO native_download_tasks (chat_id, message_id, file_name, size_bytes, destination_path, state, verification, transferred_bytes, attempts, created_at_unix_ms, updated_at_unix_ms) VALUES (100, 200, 'legacy.zip', 14, '/tmp/legacy.zip', 'paused', 'pending', 7, 1, 10, 12)", [])?;
+        }
+        {
+            let mut database = Database::open(&path)?;
+            assert_eq!(database.native_downloads()?[0].account_id, None);
+            database.resolve_legacy_native_download_accounts(restored)?;
+        }
+        let mut database = Database::open(&path)?;
+        database.resolve_legacy_native_download_accounts(Some(99))?;
+        let mut task = database.native_downloads()?.remove(0);
+        assert_eq!(task.account_id, restored);
+        assert_eq!(task.transferred_bytes, 7);
+        if restored.is_some() {
+            task.account_id = Some(99);
+            assert!(database.save_native_download(&task).is_err());
+            assert_eq!(database.native_downloads()?[0].account_id, restored);
+        }
+    }
     Ok(())
 }

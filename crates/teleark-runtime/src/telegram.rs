@@ -15,7 +15,7 @@ use teleark_telegram::{
 use zeroize::Zeroizing;
 
 use crate::{
-    DesktopLibrary, TelegramCredentialSource, TelegramCredentialsStatus,
+    DesktopLibrary, StorageChannelStatus, TelegramCredentialSource, TelegramCredentialsStatus,
     credentials::{ActiveTelegramCredentials, distribution_credentials},
 };
 
@@ -117,6 +117,21 @@ struct TelegramWorkerInner {
 }
 
 enum TelegramRequest {
+    DiscoverStorage {
+        account_id: i64,
+        preferred: Option<i64>,
+        create: Option<(String, String)>,
+        reply: mpsc::SyncSender<Result<StorageChannelStatus, ApplicationError>>,
+    },
+    ValidateStorage {
+        account_id: i64,
+        chat_id: i64,
+        reply: mpsc::SyncSender<Result<TelegramChatSummary, ApplicationError>>,
+    },
+    AccountAvatar {
+        account_id: i64,
+        reply: mpsc::SyncSender<Result<Option<Vec<u8>>, ApplicationError>>,
+    },
     Connect {
         api_id: i32,
         session_path: PathBuf,
@@ -143,9 +158,11 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<TelegramAuthState, ApplicationError>>,
     },
     ListDialogs {
+        account_id: i64,
         reply: mpsc::SyncSender<Result<Vec<TelegramChatSummary>, ApplicationError>>,
     },
     ScanPage {
+        account_id: i64,
         chat_id: i64,
         before_message_id: Option<i64>,
         limit: usize,
@@ -153,11 +170,13 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<TelegramFilePage, ApplicationError>>,
     },
     ScanFilteredFiles {
+        account_id: i64,
         chat_id: i64,
         filter: TelegramFileFilter,
         reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
     },
     Download {
+        account_id: Option<i64>,
         chat_id: i64,
         message_id: i64,
         destination: PathBuf,
@@ -165,17 +184,22 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     DownloadBytes {
+        account_id: i64,
         chat_id: i64,
         message_id: i64,
+        cancellation: Option<TelegramScanCancellation>,
         reply: mpsc::SyncSender<Result<Vec<u8>, ApplicationError>>,
     },
     SearchFiles {
+        account_id: i64,
         chat_id: i64,
         caption: String,
         limit: usize,
+        cancellation: Option<TelegramScanCancellation>,
         reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
     },
     UploadBytes {
+        account_id: i64,
         chat_id: i64,
         file_name: String,
         caption: String,
@@ -218,6 +242,80 @@ impl Default for WorkerState {
 }
 
 impl DesktopTelegram {
+    /// Finds the account's remote storage without creating or changing it.
+    pub fn discover_storage_channel(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+    ) -> Result<StorageChannelStatus, ApplicationError> {
+        self.resolve_storage_channel(library, account_id, None)
+    }
+
+    /// Explicit setup action. Discovery runs first on the serialized Telegram
+    /// owner, so an existing channel or an ambiguous result never creates a copy.
+    pub fn create_storage_channel(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+        title: String,
+        description: String,
+    ) -> Result<StorageChannelStatus, ApplicationError> {
+        self.resolve_storage_channel(library, account_id, Some((title, description)))
+    }
+
+    fn resolve_storage_channel(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+        create: Option<(String, String)>,
+    ) -> Result<StorageChannelStatus, ApplicationError> {
+        let preferred = library.storage_channel_id(account_id)?;
+        let status = self.request("resolve_storage_channel", |reply| {
+            TelegramRequest::DiscoverStorage {
+                account_id,
+                preferred,
+                create,
+                reply,
+            }
+        })?;
+        if let StorageChannelStatus::Ready(channel) = &status {
+            library.save_storage_channel_id(account_id, channel.id)?;
+        }
+        Ok(status)
+    }
+
+    pub fn select_storage_channel(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+        chat_id: i64,
+    ) -> Result<TelegramChatSummary, ApplicationError> {
+        let channel = self.validate_storage_channel(account_id, chat_id)?;
+        library.save_storage_channel_id(account_id, chat_id)?;
+        Ok(channel)
+    }
+
+    pub(crate) fn validate_storage_channel(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+    ) -> Result<TelegramChatSummary, ApplicationError> {
+        self.request("validate_storage_channel", |reply| {
+            TelegramRequest::ValidateStorage {
+                account_id,
+                chat_id,
+                reply,
+            }
+        })
+    }
+
+    pub fn account_avatar(&self, account_id: i64) -> Result<Option<Vec<u8>>, ApplicationError> {
+        self.request("account_avatar", |reply| TelegramRequest::AccountAvatar {
+            account_id,
+            reply,
+        })
+    }
+
     pub fn open(session_path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let session_path = session_path.as_ref().to_owned();
         if session_path.as_os_str().is_empty() {
@@ -282,7 +380,12 @@ impl DesktopTelegram {
         library: &DesktopLibrary,
     ) -> Result<TelegramAuthState, ApplicationError> {
         let credentials = self.active_credentials(library)?;
-        self.connect(credentials.api_id)
+        let state = self.connect(credentials.api_id)?;
+        library.resolve_legacy_native_download_accounts(match &state {
+            TelegramAuthState::Authorized(account) => Some(account.id),
+            _ => None,
+        })?;
+        Ok(state)
     }
 
     /// Reports the credential pair that would be used for authentication.
@@ -394,19 +497,25 @@ impl DesktopTelegram {
         })
     }
 
-    pub fn list_dialogs(&self) -> Result<Vec<TelegramChatSummary>, ApplicationError> {
+    pub fn list_dialogs(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<TelegramChatSummary>, ApplicationError> {
         self.request("list_dialogs", |reply| TelegramRequest::ListDialogs {
+            account_id,
             reply,
         })
     }
 
     pub fn scan_file_page(
         &self,
+        account_id: i64,
         chat_id: i64,
         before_message_id: Option<i64>,
         limit: usize,
     ) -> Result<TelegramFilePage, ApplicationError> {
         self.scan_file_page_cancellable(
+            account_id,
             chat_id,
             before_message_id,
             limit,
@@ -416,12 +525,14 @@ impl DesktopTelegram {
 
     pub fn scan_file_page_cancellable(
         &self,
+        account_id: i64,
         chat_id: i64,
         before_message_id: Option<i64>,
         limit: usize,
         cancellation: TelegramScanCancellation,
     ) -> Result<TelegramFilePage, ApplicationError> {
         self.request("scan_file_page", |reply| TelegramRequest::ScanPage {
+            account_id,
             chat_id,
             before_message_id,
             limit,
@@ -432,11 +543,13 @@ impl DesktopTelegram {
 
     pub fn scan_filtered_files(
         &self,
+        account_id: i64,
         chat_id: i64,
         filter: TelegramFileFilter,
     ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
         self.request("scan_filtered_files", |reply| {
             TelegramRequest::ScanFilteredFiles {
+                account_id,
                 chat_id,
                 filter,
                 reply,
@@ -446,11 +559,13 @@ impl DesktopTelegram {
 
     pub fn download_file(
         &self,
+        account_id: i64,
         chat_id: i64,
         message_id: i64,
         destination: impl AsRef<Path>,
     ) -> Result<(), ApplicationError> {
         self.request("download_file", |reply| TelegramRequest::Download {
+            account_id: Some(account_id),
             chat_id,
             message_id,
             destination: destination.as_ref().to_owned(),
@@ -461,6 +576,7 @@ impl DesktopTelegram {
 
     pub(crate) fn download_file_observed(
         &self,
+        account_id: i64,
         chat_id: i64,
         message_id: i64,
         destination: impl AsRef<Path>,
@@ -468,6 +584,7 @@ impl DesktopTelegram {
     ) -> Result<(), ApplicationError> {
         self.request("download_file_observed", |reply| {
             TelegramRequest::Download {
+                account_id: Some(account_id),
                 chat_id,
                 message_id,
                 destination: destination.as_ref().to_owned(),
@@ -500,38 +617,48 @@ impl DesktopTelegram {
 
     pub fn download_bytes(
         &self,
+        account_id: i64,
         chat_id: i64,
         message_id: i64,
+        cancellation: Option<TelegramScanCancellation>,
     ) -> Result<Vec<u8>, ApplicationError> {
         self.request("download_bytes", |reply| TelegramRequest::DownloadBytes {
+            account_id,
             chat_id,
             message_id,
+            cancellation,
             reply,
         })
     }
 
     pub fn search_files_exact_caption(
         &self,
+        account_id: i64,
         chat_id: i64,
         caption: impl Into<String>,
         limit: usize,
+        cancellation: Option<TelegramScanCancellation>,
     ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
         self.request("search_files", |reply| TelegramRequest::SearchFiles {
+            account_id,
             chat_id,
             caption: caption.into(),
             limit,
+            cancellation,
             reply,
         })
     }
 
     pub fn upload_bytes(
         &self,
+        account_id: i64,
         chat_id: i64,
         file_name: impl Into<String>,
         caption: impl Into<String>,
         bytes: Vec<u8>,
     ) -> Result<i64, ApplicationError> {
         self.request("upload_bytes", |reply| TelegramRequest::UploadBytes {
+            account_id,
             chat_id,
             file_name: file_name.into(),
             caption: caption.into(),
@@ -597,6 +724,52 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
     let mut state = WorkerState::default();
     while let Some(request) = receiver.recv().await {
         match request {
+            TelegramRequest::DiscoverStorage {
+                account_id,
+                preferred,
+                create,
+                reply,
+            } => {
+                // A timeout abandons the actual RPC future. Creation is not
+                // automatically retried: the next explicit attempt rediscovers.
+                let result = tokio::time::timeout(
+                    Duration::from_secs(60),
+                    discover_storage(&mut state, account_id, preferred, create),
+                )
+                .await
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
+                .and_then(|r| r);
+                let _ = reply.send(result);
+            }
+            TelegramRequest::ValidateStorage {
+                account_id,
+                chat_id,
+                reply,
+            } => {
+                let result = tokio::time::timeout(
+                    SCAN_PAGE_TIMEOUT,
+                    validate_storage(&state, account_id, chat_id),
+                )
+                .await
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
+                .and_then(|r| r);
+                let _ = reply.send(result);
+            }
+            TelegramRequest::AccountAvatar { account_id, reply } => {
+                let result = match require_account(&state, account_id)
+                    .await
+                    .and_then(|()| connection_ref(&state))
+                {
+                    Ok(connection) => {
+                        tokio::time::timeout(Duration::from_secs(10), connection.account_avatar())
+                            .await
+                            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
+                            .and_then(|result| result.map_err(map_telegram_error))
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
             TelegramRequest::Connect {
                 api_id,
                 session_path,
@@ -629,64 +802,109 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 let result = submit_password(&mut state, &password).await;
                 let _ = reply.send(result);
             }
-            TelegramRequest::ListDialogs { reply } => {
-                let result = list_dialogs(&mut state).await;
+            TelegramRequest::ListDialogs { account_id, reply } => {
+                let result = match require_account(&state, account_id).await {
+                    Ok(()) => list_dialogs(&mut state).await,
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(result);
             }
             TelegramRequest::ScanPage {
+                account_id,
                 chat_id,
                 before_message_id,
                 limit,
                 cancellation,
                 reply,
             } => {
-                let result =
-                    scan_page(&state, chat_id, before_message_id, limit, &cancellation).await;
+                let result = scan_page(
+                    &state,
+                    account_id,
+                    chat_id,
+                    before_message_id,
+                    limit,
+                    &cancellation,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             TelegramRequest::ScanFilteredFiles {
+                account_id,
                 chat_id,
                 filter,
                 reply,
             } => {
-                let result = scan_filtered_files(&state, chat_id, filter).await;
+                let result = scan_filtered_files(&state, account_id, chat_id, filter).await;
                 let _ = reply.send(result);
             }
             TelegramRequest::Download {
+                account_id,
                 chat_id,
                 message_id,
                 destination,
                 observer,
                 reply,
             } => {
-                let result = download(&state, chat_id, message_id, destination, observer).await;
+                let result = download(
+                    &state,
+                    account_id,
+                    chat_id,
+                    message_id,
+                    destination,
+                    observer,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             TelegramRequest::DownloadBytes {
+                account_id,
                 chat_id,
                 message_id,
+                cancellation,
                 reply,
             } => {
-                let result = download_bytes(&state, chat_id, message_id).await;
+                let operation = download_bytes(&state, account_id, chat_id, message_id);
+                let result = if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
+                        result = tokio::time::timeout(Duration::from_secs(30), operation) => result.unwrap_or_else(|_| Err(ApplicationError::new(ApplicationErrorKind::Network))),
+                    }
+                } else {
+                    operation.await
+                };
                 let _ = reply.send(result);
             }
             TelegramRequest::SearchFiles {
+                account_id,
                 chat_id,
                 caption,
                 limit,
+                cancellation,
                 reply,
             } => {
-                let result = search_files(&state, chat_id, &caption, limit).await;
+                let operation = search_files(&state, account_id, chat_id, &caption, limit);
+                let result = if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
+                        result = tokio::time::timeout(Duration::from_secs(30), operation) => result.unwrap_or_else(|_| Err(ApplicationError::new(ApplicationErrorKind::Network))),
+                    }
+                } else {
+                    operation.await
+                };
                 let _ = reply.send(result);
             }
             TelegramRequest::UploadBytes {
+                account_id,
                 chat_id,
                 file_name,
                 caption,
                 bytes,
                 reply,
             } => {
-                let result = upload_bytes(&state, chat_id, &file_name, &caption, &bytes).await;
+                let result =
+                    upload_bytes(&state, account_id, chat_id, &file_name, &caption, &bytes).await;
                 let _ = reply.send(result);
             }
             TelegramRequest::SignOut { reply } => {
@@ -904,13 +1122,93 @@ async fn list_dialogs(
     Ok(summaries)
 }
 
+fn chat_summary(chat: &TelegramChat) -> TelegramChatSummary {
+    TelegramChatSummary {
+        id: chat.id(),
+        name: chat.name().to_owned(),
+        username: chat.username().map(str::to_owned),
+        kind: chat.kind(),
+    }
+}
+
+async fn require_account(state: &WorkerState, account_id: i64) -> Result<(), ApplicationError> {
+    let account = tokio::time::timeout(
+        Duration::from_secs(10),
+        connection_ref(state)?.current_account(),
+    )
+    .await
+    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?
+    .map_err(map_telegram_error)?;
+    if account.id != account_id {
+        return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+    }
+    Ok(())
+}
+
+async fn discover_storage(
+    state: &mut WorkerState,
+    account_id: i64,
+    preferred: Option<i64>,
+    create: Option<(String, String)>,
+) -> Result<StorageChannelStatus, ApplicationError> {
+    require_account(state, account_id).await?;
+    let dialogs = connection_ref(state)?
+        .list_dialogs(MAX_DIALOGS)
+        .await
+        .map_err(map_telegram_error)?;
+    let candidates = connection_ref(state)?
+        .discover_storage_channels(&dialogs)
+        .await
+        .map_err(map_telegram_error)?;
+    let status = crate::storage_channel::resolve_storage_channel(
+        preferred,
+        candidates.iter().map(chat_summary).collect(),
+    );
+    state.chats = dialogs.into_iter().map(|chat| (chat.id(), chat)).collect();
+    if let (StorageChannelStatus::Missing, Some((title, description))) = (&status, create) {
+        let channel = connection_ref(state)?
+            .create_storage_channel(&title, &description)
+            .await
+            .map_err(map_telegram_error)?;
+        let summary = chat_summary(&channel);
+        state.chats.insert(channel.id(), channel);
+        Ok(StorageChannelStatus::Ready(summary))
+    } else {
+        Ok(status)
+    }
+}
+
+async fn validate_storage(
+    state: &WorkerState,
+    account_id: i64,
+    chat_id: i64,
+) -> Result<TelegramChatSummary, ApplicationError> {
+    require_account(state, account_id).await?;
+    let chat = state
+        .chats
+        .get(&chat_id)
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    if !connection_ref(state)?
+        .is_storage_channel(chat)
+        .await
+        .map_err(map_telegram_error)?
+    {
+        return Err(ApplicationError::new(
+            ApplicationErrorKind::PermissionDenied,
+        ));
+    }
+    Ok(chat_summary(chat))
+}
+
 async fn scan_page(
     state: &WorkerState,
+    account_id: i64,
     chat_id: i64,
     before_message_id: Option<i64>,
     limit: usize,
     cancellation: &TelegramScanCancellation,
 ) -> Result<TelegramFilePage, ApplicationError> {
+    require_account(state, account_id).await?;
     let chat = state
         .chats
         .get(&chat_id)
@@ -950,6 +1248,7 @@ async fn scan_page(
 
 async fn scan_filtered_files(
     state: &WorkerState,
+    account_id: i64,
     chat_id: i64,
     filter: TelegramFileFilter,
 ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
@@ -961,6 +1260,7 @@ async fn scan_filtered_files(
         let limit = 1_000.min(MAX_BATCH_SCAN_MESSAGES - examined);
         let page = scan_page(
             state,
+            account_id,
             chat_id,
             cursor,
             limit,
@@ -1017,11 +1317,15 @@ fn file_matches_filter(file: &TelegramFileSummary, filter: TelegramFileFilter) -
 
 async fn download(
     state: &WorkerState,
+    account_id: Option<i64>,
     chat_id: i64,
     message_id: i64,
     destination: PathBuf,
     observer: Option<Arc<dyn DownloadObserver>>,
 ) -> Result<(), ApplicationError> {
+    if let Some(account_id) = account_id {
+        require_account(state, account_id).await?;
+    }
     let chat = state
         .chats
         .get(&chat_id)
@@ -1046,9 +1350,11 @@ async fn download(
 
 async fn download_bytes(
     state: &WorkerState,
+    account_id: i64,
     chat_id: i64,
     message_id: i64,
 ) -> Result<Vec<u8>, ApplicationError> {
+    require_account(state, account_id).await?;
     let (connection, file) = fetch_file(state, chat_id, message_id).await?;
     connection
         .download_bytes(&file)
@@ -1058,10 +1364,12 @@ async fn download_bytes(
 
 async fn search_files(
     state: &WorkerState,
+    account_id: i64,
     chat_id: i64,
     caption: &str,
     limit: usize,
 ) -> Result<Vec<TelegramFileSummary>, ApplicationError> {
+    require_account(state, account_id).await?;
     let chat = state
         .chats
         .get(&chat_id)
@@ -1075,11 +1383,13 @@ async fn search_files(
 
 async fn upload_bytes(
     state: &WorkerState,
+    account_id: i64,
     chat_id: i64,
     file_name: &str,
     caption: &str,
     bytes: &[u8],
 ) -> Result<i64, ApplicationError> {
+    require_account(state, account_id).await?;
     let chat = state
         .chats
         .get(&chat_id)

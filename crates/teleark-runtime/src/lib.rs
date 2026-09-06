@@ -22,7 +22,7 @@ use teleark_storage::{
     NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
     SearchQuery, SettingRecord, StorageError, TelegramIndexStateRecord, VaultMetadataRecord,
 };
-use teleark_telegram::TelegramAccount;
+pub use teleark_telegram::{TelegramAccount, TelegramChatKind};
 
 mod channel_transfer;
 mod credentials;
@@ -38,7 +38,9 @@ pub use channel_transfer::{
     TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
+mod storage_channel;
 pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
+pub use storage_channel::StorageChannelStatus;
 pub use teleark_telegram::DownloadPartState;
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
@@ -455,6 +457,16 @@ impl DesktopLibrary {
         self.worker.save_native_download(task)
     }
 
+    pub(crate) fn resolve_legacy_native_download_accounts(
+        &self,
+        account_id: Option<i64>,
+    ) -> Result<(), ApplicationError> {
+        self.worker
+            .request("resolve_legacy_download_accounts", |reply| {
+                StorageRequest::ResolveLegacyDownloadAccounts { account_id, reply }
+            })
+    }
+
     pub(crate) fn native_downloads(
         &self,
     ) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
@@ -540,7 +552,8 @@ impl DesktopLibrary {
             .and_then(|state| state.before_message_id)
             .map(teleark_core::MessageId::get)
             .or(before_message_id);
-        let page = telegram.scan_file_page(chat_id.get(), durable_before, limit)?;
+        let page =
+            telegram.scan_file_page(account_id.get(), chat_id.get(), durable_before, limit)?;
         let files = telegram_file_upserts(account_id, chat_id, &page.files)?;
         let page_files = self.worker.upsert_remote_files(files)?;
         let files_indexed = previous
@@ -586,6 +599,20 @@ struct WorkerInner {
 }
 
 enum StorageRequest {
+    ResolveLegacyDownloadAccounts {
+        account_id: Option<i64>,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+
+    StorageChannel {
+        account_id: i64,
+        reply: SyncSender<Result<Option<i64>, ApplicationError>>,
+    },
+    SaveStorageChannel {
+        account_id: i64,
+        chat_id: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     Search {
         query: LibraryQuery,
         reply: SyncSender<Result<LibraryPage, ApplicationError>>,
@@ -1032,6 +1059,20 @@ fn storage_loop(
 ) {
     while let Ok(request) = receiver.recv() {
         match request {
+            StorageRequest::StorageChannel { account_id, reply } => {
+                let _ = reply.send(storage_channel::load_binding(&database, account_id));
+            }
+            StorageRequest::SaveStorageChannel {
+                account_id,
+                chat_id,
+                reply,
+            } => {
+                let _ = reply.send(storage_channel::save_binding(
+                    &mut database,
+                    account_id,
+                    chat_id,
+                ));
+            }
             StorageRequest::Search { query, reply } => {
                 let _ = reply.send(search_database(&database, &query));
             }
@@ -1189,6 +1230,13 @@ fn storage_loop(
                     .save_native_download(&task)
                     .map_err(map_storage_error);
                 let _ = reply.send(result);
+            }
+            StorageRequest::ResolveLegacyDownloadAccounts { account_id, reply } => {
+                let _ = reply.send(
+                    database
+                        .resolve_legacy_native_download_accounts(account_id)
+                        .map_err(map_storage_error),
+                );
             }
             StorageRequest::NativeDownloads { reply } => {
                 let result = database.native_downloads().map_err(map_storage_error);

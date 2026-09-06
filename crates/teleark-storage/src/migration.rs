@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 8;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 9;
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -398,6 +398,15 @@ CREATE TABLE vault_metadata (
     created_at_unix_ms      INTEGER NOT NULL,
     updated_at_unix_ms      INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)
 ) STRICT;
+"#,
+    },
+    Migration {
+        version: 9,
+        sql: r#"
+ALTER TABLE native_download_tasks ADD COLUMN account_id INTEGER
+    CHECK (account_id IS NULL OR account_id > 0);
+CREATE INDEX native_download_tasks_account_state
+    ON native_download_tasks (account_id, state, created_at_unix_ms, id);
 "#,
     },
 ];

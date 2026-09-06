@@ -12,14 +12,11 @@ name = "teleark"
 path = "src/main.rs"
 
 [dependencies]
-gpui.workspace = true
-gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-kit.workspace = true
 qrcode = { version = "=0.14.1", default-features = false }
 teleark-core.workspace = true
 teleark-i18n.workspace = true
 teleark-runtime.workspace = true
-teleark-telegram.workspace = true
 tracing.workspace = true
 
 [lints]

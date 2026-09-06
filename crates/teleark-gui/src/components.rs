@@ -1,11 +1,12 @@
-use gpui::{
-    Div, ElementId, FontWeight, ParentElement as _, Rgba, SharedString, Styled as _, div,
-    prelude::FluentBuilder as _, px,
-};
-use gpui_component::{
+use crate::assets::Symbol;
+use gpui_kit::component::{
     IconName,
     button::{Button, ButtonVariants as _},
     progress::Progress,
+};
+use gpui_kit::{
+    Div, ElementId, FontWeight, ParentElement as _, Rgba, SharedString, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::theme;
@@ -68,10 +69,12 @@ pub fn button(
 
 pub fn icon_button(
     id: impl Into<ElementId>,
-    icon: IconName,
+    icon: impl Into<gpui_kit::component::Icon>,
     tooltip: impl Into<SharedString>,
 ) -> Button {
+    let tooltip = tooltip.into();
     Button::new(id)
+        .accessibility_label(tooltip.clone())
         .size(px(34.0))
         .rounded(theme::RADIUS_SMALL)
         .icon(icon)
@@ -93,10 +96,11 @@ pub fn badge(label: impl Into<SharedString>, tone: Tone) -> Div {
         .child(label.into())
 }
 
-pub fn progress(value: f32, tone: Tone) -> Progress {
-    Progress::new()
+pub fn progress(value: f32, tone: Tone, label: impl Into<SharedString>) -> Progress {
+    Progress::new("file-progress")
         .h(px(4.0))
-        .bg(tone.foreground())
+        .color(tone.foreground())
+        .accessibility_label(label)
         .value(value)
 }
 
@@ -119,4 +123,22 @@ pub fn page_toolbar(padding: f32) -> Div {
         .flex_wrap()
         .items_center()
         .gap_3()
+}
+
+/// Original code-drawn app mark. Scales without raster assets.
+pub fn app_mark(size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px(size * 0.24))
+        .bg(theme::blue())
+        .flex()
+        .items_center()
+        .justify_center()
+        .shadow_sm()
+        .child(
+            gpui_kit::component::Icon::new(Symbol::Layers)
+                .size(px(size * 0.62))
+                .text_color(gpui_kit::rgb(0xffffff)),
+        )
 }

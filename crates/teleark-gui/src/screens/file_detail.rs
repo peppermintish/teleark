@@ -1,8 +1,8 @@
-use gpui::{
+use gpui_kit::component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_kit::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName, scroll::ScrollableElement as _};
 use teleark_core::{EncryptionState, RemoteState, VerificationState};
 use teleark_i18n::{
     MessageArgs,

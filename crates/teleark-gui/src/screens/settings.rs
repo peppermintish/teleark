@@ -1,12 +1,13 @@
-use gpui::{
+use gpui_kit::component::{
+    Disableable as _, Icon, IconName,
+    button::ButtonVariants as _,
+    input::{Input, InputState},
+    scroll::ScrollableElement as _,
+};
+use gpui_kit::{
     AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px, rgba,
-};
-use gpui_component::{
-    Disableable as _, Icon, IconName,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
 };
 use teleark_i18n::{
     SupportedLocale,
@@ -55,73 +56,88 @@ impl TeleArkApp {
                 },
             ));
 
-        let settings_nav = div()
-            .w(px(layout.local_navigation_width()))
-            .h_full()
-            .flex_none()
-            .p_2()
-            .child(self.settings_nav_item(
+        let main_sections = [
+            (
                 IconName::Settings,
-                self.tr("settings-general"),
+                "settings-general",
                 SettingsSection::General,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::CircleUser,
-                self.tr("settings-accounts"),
-                SettingsSection::Accounts,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::Inbox,
-                self.tr("settings-storage"),
-                SettingsSection::Storage,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::ArrowDown,
-                self.tr("settings-downloads"),
-                SettingsSection::Downloads,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::ArrowUp,
-                self.tr("settings-uploads"),
-                SettingsSection::Uploads,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::Asterisk,
-                self.tr("settings-key-vault"),
-                SettingsSection::KeyVault,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::Search,
-                self.tr("settings-indexing"),
-                SettingsSection::Indexing,
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                IconName::Bell,
-                self.tr("settings-notifications"),
-                SettingsSection::Notifications,
-                cx,
-            ))
-            .child(self.settings_nav_item(
+            ),
+            (
                 IconName::Palette,
-                self.tr("settings-appearance"),
+                "settings-appearance",
                 SettingsSection::Appearance,
-                cx,
-            ))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(theme::text_muted())
-                    .child(concat!("TeleArk ", env!("CARGO_PKG_VERSION"))),
-            );
+            ),
+            (
+                IconName::CircleUser,
+                "settings-accounts",
+                SettingsSection::Accounts,
+            ),
+            (
+                IconName::Asterisk,
+                "settings-key-vault",
+                SettingsSection::KeyVault,
+            ),
+            (
+                IconName::ArrowDown,
+                "settings-downloads",
+                SettingsSection::Downloads,
+            ),
+            (
+                IconName::Inbox,
+                "settings-storage",
+                SettingsSection::Storage,
+            ),
+            (IconName::Info, "settings-about", SettingsSection::About),
+        ];
+        let settings_nav =
+            div()
+                .w(px(if layout.is_compact() { 148.0 } else { 182.0 }))
+                .h_full()
+                .flex_none()
+                .overflow_y_scrollbar()
+                .p_1()
+                .children(main_sections.into_iter().map(|(icon, id, section)| {
+                    self.settings_nav_item(icon, self.tr(id), section, cx)
+                }))
+                .child(
+                    components::button(
+                        "settings-advanced-disclosure",
+                        self.tr("settings-advanced"),
+                        Some(if self.settings_advanced_expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        }),
+                        false,
+                    )
+                    .ghost()
+                    .mt_4()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_advanced_expanded = !this.settings_advanced_expanded;
+                        cx.notify();
+                    })),
+                )
+                .when(self.settings_advanced_expanded, |nav| {
+                    nav.child(self.settings_nav_item(
+                        IconName::ArrowUp,
+                        self.tr("settings-uploads"),
+                        SettingsSection::Uploads,
+                        cx,
+                    ))
+                    .child(self.settings_nav_item(
+                        IconName::Search,
+                        self.tr("settings-indexing"),
+                        SettingsSection::Indexing,
+                        cx,
+                    ))
+                    .child(self.settings_nav_item(
+                        IconName::Bell,
+                        self.tr("settings-notifications"),
+                        SettingsSection::Notifications,
+                        cx,
+                    ))
+                });
 
         let language = components::card()
             .p_5()
@@ -331,8 +347,32 @@ impl TeleArkApp {
             );
 
         let active_content = match self.settings_section {
+            SettingsSection::About => self.render_about(cx),
             SettingsSection::General => language.into_any_element(),
-            SettingsSection::Accounts => telegram_credentials.into_any_element(),
+            SettingsSection::Accounts => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    settings_card(
+                        self.tr("shell-account"),
+                        self.tr("account-switch-description"),
+                    )
+                    .child(
+                        components::button(
+                            "settings-show-account",
+                            self.tr("shell-account"),
+                            Some(IconName::CircleUser),
+                            true,
+                        )
+                        .mt_4()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_page(crate::app::Page::Account, cx)
+                        })),
+                    ),
+                )
+                .child(telegram_credentials)
+                .into_any_element(),
             SettingsSection::Storage => self.render_storage_settings(cx),
             SettingsSection::Downloads => self.render_download_settings(cx),
             SettingsSection::Uploads => self.render_upload_settings(cx),
@@ -411,11 +451,13 @@ impl TeleArkApp {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.set_settings_section(section, cx);
             }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.set_settings_section(section, cx);
-                }
-            }))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.set_settings_section(section, cx);
+                    }
+                }),
+            )
             .child(Icon::new(icon).text_color(if selected {
                 theme::blue()
             } else {
@@ -811,6 +853,76 @@ impl TeleArkApp {
     }
 
     fn render_key_vault_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                settings_card(
+                    self.tr("settings-vault-title"),
+                    self.tr("settings-vault-description"),
+                )
+                .child(
+                    div()
+                        .mt_4()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(components::badge(
+                            self.tr(if !self.vault_status.configured {
+                                "vault-status-not-configured"
+                            } else if self.vault_locked {
+                                "vault-status-locked"
+                            } else {
+                                "vault-status-unlocked"
+                            }),
+                            if self.vault_locked {
+                                Tone::Amber
+                            } else {
+                                Tone::Green
+                            },
+                        ))
+                        .child(
+                            components::button(
+                                "settings-vault-main",
+                                self.tr(if self.vault_locked {
+                                    "vault-unlock-action"
+                                } else {
+                                    "settings-vault-lock-now-action"
+                                }),
+                                None,
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.vault_locked {
+                                    this.request_vault_unlock(crate::app::UnlockIntent::Browse, cx);
+                                } else {
+                                    this.lock_vault(cx);
+                                }
+                            })),
+                        ),
+                )
+                .child(
+                    components::button(
+                        "vault-advanced-disclosure",
+                        self.tr("settings-advanced"),
+                        Some(IconName::ChevronDown),
+                        false,
+                    )
+                    .mt_4()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.vault_advanced_expanded = !this.vault_advanced_expanded;
+                        cx.notify();
+                    })),
+                ),
+            )
+            .when(self.vault_advanced_expanded, |body| {
+                body.child(self.render_vault_advanced_settings(cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_vault_advanced_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let working = self.vault_activity == VaultActivity::Working;
         let status_id = if !self.vault_status.configured {
             "vault-status-not-configured"
@@ -1145,7 +1257,106 @@ impl TeleArkApp {
                 .text_color(theme::red())
                 .child(self.tr("vault-key-loss-warning")),
         );
-        card.into_any_element()
+        card.child(
+            components::button(
+                "settings-legacy-recovery",
+                self.tr("storage-legacy-action"),
+                Some(IconName::Redo2),
+                false,
+            )
+            .mt_4()
+            .disabled(self.telegram_account.is_none())
+            .on_click(cx.listener(|this, _, _, cx| this.open_legacy_recovery(cx))),
+        )
+        .into_any_element()
+    }
+
+    fn render_about(&self, cx: &mut Context<Self>) -> AnyElement {
+        components::card()
+            .p_6()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(components::app_mark(64.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(px(28.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("TeleArk"),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_sm()
+                                    .text_color(theme::text_secondary())
+                                    .child(env!("CARGO_PKG_VERSION")),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .text_sm()
+                                    .text_color(theme::text_secondary())
+                                    .child(self.tr("about-description")),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .p_3()
+                    .rounded(theme::RADIUS_SMALL)
+                    .bg(theme::amber_soft())
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("about-alpha")),
+            )
+            .child(
+                div()
+                    .mt_6()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tr("about-changelog-title")),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .text_sm()
+                    .child(gpui_kit::base::TextView::markdown(
+                        "about-release-notes",
+                        self.tr("about-changelog-v040"),
+                    )),
+            )
+            .child(
+                components::button(
+                    "about-licenses",
+                    self.tr("about-licenses"),
+                    Some(IconName::ChevronDown),
+                    false,
+                )
+                .ghost()
+                .mt_5()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.about_show_licenses = !this.about_show_licenses;
+                    cx.notify();
+                })),
+            )
+            .when(self.about_show_licenses, |card| {
+                card.child(
+                    div()
+                        .mt_4()
+                        .text_xs()
+                        .child(gpui_kit::base::TextView::markdown(
+                            "about-third-party-notices",
+                            include_str!("../../../../THIRD_PARTY_NOTICES.md"),
+                        )),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_indexing_settings(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1299,7 +1510,7 @@ impl TeleArkApp {
                 this.set_locale(locale, window, cx);
             }))
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.set_locale(locale, window, cx);
                     }
@@ -1376,11 +1587,13 @@ impl TeleArkApp {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.use_system_locale(window, cx);
             }))
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.use_system_locale(window, cx);
-                }
-            }))
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.use_system_locale(window, cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .size(px(34.0))
@@ -1628,19 +1841,27 @@ pub fn render_telegram_api_id_prompt(app: &TeleArkApp, cx: &mut Context<TeleArkA
                 ),
         );
 
-    div()
-        .absolute()
-        .inset_0()
-        .bg(rgba(0x18203366))
-        .p_4()
+    let cancel = cx.listener(|this, _, window, cx| {
+        this.telegram_api_hash
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        this.skip_telegram_api_id_prompt(cx);
+    });
+    gpui_kit::base::Dialog::new(cx)
+        .focus_handle(app.modal_focus.clone())
         .flex()
         .items_center()
         .justify_center()
-        .child(dialog)
+        .backdrop(div().absolute().inset_0().bg(rgba(0x18203366)))
+        .popup(dialog)
+        .close_on_backdrop_press(false)
+        .on_cancel(move |event, window, cx| {
+            cancel(event, window, cx);
+            false
+        })
         .into_any_element()
 }
 
-fn settings_card(title: SharedString, description: SharedString) -> gpui::Div {
+fn settings_card(title: SharedString, description: SharedString) -> gpui_kit::Div {
     components::card()
         .p_5()
         .child(components::section_title(title))
@@ -1688,7 +1909,7 @@ fn theme_option(
     title: SharedString,
     description: SharedString,
     selected: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
@@ -1769,11 +1990,11 @@ fn theme_option(
 }
 
 fn selection_option(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     title: impl Into<SharedString>,
     description: SharedString,
     selected: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
@@ -1825,7 +2046,7 @@ fn preference_row(
     title: SharedString,
     description: SharedString,
     enabled: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
@@ -1883,7 +2104,7 @@ fn vault_input(label: SharedString, input: &Entity<InputState>) -> AnyElement {
         .into_any_element()
 }
 
-fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
+pub(crate) fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
     match app.vault_activity {
         VaultActivity::Idle | VaultActivity::Working => None,
         VaultActivity::Succeeded => Some((app.tr("vault-operation-succeeded"), Tone::Green)),
@@ -1912,6 +2133,17 @@ fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
 #[cfg(test)]
 mod tests {
     use super::TELEGRAM_API_PANEL_URL;
+
+    #[test]
+    fn about_contains_the_complete_canonical_release_record() {
+        let localizer =
+            teleark_i18n::Localizer::new(teleark_i18n::SupportedLocale::EnUs).expect("locale");
+        let about = localizer.translate_or_id(teleark_i18n::MessageId::new("about-changelog-v040"));
+        let changelog = include_str!("../../../../CHANGELOG.md")
+            .strip_prefix("# Changelog\n\n")
+            .expect("changelog heading");
+        assert_eq!(about.trim(), changelog.trim());
+    }
 
     #[test]
     fn telegram_api_panel_button_targets_the_official_https_page() {
