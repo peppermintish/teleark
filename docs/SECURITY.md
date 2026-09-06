@@ -1,186 +1,79 @@
-# Security Model
+# Security and release review
 
-Status: threat model for an early alpha with a provisional cryptographic codec candidate. Framed encryption, key wrapping, strict manifest parsing, AEAD-identity hydration APIs, candidate vectors, authenticated Manifest publication, production filesystem/Telegram adapters, a retained desktop Vault owner, explicit recovery-bundle export/restore, and the encrypted Saved Messages upload/scan/download workflow now exist. OS credential storage, independent review, durable encrypted-transfer checkpoints and controls, and credentialed crash/system evidence do not. TeleArk must not yet be used to protect valuable data.
+TeleArk is an early alpha with provisional crypto, manifest and recovery-bundle formats. Connected upload/discovery/recovery adapters and deterministic tests exist; independent security review, durable encrypted controls and credentialed crash/system evidence remain incomplete. Keep independent copies of important data and recovery material. [Status](IMPLEMENTATION_STATUS.md) is the current capability record.
 
-## Security goals
+## Threat model
 
-The intended Vault mode protects file content, original filename/path, and encrypted manifest metadata from disclosure to Telegram or an attacker who obtains only Telegram-stored ciphertext. It authenticates every crypto frame and manifest metadata, detects corruption/tampering before completion, limits memory during large transfers, and supports recovery from Telegram storage after local database loss when the user retains account access and a valid unlock/recovery secret.
+Vault mode aims to conceal content, original filenames/paths and manifest metadata from a party holding only Telegram ciphertext, authenticate every frame/manifest, reject corruption before final publication and recover completed packages after local database loss with account access and valid unlock material.
 
-The product also aims to prevent accidental exposure through final filenames, logs, debug formatting, crash checkpoints, fixtures, and source control.
+Assets include plaintext, password/recovery KEKs, Master/File Keys, Telegram sessions, local catalog/history and the integrity/availability of manifests, parts and checkpoints. Consider malicious or corrupted remote bytes, copied local databases, parser abuse, process interruption, supply-chain mistakes, secret logging and another local user without the signed-in OS account's access.
 
-Desktop diagnostics follow the allowlist and retention policy in
-`DIAGNOSTICS.md`. Daily JSONL logs may contain numeric task/chat/message IDs,
-byte counts, timings, and structured error classes, but never credentials,
-login inputs/tokens, filenames, captions, channel titles, local paths, or file
-content. Logging is bounded and non-blocking so diagnostics cannot exert
-unbounded memory pressure or stall transfer/storage owners. The subscriber
-filters out all third-party targets so dependency events cannot bypass this
-field review.
+Protection does not extend to a compromised unlocked endpoint, permanently lost keys, deleted Telegram content or account loss. Telegram can observe account/channel relationships, ciphertext sizes/counts, opaque remote names, public format markers, timing and network metadata. Native non-Vault content and indexed metadata are not encrypted by Vault. Padding, traffic shaping and anonymity are not designed.
 
-## Assets
-
-- plaintext files and original names/paths;
-- passwords and Recovery Keys;
-- derived password/recovery KEKs;
-- Vault Master Key and per-file File Keys;
-- Telegram session credentials and account identity;
-- local indexed metadata, collection membership, and transfer history;
-- integrity and availability of manifests, parts, and local recovery state.
-
-## Adversaries considered
-
-- a party able to inspect or modify objects stored in Telegram;
-- network and storage corruption (transport security remains a Telegram/MTProto responsibility);
-- an attacker who copies the local database but not the separately protected Telegram session cache;
-- malformed or malicious manifest/frame bytes presented to parsers;
-- accidental process termination between remote success and local persistence;
-- dependency/supply-chain mistakes and accidental secret logging;
-- another local user without access to the signed-in OS account or unlocked process.
-
-## Explicit non-goals and limits
-
-TeleArk does **not** provide complete anonymity, zero metadata leakage, protection from a fully compromised unlocked endpoint, or guaranteed availability of Telegram-hosted content. It cannot protect plaintext while a legitimate user has it open, prevent screen capture/malware with equivalent local privileges, or recover keys the user has permanently lost.
-
-Telegram can observe at least:
-
-- account and storage-channel relationships;
-- ciphertext object sizes and counts;
-- message/upload/download timing;
-- traffic patterns and IP/network metadata available to the service;
-- opaque remote filenames and public format-identification fields;
-- any native, non-Vault Telegram metadata/content the user chooses to index.
-
-Padding/traffic shaping is not currently designed. Multipart sizes and timing may reveal approximate logical size and activity.
-
-## Candidate cryptographic design
-
-The provisional design uses:
-
-- Argon2id to derive a password KEK from a per-vault random salt and benchmarked parameters;
-- a random 256-bit Vault Master Key, separately wrapped for password and recovery paths;
-- a fresh random 256-bit File Key per package;
-- AES-256-GCM for file-key wrapping, master-key wrapping, encrypted manifest metadata, and framed content;
-- unique 96-bit nonces under every AES-GCM key and domain-separated authenticated data;
-- BLAKE3 whole-file and per-part digests for integrity/identity checks in addition to GCM authentication.
-
-No custom AES, GHASH, GCM, Argon2, or random-number generator implementation is permitted. Hardware acceleration may be used only when the chosen maintained crate, target, and CPU actually provide it; the product must not promise it universally.
-
-Exact candidate bytes and nonce invariants are in `CRYPTO_FORMAT.md`. Explicit codecs and fixed candidate vectors now exercise those bytes, including tamper/wrong-key/layout rejection and duplicate key/nonce-identity prevention. The design remains provisional until independently reviewed, continuously fuzzed, integrated into a safe service/transfer lifecycle, and proven by database-loss recovery. BLAKE3 is not a replacement for GCM authentication.
-
-## Key hierarchy and recovery
+## Key and format contract
 
 ```text
-Password -> Argon2id -> Password KEK -> unwrap Vault Master Key
-Recovery Key --------> Recovery KEK -> unwrap Vault Master Key
-Vault Master Key --------------------> unwrap random File Key
-File Key ----------------------------> content frames + manifest metadata
+Password -> Argon2id -> Password KEK -> wrapped Master Key
+Recovery Key --------> Recovery KEK -> wrapped Master Key
+Master Key -------------------------> wrapped random File Key
+File Key ---------------------------> frames + manifest metadata
 ```
 
-Changing a password rewraps the Vault Master Key; it does not re-encrypt all file content. OS Keychain integration is a convenience adapter, not the durable recovery authority. A Recovery Key must be generated from secure randomness, displayed/exported through an explicit protected flow, and never silently uploaded alongside the material it unlocks.
+Use maintained implementations of Argon2id, AES-256-GCM, BLAKE3 and OS randomness. Master/File Keys are random 256-bit values. AES-GCM uses unique 96-bit nonces under each key and domain-separated AAD. BLAKE3 digests supplement authentication; they never replace it. Exact bytes, bounds, parameters and nonce domains are specified in [Crypto](CRYPTO_FORMAT.md) and [Manifest](MANIFEST_FORMAT.md). Never infer durable layout from Rust/Serde or implement custom cryptographic primitives.
 
-The desktop exports a self-contained, exact-version recovery bundle containing the checksummed Recovery Key text and its authenticated Recovery Wrap. That bundle is sufficient to reconstruct local Vault metadata and set a new password after the Library database is lost. Recovery rotation replaces the active local recovery record, so an old bundle cannot unlock the current local record through the ordinary unlock flow. It cannot cryptographically revoke an already exported old bundle: because that bundle still unwraps the same Master Key, it remains capable of disaster recovery against retained ciphertext. Users must protect or securely destroy superseded exports.
+Password changes rewrap the same Master Key. A self-contained exact-version recovery bundle includes checksummed Recovery Key text and its authenticated Recovery Wrap, allowing reconstruction of local Vault metadata and a new password after database loss. Export requires an explicit protected flow; never upload the secret alongside ciphertext. Loss of every unlock path is unrecoverable.
 
-Loss of every valid password/recovery/keychain path makes encrypted data unrecoverable by design. TeleArk has no backdoor. The UI must state this clearly before enabling Vault storage and should encourage an offline recovery-key backup.
+Recovery rotation replaces the active local record, preventing ordinary unlock with its old key. It cannot revoke an exported bundle that still unwraps the same Master Key: that old bundle can still perform disaster recovery. Protect or securely destroy superseded exports. Future OS Keychain convenience must not replace offline recovery or determine durable crypto bytes; its adapter remains disabled.
 
-## Secret handling
+## Secret lifetime and account isolation
 
-- Never log passwords, Recovery Keys, master/file keys, KEKs, Telegram sessions, or plaintext frame buffers.
-- Secret wrapper `Debug` output is redacted; serialization is opt-in only at explicit wrapping boundaries.
-- Zeroize key/password buffers where practical and avoid unnecessary clones.
-- Use cryptographically secure production randomness; deterministic RNG inputs are test-only.
-- Keep secrets out of command lines, panic messages, telemetry, screenshots, test fixtures, and source control.
-- Limit unlocked-key lifetime and define lock-on-sleep/logout behavior before release.
-- Do not hold secrets in GUI view models longer than needed.
+- Redact secret wrapper/manifest metadata `Debug`; serialization occurs only at reviewed wrapping boundaries. Zeroize secret/plaintext buffers where practical and avoid clones. Deterministic randomness is test-only.
+- A bounded retained Vault owner alone holds the unwrapped Master Key. GUI secret inputs are cleared on dismissal/locking. Active-window auto-lock is configurable; changing pages does not lock. Sleep/logout and platform behavior still require release qualification.
+- A lock request does not revoke keys already held by an active encrypted transfer. Account switching is blocked until Vault work finishes and pauses/drains native workers before sign-out.
+- Every native task and Telegram request carries the expected account. Runtime checks the actual session, and schema 9 prevents rebinding existing known task ownership. A one-time transaction resolves legacy NULL rows only from the actual initial restored session; an unauthorized first connection leaves them non-executable permanently. See [Data model](DATA_MODEL.md).
+- New encrypted uploads validate the bound channel's current creator/private-broadcast metadata before accessing plaintext or keys. Missing/invalid bindings fail closed; candidate discovery is bounded. The exact `teleark:storage:v1` marker classifies a channel but never authenticates file content.
+- QR links are short-lived authorization secrets: memory-only, debug-redacted, refreshed on expiry/token updates and absent from databases, sessions, diagnostics and fixtures. Never capture real login/recovery secrets during UI review.
 
-Telegram QR login links contain short-lived authorization secrets. TeleArk keeps
-them only in memory, redacts them from adapter/runtime `Debug` output, refreshes
-them on Telegram's login-token update or expiry, and never writes them to the
-Library database, session file, ordinary logs, or fixtures.
+Each immutable package writer owns an AEAD-usage registry and fresh File Key identities. Full restart-time hydration of previously used encryption identities remains a stabilization requirement.
 
-The candidate crate uses redacted secret and manifest metadata `Debug` implementations, zeroizing key/password/plaintext buffers where practical, OS randomness in production, and deterministic randomness only behind test support. The desktop Vault serializes sensitive operations on one bounded owner thread and retains only the unwrapped Master Key there while unlocked. Each package writer owns an AEAD-usage registry for its immutable File Key and fresh identities. Full restart-time hydration of all prior remote identities remains required before the candidate format can be stabilized for production.
+## Untrusted bytes, paths and finalization
 
-## Parser and output safety
+Parse fixed headers and bounded lengths before allocation. Reject unsupported required versions/algorithms, noncanonical/trailing data, invalid AAD/tags/digests, duplicate/reordered/missing/overlapping/out-of-range parts and frames. Filenames and remote path metadata are untrusted: prevent traversal, absolute escape, separator confusion, reserved-name abuse and unintended overwrite.
 
-Manifests and frames are untrusted. Parse fixed headers and bounded lengths before allocation; reject unsupported required algorithms/versions; verify AAD/tag/digests; reject duplicate, reordered, missing, overlapping, or out-of-range parts/frames. Fuzz parsers against panics, hangs, and unbounded allocation.
+Vault downloads authenticate the manifest and each frame, verify part/whole-file digests, flush a controlled private partial and atomically publish without overwrite. Wrong keys, cancellation, missing parts, disk failure and corruption must not expose a final path as complete. Native downloads enforce exact declared length and a strict versioned completion bitmap, with the same publication rule; they currently offer no cryptographic content authentication. See [Transfer](TRANSFER_ENGINE.md).
 
-Downloads write only to a controlled `.partial` destination. Authentication failure, wrong key, cancellation, disk failure, missing part, or hash mismatch must never expose the final target path as a valid complete file. Flush verified output and atomically rename only after whole-file verification.
+Telegram and SQLite cannot commit atomically. The generic engine tests ambiguous remote success/checkpoint reconciliation using deterministic fakes. Connected Vault uploads verify parts before publishing the manifest last, but progress is memory-only, encrypted restart controls are absent and pre-manifest interruption can leave orphan ciphertext. Completed disaster recovery depends on retained account access, manifest/parts, supported codecs and separately protected key material. Finalization crash injection, orphan cleanup and credentialed recovery remain open.
 
-Native, non-Vault Telegram downloads use the same publication rule but currently
-verify only the exact byte count declared by Telegram. They create a private
-collision-resistant application partial name, reject an existing final path,
-write one-mebibyte logical parts at explicit offsets, persist a strict versioned
-completion bitmap, flush before atomic no-replace publication, and remove the
-partial and bitmap on explicit cancellation. Interruption retains both for
-missing-part-only resume. This is truncation/finalization safety, not
-cryptographic content authentication.
+## Local data, API configuration and logs
 
-Path metadata is untrusted: prevent traversal, absolute-path escape, reserved-name abuse, separator confusion, and overwrite without explicit policy.
+SQLite is not encrypted. It can reveal native filenames/captions, source paths, channel membership, collections, sizes, timestamps and transfer history. Unix-like per-user directories are restricted; platform permissions, SQLite sidecars and backups still require an audit. Telegram session credentials live in the separate adapter session cache and must never enter the Library database or repository.
 
-## Local data and credentials
+Personal API ID/Hash pairs are transactionally saved/removed in SQLite, validated and loaded by Runtime, and redacted from ordinary debug output. A readable database/backup exposes the API Hash. Distributor-owned pairs may be compiled into a build and are extractable. They identify an application and do not authorize a Telegram user. Personal pairs override distributor defaults; never reuse Telegram Desktop credentials.
 
-The SQLite database may reveal indexed native filenames/captions, local source paths, channel membership, collections, sizes, timestamps, and transfer history unless a future local-database encryption feature explicitly changes that threat model. The current desktop alpha persistently imports this local metadata. Vault manifests protect remote original names, but local search necessarily stores useful metadata while the library is available. The default per-user database directory is restricted on Unix-like systems; platform permissions, auxiliary SQLite files, and backup behavior still require a release audit.
+Both process and per-transfer logs use an explicit allowlist: fixed operation/event names, structured classes and numeric IDs, offsets, sizes, timings, rates, attempts and queue/controller counters. Never record API Hashes, session data, QR tokens, phone numbers, codes/passwords/keys, filenames, captions, channel titles, paths, content/plaintext or unreviewed adapter error prose. New fields require review and deterministic coverage where practical. Third-party tracing targets are excluded. [Transfer and diagnostics](TRANSFER_ENGINE.md#progress-session-logs-and-diagnostics) owns bounds, retention and session schemas; full process queues drop events rather than block owners.
 
-Telegram sessions use adapter/platform protection and must never be committed. macOS Keychain support, when added, cannot replace recovery-key backup and must be isolated from durable crypto format definitions.
+## Dependencies and clean-room provenance
 
-The desktop persists the Telegram application API ID and API Hash together in
-the local SQLite settings table so authentication can resume after restart.
-The pair is transactionally saved/removed, validated before use, loaded by the
-runtime rather than returned to the GUI, and redacted from ordinary debug
-output. SQLite is not encrypted, so anyone who obtains a readable Library
-database or backup can obtain the API Hash. The Settings and onboarding UI make
-this tradeoff explicit. Telegram login/session secrets remain in the separately
-protected adapter session cache and are not stored in the Library database.
+Review dependency necessity, direct/relevant transitive licenses, maintenance and advisories before adding/upgrading. `cargo deny check`, license notices and exact reviewed exceptions enforce the policy. Security-sensitive changes must rerun vectors, compatibility and tamper/recovery tests.
 
-An official distributor may compile credentials registered for its own TeleArk
-application into its build. Embedded API credentials are extractable from the
-binary and are therefore application identifiers, not secret authorization or
-an account session; distributors must monitor and rotate them when necessary.
-A personal SQLite pair overrides the distributor pair and can be removed
-explicitly. TeleArk does not embed or reuse Telegram Desktop's published
-credentials. Telegram's official documentation states that sample IDs are
-limited to testing and that third-party applications must obtain their own API
-ID.
+Never inspect, copy, adapt or derive implementation from GPL `tdl`, including agent summaries, schemas, tests, architecture, naming, control flow or RPC sequencing. Use official Telegram/MTProto specifications, public grammers APIs/docs, permissively licensed sources whose license was verified first and original TeleArk work. [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) records the permissive prefixed GPUI dependency graph and bans the incompatible unprefixed logging crates.
 
-## Availability and crash consistency
+## Independent audit and format-stability gate
 
-Telegram and SQLite cannot participate in one transaction. Idempotent package/part identity, recoverable opaque names, durable checkpoints, and reconciliation prevent blind duplicate upload after a crash. Recovery depends on Telegram account/channel availability, retained manifests/parts, supported format codecs, and valid key material; Telegram deletion/account loss remains an availability risk.
+No independent audit has been completed. The reviewer must be organizationally independent from implementation, disclose conflicts, identify the exact commit and sign a report separating findings, residual risks and exclusions. Retain its hash/reviewed commit. Findings include severity, affected bytes/API, exploitability, reproduction, remediation and retest evidence.
 
-The generic Transfer engine exercises ambiguous-success and checkpoint-failure
-reconciliation against deterministic fakes, including no-duplicate remote
-parts, and the runtime composes it with real Telegram and SQLite adapters. The
-connected encrypted Saved Messages path uploads and verifies every encrypted
-part before publishing its authenticated manifest, discovers managed files by
-authenticating manifests, and downloads through a private partial file before
-whole-file verification and atomic publication. Its queue/progress is currently
-in memory, it has no pause/cancel/retry controls, scanning is bounded to 1,000
-manifest candidates, and interruption before manifest publication can leave
-unreferenced ciphertext objects. A separate bounded native-download worker is
-also connected to the desktop; its SQLite task rows and private versioned part
-bitmap resume missing ranges after restart. Both paths create privacy-reviewed
-per-transfer session logs before moving data. Credentialed Telegram crash/system
-testing still remains.
+Scope covers `crates/teleark-crypto`, its vectors under `tests/vectors`, both format documents, key wrapping/KDF/nonce/AEAD registries, parser allocation/canonical/version bounds, redaction and the integrated transfer/recovery lifecycle. Reproduce crypto tests and strict Clippy, plus `cargo fuzz run part_decode` and `cargo fuzz run manifest_decode`. Daily CI runs bounded ten-minute campaigns; release evidence must record materially longer campaigns, toolchain, corpus hash, executions, coverage, peak memory and minimized/replayed findings. Fuzz-only cargo-fuzz/libfuzzer-sys licenses were reviewed (MIT/Apache-2.0 and permissive NCSA); they do not enter release binaries.
 
-## Dependency and clean-room security
+`FORMAT_MAJOR = 1` is a candidate identifier. Remove provisional markers only after all five gates:
 
-All dependencies require license, maintenance, and security review. CI should enforce advisories, banned/duplicate policy as appropriate, and license allowlists when repository configuration is added. Security-sensitive crate upgrades require vectors and compatibility/tamper tests.
+1. Signed independent review with critical/high findings resolved.
+2. Long-running fuzz evidence and retained regression corpora.
+3. Independently generated or cross-implementation vectors.
+4. Integrated upload, fresh-database discovery, authenticated download and byte-for-byte recovery, including tamper/wrong-key/frame-order/nonce/parser/partial/crash checks and protected real-system evidence.
+5. An adopted release ADR freezing canonical bytes and backward-read obligations.
 
-Never inspect or derive implementation from GPL `tdl`; legal provenance is part of supply-chain integrity. Use official Telegram/MTProto documentation, public `grammers` APIs/docs, public specifications, and original analysis.
+Internal tests, fake remotes and UI demonstrations do not substitute for independent review or real recovery evidence.
 
-## Required security tests before production use
+## Vulnerability reports
 
-- correct encrypt/decrypt plus ciphertext/tag/AAD tamper rejection;
-- wrong File Key, Master Key, password, and Recovery Key rejection;
-- frame reorder, omission, duplication, truncation, and invalid final-frame rejection;
-- nonce uniqueness across all supported part/frame indices;
-- manifest tamper/version/algorithm/length-limit rejection;
-- fixed crypto vectors and old manifest fixtures;
-- parser fuzzing and allocation bounds;
-- `.partial` failure safety;
-- crash injection around remote upload/checkpoint boundaries;
-- database-loss recovery through a fake remote, followed by real protected integration testing.
-
-No UI demonstration substitutes for these tests or for external cryptographic review.
-
-## Reporting vulnerabilities
-
-Until a private security contact is published, avoid disclosing exploitable details in a public issue. Contact the repository owners through an available private channel and include the affected revision, impact, reproduction conditions, and proposed embargo needs. Do not include real user data, sessions, passwords, or keys in reports.
+Until a private security contact exists, contact repository owners through an available private channel rather than publishing exploitable details. Include revision, impact, reproduction and embargo needs; omit real sessions, keys and user data.

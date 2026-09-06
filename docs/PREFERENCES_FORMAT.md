@@ -49,10 +49,10 @@ that settings could not be loaded or saved. A future incompatible encoding
 must use a new namespace and migration rather than changing version 1 in place.
 
 The four retained `upload_*` keys remain parseable so existing version-1
-preferences do not break, but the connected Saved Messages writer does not use
+preferences do not break, but the connected private-channel writer does not use
 them. Vault uploads currently require encryption of content, original name, and
 manifest metadata and use the runtime's conservative 60 MiB plaintext-part
-ceiling. Those protections are presented only in the Saved Messages upload
+ceiling. Those protections are presented only in the TeleArk upload
 flow; Settings no longer exposes inactive controls that would imply otherwise.
 
 `transfer_soft_limit_policy` affects only official conservative guidance, never
@@ -79,4 +79,37 @@ throughput/error boundary, down to one part. The preference is captured once
 when a native task starts/resumes/retries; it does not change an already running
 owner or the encrypted Vault pipeline. Unknown values fail as structured
 persistence errors. Tests cover literal legacy rows, invalid values, and a
-Max Throughput save/reopen round trip. See ADR 0010.
+Max Throughput save/reopen round trip. See ADRs [0010](adr/0010-native-download-throughput-strategy.md) and [0011](adr/0011-adaptive-native-probe-refinement.md).
+
+## Account-scoped private channel binding
+
+Outside the preference namespace, `storage-channel.v1.account.<account-id>`
+stores the canonical positive base-10 chat ID. Account IDs are likewise positive
+canonical decimal integers. Unknown/malformed bindings are errors rather than
+permission to create or select an arbitrary channel. Display names are never
+identity. SQLite is a convenience binding; Telegram metadata supports
+rediscovery after local database loss.
+
+The remote channel description begins with the exact line `teleark:storage:v1`.
+Following lines may contain a localized description. Discovery requires full
+metadata: creator, private broadcast, not left/min/mega/gigagroup, no username or
+username aliases, and the marker on the matching full channel. It checks at most
+64 owned-private candidates from a dialog snapshot bounded to 10,000; a snapshot
+at that ceiling or incomplete inspection fails rather than proving absence.
+A saved valid ID survives rename. Missing/invalid saved bindings report
+Unavailable; multiple unbound candidates report Choose. The user must select a
+validated candidate. Create first discovers, creates only from Missing, and does
+not blindly retry. Creation/discovery has a 60-second deadline; validation has
+20 seconds. No public username, invite, member or message is added by creation.
+
+`native-download-account-migration.v1` is a separate one-time migration marker.
+Its writer emits `resolved`; presence prevents later reassignment of legacy
+unknown download accounts. The assignment and marker commit atomically before
+a configured connection is returned. See [Data model](DATA_MODEL.md) for schema
+9 compatibility and unknown-provenance behavior.
+
+`lock_vault_when_hidden` retains its version-1 boolean encoding. Its desktop
+meaning is now window inactivity, exempting active native prompts, rather than
+navigation away from Key Vault settings. Inactivity clears secret inputs and
+requests locking; already running encrypted work can finish with retained keys.
+This behavior change does not alter crypto or preference bytes.

@@ -1,436 +1,56 @@
-# Implementation status — v0.4.0 rewrite checkpoint
+# Implementation status — v0.4.0
 
-The desktop rewrite is implemented on `codex/gpui-kit-redesign`: GPUI Kit 0.6.0 /
-gpui-pre 0.3.3, permanent Transfers and TeleArk navigation, private storage setup
-and rediscovery, authenticated/raw views, account welcome/switch, resumable unlock
-intents, progressive settings, localized About changelog and native shortcuts.
-ADR 0012 defines the new dependency, destination and account-migration contracts.
-Schema 9 preserves old history with a one-time, actual-session ownership decision.
+Updated 2026-09-07. TeleArk is an early desktop alpha with real Telegram/native-download and encrypted private-channel workflows. UI polish and deterministic engine evidence do not establish a security-reviewed, signed commercial release.
 
-Validation on macOS: workspace/all-target check, strict Clippy, all workspace
-tests, all localization tests, rustdoc and cargo-deny pass. There are 296 tests
-including the canonical About/changelog parity test. Crypto candidate fixtures
-and state/migration/recovery tests pass; no live Telegram credentials were used.
-A transitive `block 0.1.6` future-Rust warning remains upstream maintenance debt.
+## Current capabilities
 
-Actual isolated English windows inspected: Transfers with 200 channels,
-authenticated storage, upload modal, returning-account and fresh login.
-Initial visual defects (row width, palette, accessibility labels) were corrected.
-The final keyboard-focus and modal-height fixes compile; remaining visual
-checks are temporarily blocked because the host Mac is locked. No full
-locale/size/backing-scale or screen-reader audit is claimed. Runtime constructors
-are disabled by `--preview-ui`; fixtures never use real sessions or files.
-
-Snapshot exception: the documentation below and other subsystem prose preserve
-the pre-rewrite source material deliberately. Their older GUI/Saved Messages
-workflow and version descriptions are historical, superseded by the above and
-ADR 0012. The immediately following documentation consolidation will replace
-this history with a short current status, reconcile subsystem contracts and keep
-before/after Git checkpoints. This is an explicit user-requested recovery point,
-not a final release gate. Crypto formats remain provisional; encrypted durable
-controls, native credentialed testing and independent review remain open.
-
-Pre-commit review: Core/runtime have no GUI dependency; GUI imports no SQL or
-`grammers`; no incompatible implementation was used. Dependency licenses and
-notices are reviewed in ADR 0012 and cargo-deny. Domain errors/values stay
-structured; all three catalogs, formatting and error mappings pass validation.
-New channel/account/cancellation behavior has deterministic tests; state
-transitions, migrations, crypto vectors and manifest recovery remain passing.
-No production unwrap/panic, unbounded spawning or lock-across-network-await was
-added. Durable changes are the explicit schema-9 column and versioned settings
-above. Formatting, workspace checks, Clippy, tests, rustdoc and diff review pass.
-The justified documentation/visual-review exceptions are recorded above.
-
----
-
-# Implementation Status
-
-Last updated: 2026-09-06
-
-## Current milestone
-
-TeleArk is a **persistent local-catalog alpha with API ID onboarding, real Telegram login, browsing,
-native download, indexing, and a production-adapter encrypted-transfer
-foundation**. In addition to local import/search/open/reveal, the desktop
-atomically persists a personal Telegram API ID/API Hash pair or uses an
-optional distributor-owned pair supplied at build time, performs QR or
-code/2FA authorization, lists real
-dialogs, immediately shows cached source rows and refreshes each selected
-source through cancellable 200-message chunks in a virtualized table bounded
-at 5,000 rows, filters by time and multiple file types, supports direct and
-multi-selected downloads without a per-file save dialog through a retained
-bounded worker, creates atomic per-channel selected-file batch downloads, and can
-scan source pages into SQLite/FTS5. Batch tasks appear as one expandable
-Transfers row, while their message sent time, MIME type, and full caption
-survive restart. A configurable managed-files
-root keeps `Downloads`, `Cache`, and privacy-bounded `Logs` together for direct
-user management. Daily structured tracing covers runtime storage, Telegram,
-and native-download operations, while transfer details expose safe performance
-and failure diagnostics. Native download rows, checkpoints, timing, and
-structured failures persist in SQLite; missing 1 MiB logical parts are fetched
-concurrently through Telegram-compatible 512 KiB requests, written at their
-offsets, and tracked by a versioned bitmap for restart continuation. Live part
-events drive progress, current speed, ETA, pause/resume/cancel/retry, and an
-adaptive per-file inflight target. Native part failures now receive bounded
-local retry with exact FloodWait delays, expose policy-dependent RECOVER reductions,
-and no longer terminate an entire task on the first transient error. Rolling
-goodput and a probe settle window prevent burst samples from driving runaway
-concurrency. Retryable failures keep only useful valid resume pairs; other
-failed artifacts are cleaned. Users can delete terminal tasks and their
-TeleArk-owned history/recovery/log data without deleting completed files.
-Desktop shutdown writes the latest active byte checkpoint without waiting on
-an indefinitely stalled Telegram network read.
-
-The native Telegram indexing entry path is real, but it is not yet the complete
-CAS/range coordinator and does not include live-update ingestion. The runtime
-now retains a bounded, serialized Vault owner that persists only wrapped key
-metadata, holds the unwrapped Master Key outside the GUI, supports creation,
-password and Recovery Bundle unlock, database-loss restore, password change,
-recovery rotation, explicit lock, and automatic lock when its Settings section
-is hidden. Self-contained recovery exports are exact-version secret bundles;
-OS Credential is deliberately disabled and labeled as under development.
-
-The desktop sidebar no longer exposes the unused Library, preview Collections,
-or standalone Key Vault destinations: authorized Telegram channels appear
-directly by source name, Saved Messages has separate raw Telegram-object and
-authenticated TeleArk-file projections, and Key Vault is available only within
-Settings. The raw inspector explains recognized versioned manifest/part objects
-and their relationships. The managed projection asks the runtime to authenticate
-remote manifests, restores original logical names and metadata, lists related
-objects, and can reconstruct a selected file through verified decryption and
-atomic non-overwriting publication. Upload selects a real local file and sends
-encrypted, verified parts plus a final authenticated Manifest to Saved Messages.
-The desktop Transfers route combines native downloads with real Vault upload and
-download snapshots including direction, bytes, part progress, timing, rate,
-destination, crypto suite, manifest state, structured failures, adaptive
-controller telemetry, and permanent per-transfer session logs. Encrypted upload
-uses a bounded reader/encryption-worker/encrypted-queue/uploader pipeline so CPU
-encryption overlaps network transfer. The Transfers inspector exposes localized
-Live and decision-by-decision Replay views.
-The global sidebar reports live aggregate transfer rates, free destination
-space, and bounded background-measured TeleArk disk use. The encrypted path is
-an alpha: its snapshots are not durable and do not yet expose pause, cancel,
-retry, priority, bandwidth policy, or restart resume.
-
-## Native Max Throughput strategy
-
-An additive, persisted download strategy separates Balanced (existing P4–24)
-from Max Throughput (P4 start, P1–64, fast initial growth and bidirectional
-single-part refinement). Confirmed low gains, retry bursts and regressions
-narrow the search; settled rate collapse can reopen old bounds. A stable upper
-boundary is reconsidered after 60 seconds using +1 probes. Actual probe values
-remain correct in replay. Deterministic models cover every sustainable retry
-limit from 1 through 64, rate optima from 10 through 20, smooth peaks skipped by
-coarse successful jumps, noise, flat throughput and changing capacity. Transient retry
-tolerance, bounded eight-attempt retries and independent delayed-part scheduling
-keep healthy work flowing. A shared connection-owned native FloodWait gate
-prevents other chunks/new native tasks from ignoring server waits. Memory,
-protocol, authorization and part-map protections remain unchanged. Download
-settings exposes both strategies in English, Chinese and Japanese; resume/retry
-captures the new preference. Encrypted Vault throughput is unchanged.
-
-Validation: all 293 workspace all-target tests pass (including 21 i18n tests),
-workspace all-target check and strict Clippy pass, formatting/diff checks pass,
-and the GUI builds. No dependencies or persistent data formats changed apart
-from the documented additive preference. The earlier UI revision is included in the same v0.3.2 review scope. Remaining: credentialed before/after
-large-file throughput measurement on the user's network, account-limit incidence,
-and visual review of the new settings controls (CUA coordinate interaction
-failed with `noWindowsAvailable`; see `UI_REVIEW.md`). No bandwidth or ban-rate claims
-are inferred from deterministic tests. The shared wait gate is not persisted
-across process restarts and does not gate independent Telegram connections.
-
-## September 2026 desktop interface revision
-
-The Transfers list now owns native per-row lifecycle/open/reveal controls and
-scope-aware bulk resume/pause/retry/cancel/delete. Collapsed batches can be
-selected directly; group/child selection deduplicates task IDs. Deletion
-confirms the exact task count in the main area and keeps completed files.
-One retained, cancellable background command owner serializes bulk actions;
-Runtime command errors are surfaced instead of discarded. State/direction tabs
-replace large summary cards; speed remains visible at minimum width and
-Details opens on demand as a closable overlay. Vault controls remain unavailable
-where the runtime does not implement them.
-
-All routes consume the revised shared neutral/blue theme, typography, borders
-and radii. Library, File Detail and Settings share page-toolbar geometry;
-Settings navigation and channel filters are flatter, empty channel/Saved
-Messages inspectors no longer consume width, and Upload has an explicit header
-close control. Search no longer advertises a mock catalog count.
-`--preview-ui` starts with unavailable adapters and isolated synthetic transfer
-fixtures, without opening a real database/session or creating runtime workers.
-It is a visual review mode, not an authenticated integration test.
-
-Visual verification and remaining coverage are recorded in `UI_REVIEW.md`.
-The full authenticated channel/Vault matrix and accessibility audit remain
-required before a commercial-quality release claim. No backend/persistent
-format or dependency changes are part of this revision.
-
-## Implemented capability
-
-| Area | Current evidence | Deliberate limit |
+| Area | Connected behavior | Remaining limits |
 | --- | --- | --- |
-| Core application API | Typed Library queries, imports, pages, statistics, repository port, structured errors; 25 Core tests total | Transfer/Index/Vault services are separate foundations, not one application command bus |
-| Persistent Library | SQLite migrations v1-v8, strict tables, FTS5, Telegram remote identities/cursors, facets, settings, collections, index rows, encrypted transfer checkpoints, durable native-download history/progress/message metadata, atomic batch creation/deletion and credential settings, plus one strict singleton wrapped Vault-metadata row | Vault package/manifest tables, collection editor, and million-row benchmark remain; authenticated Telegram manifests are the current managed-file authority |
-| Desktop runtime | Existing bounded storage/Telegram/native-download workers plus a retained bounded Vault owner; persisted password/recovery wraps; create/unlock/lock/password-change/recovery-rotation/database-loss restore; concurrent 1 MiB native parts with bitmap resume, bounded local retry, failure-artifact retention policy, and terminal-task deletion; bounded overlapping encryption/upload pipeline; adaptive telemetry and required session logs; real encrypted Saved Messages upload, authenticated manifest scan, and verified atomic restore download | Vault transfer snapshots/controls/checkpoints are memory-only; encrypted parts temporarily buffer at 60 MiB; the current grammers adapter does not expose physical media-DC lanes or multiple owned transfer connections; encrypted-upload orphan cleanup, full identity hydration, and credentialed system tests remain |
-| GPUI desktop | Existing Telegram/channel/native-transfer UI plus direct named-channel navigation, separate raw and authenticated managed Saved Messages views, real encrypted upload/restore actions, controller Live/Replay with C/W/F/P/E/Qe, rates, BDP, buffers, part state, decisions and session-log path, a persisted Respect/Adaptive Override/Ignore soft-limit selector, and Key Vault lifecycle controls only inside Settings; OS Credential is visibly disabled | Physical DC/lane rows honestly remain unavailable through the current grammers abstraction; the hidden legacy Library route remains paged; Vault accessibility/pixel review and encrypted pause/cancel/retry controls remain |
-| Localization | Complete synchronized Fluent catalogs for `en-US`, `zh-CN`, and `ja-JP`; live switching, persistent explicit override, System Default; 21 tests | Native-speaker, assistive-technology, and pixel-level locale review remain |
-| Telegram adapter | `grammers` 0.10 connection, short-lived QR login with DC migration, code/2FA, dialogs, refetch by message identity, bounded cancellable cursor scans, upload/download, structured errors, concurrent 1 MiB logical downloads over 512 KiB requests, positional writes, strict `TARKDPM1` resume bitmap, bounded part retry, failed-artifact validation/cleanup, part observer/control, atomic no-replace publication, and a versioned atomic `0600` session cache; 22 tests | Native download checks Telegram's byte length rather than a content hash; physical DC/lane identity is not exposed; ordinary tests use no live credentials and OS credential-store UX remains |
-| Historical Index Engine | Desktop Telegram-to-SQLite bounded scan with durable cursor plus the separate CAS/range coordinator and its 12 deterministic tests | Full coordinator repository mapping, live updates, retry owner, pause/cancel UI, and range compaction remain |
-| Transfer Engine | Bounded encrypted scheduler, reconfigurable concurrency envelope, adaptive C/W/F/P/E/Qe goodput controller with probe settling and BDP/soft-limit/FloodWait/retry recovery decisions, bounded encryption pipeline, native positional files, BLAKE3, SQLite checkpoints, reconciliation and safe `.partial` finalization; 54 engine tests plus runtime integration | Current production adapters vary native-download P but truthfully clamp unavailable physical C/W/F and fixed upload E/Qe; encrypted engine still buffers one application part (temporarily capped at 60 MiB); physical media connection pool, true large-part streaming, and bandwidth control remain |
-| Crypto/manifest candidate | Explicit bounded codecs, canonical checksummed Recovery Key text, self-contained versioned Recovery Bundle, authenticated remote Manifest publication/discovery, File Key recovery, and locator-bound download after fresh-SQLite recovery; two libFuzzer targets and daily fuzz workflow remain | Formats remain provisional: no independent review, long campaign evidence, full identity hydration/generation-conflict policy, or compatibility promise |
-| Packaging | Local macOS development build and baseline release workflow | No signed/notarized installer or production platform-support claim |
+| Desktop | GPUI Kit 0.6.0 / gpui-pre 0.3.3, Apple-style palette, permanent Transfers/TeleArk sidebar, virtualized channels/raw/managed/transfer lists, inspectors, progressive settings, native menus/shortcuts, localized full About changelog | Full pixel/backing-scale and assistive-technology matrix outstanding |
+| Account | Phone/code/2FA and QR, restored avatar/name welcome, explicit Log In/Switch Account, optional personal/distributor API configuration | Platform credential adapter disabled; credentialed end-to-end qualification outstanding |
+| TeleArk storage | Create/discover/validate the active account's owned private broadcast channel, account-scoped binding independent of title, candidate selection, Files/Raw Files and help guide | No automatic migration/deletion of legacy Saved Messages; legacy recovery stays in advanced Key Vault settings |
+| Vault | Retained bounded owner, password/recovery setup/unlock, password change, recovery rotation, explicit bundle export/database-loss restore, active-window lock policy | OS Credential unavailable; exported old bundles cannot be cryptographically revoked; sleep/logout qualification outstanding |
+| Unlock flow | Focused modal preserves browse/upload/download intent and resumes after successful unlock/recovery acknowledgement; cancellation clears secret inputs | Actual login/key workflows require protected credentialed review |
+| Native browsing/index | Cached source rows, 200-message cancellable transport pages, up to 5,000 virtualized rows, time/type filters, bounded SQLite/FTS indexing with persisted cursors | Generic CAS/range Index coordinator and live updates are not yet the desktop path; a row cap is not coverage evidence |
+| Native transfers | Durable account-scoped tasks/batches, bitmap missing-part resume, pause/resume/cancel/retry, terminal deletion, adaptive P, bounded retries/shared FloodWait, live/replay session logs | Exact byte-count verification only; no cryptographic content hash, physical multi-connection/DC pool or bandwidth control |
+| Encrypted transfers | Real file→encryption→Telegram upload with verified parts and final authenticated manifest; managed discovery; authenticated restore and atomic non-overwriting publication | 60 MiB plaintext/8 MiB frames/64 MiB encoded object bounds; memory-only tasks, no durable pause/cancel/retry/restart resume, orphan cleanup or empty-file desktop upload |
+| Local Library | Persistent metadata import/search/filter/paging/details, open/reveal original files under Utilities; collections remain Core/Storage capabilities | Paged Library is not virtualized; million-record performance unmeasured; source files may move/disappear |
+| i18n | Synchronized en-US/zh-CN/ja-JP, live locale choice, fallback/negotiation/formatting, semantic errors, About/CHANGELOG parity | Native NSLocale discovery and native-speaker review outstanding |
+| Diagnostics | Bounded lossy process JSONL plus durable typed transfer session logs, Settings access, safe performance/failure fields | Index event coverage and long-term session-log retention need further work |
+| Crypto/formats | Explicit codecs, candidate vectors, bounds/tamper/wrong-key tests, AEAD registry APIs, fake-remote fresh-database recovery | Provisional: independent review, longer fuzz evidence, full identity hydration and protected real-system recovery are release gates |
 
-## Architecture and data truth
+## v0.4.0 compatibility and scope
 
-- Core, Index, Transfer, Storage, Telegram, Crypto, Runtime, i18n, and GUI are
-  separate workspace crates with one-way dependencies.
-- GPUI types do not enter Core; the GUI does not execute SQL, call `grammers`,
-  perform crypto, or own transfer checkpoints.
-- `grammers` types remain private to the Telegram adapter and SQL remains in the
-  Storage crate.
-- The user-facing and persisted domain abstraction is `LogicalFile`; Telegram
-  messages and multipart pieces are adapter/diagnostic details.
-- The local database is an index/checkpoint/settings cache. Native desktop
-  download task history and chunk progress survive restart; interrupted running
-  tasks return to the queue and continue after Telegram reconnects. The fake-remote
-  acceptance path now proves recovery from an authenticated remote Manifest;
-  live Telegram recovery still needs credentialed system testing and desktop UX.
-- The configurable managed-files root owns the user-visible `Downloads`,
-  `Cache`, and `Logs` directories. SQLite and the Telegram session intentionally stay in
-  the platform application-data location because live database/session
-  relocation is not implemented.
-- Crypto and manifest encodings are implemented recovery candidates but remain
-  provisional until independent review, longer fuzz campaigns, and release
-  compatibility fixtures are complete.
+[ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) governs dependency provenance, private storage and account ownership. Schema 9 adds nullable positive account ownership to native tasks. The first configured Telegram connection atomically attributes legacy unknown rows only to its actual restored authorized session, or permanently leaves them unknown if unauthorized. Later logins cannot claim that work. New tasks require known scope; enqueue/resume/retry and actual network execution validate it. Switching pauses/drains native workers and waits for Vault work. Completed user files/history remain intact.
 
-## UI and responsive verification
+Versioned settings record account-scoped channel binding and the one-time migration decision. Crypto/manifest/recovery/bitmap/session-log encodings are unchanged. Missing/invalid/truncated channel discovery fails closed, new uploads validate current privacy/ownership before touching plaintext/keys, and manifest cancellation is propagated independently from key-operation state.
 
-The desktop layout has compact, standard, and spacious policies with a hard
-minimum of `900x600`. Deterministic layout tests cover breakpoint edges,
-localized primary-control width budgets, dialog/inspector fit, progressive
-column visibility, and usable route content budgets.
+The permissive GPUI graph and exact license exceptions are reviewed in ADR 0012, `deny.toml` and third-party notices. No GPL `tdl` or incompatible implementation was used. Core/Runtime remain GUI-free; SQL and grammers remain adapter-owned. Three catalogs, structured domain errors and bounded retained owners remain in place.
 
-The last recorded process-launch smoke matrix covered:
+## Verification record
 
-```text
-Library, Upload, Transfers, File Detail, Key Vault,
-Channel Index Detail, Settings
-x en-US, zh-CN, ja-JP
-x 960x640, 1360x760, 1920x1080
-= 63 launches
-```
+Passed: the [development quality checks](DEVELOPMENT.md#quality-gates), including formatting, locked workspace/all-target check, strict Clippy, all workspace tests, warning-denied rustdoc, cargo-deny and diff review. Static GUI message IDs and all documentation links/anchors also resolve. The suite contains 296 tests: Core 25, Crypto 36, GUI 45, i18n 21, Index 12, Runtime 56, Storage 23, Telegram 24 and Transfer 54. Account isolation, one-time legacy attribution/no-rebinding, private-channel identity, cancellation, modal Escape priority and About parity extend existing transition, migration, compatibility-vector and recovery coverage. No required source gate was skipped; the remaining live-system, security and product-review limitations are explicit below.
 
-All 63 configurations started and remained alive for the bounded smoke period.
-That evidence predates removal of the standalone Key Vault route. The September 2026 revision additionally passes the revised 54-launch
-six-route isolated-preview matrix; see `UI_REVIEW.md`. Key Vault remains a
-Settings subsection and still needs authenticated visual review. These launches verify startup and gross layout-policy selection, not
-actual pixels.
-The v0.2 Settings changes were additionally launched at `960x640` in English,
-`1360x760` in Simplified Chinese, and `1920x1080` in Japanese; all three
-remained alive through the bounded check, while deterministic tests cover the
-new localized toolbar budget and authorized nested-scroll policy.
-Unlocked macOS captures additionally verify the dual-method Telegram login and
-real Transfers routes at `900x600` in Simplified Chinese and a requested
-`1680x960` Telegram route in Japanese. The latest compact capture includes the
-native macOS titlebar, prominent global login action, aligned phone/QR panels,
-both primary login buttons without clipping, and an English Settings view whose
-localized API placeholders and wrapped credential notice remain inside the
-card at `900x600`. Visual inspection also found and fixed compact navigation
-scrollbar wrapping, transfer-summary overlap, and oversized-window placement.
-Oversized requests use desktop-safe insets before centering. Native macOS
-windowed/full-screen transitions were also exercised with the traffic-light
-control; the app now publishes localized application, View, and Window menus
-while retaining Escape and the visible in-app exit-full-screen control.
-The batch-transfer/message-detail/sidebar-metrics build additionally remained
-alive in bounded launches at `960x640` in Simplified Chinese, `1360x760` in
-English, and `1920x1080` in Japanese. These launches verify startup and layout
-selection only; authenticated batch content still needs capture-based review.
+Actual isolated windows reviewed: English Transfers with 200 channels, authenticated Files, upload, returning-account and fresh login; Chinese 900×600 unlock layout, localized wrapping, Tab cycling within the dialog, Escape/cancel dismissal, Return submission/empty-password feedback and the compact raw file table; Japanese dark About with version/full changelog, Files/Raw switching, 5,000-row raw scrolling and direct return to Transfers. The sidebar refresh action retained the current Transfers view. Visual defects found during review were corrected, including table-header/input contrast and synthetic preview persistence banners. Preview runtime constructors are disabled and fixtures are synthetic; no real sessions, credentials, private files or remote writes were used.
 
-## Verification evidence
+The full locale/size/backing-scale, VoiceOver and real-account matrices remain release qualification. The reviewed layouts and keyboard actions do not imply those broader checks are complete.
 
-The applicable local gate for this milestone is:
+Known toolchain debt: upstream `block 0.1.6` emits a future-Rust incompatibility warning; current workspace Clippy is warning-clean. Passing cargo-deny reflects reviewed policy/explicit exceptions, not a blanket claim that every dependency has no maintenance risk.
 
-```text
-cargo fmt --all --check
-cargo check --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-cargo deny check
-git diff --check
-```
+## Documentation consolidation
 
-The v0.3.3 suite passes 295 tests: Core 25, Crypto 36, GUI 53, i18n 21,
-Index 12, Runtime 50, Storage 22, Telegram 22, and Transfer 54.
-The current gate passes format, workspace check, strict Clippy, all workspace
-tests, warning-denied documentation, dependency policy, and diff validation.
+The contributor guide now routes to 12 focused top-level documents, down from 15. The guide plus those documents shrank from 3,261 to about 1,200 lines (approximately 63%). Diagnostics moved into Transfer/Security, the audit package into Security, and UI review into this status plus the Development matrix. Redundant `DIAGNOSTICS.md`, `SECURITY_AUDIT_PACKAGE.md` and `UI_REVIEW.md` were removed. Byte-level Crypto/Manifest contracts, both license files and all accepted ADRs were preserved.
 
-The published GPUI dependency graph currently reports future-incompatibility
-warnings for transitive `block 0.1.6` and `proc-macro-error2 2.0.1`; the workspace
-itself is warning-clean under Clippy. Existing documented RustSec and license
-policy exceptions remain governed by `deny.toml` and third-party notices.
-The new direct `base64 0.22.1` and `qrcode 0.14.1` dependencies both declare
-`MIT OR Apache-2.0`; QR default image/SVG/PIC features were disabled, so the
-locked graph gained only `qrcode` while reusing the existing `base64` package.
-The direct `tracing-subscriber 0.3.23` and `tracing-appender 0.2.5`
-dependencies are maintained by the Tokio tracing project, declare MIT, and are
-used with their documented JSON and bounded non-blocking rolling-writer APIs.
-They do not introduce the prohibited GPL `ztracing`/`zlog` dependency family.
-The direct `sysinfo 0.31.4` dependency declares MIT, was already present in the
-locked transitive graph, and is used only for destination-volume capacity; the
-application-owned directory scan remains bounded and does not follow symlinks.
-The runtime directly reuses the workspace's locked `blake3 1.8.7` package
-(`CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception`) so the upload Reader
-can calculate the whole-file digest without a second disk pass; no new
-transitive package was introduced.
+Git checkpoints preserve the complete source before the rewrite (`checkpoint/pre-gpui-kit-redesign-20260907`), before document removal (`checkpoint/pre-doc-consolidation-20260907`) and after consolidation (`checkpoint/post-doc-consolidation-20260907`). [Recovery commands](DEVELOPMENT.md#documentation-recovery-checkpoints) support inspecting/restoring documents without guessing prior versions. Source rollback never downgrades user data automatically.
 
-## Known gaps and risks
+## Next actions and release gates
 
-- Desktop QR/code login, source selection, bounded document browsing/download,
-  and bounded indexing are real. The
-  richer generic Index coordinator is not yet the production desktop owner.
-- Transfer now has concrete native-file, SQLite, crypto, and Telegram adapters,
-  plus fake-remote crash/restart and database-loss integration. A retained
-  desktop Vault owner now connects encrypted Saved Messages upload, scan, and
-  restore, but its snapshots and controls are not durable and it still
-  needs streaming beyond the temporary 60 MiB part cap, credentialed Telegram
-  system tests, orphan reconciliation, and more finalization crash injection.
-  Both paths permanently write safe controller session logs. The real
-  native-download worker now has byte/part progress, out-of-order bitmap resume,
-  adaptive P, pause/resume/cancel/retry, bounded automatic part retry, recovery
-  cleanup, and terminal-task deletion, but still lacks physical
-  multi-connection/DC-lane ownership, bandwidth control, and a content
-  hash. The current upload transport is serialized, so its fixed E/Qe and
-  connection bounds are reported honestly rather than presented as adaptive.
-- Crypto/manifest/recovery-bundle candidate vectors are not a stable released
-  format. Lifecycle and fake-remote recovery proofs are engineering evidence,
-  not a released recovery guarantee or an independent security assessment.
-- Scheduled fuzzing is continuous regression pressure, not proof of security.
-  An independent reviewer must still sign the exact release candidate, and the
-  format cannot be frozen until encrypted database-loss recovery is integrated.
-- The hidden legacy Library route remains paged but not virtualized;
-  million-record performance and UI memory behavior are unmeasured.
-- Existing imported source files can move or disappear; open/reveal uses the
-  retained original path and the runtime returns structured source errors on a
-  later operation.
-- Local catalog metadata includes filenames and absolute source paths. The
-  per-user data directory is restricted on supported Unix systems, but device
-  account security and backups still matter.
-- Key Vault is now confined to Settings, while OS Credential remains disabled
-  pending a reviewed platform adapter. Recovery rotation cannot revoke old
-  exported disaster-recovery bundles. Personal API Hashes persist in unencrypted SQLite; distributor hashes are
-  extractable from their build binary. Neither is an account session secret,
-  but both require appropriate local/release handling. The obsolete sidebar
-  Collections preview has been removed; collection persistence remains an
-  internal Core/Storage capability without a current desktop entry point.
-- Accessibility, focus trapping, reduced motion, screen-reader labels, and
-  native-speaker wording still need dedicated product review.
-- Actual screenshots now verify compact Chinese login/Transfers layouts, a
-  display-fitted spacious Japanese login layout, and the local development
-  binary's native full-screen transition. The full route/locale pixel matrix, a
-  packaged-app native full-screen transition check, and authenticated
-  QR/channel/file/download states still need capture.
+1. Run protected real-account creation/discovery/rename/privacy-loss, switch-account, upload/manifest scan/download and legacy recovery tests; include timeout, cancellation, reconnect and crash boundaries.
+2. Stream larger encrypted parts, persist Vault checkpoints/controls, hydrate all prior AEAD identities, reconcile orphan ciphertext and test rename/database-finalization crash windows.
+3. Connect the generic Index coverage coordinator and live updates; benchmark Library and virtualized views from 1,000 to 3,000,000 records before claiming scale.
+4. Add an owned physical media-DC connection pool, then measure throughput and server-limit behavior on real networks; synthetic controller tests are not bandwidth or ban-rate claims.
+5. Complete minimum/default/display-fitted-large, three-locale, light/dark, backing-scale, native fullscreen, keyboard/VoiceOver, reduced-motion and native-speaker review. Qualify active-window/sleep/logout behavior without relying on synthetic secrets.
+6. Review OS credentials, local permissions/SQLite backups, NSLocale discovery, packaging/signing/notarization and deployment/CPU support.
+7. Retain longer fuzz campaigns, obtain an independent signed review of the exact candidate and satisfy every [format-stability gate](SECURITY.md#independent-audit-and-format-stability-gate) before removing provisional markers.
 
-## Next implementation sequence
-
-1. Map the generic Index coordinator repository and retry/cancellation policy
-   onto the working bounded Telegram-to-SQLite desktop scan path.
-2. Add a project-owned physical media-DC connection pool above raw grammers
-   MTProto calls so C/W/F and lane-scoped FloodWait can vary in production, then
-   connect the existing adaptive controller and soft-limit modes to it.
-3. Replace the current bounded per-part buffers with streaming native-file ↔
-   crypto-frame ↔ Telegram pipes and move Vault snapshots onto durable
-   checkpoints with pause/cancel/retry/reconciliation controls.
-4. Hydrate all prior wrap/manifest/part encryption identities on restart and add
-   cleanup/reconciliation for encrypted parts left before Manifest publication.
-5. Virtualize Library/Transfer lists and benchmark 1,000 to 3,000,000 records.
-6. Run unlocked reference screenshot comparison at the matrix sizes/locales,
-   then complete keyboard and assistive-technology review.
-7. Add the reviewed OS credential adapter and keep it disabled in Settings until
-   its platform and recovery tests pass.
-8. Run longer recorded fuzz campaigns, obtain independent crypto/security
-   review, stabilize versioned fixtures, and validate packaging/signing.
-
-## Handoff rule
-
-Update this file whenever code changes a capability row. Rendered UI is never
-proof of backend completion, and passing fake-port tests is never represented as
-real Telegram, encryption, or recovery behavior.
-
-## v0.3.2 probe refinement and commit scope
-
-Max Throughput now starts at P4 and can back off to P1. It narrows both sides of
-measured peaks, confirms weak/noisy samples over five seconds, and reopens the
-search when capacity changes. See ADR 0011 and TRANSFER_ENGINE.md. Tests cover
-all integral error thresholds from 1 to 64, low-P rate optima, smooth peaks,
-flat rates, transient dips, large capacity drops and later recovery. These are
-synthetic policy models, not real-network performance claims.
-
-The user authorized committing and tagging this session's UI and throughput
-work. No unrelated files are included, no credentials or user data are added,
-and no dependency is upgraded (only workspace package versions become 0.3.2).
-Persistent formats remain unchanged except the additive v1 strategy preference
-with missing-key and invalid-value compatibility tests. Core/GUI, SQL/Telegram,
-i18n, bounded task ownership and security boundaries are preserved. Visual
-review exceptions remain as recorded in UI_REVIEW.md; they do not block the
-compiled alpha functionality but preclude a commercial-quality release claim.
-
-### v0.3.2 pre-commit verification
-
-- Passed: formatting, workspace/all-target check, strict Clippy, all 293 tests,
-  GUI build, warning-denied workspace documentation, cargo-deny advisories/bans/
-  licenses/sources checks, and diff whitespace review.
-- Architecture reviewed: Core has no GUI dependency; SQL and grammers remain
-  behind adapters; domain terms and locale-neutral states are preserved.
-- i18n parse, completeness, variables, fallback, negotiation and error mapping
-  pass in all three catalogs. Native-speaker and pixel-review exceptions remain
-  tracked in UI_REVIEW.md.
-- Deterministic policy/regression and existing state-transition tests pass;
-  existing database migration, crypto-vector and manifest-fixture tests pass.
-  No migration or encrypted format change was introduced.
-- No incompatible implementation source, external dependency upgrade, secret,
-  user document, casual production panic, unowned task or unbounded new queue
-  was introduced. Locks do not span network waits. Retry workers remain owned
-  by the retained JoinSet, and server waits are shared within the connection.
-- Docs and preference compatibility evidence are synchronized. The commit groups
-  this session's list-first transfer UI and native throughput strategy; v0.3.2
-  is an alpha source snapshot, not a signed/notarized commercial release.
-
-## v0.3.3 cancelled native-download retry fix
-
-Cancelled native downloads now accept explicit retry through both row controls
-and the scoped bulk toolbar. Retry preserves task/source/destination identity,
-clears cancelled progress, and works for cancelled rows restored from SQLite.
-When the old attempt is still active, it retains its cancellation signal until
-it releases backend ownership; the retained worker then starts the replacement.
-Terminal publication and retry are serialized to prevent the old cancellation
-from overwriting the replacement's queued state. Completed tasks remain
-ineligible for retry. Encrypted Vault controls remain outside this native path.
-
-Regression coverage includes immediate cancel/retry with a channel-controlled
-backend, replacement-attempt counts, completed-task rejection, persisted
-cancelled-row restoration, and the GUI action-state matrix. The existing
-pause/resume/cancel worker regression also exercises retry after cancellation.
-
-Pre-commit verification and scope:
-
-- Passed: `cargo fmt --all --check`, locked workspace/all-target check, strict
-  Clippy, all 295 workspace tests, warning-denied workspace documentation,
-  cargo-deny advisories/bans/licenses/sources, and diff whitespace review.
-- Core/GUI dependency boundaries, repository-owned SQL, adapter-owned Telegram
-  calls, locale-neutral state/error values, and domain terminology are preserved.
-  No new UI text is introduced; existing retry message IDs are reused. The
-  synchronized en-US/zh-CN/ja-JP parse, completeness, variable, fallback,
-  negotiation, formatting, and error-mapping tests pass.
-- State-transition regressions and existing database migration, crypto-vector,
-  and manifest compatibility tests pass. Persistent formats are unchanged.
-  Only TeleArk package versions move to 0.3.3; external dependencies are unchanged.
-- No incompatible source, secret, user document, new production panic, unbounded
-  queue, or unowned task is introduced. The same retained bounded worker owns
-  replacement attempts; retirement locks do not span network calls or awaits.
-- Transfer/UI documentation is synchronized. The commit includes the pre-existing
-  task-related GUI/runtime retry edits and their completed regression fix, under
-  the user's request to fix this issue and create a new tag.
-- Exception: no credentialed Telegram run or new screenshot matrix was performed
-  for this state/control fix. There is no layout or translation change; existing
-  visual/accessibility and live-network limitations remain tracked above.
+Update capability rows and limitations when code changes. Tests against fakes never stand in for real Telegram, independent security review or successful recovery on a user's data.

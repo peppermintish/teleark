@@ -10,7 +10,7 @@ It does not hide ciphertext size, part count, upload timing, account/channel rel
 
 Application parts (target default 1900 MiB plaintext) are distinct from crypto frames (proposed default 8 MiB plaintext) and MTProto upload parts. Implementations stream frames; they must not allocate an application part or create giant plaintext/ciphertext temporary part files.
 
-The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected Saved Messages upload/recovery path. Each fresh package writer tracks its AEAD identities; full restart-time hydration from every existing wrap/manifest/part identity remains a stabilization requirement before production output may be claimed.
+The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected private-channel upload/recovery path. Each fresh package writer tracks its AEAD identities; full restart-time hydration from every existing wrap/manifest/part identity remains a stabilization requirement before production output may be claimed.
 
 ## Primitive suite
 

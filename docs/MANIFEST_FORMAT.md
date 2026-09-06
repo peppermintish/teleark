@@ -18,7 +18,7 @@ The current codec authenticates the envelope/public header, decrypts only after
 File Key resolution, validates bounded canonical metadata and exact
 part/container bindings, derives opaque remote names, and redacts sensitive
 fields from `Debug`. The retained desktop Vault owner now uses those mechanics
-for Saved Messages upload, authenticated managed-file discovery, and verified
+for private-channel upload, authenticated managed-file discovery, and verified
 restore. This remains an alpha workflow rather than a release recovery
 guarantee because the format is provisional and credentialed crash/system and
 independent security tests remain.
@@ -51,7 +51,7 @@ teleark-manifest-v1
 teleark-object-v1-<lowercase-hex-package-id>-<eight-digit-lowercase-hex-part-index>
 ```
 
-The raw Saved Messages UI may use the exact name/caption pair to explain that
+The raw TeleArk storage UI may use the exact name/caption pair to explain that
 an object is a candidate manifest or part. This is classification only: it must
 not expose encrypted metadata as trusted or claim a package is recoverable
 until the bounded codec authenticates the manifest and validates its locators.

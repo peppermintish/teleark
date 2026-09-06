@@ -1,186 +1,62 @@
-# TeleArk Data Model
+# Data model and SQLite contracts
 
-Status: conceptual model remains provisional. A pre-release SQLite storage foundation now implements ordered schema migrations, file/search persistence, Telegram remote-object identity and scan cursors, settings, collections, transfer checkpoints, index job/range records, and wrapped Vault metadata. Package/manifest projections remain remote-authoritative and are not yet persisted locally; no schema has been released as a compatibility guarantee.
+The current pre-release schema is version **9**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate provisional contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
-## Modeling rules
+## Identity and projections
 
-The model is file-centric and locale-neutral. Stable newtypes prevent accidental ID mixing. Persisted enums use stable symbolic/integer representations, never translated labels. Telegram/`grammers`, SQLite row, and GUI view-model types are adapters around project-owned domain types rather than the domain itself.
-
-## Identity types
-
-Expected IDs include `LogicalFileId`, `PackageId`, `ManifestId`, `RemoteObjectId`, `FilePartId`, `TransferId`, `TransferPartId`, `IndexJobId`, `IndexRangeId`, `AccountId`, `ChatId`, `CollectionId`, and `VaultId`. IDs need stable serialized representations; remote Telegram identity additionally includes account, chat, and message identity.
-
-## Core entities
-
-### LogicalFile
-
-The item shown in the library and referenced by search, collections, and transfer history.
-
-| Field | Meaning |
+| Entity | Identity / invariant |
 | --- | --- |
-| `id` | Stable TeleArk identity |
-| `name` | Original Unicode filename |
-| `relative_path` | Optional original logical path; encrypted in Vault manifests |
-| `size_bytes` | Plaintext logical size |
-| `media_kind` | Locale-neutral category such as video/document/archive |
-| `mime_type` / `extension` | Original normalized metadata where available |
-| `caption` | Original Telegram/user content, not localized |
-| `source_chat_id` | Optional source channel identity |
-| `created_at` / `modified_at` | Domain timestamps with explicit UTC/offset policy |
-| `storage_kind` | Native remote object or Vault package |
-| `verification_state` | Stable state, rendered by the frontend |
+| Logical file | Stable `LogicalFileId`, original Unicode name, plaintext size, kind, source, remote/encryption/verification states |
+| Remote object | `(account_id, chat_id, message_id)`; volatile references/access hashes are refreshable adapter hints |
+| Vault package | One logical file, authenticated manifest generation and ordered parts covering the file without gaps/overlap |
+| Account/chat | Chats and remote projections are account scoped; no session secrets in ordinary rows |
+| Collection | Membership references logical files, never encrypted pieces |
+| Index range | Account/chat plus policy fingerprint/version and actual committed coverage |
 
-A native Telegram media file resolves to one `RemoteObject`. A Vault file resolves to one `Package` and its parts.
+Storage allocates local IDs transactionally and monotonically; deleting the highest row cannot reuse its ID. Original names/captions/paths are preserved, while searchable projections may normalize separately. Local source paths use an explicitly tagged platform encoding, including non-UTF-8 Unix paths; they are not portable manifest paths.
 
-The SQLite adapter currently persists the Core projection plus relative path, MIME type, extension, caption, local availability, and an optional absolute local source path. Logical-file IDs allocated by storage use a transactional monotonic allocator so deleting the highest row does not cause its identity to be reused. Local paths use an explicitly tagged platform representation rather than assuming UTF-8; they remain local-machine metadata and are not a portable manifest field.
+A native file maps to one remote object. A Vault manifest binds package/vault identity, File Key wrap, exact plaintext/encoded sizes, whole/part hashes and part locators. Application part indices are contiguous from zero and their ranges cover exactly the logical size. The current managed-file list is reconstructed from authenticated remote manifests; local package/manifest/file-part tables are not implemented.
 
-### RemoteObject
-
-Represents one Telegram-hosted object without leaking `grammers` types.
+## Implemented tables and evolution
 
 ```text
-RemoteObject
-  id
-  account_id
-  chat_id
-  message_id
-  remote_kind            # native, vault_part, manifest
-  opaque_remote_name
-  expected_size_bytes
-  transport_locator_data # adapter-owned/versioned, never a GUI concern
-  observed_at
-  availability_state
-```
-
-The `(account_id, chat_id, message_id)` tuple is required for unambiguous multi-account operation. File references/access hashes are volatile adapter data, not durable domain identity by themselves.
-
-### Package, Manifest, and FilePart
-
-`Package` groups the authoritative versioned manifest and ordered application parts for one Vault `LogicalFile`.
-
-```text
-Package 1 --- 1 LogicalFile
-Package 1 --- 1 authoritative Manifest generation
-Package 1 --- N FileParts
-FilePart 1 --- 1 RemoteObject
-Manifest 1 --- 1 RemoteObject
-```
-
-`FilePart` records zero-based index, plaintext offset/length, encoded/ciphertext length, frame count, plaintext/ciphertext BLAKE3 digests, and verification state. Part ranges are contiguous, non-overlapping, and cover exactly `LogicalFile.size_bytes`.
-
-### Account and Chat
-
-An account represents a Telegram authorization identity and references adapter-managed session/credential locations, never raw secrets in ordinary database/debug output. A chat belongs to an account. Index jobs, remote objects, and storage-channel settings always identify both.
-
-The settings table contains a user's Telegram application API ID and API Hash
-as an atomically updated pair. The runtime validates the pair, exposes only the
-numeric API ID and credential-source marker to frontends, and redacts the hash
-from ordinary debug output. This alpha-stage persistence choice means a copy of
-the Library database also contains the personal API Hash and must be protected
-accordingly. An optional distributor pair is compile-time application
-configuration, not a database row; a complete personal pair takes precedence.
-Telegram login/session secrets remain outside this table in the adapter-owned
-session cache.
-
-### TransferTask and TransferPart
-
-A `TransferTask` is one logical-file-level upload or download. It records direction, priority, state, requested source/destination, totals, progress, retry policy state, account, timestamps, and structured failure category. A `TransferPart` records per-application-part state, attempts, verified byte counts, remote association, and durable checkpoint data.
-
-Allowed task states are centrally defined. The current Core foundation includes `Queued`, `Running`, `Paused`, `WaitingRetry`, `Verifying`, `Completed`, `Failed`, and `Cancelled`; network/FloodWait detail is structured scheduler/error data unless a later synchronized state-model change promotes it. Completed is terminal. The exact transition table is in `TRANSFER_ENGINE.md`.
-
-SQLite now stores task state, totals, retry metadata, locale-neutral failure codes, and ordered per-part checkpoints transactionally. Repository validation rejects non-contiguous indices, offset gaps, mismatched totals/progress, malformed checkpoint version/data pairs, and a completed task whose parts are not fully verified. This is durable state storage, not a transfer worker or proof of remote reconciliation.
-
-Native Telegram downloads use a separate adapter-owned `TARKDPM1` sidecar for
-out-of-order resume. It records the exact total length, fixed 1 MiB logical part
-size, part count, and completion bitmap; it contains no Telegram/grammers types,
-filenames, content, or localized values. This is an explicitly versioned local
-persistent format governed by ADR 0009, not a Rust memory layout or SQLite row.
-Controller session history is likewise stored in schema-1 per-transfer JSONL
-under the managed Logs directory rather than added to the domain tables.
-
-### IndexJob and IndexRange
-
-An `IndexJob` describes one requested scan/synchronization with account/chat, content policy, requested temporal scope, progress/checkpoint cursor, state, counters, and timing. An `IndexRange` records actual historical coverage rather than one last-message marker:
-
-```text
-account_id + chat_id
-lower bound (time/message ordering key)
-upper bound (time/message ordering key)
-coverage state: partial or complete
-content-policy fingerprint
-checkpoint/evidence
-```
-
-Ranges may be non-contiguous. Only ranges with compatible content policy can merge. `INDEX_ENGINE.md` defines coverage semantics.
-
-The current SQLite rows persist account/chat scope, inclusive message-ID bounds, partial/complete coverage, checkpoint, counters, policy version/fingerprint, scan generation, and update time. Storage rejects overlapping ranges for the same scope and policy and can commit file upserts, job progress, and range evidence atomically. Date/source-order bounds, range compaction, and scanner-produced evidence beyond these fields remain target work.
-
-### Collections
-
-A manual collection uses `CollectionItem` rows linking collections to logical files. A smart collection stores a versioned, locale-neutral rule AST over facets such as channel, type, size, date, and extension. It evaluates to logical files; it never contains multipart pieces.
-
-### Vault and encryption metadata
-
-`VaultMetadata` is one singleton row containing the 16-byte Vault ID, exact
-Password Wrap and Recovery Wrap codec bytes, their nonzero generations, and
-creation/update timestamps. It contains wrapped key material but no raw
-password, Recovery Key, unwrapped Vault Master Key, File Key, or derived KEK.
-Those secrets must not be stored as ordinary database fields or logged. OS
-credential bindings are intentionally absent until that adapter is implemented.
-
-## SQLite implementation and remaining areas
-
-The implemented pre-release schema currently contains:
-
-```text
-accounts, chats
+accounts, chats, remote_objects
 logical_files, logical_files_fts
-index_jobs, index_ranges
+index_jobs, index_ranges, telegram_index_state
 transfer_tasks, transfer_parts
 native_download_batches, native_download_tasks
 collections, collection_items
-settings, id_allocators
-vault_metadata
+settings, id_allocators, vault_metadata
 ```
 
-Eight ordered migrations create this schema, configure external-content FTS5 triggers, add checkpoint/index tables, add tagged local paths and ID allocators, add Telegram remote-object identities plus per-source scan cursors, and persist bounded native-download history/progress for restart recovery. Schema v7 adds durable batch identity plus the source message's sent time, caption, and MIME type to native download tasks. Schema v8 adds one strict Vault metadata row containing only explicit password/recovery wrap codecs, generations, and timestamps. A batch header and all of its task rows are inserted in one transaction, so a rejected member cannot leave a partial batch. Empty-to-latest and every pre-latest-to-latest path are tested with data preservation. Foreign keys, strict tables, checks, uniqueness constraints, prepared statements, and explicit transactions enforce practical invariants. The connection enables foreign keys, WAL for file-backed databases, a busy timeout, and an untrusted schema.
+Migrations 1–6 establish the catalog, FTS triggers, checkpoints/ranges, tagged paths, monotonic IDs, remote-object identities, cursors and native history. Version 7 adds native batch identity and source sent-time/caption/MIME metadata; version 8 adds wrapped Vault metadata; version 9 adds native account scope. Tests cover empty-to-latest and every prior-version upgrade, preserving indexed data.
 
-Still absent are tables/repositories for Vault `file_parts`, `packages`, `manifests`, and encryption profiles. Authenticated Telegram manifests are currently the authoritative managed-file projection. Native Telegram documents now use `remote_objects` keyed by account/chat/message with monotonic revision checks and an opaque bounded transport key. Smart-collection rule payloads are currently versioned inline on the collection rather than represented by a separately interpreted rule repository. Because the product and recovery formats have not shipped, current table names and columns remain pre-release and are not yet a public compatibility promise.
+Connections enable foreign keys, an untrusted schema, busy timeout and WAL for file databases. Strict tables, checks, prepared statements and transactions enforce repository invariants. SQL remains exclusively in Storage. Future schema versions/application IDs are rejected rather than guessed.
 
-The remote-file projection preserves the source message sent time separately
-from its latest modification time. Interactive source browsing can read these
-projected rows as a bounded cache, but the presence of a cached row never
-implies that `telegram_index_state` or an `IndexRange` covers surrounding
-history.
+## Native download history: version 9
 
-## Relationships and deletion
+`native_download_tasks.account_id` is nullable `INTEGER`, with a check requiring a positive value when present. The index is `(account_id, state, created_at_unix_ms, id)`. New inserts require a positive account, chat and message ID. All members of a batch share account and chat; batch header and children commit atomically. Updates cannot rebind a known task to another account or erase its account.
 
-- Deleting a local index record is not the same as deleting a remote Telegram object.
-- Remote deletion or disappearance changes availability state and may leave an auditable/tombstone record according to sync policy.
-- Removing a logical file from a collection never deletes the file or its remote parts.
-- Package cleanup is explicit and must account for manifest/part reachability; cascading remote deletion is never an accidental database cascade.
-- Account removal must define whether local indexed metadata, sessions, transfer checkpoints, and remote content are retained or removed.
+Existing version-8 rows migrate with NULL ownership. Before the first configured Telegram connection returns, the runtime calls the storage resolver with the actual restored account, or no account when unauthorized. In one transaction it assigns all unknown rows only if that old session was restored, then writes the setting `native-download-account-migration.v1 = resolved`. Presence of this marker prevents subsequent assignment, including after a new login or restart. Unknown rows remain in history and cannot execute; the user can enqueue a fresh download from a known account/source.
 
-Destructive behavior requires an explicit product flow and recoverability review.
+Runtime snapshots preserve `Option<i64>` for legacy ownership. Native scheduling, resume/retry and the actual serialized Telegram operation enforce expected account identity. Switching pauses queued/running work and waits for worker release before sign-out. Local completed files are retained. Tests exercise upgrade/reopen, unknown provenance, attempted reassignment and cross-account operation rejection.
 
-## Search and pagination projections
+Native history also retains durable task/batch IDs, destination, original message metadata, size, progress, timestamps, attempts, verification and structured failure. Its restart/partial-file behavior is specified in [Transfer](TRANSFER_ENGINE.md); the `TARKDPM1` bitmap and schema-1 session log are explicit independent formats, unchanged by schema 9.
 
-Search projections return stable domain/view DTOs containing a keyset cursor. Ordering always includes a deterministic unique tie-breaker, commonly `(primary_sort_value, LogicalFileId)`. Deep `OFFSET` is not the million-record strategy. FTS indexes normalized searchable copies while preserving original Unicode metadata.
+## Core transfer and index records
 
-Search facets include account/channel, media type, date, size, extension, local/remote state, encryption, multipart, and verification. Filters are structured query inputs, not concatenated raw SQL.
+Core task/part transitions live in `teleark-core`; storage validation does not replace that state machine. A checkpoint transaction replaces the task and ordered parts together and rejects noncontiguous indices, gaps, mismatched totals/progress, invalid codec version/data pairs, or a completed task lacking verified parts. Exact state rules are in [Transfer](TRANSFER_ENGINE.md).
 
-The SQLite adapter implements these structured filters, phrase-based FTS5 over name/path/caption, and modified-time-descending keyset pages with `LogicalFileId` as the unique tie-breaker. Its versioned opaque cursor is bound to the query/facet fingerprint and is rejected after a query change. Tests cover tied traversal without duplicates, FTS insert/update/delete triggers, Chinese and Japanese content, case-insensitive extension filtering, and adversarial query text. Other sort orders and million-record performance remain unimplemented/unmeasured.
+Index rows persist account/chat, inclusive message-ID bounds, partial/complete state, checkpoint/counters, policy identity, generation and update time. Overlap within the same scope/policy is rejected. File upserts, job progress and range evidence can commit atomically. Interactive cache rows never imply surrounding history coverage. Date/order-rich ranges, compaction and complete incremental synchronization remain unfinished; see [Index](INDEX_ENGINE.md).
 
-## Required invariants
+## Settings and wrapped keys
 
-- Logical-file size equals the sum of multipart plaintext lengths.
-- Part indices are contiguous from zero; ranges have no overlap or gap.
-- Each Vault package has exactly one authoritative manifest per generation.
-- A `Completed` transfer has a verified manifest/object set and all required verified parts.
-- A remote object has complete multi-account identity.
-- Index coverage never claims more content/policy than was durably scanned.
-- Smart collection rules and statuses are locale-neutral.
-- Original user/source Unicode text is preserved exactly enough for display/recovery.
-- Secret key bytes do not appear in ordinary persisted metadata, logs, or `Debug`.
+The `settings` table stores explicitly versioned preferences, locale override, API application credentials, storage-channel bindings and the one-time native-account marker. [Preferences format](PREFERENCES_FORMAT.md) defines active encodings. A personal API ID/Hash pair is saved/removed transactionally; the GUI receives only its ID/source status. The SQLite database is not encrypted. Telegram user sessions are in a separate adapter-owned protected cache.
 
-These invariants require domain tests, database constraints/tests, and manifest validation; documentation alone is insufficient.
+`vault_metadata` is a singleton with the 16-byte Vault ID, explicit Password/Recovery Wrap bytes, nonzero generations and timestamps. It contains no raw password, Recovery Key, unwrapped Master Key, File Key or KEK. OS credential bindings are absent. The remotely authoritative crypto/manifest codecs do not change when this row's in-memory model changes.
+
+## Search and deletion
+
+FTS5 covers normalized filename/path/caption projections while preserving original text. Structured facets include account/channel, type, date, size, extension and local/remote/encryption/verification state. Current ordering is modified-time descending with logical-file ID as a unique tie-breaker. Opaque versioned keyset cursors bind the query/facet fingerprint; changed queries reject old cursors. Never concatenate user text into SQL or use deep OFFSET for scale.
+
+Deleting catalog/history rows is distinct from deleting remote content. Collection removal does not remove files. Terminal native-history deletion removes owned logs/partials/bitmaps but never a completed user file. Remote package cleanup requires explicit reachability and recovery policy; it is not a database cascade. Smart-collection rule evaluation, other sort orders and million-record performance claims remain future work.
