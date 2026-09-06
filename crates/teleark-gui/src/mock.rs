@@ -37,11 +37,22 @@ impl TransferState {
 }
 
 #[derive(Clone, Debug)]
+pub struct BatchSummary {
+    pub file_names: Vec<SharedString>,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub queued_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct TransferRow {
     pub runtime_task_id: Option<u64>,
     pub vault_transfer_id: Option<u64>,
+    pub vault_batch_id: Option<u64>,
     pub runtime_batch_id: Option<u64>,
     pub batch_child: bool,
+    pub batch_summary: Option<BatchSummary>,
     pub message_id: Option<i64>,
     pub message_sent_at_unix_ms: Option<i64>,
     pub caption: Option<SharedString>,
@@ -76,8 +87,10 @@ macro_rules! transfer_row {
         TransferRow {
             runtime_task_id: None,
             vault_transfer_id: None,
+            vault_batch_id: None,
             runtime_batch_id: None,
             batch_child: false,
+            batch_summary: None,
             message_id: None,
             message_sent_at_unix_ms: None,
             caption: None,

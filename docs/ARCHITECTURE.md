@@ -28,7 +28,7 @@ Dependencies point toward project-owned contracts. Traits belong at meaningful s
 
 - **TeleArk** is a dedicated private broadcast channel owned by the active account. Its Files view shows authenticated manifests as complete logical files; Raw Files exposes original Telegram documents and candidate encrypted objects.
 - **Channels** browse ordinary Telegram sources. Their account/chat/message identities remain attached to all file and download requests.
-- **Local Library**, under Utilities, is the persistent catalog and FTS projection. Import records local metadata; it is a separate action from uploading content.
+- **Local Library**, a direct navigation destination, is the persistent catalog and FTS projection. Import records local metadata; it is a separate action from uploading content.
 - **Transfers** is a fixed primary destination. Refreshing or scrolling channels cannot replace the route, selected transfer, filter or transfer scroll owner.
 - Existing Saved Messages packages remain available through Settings → Key Vault → Advanced → legacy recovery. New uploads never use Saved Messages, and migration never moves or deletes remote objects.
 
@@ -50,11 +50,15 @@ Interactive raw scans own cancellation and bounded transport pages. Manifest sca
 
 A modal keeps the requested unlock intent (browse, upload or download), takes focus and resumes it only after successful unlock/recovery acknowledgement. Changing pages does not lock the Vault. With `lock_vault_when_hidden`, inactive windows clear secret inputs and request locking; active native prompts are exempt. Already running encrypted work may finish with its retained key. Sleep/logout guarantees beyond window activation still need platform verification.
 
+The primary sidebar collapses to a 64-point icon rail or expands to 184 points. Channels have their own contextual list; inspectors own bounded, occluding scroll viewports. A retained local-output observer reads account-scoped pages and performs filesystem metadata work through Runtime off the UI thread. The bottom status bar queries download-volume space independently of directory usage scans.
+
 ## Files, durability and recovery
 
 A native file resolves to one remote object; a Vault package resolves to one authenticated manifest and ordered application parts. Crypto frames and MTProto request units are different layers. The compatibility target remains 1900 MiB application parts; the current desktop encrypted adapter uses a conservative 60 MiB plaintext ceiling and 8 MiB frames. These limits are recorded explicitly rather than inferred from account tier.
 
 Completed Vault recovery authority is the remote manifest and parts plus separately protected unlock material. SQLite is a catalog/cache/checkpoint store, not the sole authority. Publish the manifest only after parts verify; finalize a download only after authentication, whole-file verification and atomic non-overwriting publication. Incomplete uploads may require surviving local state and can leave orphan ciphertext.
+
+Schema 10 adds a local Vault output inventory; native completed history is projected directly. It records local availability hints, never remote recovery authority. Bounded multi-file upload plans run sequentially through the existing Vault owner. [ADR 0013](adr/0013-local-output-inventory-and-upload-batches.md) records the decisions.
 
 All durable encodings are explicit: SQLite migrations, crypto/manifest codecs, recovery bundles, native completion bitmaps and session-log schemas. Internal Rust layout never defines bytes. The [crypto](CRYPTO_FORMAT.md) and [manifest](MANIFEST_FORMAT.md) formats remain provisional; independent review, longer fuzz evidence and production recovery validation are release gates.
 

@@ -4,6 +4,7 @@ use gpui_kit::Window;
 pub(crate) struct LayoutPolicy {
     width: f32,
     height: f32,
+    sidebar_collapsed: bool,
 }
 impl LayoutPolicy {
     pub(crate) fn from_window(window: &Window) -> Self {
@@ -11,7 +12,11 @@ impl LayoutPolicy {
         Self::from_size(size.width.into(), size.height.into())
     }
     pub(crate) fn from_size(width: f32, height: f32) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            sidebar_collapsed: true,
+        }
     }
     pub(crate) fn is_compact(self) -> bool {
         self.width < 1300.0
@@ -20,13 +25,11 @@ impl LayoutPolicy {
         self.width >= 1600.0
     }
     pub(crate) fn sidebar_width(self) -> f32 {
-        if self.is_spacious() {
-            232.0
-        } else if self.is_compact() {
-            190.0
-        } else {
-            214.0
-        }
+        if self.sidebar_collapsed { 64.0 } else { 184.0 }
+    }
+    pub(crate) fn with_sidebar_collapsed(mut self, collapsed: bool) -> Self {
+        self.sidebar_collapsed = collapsed;
+        self
     }
     pub(crate) fn content_padding(self) -> f32 {
         if self.is_spacious() {
@@ -36,6 +39,13 @@ impl LayoutPolicy {
         } else {
             20.0
         }
+    }
+    pub(crate) fn raw_table_width(self, channel_context: bool) -> f32 {
+        self.width
+            - self.sidebar_width()
+            - 2.0 * self.content_padding()
+            - 26.0
+            - if channel_context { 208.0 } else { 0.0 }
     }
     pub(crate) fn transfer_inspector_width(self) -> f32 {
         if self.is_compact() { 380.0 } else { 420.0 }

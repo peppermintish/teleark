@@ -129,7 +129,7 @@ file-detail-empty-description = Import a file, then select it to view its saved 
 file-detail-modified-at = Modified At
 file-detail-verification-unavailable = Verification details are not available for this local item.
 
-upload-dialog-title = Upload to Telegram
+upload-dialog-title = Upload to TeleArk
 upload-target-account = Target Account
 upload-target-channel = Target Channel
 upload-storage-method = Storage Method
@@ -149,7 +149,7 @@ upload-part-count = Parts: { $count }
 upload-total-size = Total size: { $size }
 upload-telegram-messages = Telegram messages: { $count }
 upload-estimated-time = Estimated time: { $time }
-upload-change-file = Change File
+upload-change-file = Change Selection
 upload-add-to-queue = Add to Upload Queue
 upload-select-file = Select a File
 
@@ -418,7 +418,7 @@ transfer-footer-total-live = { $count } tasks
 transfer-footer-downloading-live = { $count } downloading
 transfer-footer-waiting-live = { $count } waiting
 transfer-empty = No transfers yet. Choose a Telegram source and download a file to get started.
-transfer-batch-name = Batch download ({ $count } files)
+transfer-batch-name = { $source } · { $count } files
 transfer-tab-log = Log
 
 connection-title = Connections
@@ -438,7 +438,7 @@ detail-created = Created
 detail-started = Started
 detail-time-remaining = Time Remaining
 detail-tab-details = Details
-detail-tab-file-list = File List (128)
+detail-tab-file-list = Files
 detail-verification = File Verification
 
 log-connected = Connected to peer
@@ -822,7 +822,7 @@ vault-error-conflict = A Key Vault is already configured.
 vault-error-capacity = The operation exceeded a supported size or storage limit.
 vault-error-cancelled = The Vault operation was cancelled.
 vault-error-persistence = Vault data could not be safely read, verified, or saved.
-upload-file-picker-prompt = Choose a file to encrypt and upload to TeleArk
+upload-file-picker-prompt = Choose Files
 upload-no-file-selected = No file selected
 upload-select-file-description = Select a source file. Its original path is never uploaded.
 storage-channel-managed-vault-locked = Unlock to verify your files and reveal their original names. Raw Files is available without unlocking.
@@ -1112,7 +1112,7 @@ about-changelog-v040 =
     - Simplified contributor documentation while preserving format specifications, security constraints, and architectural decisions. Git checkpoints preserve the documentation before and after consolidation.
     - Encrypted formats remain provisional pending independent security review. No live Telegram account is required by ordinary tests.
 
-upload-choose-file = Choose a File…
+upload-choose-file = Choose Files…
 upload-simple-description = TeleArk encrypts your file and its name before uploading. Large files are split automatically and restored as one file when downloaded.
 transfer-manage = Manage
 
@@ -1120,3 +1120,37 @@ action-close-details = Close details
 storage-scan-summary = { $count } files · { $rejected } unverified manifests skipped · Latest 1,000 manifests
 
 shell-refresh-channels = Refresh channels
+
+# Navigation, batches, and local filesystem observations
+shell-expand-navigation = Expand navigation
+shell-collapse-navigation = Collapse navigation
+shell-free-disk-space = { $free } free
+shell-disk-space-unavailable = Disk space unavailable
+transfer-batch-progress = { $completed } / { $total } completed · { $failed } failed
+transfer-batch-created = Added
+transfer-expand-batch = Expand batch files
+transfer-collapse-batch = Collapse batch files
+local-file-present = Available locally
+local-file-missing = Deleted from disk
+local-file-size-changed = Local file changed
+local-file-unavailable = Local file unavailable
+local-file-checking = Checking local file
+
+local-file-status = Local file
+transfer-download-again = Download again
+
+upload-selection-summary = { $count } files · { $size }
+upload-batch-limit = Choose up to 128 files. Each file remains an independent TeleArk file.
+upload-remove-file = Remove file from selection
+upload-stop-after-current = Stop after the current file
+transfer-batch-upload-name = Upload · { $count } files
+
+about-changelog-unreleased =
+    ## Unreleased · Everyday usability
+
+    - Added a collapsible icon sidebar, direct Local Library access, a separate channel browser, and visible free space for the download disk.
+    - Fixed scrolling in Raw Files and transfer inspectors so details scroll independently of the underlying list.
+    - Batch rows now show their source, file names, counts, time, and real member lists. Multiple uploads can be reviewed together; stopping a batch skips remaining files after the current file finishes.
+    - Downloaded files are checked in the background. Missing, changed, and unavailable files have distinct states; a missing native download can be downloaded again as a new task.
+    - Added original TeleArk artwork and a macOS app bundle with an application icon.
+    - Schema v10 preserves account-scoped local output identities across restarts. Encryption and manifest formats are unchanged.

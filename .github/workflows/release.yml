@@ -69,7 +69,7 @@ jobs:
           version="${version//\//-}"
           package="teleark-${version}-macos-${architecture}"
           mkdir -p "dist/${package}"
-          cp target/release/teleark "dist/${package}/teleark"
+          scripts/package-macos.sh target/release/teleark "dist/${package}/TeleArk.app"
           cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           shasum -a 256 "dist/${package}.tar.gz" > dist/SHA256SUMS

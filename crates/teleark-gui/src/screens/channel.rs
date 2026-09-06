@@ -5,7 +5,6 @@ use gpui_kit::component::{
     button::ButtonVariants as _,
     checkbox::Checkbox,
     input::Input,
-    scroll::ScrollableElement as _,
     spinner::Spinner,
     table::{Column, DataTable, TableDelegate, TableState},
     tooltip::Tooltip,
@@ -187,6 +186,7 @@ impl TableDelegate for ChannelFileTableDelegate {
                             .on_click(move |checked, _, cx| {
                                 if let Some(owner) = owner.as_ref() {
                                     let _ = owner.update(cx, |app, cx| {
+                                        cx.stop_propagation();
                                         app.set_channel_file_selected(row.message_id, *checked, cx);
                                     });
                                 }
@@ -195,15 +195,45 @@ impl TableDelegate for ChannelFileTableDelegate {
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .into_any_element()
             }
-            1 => div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(IconName::File).text_color(theme::blue()))
-                .child(div().min_w_0().flex_1().truncate().child(row.name))
-                .into_any_element(),
+            1 => {
+                let local = self.owner.as_ref().and_then(|owner| {
+                    owner
+                        .read_with(cx, |app, _| {
+                            app.selected_chat_id
+                                .and_then(|chat_id| {
+                                    app.local_download_for_source(
+                                        chat_id,
+                                        Some(row.message_id),
+                                        None,
+                                    )
+                                })
+                                .map(|item| {
+                                    (app.local_presence_label(Some(item.presence)), item.presence)
+                                })
+                        })
+                        .ok()
+                        .flatten()
+                });
+                div()
+                    .size_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(IconName::File).text_color(theme::blue()))
+                    .child(div().min_w_0().flex_1().truncate().child(row.name))
+                    .when_some(local, |cell, (label, presence)| {
+                        cell.child(components::badge(
+                            label,
+                            if presence == teleark_runtime::LocalFilePresence::Present {
+                                Tone::Green
+                            } else {
+                                Tone::Amber
+                            },
+                        ))
+                    })
+                    .into_any_element()
+            }
             2 => table_cell(row.sent_at),
             3 => table_cell(row.kind),
             4 => table_cell(row.size),
@@ -224,6 +254,7 @@ impl TableDelegate for ChannelFileTableDelegate {
                         .on_click(move |_, _, cx| {
                             if let Some(owner) = owner.as_ref() {
                                 let _ = owner.update(cx, |app, cx| {
+                                    cx.stop_propagation();
                                     app.download_telegram_file(row.message_id, cx);
                                 });
                             }
@@ -878,84 +909,96 @@ impl TeleArkApp {
         _layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let detail = components::card()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .p_3()
-            .overflow_y_scrollbar()
-            .child(components::section_title(
-                self.tr("storage-channel-managed-detail-title"),
-            ));
+        let detail = div().w_full().p_4().child(components::section_title(
+            self.tr("storage-channel-managed-detail-title"),
+        ));
         let Some(package) = package else {
-            return detail
-                .child(
+            return components::inspector_body(
+                "managed-detail-body",
+                &self.raw_detail_scroll,
+                detail.child(
                     div()
                         .mt_4()
                         .text_sm()
                         .text_color(theme::text_secondary())
                         .child(self.tr("storage-channel-managed-detail-empty")),
-                )
-                .into_any_element();
+                ),
+            );
         };
-        detail
-            .child(message_detail_row(
-                self.tr("storage-channel-package-id"),
-                package.package_id.clone().into(),
-            ))
-            .child(message_detail_row(
-                self.tr("storage-channel-logical-name"),
-                package.logical_name.clone().into(),
-            ))
-            .child(message_detail_row(
-                self.tr("storage-channel-manifest-state"),
-                self.tr("storage-channel-manifest-authenticated"),
-            ))
-            .child(message_detail_row(
-                self.tr("table-parts"),
-                format_integer(self.locale(), package.part_count as u64).into(),
-            ))
-            .child(message_detail_row(
-                self.tr("storage-channel-encoded-size"),
-                format_bytes(self.locale(), package.encoded_size_bytes).into(),
-            ))
-            .child(message_detail_row(
-                self.tr("storage-channel-restore-state"),
-                self.tr("storage-channel-restore-ready"),
-            ))
-            .child(
-                div()
-                    .mt_4()
-                    .text_xs()
-                    .text_color(theme::text_muted())
-                    .child(self.tr("storage-channel-related-files")),
-            )
-            .children(package.related_remote_names.iter().map(|file| {
-                div()
-                    .mt_2()
-                    .p_2()
-                    .rounded(theme::RADIUS_SMALL)
-                    .bg(theme::sidebar())
-                    .text_xs()
-                    .child(file.clone())
-            }))
-            .child(
-                components::button(
-                    "storage-channel-download-managed",
-                    self.tr("storage-channel-download-restored-action"),
-                    Some(IconName::ArrowDown),
-                    true,
+        components::inspector_body(
+            "managed-detail-body",
+            &self.raw_detail_scroll,
+            detail
+                .when_some(
+                    self.selected_chat_id.and_then(|chat_id| {
+                        self.local_download_for_source(chat_id, None, Some(&package.package_id))
+                    }),
+                    |detail, observation| {
+                        detail
+                            .child(message_detail_row(
+                                self.tr("local-file-status"),
+                                self.local_presence_label(Some(observation.presence)),
+                            ))
+                            .child(self.local_download_actions(observation))
+                    },
                 )
-                .mt_4()
-                .disabled(self.vault_activity == crate::app::VaultActivity::Working)
-                .on_click({
-                    let package_id = package.package_numeric_id;
-                    cx.listener(move |this, _, _, cx| {
-                        this.download_managed_vault_file(package_id, cx);
-                    })
-                }),
-            )
-            .into_any_element()
+                .child(message_detail_row(
+                    self.tr("storage-channel-package-id"),
+                    package.package_id.clone().into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("storage-channel-logical-name"),
+                    package.logical_name.clone().into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("storage-channel-manifest-state"),
+                    self.tr("storage-channel-manifest-authenticated"),
+                ))
+                .child(message_detail_row(
+                    self.tr("table-parts"),
+                    format_integer(self.locale(), package.part_count as u64).into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("storage-channel-encoded-size"),
+                    format_bytes(self.locale(), package.encoded_size_bytes).into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("storage-channel-restore-state"),
+                    self.tr("storage-channel-restore-ready"),
+                ))
+                .child(
+                    div()
+                        .mt_4()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("storage-channel-related-files")),
+                )
+                .children(package.related_remote_names.iter().map(|file| {
+                    div()
+                        .mt_2()
+                        .p_2()
+                        .rounded(theme::RADIUS_SMALL)
+                        .bg(theme::sidebar())
+                        .text_xs()
+                        .child(file.clone())
+                }))
+                .child(
+                    components::button(
+                        "storage-channel-download-managed",
+                        self.tr("storage-channel-download-restored-action"),
+                        Some(IconName::ArrowDown),
+                        true,
+                    )
+                    .mt_4()
+                    .disabled(self.vault_activity == crate::app::VaultActivity::Working)
+                    .on_click({
+                        let package_id = package.package_numeric_id;
+                        cx.listener(move |this, _, _, cx| {
+                            this.download_managed_vault_file(package_id, cx);
+                        })
+                    }),
+                ),
+        )
     }
 
     fn render_channel_batch_controls(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1183,6 +1226,14 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let name_width =
+            px((layout.raw_table_width(self.page == crate::app::Page::Channel) - 430.0).max(220.0));
+        if self.channel_file_table.read(cx).delegate().columns[1].width != name_width {
+            self.channel_file_table.update(cx, |table, cx| {
+                table.delegate_mut().columns[1].width = name_width;
+                table.refresh(cx);
+            });
+        }
         let selected_message = self.selected_telegram_message_id.and_then(|message_id| {
             self.telegram_files
                 .iter()
@@ -1228,16 +1279,12 @@ impl TeleArkApp {
                 selected_message.filter(|_| self.show_channel_detail),
                 |browser, message| {
                     browser.child(
-                        components::card()
+                        components::inspector_panel("raw-file-inspector", 340.0)
                             .absolute()
                             .right_0()
                             .top_0()
                             .bottom_0()
-                            .w(px(320.0))
                             .shadow_lg()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
                             .child(
                                 div()
                                     .px_3()
@@ -1358,25 +1405,21 @@ impl TeleArkApp {
         file: Option<&TelegramFileSummary>,
         _layout: LayoutPolicy,
     ) -> AnyElement {
-        let detail = components::card()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .p_3()
-            .overflow_y_scrollbar()
-            .child(components::section_title(
-                self.tr("telegram-message-detail-title"),
-            ));
+        let detail = div().w_full().p_4().child(components::section_title(
+            self.tr("telegram-message-detail-title"),
+        ));
         let Some(file) = file else {
-            return detail
-                .child(
+            return components::inspector_body(
+                "raw-detail-body",
+                &self.raw_detail_scroll,
+                detail.child(
                     div()
                         .mt_4()
                         .text_sm()
                         .text_color(theme::text_secondary())
                         .child(self.tr("telegram-message-detail-empty")),
-                )
-                .into_any_element();
+                ),
+            );
         };
         let caption = if file.caption.trim().is_empty() {
             self.tr("telegram-message-no-caption")
@@ -1393,98 +1436,116 @@ impl TeleArkApp {
                 })
                 .collect::<Vec<_>>()
         });
-        detail
-            .child(message_detail_row(
-                self.tr("telegram-message-file-name"),
-                if file.file_name.is_empty() {
-                    self.tr_with(
-                        "telegram-file-unnamed",
-                        MessageArgs::new().with("message_id", file.message_id.to_string()),
-                    )
-                } else {
-                    file.file_name.clone().into()
-                },
-            ))
-            .child(message_detail_row(
-                self.tr("detail-message-id"),
-                file.message_id.to_string().into(),
-            ))
-            .child(message_detail_row(
-                self.tr("telegram-message-sent-at"),
-                format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
-            ))
-            .child(message_detail_row(
-                self.tr("telegram-message-mime-type"),
-                file.mime_type
-                    .clone()
-                    .unwrap_or_else(|| self.tr("transfer-value-unavailable").to_string())
-                    .into(),
-            ))
-            .child(message_detail_row(
-                self.tr("table-size"),
-                format_bytes(self.locale(), file.size_bytes).into(),
-            ))
-            .child(
-                div()
-                    .mt_4()
-                    .text_xs()
-                    .text_color(theme::text_muted())
-                    .child(self.tr("telegram-message-caption")),
-            )
-            .child(div().mt_2().text_sm().whitespace_normal().child(caption))
-            .when_some(teleark_descriptor, |detail, descriptor| {
-                let (role, explanation) = match descriptor.role {
-                    TeleArkRemoteRole::Manifest => (
-                        self.tr("storage-channel-role-manifest"),
-                        self.tr("storage-channel-manifest-explanation"),
-                    ),
-                    TeleArkRemoteRole::Part(index) => (
+        components::inspector_body(
+            "raw-detail-body",
+            &self.raw_detail_scroll,
+            detail
+                .when_some(
+                    self.selected_chat_id.and_then(|chat_id| {
+                        self.local_download_for_source(chat_id, Some(file.message_id), None)
+                    }),
+                    |detail, observation| {
+                        detail
+                            .child(message_detail_row(
+                                self.tr("local-file-status"),
+                                self.local_presence_label(Some(observation.presence)),
+                            ))
+                            .child(self.local_download_actions(observation))
+                    },
+                )
+                .child(message_detail_row(
+                    self.tr("telegram-message-file-name"),
+                    if file.file_name.is_empty() {
                         self.tr_with(
-                            "storage-channel-role-part",
-                            MessageArgs::new()
-                                .with("index", format_integer(self.locale(), u64::from(index) + 1)),
+                            "telegram-file-unnamed",
+                            MessageArgs::new().with("message_id", file.message_id.to_string()),
+                        )
+                    } else {
+                        file.file_name.clone().into()
+                    },
+                ))
+                .child(message_detail_row(
+                    self.tr("detail-message-id"),
+                    file.message_id.to_string().into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("telegram-message-sent-at"),
+                    format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("telegram-message-mime-type"),
+                    file.mime_type
+                        .clone()
+                        .unwrap_or_else(|| self.tr("transfer-value-unavailable").to_string())
+                        .into(),
+                ))
+                .child(message_detail_row(
+                    self.tr("table-size"),
+                    format_bytes(self.locale(), file.size_bytes).into(),
+                ))
+                .child(
+                    div()
+                        .mt_4()
+                        .text_xs()
+                        .text_color(theme::text_muted())
+                        .child(self.tr("telegram-message-caption")),
+                )
+                .child(div().mt_2().text_sm().whitespace_normal().child(caption))
+                .when_some(teleark_descriptor, |detail, descriptor| {
+                    let (role, explanation) = match descriptor.role {
+                        TeleArkRemoteRole::Manifest => (
+                            self.tr("storage-channel-role-manifest"),
+                            self.tr("storage-channel-manifest-explanation"),
                         ),
-                        self.tr("storage-channel-part-explanation"),
-                    ),
-                };
-                detail
-                    .child(message_detail_row(
-                        self.tr("storage-channel-file-role"),
-                        role,
-                    ))
-                    .child(message_detail_row(
-                        self.tr("storage-channel-why-file-exists"),
-                        explanation,
-                    ))
-                    .child(message_detail_row(
-                        self.tr("storage-channel-package-id"),
-                        descriptor.package_id.into(),
-                    ))
-                    .child(message_detail_row(
-                        self.tr("storage-channel-logical-name"),
-                        self.tr("storage-channel-managed-name-locked"),
-                    ))
-            })
-            .when_some(related_files, |detail, related| {
-                detail
-                    .child(
-                        div()
-                            .mt_4()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(self.tr("storage-channel-related-files")),
-                    )
-                    .children(related.into_iter().map(|related| {
-                        div()
-                            .mt_2()
-                            .p_2()
-                            .rounded(theme::RADIUS_SMALL)
-                            .bg(theme::sidebar())
-                            .text_xs()
-                            .child(related.file_name.clone())
-                    }))
-            })
-            .into_any_element()
+                        TeleArkRemoteRole::Part(index) => (
+                            self.tr_with(
+                                "storage-channel-role-part",
+                                MessageArgs::new().with(
+                                    "index",
+                                    format_integer(self.locale(), u64::from(index) + 1),
+                                ),
+                            ),
+                            self.tr("storage-channel-part-explanation"),
+                        ),
+                    };
+                    detail
+                        .child(message_detail_row(
+                            self.tr("storage-channel-file-role"),
+                            role,
+                        ))
+                        .child(message_detail_row(
+                            self.tr("storage-channel-why-file-exists"),
+                            explanation,
+                        ))
+                        .child(message_detail_row(
+                            self.tr("storage-channel-package-id"),
+                            descriptor.package_id.into(),
+                        ))
+                        .child(message_detail_row(
+                            self.tr("storage-channel-logical-name"),
+                            self.tr("storage-channel-managed-name-locked"),
+                        ))
+                })
+                .when_some(related_files, |detail, related| {
+                    detail
+                        .child(
+                            div()
+                                .mt_4()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(self.tr("storage-channel-related-files")),
+                        )
+                        .children(related.into_iter().map(|related| {
+                            div()
+                                .mt_2()
+                                .p_2()
+                                .rounded(theme::RADIUS_SMALL)
+                                .bg(theme::sidebar())
+                                .text_xs()
+                                .child(related.file_name.clone())
+                        }))
+                }),
+        )
     }
 
     pub(crate) fn telegram_error_message(&self) -> Option<gpui_kit::SharedString> {

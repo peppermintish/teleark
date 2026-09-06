@@ -721,6 +721,38 @@ impl DesktopTransfers {
         Ok(id)
     }
 
+    /// Creates a new attempt from historical source metadata, allocating a new
+    /// destination. The completed record and any existing file remain intact.
+    pub fn redownload_completed(&self, task_id: u64) -> Result<u64, ApplicationError> {
+        let snapshot = self
+            .snapshots()?
+            .into_iter()
+            .find(|item| item.id == task_id)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        self.require_active_account(snapshot.account_id)?;
+        if snapshot.state != ChannelDownloadState::Completed {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        let account_id = snapshot
+            .account_id
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+        let destination = self
+            .inner
+            .library
+            .next_download_destination(&snapshot.file_name)?;
+        self.enqueue_channel_download(ChannelDownloadRequest {
+            account_id,
+            chat_id: snapshot.chat_id,
+            message_id: snapshot.message_id,
+            message_sent_at_unix_ms: snapshot.message_sent_at_unix_ms,
+            file_name: snapshot.file_name,
+            caption: snapshot.caption,
+            mime_type: snapshot.mime_type,
+            size_bytes: snapshot.size_bytes,
+            destination,
+        })
+    }
+
     pub fn enqueue_channel_download_batch(
         &self,
         requests: Vec<ChannelDownloadRequest>,
@@ -2921,6 +2953,51 @@ mod tests {
                 .expect_err("path traversal must fail")
                 .kind(),
             ApplicationErrorKind::InvalidRequest
+        );
+    }
+    #[test]
+    fn redownload_preserves_history_and_rejects_another_account() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let destination = directory.path().join("archive.zip");
+        let library = library(&directory);
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
+        let first = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("first download");
+        assert_eq!(
+            wait_for_terminal(&transfers, first).state,
+            ChannelDownloadState::Completed
+        );
+        std::fs::remove_file(&destination).expect("external deletion");
+        assert_eq!(
+            crate::local_file_presence(&destination, 14),
+            crate::LocalFilePresence::Missing
+        );
+        let second = transfers
+            .redownload_completed(first)
+            .expect("download again");
+        assert_ne!(first, second);
+        let repeated = wait_for_terminal(&transfers, second);
+        assert_eq!(repeated.state, ChannelDownloadState::Completed);
+        assert!(repeated.destination.exists());
+        assert_eq!(
+            library
+                .downloaded_files_page(1, None)
+                .expect("persisted output inventory")
+                .len(),
+            2
+        );
+        transfers.activate_account(2).expect("switch account");
+        assert_eq!(
+            transfers
+                .redownload_completed(first)
+                .expect_err("cross-account source must not execute")
+                .kind(),
+            ApplicationErrorKind::Authorization
         );
     }
 }

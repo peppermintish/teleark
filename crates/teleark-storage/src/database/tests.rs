@@ -861,3 +861,169 @@ fn legacy_download_account_resolution_is_durable_and_never_reassigns_history()
     }
     Ok(())
 }
+
+#[test]
+fn downloaded_inventory_pages_preserve_account_scope_and_platform_paths()
+-> Result<(), Box<dyn Error>> {
+    use crate::{DownloadedFilesCursor, VaultDownloadRecord};
+    let directory = tempdir()?;
+    let path = directory.path().join("inventory.sqlite3");
+    let mut db = Database::open(&path)?;
+    for index in 0..140 {
+        db.record_vault_download(&VaultDownloadRecord {
+            account_id: 7,
+            chat_id: 90,
+            package_id: format!("{index:032x}"),
+            destination: directory.path().join(format!("写真 {index}.bin")),
+            size_bytes: 14,
+            completed_at_unix_ms: index,
+        })?;
+    }
+    db.record_vault_download(&VaultDownloadRecord {
+        account_id: 8,
+        chat_id: 90,
+        package_id: "a".repeat(32),
+        destination: directory.path().join("private.bin"),
+        size_bytes: 2,
+        completed_at_unix_ms: 1,
+    })?;
+    drop(db);
+    let db = Database::open(&path)?;
+    let first = db.downloaded_files_page(7, None)?;
+    assert_eq!(first.len(), 128);
+    assert!(
+        first
+            .iter()
+            .all(|file| file.account_id == 7 && file.message_id.is_none())
+    );
+    assert!(first[0].destination.ends_with("写真 139.bin"));
+    let second = db.downloaded_files_page(7, first.last().map(|file| file.cursor))?;
+    assert_eq!(second.len(), 12);
+    assert!(
+        db.downloaded_files_page(7, second.last().map(|file| file.cursor))?
+            .is_empty()
+    );
+    assert_eq!(db.downloaded_files_page(8, None)?.len(), 1);
+    assert!(db.downloaded_files_page(0, None).is_err());
+    assert!(
+        db.downloaded_files_page(7, Some(DownloadedFilesCursor { kind: 2, id: 0 }))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn completed_native_outputs_are_observed_without_rewriting_transfer_history()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let mut db = Database::open(directory.path().join("inventory.sqlite3"))?;
+    let mut task = db.insert_native_download(&NewNativeDownloadTaskRecord {
+        account_id: 7,
+        chat_id: 90,
+        message_id: 100,
+        message_sent_at_unix_ms: None,
+        file_name: "native.bin".into(),
+        caption: None,
+        mime_type: None,
+        size_bytes: 14,
+        destination: directory.path().join("native.bin"),
+        created_at_unix_ms: 1,
+    })?;
+    assert!(db.downloaded_files_page(7, None)?.is_empty());
+    task.state = StoredNativeDownloadState::Completed;
+    task.transferred_bytes = 14;
+    task.finished_at_unix_ms = Some(20);
+    task.updated_at_unix_ms = 20;
+    db.save_native_download(&task)?;
+    let outputs = db.downloaded_files_page(7, None)?;
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].cursor.kind, 0);
+    assert_eq!(outputs[0].message_id, Some(100));
+    assert!(db.downloaded_files_page(8, None)?.is_empty());
+    // A missing local path cannot turn completed history back into a failed transfer.
+    assert_eq!(
+        db.native_downloads()?[0].state,
+        StoredNativeDownloadState::Completed
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn downloaded_file_v10_fixture_retains_exact_path_bytes() -> Result<(), Box<dyn Error>> {
+    let mut db = Database::open_in_memory()?;
+    db.connection
+        .execute_batch(include_str!("../fixtures/v10-vault-download.sql"))?;
+    let record = db.downloaded_files_page(7, None)?.remove(0);
+    assert_eq!(record.destination, PathBuf::from("/tmp/TeleArk/京都.pdf"));
+    assert_eq!(
+        record.package_id.as_deref(),
+        Some("5441524b504b4731000000000000002a")
+    );
+    let original = crate::VaultDownloadRecord {
+        account_id: 7,
+        chat_id: 90,
+        package_id: record.package_id.clone().expect("fixture identity"),
+        destination: record.destination.clone(),
+        size_bytes: record.size_bytes,
+        completed_at_unix_ms: record.completed_at_unix_ms,
+    };
+    db.record_vault_download(&original)?;
+    assert_eq!(
+        db.downloaded_files_page(7, None)?.len(),
+        1,
+        "repeated registration is idempotent"
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_output_cursor_visits_both_kinds_once_without_deep_offsets() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let mut db = Database::open_in_memory()?;
+    for index in 1..=130 {
+        let mut task = db.insert_native_download(&NewNativeDownloadTaskRecord {
+            account_id: 7,
+            chat_id: 90,
+            message_id: index,
+            message_sent_at_unix_ms: None,
+            file_name: format!("native {index}.bin"),
+            caption: None,
+            mime_type: None,
+            size_bytes: 14,
+            destination: directory.path().join(format!("native {index}.bin")),
+            created_at_unix_ms: index,
+        })?;
+        task.state = StoredNativeDownloadState::Completed;
+        task.transferred_bytes = 14;
+        task.finished_at_unix_ms = Some(200);
+        task.updated_at_unix_ms = 200;
+        db.save_native_download(&task)?;
+        db.record_vault_download(&crate::VaultDownloadRecord {
+            account_id: 7,
+            chat_id: 90,
+            package_id: format!("{index:032x}"),
+            destination: directory.path().join(format!("vault {index}.bin")),
+            size_bytes: 14,
+            completed_at_unix_ms: 200,
+        })?;
+    }
+    let mut cursor = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut page_sizes = Vec::new();
+    loop {
+        let page = db.downloaded_files_page(7, cursor)?;
+        if page.is_empty() {
+            break;
+        }
+        page_sizes.push(page.len());
+        cursor = page.last().map(|file| file.cursor);
+        for file in page {
+            assert!(seen.insert((file.cursor.kind, file.cursor.id)));
+        }
+    }
+    assert_eq!(page_sizes, vec![128, 128, 4]);
+    assert_eq!(seen.iter().filter(|(kind, _)| *kind == 0).count(), 130);
+    assert_eq!(seen.iter().filter(|(kind, _)| *kind == 1).count(), 130);
+    Ok(())
+}

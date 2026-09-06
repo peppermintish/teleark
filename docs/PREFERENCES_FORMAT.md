@@ -31,6 +31,7 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `index_batch_size` | `200`, `500`, or `1000` | `1000` |
 | `notify_download_completed` | boolean | `true` |
 | `notify_download_failed` | boolean | `true` |
+| `sidebar_collapsed` | boolean | `true` |
 | `appearance` | `system`, `light`, or `dark` | `system` |
 
 ## Compatibility and failure behavior

@@ -2,7 +2,6 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName,
     button::ButtonVariants as _,
     checkbox::Checkbox,
-    scroll::ScrollableElement as _,
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
@@ -29,7 +28,7 @@ use crate::{
     app::TeleArkApp,
     components::{self, Tone},
     layout::LayoutPolicy,
-    mock::{TransferDirection, TransferRow, TransferState, transfers},
+    mock::{BatchSummary, TransferDirection, TransferRow, TransferState, transfers},
     theme,
 };
 
@@ -49,33 +48,34 @@ impl Drop for TransferActionJob {
 
 impl TeleArkApp {
     pub(crate) fn transfer_rows(&self) -> Vec<TransferRow> {
-        let Some(transfers_runtime) = self.transfers.as_ref() else {
-            return if self.visual_preview {
-                transfers(self.upload_queued)
-            } else {
-                Vec::new()
-            };
-        };
-        let Ok(snapshots) = transfers_runtime.snapshots() else {
-            return Vec::new();
-        };
+        if self.visual_preview {
+            return self.preview_transfer_rows.clone();
+        }
+        let mut snapshots = self
+            .transfers
+            .as_ref()
+            .and_then(|runtime| runtime.snapshots().ok())
+            .unwrap_or_default();
+        let account = self.telegram_account.as_ref().map(|account| account.id);
+        snapshots.retain(|item| item.account_id.is_none() || item.account_id == account);
         let mut rows = Vec::new();
-        let mut rendered_batches = std::collections::BTreeSet::new();
+        let mut batches = std::collections::BTreeMap::<u64, Vec<&ChannelDownloadSnapshot>>::new();
+        for snapshot in &snapshots {
+            if let Some(id) = snapshot.batch_id {
+                batches.entry(id).or_default().push(snapshot);
+            }
+        }
         for snapshot in snapshots.iter().rev() {
             let Some(batch_id) = snapshot.batch_id else {
                 rows.push(self.transfer_row_from_snapshot(snapshot, false));
                 continue;
             };
-            if !rendered_batches.insert(batch_id) {
+            let Some(mut items) = batches.remove(&batch_id) else {
                 continue;
-            }
-            let mut items: Vec<_> = snapshots
-                .iter()
-                .filter(|item| item.batch_id == Some(batch_id))
-                .collect();
+            };
             items.sort_by_key(|item| item.id);
             rows.push(self.transfer_row_from_batch(batch_id, &items));
-            if self.expanded_transfer_batches.contains(&batch_id) {
+            {
                 rows.extend(
                     items
                         .into_iter()
@@ -85,14 +85,37 @@ impl TeleArkApp {
             }
         }
         if let Some(vault) = self.vault.as_ref() {
-            rows.splice(
-                0..0,
-                vault
-                    .transfers()
-                    .into_iter()
-                    .rev()
-                    .map(|snapshot| self.transfer_row_from_vault_snapshot(&snapshot)),
-            );
+            let snapshots = vault
+                .transfers()
+                .into_iter()
+                .filter(|item| Some(item.account_id) == account)
+                .collect::<Vec<_>>();
+            let mut batches = std::collections::BTreeMap::<u64, Vec<&VaultTransferSnapshot>>::new();
+            for item in &snapshots {
+                if let Some(id) = item.batch_id {
+                    batches.entry(id).or_default().push(item);
+                }
+            }
+            let mut vault_rows = Vec::new();
+            for snapshot in snapshots.iter().rev() {
+                if let Some(id) = snapshot.batch_id {
+                    if let Some(items) = batches.remove(&id) {
+                        if let Some(group) = self.transfer_row_from_vault_batch(id, &items) {
+                            vault_rows.push(group);
+                        }
+                        {
+                            vault_rows.extend(items.into_iter().map(|item| {
+                                let mut row = self.transfer_row_from_vault_snapshot(item);
+                                row.batch_child = true;
+                                row
+                            }));
+                        }
+                    }
+                } else {
+                    vault_rows.push(self.transfer_row_from_vault_snapshot(snapshot));
+                }
+            }
+            rows.splice(0..0, vault_rows);
         }
         if self.visual_preview
             && self.upload_queued
@@ -107,6 +130,8 @@ impl TeleArkApp {
 
     fn transfer_row_from_vault_snapshot(&self, snapshot: &VaultTransferSnapshot) -> TransferRow {
         let state = match snapshot.state {
+            VaultTransferState::Queued => TransferState::Waiting,
+            VaultTransferState::Cancelled => TransferState::Cancelled,
             VaultTransferState::Running => match snapshot.direction {
                 VaultTransferDirection::Upload => TransferState::Uploading,
                 VaultTransferDirection::Download => TransferState::Downloading,
@@ -129,8 +154,10 @@ impl TeleArkApp {
         TransferRow {
             runtime_task_id: None,
             vault_transfer_id: Some(snapshot.id),
+            vault_batch_id: snapshot.batch_id,
             runtime_batch_id: None,
             batch_child: false,
+            batch_summary: None,
             message_id: None,
             message_sent_at_unix_ms: None,
             caption: snapshot.package_id.clone().map(Into::into),
@@ -173,6 +200,57 @@ impl TeleArkApp {
         }
     }
 
+    fn transfer_row_from_vault_batch(
+        &self,
+        batch_id: u64,
+        items: &[&VaultTransferSnapshot],
+    ) -> Option<TransferRow> {
+        let mut row = self.transfer_row_from_vault_snapshot(items.first()?);
+        row.vault_transfer_id = None;
+        row.vault_batch_id = Some(batch_id);
+        row.batch_summary = Some(BatchSummary {
+            file_names: items
+                .iter()
+                .take(3)
+                .map(|item| item.file_name.clone().into())
+                .collect(),
+            total: items.len(),
+            completed: items
+                .iter()
+                .filter(|item| item.state == VaultTransferState::Completed)
+                .count(),
+            failed: items
+                .iter()
+                .filter(|item| matches!(item.state, VaultTransferState::Failed(_)))
+                .count(),
+            queued_at_unix_ms: items
+                .iter()
+                .map(|item| item.queued_at_unix_ms)
+                .min()
+                .unwrap_or_default(),
+        });
+        let total = items
+            .iter()
+            .fold(0_u64, |sum, item| sum.saturating_add(item.size_bytes));
+        let transferred = items.iter().fold(0_u64, |sum, item| {
+            sum.saturating_add(item.transferred_bytes)
+        });
+        row.state = aggregate_transfer_states(
+            &items
+                .iter()
+                .map(|item| self.transfer_row_from_vault_snapshot(item).state)
+                .collect::<Vec<_>>(),
+        );
+        row.name = self.tr_with(
+            "transfer-batch-upload-name",
+            MessageArgs::new().with("count", format_integer(self.locale(), items.len() as u64)),
+        );
+        row.size = format_bytes(self.locale(), total).into();
+        row.transferred = format_bytes(self.locale(), transferred).into();
+        row.progress = transfer_progress(transferred, total, row.state == TransferState::Completed);
+        Some(row)
+    }
+
     fn transfer_row_from_snapshot(
         &self,
         snapshot: &ChannelDownloadSnapshot,
@@ -193,8 +271,10 @@ impl TeleArkApp {
         TransferRow {
             runtime_task_id: Some(snapshot.id),
             vault_transfer_id: None,
+            vault_batch_id: None,
             runtime_batch_id: snapshot.batch_id,
             batch_child,
+            batch_summary: None,
             message_id: Some(snapshot.message_id),
             message_sent_at_unix_ms: snapshot.message_sent_at_unix_ms,
             caption: snapshot.caption.clone().map(Into::into),
@@ -265,15 +345,39 @@ impl TeleArkApp {
         TransferRow {
             runtime_task_id: None,
             vault_transfer_id: None,
+            vault_batch_id: None,
             runtime_batch_id: Some(batch_id),
             batch_child: false,
+            batch_summary: Some(BatchSummary {
+                file_names: items
+                    .iter()
+                    .take(3)
+                    .map(|item| item.file_name.clone().into())
+                    .collect(),
+                total: items.len(),
+                completed: items
+                    .iter()
+                    .filter(|item| item.state == ChannelDownloadState::Completed)
+                    .count(),
+                failed: items
+                    .iter()
+                    .filter(|item| matches!(item.state, ChannelDownloadState::Failed(_)))
+                    .count(),
+                queued_at_unix_ms: items
+                    .iter()
+                    .map(|item| item.queued_at_unix_ms)
+                    .min()
+                    .unwrap_or_default(),
+            }),
             message_id: None,
             message_sent_at_unix_ms: None,
             caption: None,
             mime_type: None,
             name: self.tr_with(
                 "transfer-batch-name",
-                MessageArgs::new().with("count", format_integer(self.locale(), items.len() as u64)),
+                MessageArgs::new()
+                    .with("count", format_integer(self.locale(), items.len() as u64))
+                    .with("source", source.clone()),
             ),
             source: source.into(),
             direction: TransferDirection::Download,
@@ -392,18 +496,12 @@ impl TeleArkApp {
                     total.saturating_add(snapshot.telemetry.goodput_bytes_per_second)
                 })
         });
-        let transfer_rows: Vec<_> = all_transfer_rows
-            .into_iter()
-            .filter(|transfer| {
-                transfer_matches_nav(self.nav_selection, transfer.state, transfer.direction)
-            })
-            .filter(|transfer| {
-                query.is_empty()
-                    || transfer.name.to_lowercase().contains(&query)
-                    || transfer.source.to_lowercase().contains(&query)
-                    || transfer.destination.to_lowercase().contains(&query)
-            })
-            .collect();
+        let transfer_rows = visible_transfer_rows(
+            all_transfer_rows,
+            self.nav_selection,
+            &query,
+            &self.expanded_transfer_batches,
+        );
         let selected = transfer_rows
             .iter()
             .enumerate()
@@ -520,8 +618,10 @@ impl TeleArkApp {
                         this.selected_transfer_keys.clear();
                         this.pending_transfer_bulk_delete.clear();
                         this.show_transfer_detail = false;
-                        this.transfer_scroll
-                            .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
+                        this.transfer_scroll.scroll_to(gpui_kit::ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.0),
+                        });
                         cx.notify();
                     }
                 })),
@@ -713,20 +813,37 @@ impl TeleArkApp {
         let has_rows = !transfer_rows.is_empty();
         let row_count = transfer_rows.len();
         let rows = std::sync::Arc::new(transfer_rows);
-        let virtual_rows = gpui_kit::uniform_list(
-            "transfer-list",
-            row_count,
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .filter_map(|index| {
-                        rows.get(index)
-                            .cloned()
-                            .map(|row| this.render_transfer_row(index, row, layout, cx))
-                    })
-                    .collect::<Vec<_>>()
+        let keys = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| transfer_selection_key(row, index))
+            .collect::<Vec<_>>();
+        {
+            let mut previous = self.transfer_list_keys.borrow_mut();
+            if *previous != keys {
+                let offset = self.transfer_scroll.logical_scroll_top();
+                let anchor = previous.get(offset.item_ix).copied();
+                self.transfer_scroll.reset(row_count);
+                if let Some(index) =
+                    anchor.and_then(|anchor| keys.iter().position(|key| *key == anchor))
+                {
+                    self.transfer_scroll.scroll_to(gpui_kit::ListOffset {
+                        item_ix: index,
+                        offset_in_item: offset.offset_in_item,
+                    });
+                }
+                *previous = keys;
+            }
+        }
+        let virtual_rows = gpui_kit::list(
+            self.transfer_scroll.clone(),
+            cx.processor(move |this, index: usize, _, cx| {
+                rows.get(index)
+                    .cloned()
+                    .map(|row| this.render_transfer_row(index, row, layout, cx))
+                    .unwrap_or_else(|| div().into_any_element())
             }),
         )
-        .track_scroll(&self.transfer_scroll)
         .w_full()
         .flex_1()
         .min_h_0();
@@ -856,6 +973,37 @@ impl TeleArkApp {
             .into_any_element()
     }
 
+    fn redownload_completed(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.transfer_action_job.is_some() {
+            return;
+        }
+        let Some(transfers) = self.transfers.clone() else {
+            return;
+        };
+        self.transfer_action_error = None;
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let work = cx.background_spawn(async move { transfers.redownload_completed(id) });
+        let task = cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                this.transfer_action_job = None;
+                match result {
+                    Ok(id) => {
+                        this.focused_transfer_key = Some(id);
+                        this.monitor_channel_download(id, cx);
+                    }
+                    Err(error) => this.transfer_action_error = Some(error.kind()),
+                }
+                cx.notify();
+            });
+        });
+        self.transfer_action_job = Some(TransferActionJob {
+            _task: task,
+            cancelled,
+        });
+    }
+
     fn apply_transfer_action(
         &mut self,
         action: TransferAction,
@@ -937,7 +1085,7 @@ impl TeleArkApp {
                         .ghost()
                         .h(px(26.0))
                         .w(px(26.0))
-                        .disabled(self.transfer_action_job.is_some())
+                        .disabled(self.transfer_action_job.is_some() || self.visual_preview)
                         .ghost()
                         .h(px(26.0))
                         .w(px(26.0))
@@ -954,6 +1102,36 @@ impl TeleArkApp {
                     );
                 }
             }
+        }
+        if transfer.vault_transfer_id.is_none()
+            && let Some(batch_id) = transfer.vault_batch_id
+            && matches!(
+                transfer.state,
+                TransferState::Uploading | TransferState::Waiting
+            )
+        {
+            actions = actions.child(
+                components::icon_button(
+                    ("vault-batch-stop", batch_id),
+                    IconName::CircleX,
+                    self.tr("upload-stop-after-current"),
+                )
+                .ghost()
+                .size(px(26.0))
+                .disabled(self.visual_preview)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if let (Some(vault), Some(account)) =
+                        (this.vault.as_ref(), this.telegram_account.as_ref())
+                    {
+                        this.transfer_action_error = vault
+                            .stop_upload_batch(account.id, batch_id)
+                            .err()
+                            .map(|error| error.kind());
+                    }
+                    cx.notify();
+                })),
+            );
         }
         if self.transfers.is_none() && transfer.runtime_task_id.is_none() {
             for action in [
@@ -984,37 +1162,59 @@ impl TeleArkApp {
         {
             let destination = std::path::PathBuf::from(transfer.destination.as_ref());
             let reveal = destination.clone();
-            actions = actions
-                .child(
+            let available = self.local_presence_for_path(&destination)
+                == Some(teleark_runtime::LocalFilePresence::Present);
+            if available {
+                actions = actions
+                    .child(
+                        components::icon_button(
+                            ("transfer-open", index),
+                            IconName::ArrowRight,
+                            self.tr("action-open-file"),
+                        )
+                        .ghost()
+                        .h(px(26.0))
+                        .w(px(26.0))
+                        .disabled(self.visual_preview)
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.open_with_system(&destination);
+                        }),
+                    )
+                    .child(
+                        components::icon_button(
+                            ("transfer-reveal", index),
+                            IconName::FolderOpen,
+                            self.tr("action-show-in-folder"),
+                        )
+                        .ghost()
+                        .h(px(26.0))
+                        .w(px(26.0))
+                        .disabled(self.visual_preview)
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.reveal_path(&reveal);
+                        }),
+                    );
+            }
+            if !available && let Some(id) = transfer.runtime_task_id {
+                actions = actions.child(
                     components::icon_button(
-                        ("transfer-open", index),
-                        IconName::ArrowRight,
-                        self.tr("action-open-file"),
+                        ("transfer-redownload", id),
+                        IconName::Redo2,
+                        self.tr("transfer-download-again"),
                     )
                     .ghost()
-                    .h(px(26.0))
-                    .w(px(26.0))
-                    .on_click(move |_, _, cx| {
+                    .size(px(26.0))
+                    .disabled(self.transfer_action_job.is_some() || self.visual_preview)
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        cx.open_with_system(&destination);
-                    }),
-                )
-                .child(
-                    components::icon_button(
-                        ("transfer-reveal", index),
-                        IconName::FolderOpen,
-                        self.tr("action-show-in-folder"),
-                    )
-                    .ghost()
-                    .h(px(26.0))
-                    .w(px(26.0))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        cx.reveal_path(&reveal);
-                    }),
+                        this.redownload_completed(id, cx);
+                    })),
                 );
+            }
         }
-        if transfer.runtime_task_id.is_some() || transfer.runtime_batch_id.is_none() {
+        {
             actions = actions.child(
                 components::icon_button(
                     ("transfer-details", index),
@@ -1029,6 +1229,10 @@ impl TeleArkApp {
                     this.selected_file = index;
                     this.focused_transfer_key = Some(selection_key);
                     this.show_transfer_detail = true;
+                    this.transfer_detail_scroll
+                        .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+                    this.batch_detail_scroll
+                        .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
                     cx.notify();
                 })),
             );
@@ -1050,14 +1254,28 @@ impl TeleArkApp {
         let actions = self.render_transfer_actions(&transfer, index, cx);
         let batch_group_id = transfer
             .runtime_batch_id
-            .filter(|_| transfer.runtime_task_id.is_none() && !transfer.batch_child);
+            .filter(|_| transfer.runtime_task_id.is_none() && !transfer.batch_child)
+            .or_else(|| {
+                transfer
+                    .vault_batch_id
+                    .filter(|_| transfer.vault_transfer_id.is_none() && !transfer.batch_child)
+                    .map(vault_batch_key)
+            });
         let batch_expanded =
             batch_group_id.is_some_and(|id| self.expanded_transfer_batches.contains(&id));
 
+        let local_presence = (transfer.state == TransferState::Completed
+            && transfer.direction == TransferDirection::Download
+            && (transfer.runtime_task_id.is_some() || transfer.vault_transfer_id.is_some()))
+        .then(|| self.local_presence_for_path(std::path::Path::new(transfer.destination.as_ref())));
         div()
             .id(("transfer-row", selection_key))
             .w_full()
-            .h(px(68.0))
+            .h(px(if transfer.batch_summary.is_some() {
+                108.0
+            } else {
+                72.0
+            }))
             .px_3()
             .flex()
             .items_center()
@@ -1072,29 +1290,24 @@ impl TeleArkApp {
             })
             .hover(|row| row.bg(theme::blue_pale()))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(batch_id) = batch_group_id {
-                    if !this.expanded_transfer_batches.insert(batch_id) {
-                        this.expanded_transfer_batches.remove(&batch_id);
-                    }
-                } else {
-                    this.selected_file = index;
-                    this.focused_transfer_key = Some(selection_key);
-                    this.pending_transfer_delete = None;
-                }
+                this.selected_file = index;
+                this.focused_transfer_key = Some(selection_key);
+                this.pending_transfer_delete = None;
+                this.show_transfer_detail = true;
+                this.batch_detail_scroll
+                    .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
+                this.transfer_detail_scroll
+                    .set_offset(gpui_kit::point(px(0.0), px(0.0)));
                 cx.notify();
             }))
             .on_key_down(
                 cx.listener(move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        if let Some(batch_id) = batch_group_id {
-                            if !this.expanded_transfer_batches.insert(batch_id) {
-                                this.expanded_transfer_batches.remove(&batch_id);
-                            }
-                        } else {
-                            this.selected_file = index;
-                            this.focused_transfer_key = Some(selection_key);
-                            this.pending_transfer_delete = None;
-                        }
+                        this.selected_file = index;
+                        this.focused_transfer_key = Some(selection_key);
+                        this.pending_transfer_delete = None;
+                        this.show_transfer_detail = true;
+                        cx.stop_propagation();
                         cx.notify();
                     }
                 }),
@@ -1124,12 +1337,33 @@ impl TeleArkApp {
                     .gap_2()
                     .when(transfer.batch_child, |name| name.pl_4())
                     .font_weight(FontWeight::MEDIUM)
-                    .when(batch_group_id.is_some(), |name| {
-                        name.child(Icon::new(if batch_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        }))
+                    .when_some(batch_group_id, |name, batch_id| {
+                        name.child(
+                            components::icon_button(
+                                ("batch-expand", batch_id),
+                                if batch_expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                self.tr(if batch_expanded {
+                                    "transfer-collapse-batch"
+                                } else {
+                                    "transfer-expand-batch"
+                                }),
+                            )
+                            .ghost()
+                            .size(px(26.0))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.expanded_transfer_batches.insert(batch_id) {
+                                        this.expanded_transfer_batches.remove(&batch_id);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
                     })
                     .child(
                         Icon::new(if transfer.direction == TransferDirection::Upload {
@@ -1152,6 +1386,38 @@ impl TeleArkApp {
                             .min_w_0()
                             .pr_4()
                             .child(div().text_size(px(13.0)).truncate().child(transfer.name))
+                            .when_some(transfer.batch_summary.as_ref(), |name, batch| {
+                                name.child(
+                                    div()
+                                        .mt_1()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(
+                                            batch
+                                                .file_names
+                                                .iter()
+                                                .map(|name| name.as_ref())
+                                                .collect::<Vec<_>>()
+                                                .join(" · "),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .truncate()
+                                        .text_size(px(11.0))
+                                        .text_color(theme::text_muted())
+                                        .child(format!(
+                                            "{} · {}",
+                                            self.batch_progress_label(batch),
+                                            format_unix_millis(
+                                                self.locale(),
+                                                batch.queued_at_unix_ms
+                                            )
+                                        )),
+                                )
+                            })
                             .child(
                                 div()
                                     .mt_1()
@@ -1192,16 +1458,29 @@ impl TeleArkApp {
                             .text_size(px(10.0))
                             .text_color(theme::text_muted())
                             .truncate()
-                            .child(
-                                if matches!(
-                                    transfer.state,
-                                    TransferState::Uploading | TransferState::Downloading
-                                ) {
-                                    transfer.speed
-                                } else {
-                                    transfer.eta
-                                },
-                            ),
+                            .when(
+                                local_presence.is_some_and(|presence| {
+                                    presence.is_some_and(|presence| {
+                                        presence != teleark_runtime::LocalFilePresence::Present
+                                    })
+                                }),
+                                |label| label.text_color(theme::amber()),
+                            )
+                            .child(if let Some(presence) = local_presence {
+                                self.local_presence_label(presence)
+                            } else if matches!(
+                                transfer.state,
+                                TransferState::Uploading | TransferState::Downloading
+                            ) {
+                                transfer.speed
+                            } else if matches!(
+                                transfer.state,
+                                TransferState::Waiting | TransferState::Paused
+                            ) {
+                                transfer.eta
+                            } else {
+                                "".into()
+                            }),
                     ),
             )
             .child(actions)
@@ -1579,12 +1858,219 @@ impl TeleArkApp {
             .into_any_element()
     }
 
+    fn batch_progress_label(&self, batch: &BatchSummary) -> SharedString {
+        self.tr_with(
+            "transfer-batch-progress",
+            MessageArgs::new()
+                .with(
+                    "completed",
+                    format_integer(self.locale(), batch.completed as u64),
+                )
+                .with("total", format_integer(self.locale(), batch.total as u64))
+                .with("failed", format_integer(self.locale(), batch.failed as u64)),
+        )
+    }
+
+    fn render_batch_detail(
+        &self,
+        transfer: &TransferRow,
+        layout: LayoutPolicy,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let members = if self.visual_preview {
+            self.preview_transfer_rows
+                .iter()
+                .filter(|row| {
+                    row.batch_child
+                        && row.runtime_batch_id == transfer.runtime_batch_id
+                        && row.vault_batch_id == transfer.vault_batch_id
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else if let Some(batch_id) = transfer.runtime_batch_id {
+            self.transfers
+                .as_ref()
+                .and_then(|runtime| runtime.snapshots().ok())
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.batch_id == Some(batch_id))
+                .map(|item| self.transfer_row_from_snapshot(item, true))
+                .collect::<Vec<_>>()
+        } else {
+            self.vault
+                .as_ref()
+                .map(|vault| vault.transfers())
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.batch_id == transfer.vault_batch_id)
+                .map(|item| self.transfer_row_from_vault_snapshot(item))
+                .collect::<Vec<_>>()
+        };
+        let batch_key = transfer
+            .runtime_batch_id
+            .or_else(|| transfer.vault_batch_id.map(vault_batch_key));
+        let member_count = members.len();
+        let members = std::sync::Arc::new(members);
+        let files = gpui_kit::uniform_list(
+            "batch-member-list",
+            member_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|index| members.get(index))
+                    .map(|row| {
+                        let selection_key = transfer_selection_key(row, 0);
+                        let presence = (row.direction == TransferDirection::Download
+                            && row.state == TransferState::Completed)
+                            .then(|| {
+                                this.local_presence_for_path(std::path::Path::new(
+                                    row.destination.as_ref(),
+                                ))
+                            });
+                        gpui_kit::base::Button::new(("batch-member", selection_key))
+                            .accessibility_label(row.name.clone())
+                            .w_full()
+                            .h(px(82.0))
+                            .px_4()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(theme::border())
+                            .hover(|row| row.bg(theme::blue_pale()))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_left()
+                                    .text_sm()
+                                    .child(row.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_secondary())
+                                            .child(row.size.clone()),
+                                    )
+                                    .child(components::badge(
+                                        presence
+                                            .map(|presence| this.local_presence_label(presence))
+                                            .unwrap_or_else(|| this.tr(row.state.message_id())),
+                                        match presence {
+                                            Some(Some(
+                                                teleark_runtime::LocalFilePresence::Present,
+                                            )) => Tone::Green,
+                                            Some(Some(_)) => Tone::Amber,
+                                            Some(None) => Tone::Neutral,
+                                            None => transfer_tone(row.state),
+                                        },
+                                    )),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(batch_key) = batch_key {
+                                    this.expanded_transfer_batches.insert(batch_key);
+                                }
+                                this.focused_transfer_key = Some(selection_key);
+                                this.transfer_detail_scroll
+                                    .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.batch_detail_scroll)
+        .w_full()
+        .flex_1()
+        .min_h_0();
+        components::inspector_panel("batch-inspector", layout.transfer_inspector_width())
+            .child(
+                div()
+                    .p_4()
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(transfer.name.clone()),
+                            )
+                            .child(
+                                components::icon_button(
+                                    "batch-close-details",
+                                    IconName::Close,
+                                    self.tr("transfer-close-details"),
+                                )
+                                .ghost()
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_transfer_detail = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(format!("{} · {}", transfer.source, transfer.size)),
+                    )
+                    .when_some(transfer.batch_summary.as_ref(), |body, batch| {
+                        body.child(
+                            div()
+                                .mt_3()
+                                .text_sm()
+                                .child(self.batch_progress_label(batch)),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(format_unix_millis(self.locale(), batch.queued_at_unix_ms)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .h(px(36.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .child(self.tr("detail-tab-file-list")),
+            )
+            .child(files)
+            .into_any_element()
+    }
+
     fn render_transfer_detail(
         &self,
         transfer: TransferRow,
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if transfer.batch_summary.is_some() {
+            return self.render_batch_detail(&transfer, layout, cx);
+        }
         let tone = transfer_tone(transfer.state);
         let active = matches!(
             transfer.state,
@@ -1596,7 +2082,7 @@ impl TeleArkApp {
         let runtime_backed = transfer.runtime_task_id.is_some();
         let vault_backed = transfer.vault_transfer_id.is_some();
         let upload = transfer.direction == TransferDirection::Upload;
-        let preview_upload = upload && !runtime_backed && !vault_backed;
+        let preview_upload = self.visual_preview && upload && !runtime_backed && !vault_backed;
         let runtime_snapshot = transfer
             .runtime_task_id
             .and_then(|id| self.runtime_transfer_snapshot(id));
@@ -1612,48 +2098,32 @@ impl TeleArkApp {
                     .map(|snapshot| snapshot.telemetry.clone())
             });
         let unavailable = self.tr("transfer-value-unavailable");
-        let remote_message_id = if let Some(message_id) = transfer.message_id {
-            message_id.to_string().into()
-        } else if waiting || vault_backed {
-            unavailable.clone()
-        } else {
-            SharedString::from("1876543210897")
-        };
-        let created_at = vault_snapshot.as_ref().map_or_else(
-            || {
-                runtime_snapshot.as_ref().map_or_else(
-                    || {
-                        if runtime_backed {
-                            unavailable.clone()
-                        } else {
-                            SharedString::from("2026-08-23 20:48:31")
-                        }
-                    },
-                    |snapshot| format_unix_millis(self.locale(), snapshot.queued_at_unix_ms).into(),
-                )
-            },
-            |snapshot| format_unix_millis(self.locale(), snapshot.started_at_unix_ms).into(),
-        );
-        let started_at = vault_snapshot.as_ref().map_or_else(
-            || {
-                runtime_snapshot.as_ref().map_or_else(
-                    || {
-                        if runtime_backed || waiting {
-                            unavailable.clone()
-                        } else {
-                            SharedString::from("2026-08-23 20:49:02")
-                        }
-                    },
-                    |snapshot| {
-                        snapshot
-                            .started_at_unix_ms
-                            .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
-                            .unwrap_or_else(|| unavailable.clone())
-                    },
-                )
-            },
-            |snapshot| format_unix_millis(self.locale(), snapshot.started_at_unix_ms).into(),
-        );
+        let remote_message_id = transfer
+            .message_id
+            .map(|id| id.to_string().into())
+            .unwrap_or_else(|| unavailable.clone());
+        let created_at = vault_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.queued_at_unix_ms)
+            .or_else(|| {
+                runtime_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.queued_at_unix_ms)
+            })
+            .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
+            .unwrap_or_else(|| unavailable.clone());
+        let started_at = vault_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                (snapshot.started_at_unix_ms > 0).then_some(snapshot.started_at_unix_ms)
+            })
+            .or_else(|| {
+                runtime_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.started_at_unix_ms)
+            })
+            .map(|timestamp| format_unix_millis(self.locale(), timestamp).into())
+            .unwrap_or_else(|| unavailable.clone());
         let finished_at = runtime_snapshot.as_ref().and_then(|snapshot| {
             snapshot
                 .finished_at_unix_ms
@@ -1710,15 +2180,7 @@ impl TeleArkApp {
                 vault_snapshot.as_ref().map_or_else(
                     || {
                         runtime_snapshot.as_ref().map_or_else(
-                            || {
-                                SharedString::from(if runtime_backed {
-                                    "—"
-                                } else if active {
-                                    "16"
-                                } else {
-                                    "—"
-                                })
-                            },
+                            || unavailable.clone(),
                             |snapshot| {
                                 if snapshot.started_at_unix_ms.is_some() {
                                     format_integer(self.locale(), 1).into()
@@ -1736,15 +2198,7 @@ impl TeleArkApp {
                 vault_snapshot.as_ref().map_or_else(
                     || {
                         runtime_snapshot.as_ref().map_or_else(
-                            || {
-                                SharedString::from(if runtime_backed {
-                                    "—"
-                                } else if failed {
-                                    "3"
-                                } else {
-                                    "0"
-                                })
-                            },
+                            || unavailable.clone(),
                             |snapshot| {
                                 format_integer(
                                     self.locale(),
@@ -1760,6 +2214,18 @@ impl TeleArkApp {
             (self.tr("detail-created"), created_at),
             (self.tr("detail-started"), started_at),
         ];
+        if completed && !upload && (runtime_backed || vault_backed) {
+            details.insert(
+                4,
+                (
+                    self.tr("local-file-status"),
+                    self.local_presence_label(self.local_presence_for_path(std::path::Path::new(
+                        transfer.destination.as_ref(),
+                    ))),
+                ),
+            );
+        }
+
         details.push((
             self.tr("detail-storage-format"),
             self.tr(if upload || vault_backed {
@@ -2066,15 +2532,7 @@ impl TeleArkApp {
                 })
             });
 
-        div()
-            .w(px(layout.transfer_inspector_width()))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .bg(theme::surface())
-            .border_l_1()
-            .border_color(theme::border())
+        components::inspector_panel("transfer-inspector", layout.transfer_inspector_width())
             .child(
                 div()
                     .p_5()
@@ -2147,23 +2605,29 @@ impl TeleArkApp {
                             .justify_between()
                             .text_sm()
                             .child(self.tr("table-progress"))
-                            .child(format!("{:.1}%", transfer.progress)),
+                            .child(format_percent(
+                                self.locale(),
+                                f64::from(transfer.progress) / 100.0,
+                                1,
+                            )),
                     )
                     .child(div().mt_2().child(components::progress(
                         transfer.progress,
                         tone,
                         self.tr("table-progress"),
                     )))
-                    .child(
-                        div()
-                            .mt_4()
-                            .flex()
-                            .justify_between()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr("detail-time-remaining"))
-                            .child(transfer.eta),
-                    ),
+                    .when(active || waiting, |header| {
+                        header.child(
+                            div()
+                                .mt_4()
+                                .flex()
+                                .justify_between()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("detail-time-remaining"))
+                                .child(transfer.eta),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2174,14 +2638,12 @@ impl TeleArkApp {
                     .gap_5()
                     .border_b_1()
                     .border_color(theme::border())
-                    .child(detail_tab(self.tr("detail-tab-details"), true))
-                    .child(detail_tab(self.tr("detail-tab-file-list"), false)),
+                    .child(detail_tab(self.tr("detail-tab-details"), true)),
             )
-            .child(
+            .child(components::inspector_body(
+                "transfer-detail-body",
+                &self.transfer_detail_scroll,
                 div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
                     .p_5()
                     .flex()
                     .flex_col()
@@ -2369,7 +2831,7 @@ impl TeleArkApp {
                                     .children(part_events),
                             )
                     }),
-            )
+            ))
             .into_any_element()
     }
 }
@@ -2609,8 +3071,13 @@ fn transfer_selection_key(transfer: &TransferRow, index: usize) -> u64 {
             return 0x2000_0000_0000_0000_u64 | id;
         }
         transfer
-            .runtime_batch_id
-            .map(|id| 0x4000_0000_0000_0000_u64 | id)
+            .vault_batch_id
+            .map(vault_batch_key)
+            .or_else(|| {
+                transfer
+                    .runtime_batch_id
+                    .map(|id| 0x4000_0000_0000_0000_u64 | id)
+            })
             .unwrap_or(0x8000_0000_0000_0000_u64 | index as u64)
     })
 }
@@ -2701,6 +3168,33 @@ fn toggle_visible_selection(
     }
 }
 
+fn visible_transfer_rows(
+    rows: Vec<TransferRow>,
+    selection: &str,
+    query: &str,
+    expanded: &std::collections::BTreeSet<u64>,
+) -> Vec<TransferRow> {
+    let reveal_matching_members =
+        !query.is_empty() || matches!(selection, "nav-waiting" | "nav-completed" | "nav-failed");
+    rows.into_iter()
+        .filter(|row| {
+            (!row.batch_child
+                || reveal_matching_members
+                || row
+                    .runtime_batch_id
+                    .is_some_and(|id| expanded.contains(&id))
+                || row
+                    .vault_batch_id
+                    .is_some_and(|id| expanded.contains(&vault_batch_key(id))))
+                && transfer_matches_nav(selection, row.state, row.direction)
+                && (query.is_empty()
+                    || row.name.to_lowercase().contains(query)
+                    || row.source.to_lowercase().contains(query)
+                    || row.destination.to_lowercase().contains(query))
+        })
+        .collect()
+}
+
 fn transfer_matches_nav(
     selection: &str,
     state: TransferState,
@@ -2756,9 +3250,63 @@ fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
         .into_any_element()
 }
 
+fn vault_batch_key(id: u64) -> u64 {
+    0x6000_0000_0000_0000 | id
+}
+
+fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
+    [
+        TransferState::Uploading,
+        TransferState::Downloading,
+        TransferState::Waiting,
+        TransferState::Paused,
+        TransferState::Failed,
+        TransferState::Cancelled,
+    ]
+    .into_iter()
+    .find(|state| states.contains(state))
+    .unwrap_or(TransferState::Completed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn searching_or_filtering_reaches_members_of_collapsed_batches() {
+        let mut group = transfers(false).remove(0);
+        group.runtime_batch_id = Some(7);
+        group.state = TransferState::Failed;
+        let mut completed = group.clone();
+        completed.runtime_task_id = Some(11);
+        completed.batch_child = true;
+        completed.name = "京都 — hidden member.pdf".into();
+        completed.state = TransferState::Completed;
+        let mut failed = completed.clone();
+        failed.runtime_task_id = Some(12);
+        failed.name = "failed member.pdf".into();
+        failed.state = TransferState::Failed;
+        let rows = vec![group, completed.clone(), failed];
+        let collapsed = std::collections::BTreeSet::new();
+        assert_eq!(
+            visible_transfer_rows(rows.clone(), "nav-transfers-all", "", &collapsed).len(),
+            1
+        );
+        let found = visible_transfer_rows(
+            rows.clone(),
+            "nav-transfers-all",
+            "hidden member",
+            &collapsed,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(transfer_selection_key(&found[0], 0), 11);
+        let found = visible_transfer_rows(rows, "nav-completed", "", &collapsed);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            transfer_selection_key(&found[0], 0),
+            transfer_selection_key(&completed, 7)
+        );
+    }
 
     #[test]
     fn bulk_commands_continue_after_failure_and_only_clear_successful_deletions() {

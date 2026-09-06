@@ -787,3 +787,32 @@ fn unsupported_enum(field: &'static str) -> crate::StorageError {
         reason: crate::InputReason::InvalidCombination,
     }
 }
+
+/// Resume cursor for the bounded local-output inventory: 0 native, 1 Vault.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DownloadedFilesCursor {
+    pub kind: u8,
+    pub id: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadedFileRecord {
+    pub cursor: DownloadedFilesCursor,
+    pub account_id: i64,
+    pub chat_id: i64,
+    pub message_id: Option<i64>,
+    pub package_id: Option<String>,
+    pub destination: std::path::PathBuf,
+    pub size_bytes: u64,
+    pub completed_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultDownloadRecord {
+    pub account_id: i64,
+    pub chat_id: i64,
+    pub package_id: String,
+    pub destination: std::path::PathBuf,
+    pub size_bytes: u64,
+    pub completed_at_unix_ms: i64,
+}

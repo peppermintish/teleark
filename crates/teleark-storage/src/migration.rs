@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 9;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 10;
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -407,6 +407,25 @@ ALTER TABLE native_download_tasks ADD COLUMN account_id INTEGER
     CHECK (account_id IS NULL OR account_id > 0);
 CREATE INDEX native_download_tasks_account_state
     ON native_download_tasks (account_id, state, created_at_unix_ms, id);
+"#,
+    },
+    Migration {
+        version: 10,
+        sql: r#"
+CREATE TABLE vault_downloaded_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL CHECK (account_id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    package_id TEXT NOT NULL CHECK (length(package_id) = 32 AND package_id NOT GLOB '*[^0-9a-f]*'),
+    path_encoding TEXT NOT NULL CHECK (path_encoding IN ('unix-bytes-v1', 'windows-utf16le-v1', 'utf8-v1')),
+    destination_path BLOB NOT NULL CHECK (length(destination_path) BETWEEN 1 AND 32768),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    completed_at_unix_ms INTEGER NOT NULL,
+    UNIQUE (account_id, path_encoding, destination_path)
+) STRICT;
+CREATE INDEX vault_downloaded_files_account ON vault_downloaded_files (account_id, id);
+CREATE INDEX native_download_completed_outputs ON native_download_tasks (account_id, id)
+    WHERE state = 'completed';
 "#,
     },
 ];

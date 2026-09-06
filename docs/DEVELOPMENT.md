@@ -19,11 +19,17 @@ Use deterministic temporary databases/files, fake remote stores, injected clocks
 
 Before dependency changes, review direct/transitive licenses, maintenance and advisories. The published GPUI Kit/gpui-pre graph and exact permissive exceptions are recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md); the unprefixed GPL graph remains banned. Distributions include both licenses and `THIRD_PARTY_NOTICES.md`. A passing deny policy does not imply every transitive crate is maintained forever.
 
+GPUI Kit's development-only `test-support` feature drives actual wheel-event regression tests. Its eight newly locked dependencies were reviewed: `convert_case 0.11.0` (MIT), `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These are existing upstream test helpers, excluded from release features; no existing package was upgraded. Necessity is the real scroll/focus harness; the full locked advisory/license gate remains required.
+
 ## Native macOS build
 
 ```bash
 cargo run -p teleark-gui --bin teleark
+cargo build -p teleark-gui --release --locked
+scripts/package-macos.sh target/release/teleark dist/TeleArk.app
 ```
+
+The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. The release archive contains this unsigned bundle.
 
 GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. A signed/notarized release and the macOS deployment floor, Apple Silicon/Intel matrix and other desktop platforms need separate qualification.
 
@@ -39,7 +45,7 @@ cargo run -p teleark-gui -- --preview-ui --preview-state=unlock --locale=zh-CN -
 cargo run -p teleark-gui -- --preview-ui --preview-state=about --preview-dark --locale=ja-JP
 ```
 
-Preview disables Library, Telegram, diagnostics, native-transfer and Vault runtime constructors. Fixtures contain a synthetic account, 200 channel titles, 5,000 raw rows and Unicode managed files; a missing real runtime never produces fake transfer success. Preview actions cannot authenticate or move real Telegram data. `--preview-state` and `--preview-dark` are interpreted only in preview mode.
+Preview disables Library, Telegram, diagnostics, native-transfer and Vault runtime constructors. Fixtures contain a synthetic account, 200 channel titles, 5,000 raw rows, Unicode managed files and native/upload batches with local-file states; a missing real runtime never produces fake transfer success. Preview actions cannot authenticate or move real Telegram data. `--preview-state` and `--preview-dark` are interpreted only in preview mode.
 
 | Option | Values |
 | --- | --- |
@@ -50,7 +56,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 
 Oversized windows fit the active display; record actual size separately. The legacy `--skip-telegram-api-id-prompt` flag remains accepted, but API setup is now opt-in. Non-preview startup opens real local state and can resume eligible downloads after account entry.
 
-Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details; Settings/About; light/dark and all locales. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
+Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details, batch membership, scroll isolation at both boundaries, expanded/collapsed navigation, multi-file picker/removal and local-file states; Settings/About; light/dark and all locales. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
 
 ## CI and releases
 

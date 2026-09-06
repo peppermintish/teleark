@@ -3,6 +3,13 @@
 //! This crate owns adapter worker lifecycles so frontends never execute SQL or
 //! other blocking infrastructure work directly.
 
+mod local_files;
+pub use local_files::{
+    LOCAL_FILE_PROBE_LIMIT, LocalFilePresence, VolumeSpace, local_file_presence, probe_local_files,
+    volume_space,
+};
+pub use teleark_storage::{DownloadedFileRecord, DownloadedFilesCursor};
+
 use std::sync::mpsc::SyncSender;
 use std::{
     path::{Path, PathBuf},
@@ -59,8 +66,9 @@ pub use transfer::{
     encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, ManagedVaultFile, ManagedVaultScan, VaultStatus, VaultTransferDirection,
-    VaultTransferSnapshot, VaultTransferState,
+    DesktopVault, MAX_VAULT_UPLOAD_BATCH, ManagedVaultFile, ManagedVaultScan, VaultStatus,
+    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadFailure,
+    VaultUploadReport, VaultUploadSource, inspect_upload_sources,
 };
 
 const STORAGE_QUEUE_CAPACITY: usize = 64;
@@ -92,6 +100,7 @@ pub struct DesktopPreferences {
     pub notify_download_completed: bool,
     pub notify_download_failed: bool,
     pub appearance: AppearancePreference,
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for DesktopPreferences {
@@ -110,6 +119,7 @@ impl Default for DesktopPreferences {
             notify_download_completed: true,
             notify_download_failed: true,
             appearance: AppearancePreference::System,
+            sidebar_collapsed: true,
         }
     }
 }
@@ -418,6 +428,13 @@ impl DesktopLibrary {
         self.worker.managed_directories()
     }
 
+    /// Cheap volume query for the configured download location, without a
+    /// recursive app-data walk or creating an unavailable destination.
+    pub fn download_volume_space(&self) -> Result<VolumeSpace, ApplicationError> {
+        let directories = managed_directories_for(&self.database_path, &self.preferences()?)?;
+        volume_space(&directories.downloads)
+    }
+
     /// Measures TeleArk-owned data without following symlinks. Callers should
     /// run this bounded filesystem walk away from the GUI thread.
     pub fn managed_storage_metrics(&self) -> Result<ManagedStorageMetrics, ApplicationError> {
@@ -465,6 +482,30 @@ impl DesktopLibrary {
             .request("resolve_legacy_download_accounts", |reply| {
                 StorageRequest::ResolveLegacyDownloadAccounts { account_id, reply }
             })
+    }
+
+    pub(crate) fn record_vault_download(
+        &self,
+        record: teleark_storage::VaultDownloadRecord,
+    ) -> Result<(), ApplicationError> {
+        self.worker.request("record_vault_download", |reply| {
+            StorageRequest::RecordVaultDownload { record, reply }
+        })
+    }
+
+    /// Bounded inventory of successful downloads for the specified account.
+    pub fn downloaded_files_page(
+        &self,
+        account_id: i64,
+        after: Option<DownloadedFilesCursor>,
+    ) -> Result<Vec<DownloadedFileRecord>, ApplicationError> {
+        self.worker.request("downloaded_files_page", |reply| {
+            StorageRequest::DownloadedFilesPage {
+                account_id,
+                after,
+                reply,
+            }
+        })
     }
 
     pub(crate) fn native_downloads(
@@ -712,6 +753,15 @@ enum StorageRequest {
     SaveNativeDownload {
         task: NativeDownloadTaskRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    RecordVaultDownload {
+        record: teleark_storage::VaultDownloadRecord,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    DownloadedFilesPage {
+        account_id: i64,
+        after: Option<DownloadedFilesCursor>,
+        reply: SyncSender<Result<Vec<DownloadedFileRecord>, ApplicationError>>,
     },
     NativeDownloads {
         reply: SyncSender<Result<Vec<NativeDownloadTaskRecord>, ApplicationError>>,
@@ -1238,6 +1288,24 @@ fn storage_loop(
                         .map_err(map_storage_error),
                 );
             }
+            StorageRequest::RecordVaultDownload { record, reply } => {
+                let _ = reply.send(
+                    database
+                        .record_vault_download(&record)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::DownloadedFilesPage {
+                account_id,
+                after,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .downloaded_files_page(account_id, after)
+                        .map_err(map_storage_error),
+                );
+            }
             StorageRequest::NativeDownloads { reply } => {
                 let result = database.native_downloads().map_err(map_storage_error);
                 let _ = reply.send(result);
@@ -1476,6 +1544,9 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
             "notify_download_failed" => {
                 preferences.notify_download_failed = parse_bool_setting(&setting.value)?;
             }
+            "sidebar_collapsed" => {
+                preferences.sidebar_collapsed = parse_bool_setting(&setting.value)?;
+            }
             "appearance" => {
                 preferences.appearance = match setting.value.as_str() {
                     "system" => AppearancePreference::System,
@@ -1538,6 +1609,10 @@ fn store_preferences(
         DownloadThroughputStrategy::MaxThroughput => "max_throughput",
     };
     let values = [
+        (
+            "sidebar_collapsed",
+            bool_setting(preferences.sidebar_collapsed),
+        ),
         ("download_throughput_strategy", download_strategy.to_owned()),
         ("managed_files_root", managed_root.to_owned()),
         // Clear the retired values so older releases cannot reopen a stale
@@ -1927,6 +2002,7 @@ mod tests {
             notify_download_completed: false,
             notify_download_failed: false,
             appearance: AppearancePreference::Dark,
+            sidebar_collapsed: false,
         };
         library
             .set_preferences(&preferences)

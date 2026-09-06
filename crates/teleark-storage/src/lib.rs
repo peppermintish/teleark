@@ -16,11 +16,12 @@ pub use error::{
 };
 pub use model::{
     AccountRecord, CachedTelegramFileRecord, ChatRecord, CollectionKind, CollectionRecord,
-    FileSearchFacets, IndexBatch, IndexJobRecord, IndexRangeRecord, LibraryStatisticsRecord,
-    LogicalFileRecord, NativeDownloadBatchRecord, NativeDownloadTaskRecord, NewLogicalFileRecord,
-    NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
-    RemoteObjectRecord, SearchPage, SearchQuery, SettingRecord, StoredIndexCoverage,
-    StoredIndexJobState, StoredNativeDownloadState, StoredNativeDownloadVerification,
-    StoredPartState, StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord,
-    TransferPartCheckpoint, TransferTaskRecord, VaultMetadataRecord,
+    DownloadedFileRecord, DownloadedFilesCursor, FileSearchFacets, IndexBatch, IndexJobRecord,
+    IndexRangeRecord, LibraryStatisticsRecord, LogicalFileRecord, NativeDownloadBatchRecord,
+    NativeDownloadTaskRecord, NewLogicalFileRecord, NewNativeDownloadBatchRecord,
+    NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert, RemoteObjectRecord, SearchPage,
+    SearchQuery, SettingRecord, StoredIndexCoverage, StoredIndexJobState,
+    StoredNativeDownloadState, StoredNativeDownloadVerification, StoredPartState,
+    StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord, TransferPartCheckpoint,
+    TransferTaskRecord, VaultDownloadRecord, VaultMetadataRecord,
 };

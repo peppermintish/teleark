@@ -77,7 +77,9 @@ impl TeleArkApp {
                             this.vault_recovery_secret = None;
                             this.vault_locked = true;
                             this.unlock_intent = None;
-                            this.upload_source = None;
+                            this.upload_sources.clear();
+                            this.last_channel_id = None;
+                            this.local_downloads.clear();
                             this.telegram_file_generation =
                                 this.telegram_file_generation.wrapping_add(1);
                             this.refresh_channel_file_table(cx);

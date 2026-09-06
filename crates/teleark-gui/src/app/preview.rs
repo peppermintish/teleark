@@ -14,6 +14,10 @@ impl TeleArkApp {
             theme::apply_appearance(AppearancePreference::Dark, window, cx);
         }
         self.preferences.lock_vault_when_hidden = false;
+        self.volume_space = Some(teleark_runtime::VolumeSpace {
+            available_bytes: 248 * 1024 * 1024 * 1024,
+            total_bytes: 1024 * 1024 * 1024 * 1024,
+        });
         self.telegram_activity = TelegramActivity::Idle;
         self.vault_activity = VaultActivity::Idle;
         self.preference_persistence = PreferencePersistence::Idle;
@@ -85,7 +89,7 @@ impl TeleArkApp {
                 sent_at_unix_ms: 1_788_624_000_000,
                 modified_at_unix_ms: 1_788_624_000_000,
                 file_name: format!("{index:04} {}", names[index as usize % names.len()]),
-                caption: String::new(),
+                caption: (0..24).map(|line| format!("Field note {line:02} · 京都の春 — 摄影素材与项目记录。Original source content remains unchanged.\n")).collect(),
                 mime_type: None,
                 size_bytes: 1024 * 1024 * 123,
             })
@@ -117,6 +121,121 @@ impl TeleArkApp {
             next_cursor: None,
             statistics: LibraryStatistics::default(),
         });
+        let fixture = crate::mock::transfers(false);
+        let mut rows = Vec::new();
+        for (batch_id, upload) in [(42_u64, false), (17_u64, true)] {
+            let mut group = fixture[0].clone();
+            group.runtime_batch_id = (!upload).then_some(batch_id);
+            group.vault_batch_id = upload.then_some(batch_id);
+            group.name = if upload {
+                self.tr_with(
+                    "transfer-batch-upload-name",
+                    MessageArgs::new().with("count", "6"),
+                )
+            } else {
+                self.tr_with(
+                    "transfer-batch-name",
+                    MessageArgs::new()
+                        .with("count", "6")
+                        .with("source", "Kyoto · September"),
+                )
+            };
+            group.source = if upload {
+                "TeleArk".into()
+            } else {
+                "Kyoto · September".into()
+            };
+            group.direction = if upload {
+                crate::mock::TransferDirection::Upload
+            } else {
+                crate::mock::TransferDirection::Download
+            };
+            group.state = if upload {
+                crate::mock::TransferState::Uploading
+            } else {
+                crate::mock::TransferState::Completed
+            };
+            group.progress = if upload { 35.0 } else { 100.0 };
+            group.size = format_bytes(self.locale(), 21 * 123 * 1024 * 1024).into();
+            group.transferred = if upload {
+                format_bytes(self.locale(), 775 * 1024 * 1024).into()
+            } else {
+                group.size.clone()
+            };
+            group.batch_summary = Some(crate::mock::BatchSummary {
+                file_names: names.iter().take(3).map(|name| (*name).into()).collect(),
+                total: 6,
+                completed: if upload { 2 } else { 6 },
+                failed: 0,
+                queued_at_unix_ms: if upload {
+                    1_788_710_400_000
+                } else {
+                    1_788_624_000_000
+                },
+            });
+            rows.push(group.clone());
+            for (index, name) in names.iter().enumerate() {
+                let mut row = group.clone();
+                row.batch_summary = None;
+                row.batch_child = true;
+                row.name = (*name).into();
+                let size_bytes = (index as u64 + 1) * 123 * 1024 * 1024;
+                row.size = format_bytes(self.locale(), size_bytes).into();
+                row.destination = format!("/Preview/Downloads/{name}").into();
+                if !upload {
+                    let destination = std::path::PathBuf::from(row.destination.as_ref());
+                    self.local_downloads.insert(
+                        destination.clone(),
+                        super::local_files::LocalDownloadObservation {
+                            file: teleark_runtime::DownloadedFileRecord {
+                                cursor: teleark_runtime::DownloadedFilesCursor {
+                                    kind: 0,
+                                    id: 200 + index as u64,
+                                },
+                                account_id: 1,
+                                chat_id: 9000,
+                                message_id: Some(5000 - index as i64),
+                                package_id: Some(format!("{:032x}", index + 1)),
+                                destination,
+                                size_bytes,
+                                completed_at_unix_ms: 1_788_624_000_000,
+                            },
+                            presence: match index {
+                                1 => teleark_runtime::LocalFilePresence::Missing,
+                                2 => teleark_runtime::LocalFilePresence::SizeChanged,
+                                _ => teleark_runtime::LocalFilePresence::Present,
+                            },
+                        },
+                    );
+                }
+                row.runtime_task_id = (!upload).then_some(200 + index as u64);
+                row.vault_transfer_id = upload.then_some(300 + index as u64);
+                row.state = if !upload || index < 2 {
+                    crate::mock::TransferState::Completed
+                } else if index == 2 {
+                    crate::mock::TransferState::Uploading
+                } else {
+                    crate::mock::TransferState::Waiting
+                };
+                row.progress = if row.state == crate::mock::TransferState::Completed {
+                    100.0
+                } else {
+                    0.0
+                };
+                row.transferred = if row.state == crate::mock::TransferState::Completed {
+                    row.size.clone()
+                } else {
+                    format_bytes(self.locale(), 0).into()
+                };
+                rows.push(row);
+            }
+        }
+        for index in 0..48 {
+            let mut row = fixture[index % fixture.len()].clone();
+            row.name = format!("{:02} {}", index + 1, row.name).into();
+            rows.push(row);
+        }
+        self.preview_transfer_rows = rows;
         match state.as_str() {
             "returning" => self.page = Page::Account,
             "setup" => {

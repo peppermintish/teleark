@@ -105,7 +105,7 @@ file-detail-empty-description = 导入文件并将其选中，即可查看已保
 file-detail-modified-at = 修改时间
 file-detail-verification-unavailable = 此本机项目暂无验证详情。
 
-upload-dialog-title = 上传到 Telegram
+upload-dialog-title = 上传到 TeleArk
 upload-target-account = 目标账号
 upload-target-channel = 目标频道
 upload-storage-method = 存储方式
@@ -125,7 +125,7 @@ upload-part-count = 分片数量：{ $count }
 upload-total-size = 总大小：{ $size }
 upload-telegram-messages = Telegram 消息数：{ $count }
 upload-estimated-time = 预计时间：{ $time }
-upload-change-file = 更改文件
+upload-change-file = 重新选择
 upload-add-to-queue = 加入上传队列
 upload-select-file = 选择文件
 
@@ -390,7 +390,7 @@ transfer-footer-total-live = 共 { $count } 个任务
 transfer-footer-downloading-live = { $count } 个下载中
 transfer-footer-waiting-live = { $count } 个等待中
 transfer-empty = 暂无传输任务。请先选择 Telegram 来源并下载文件。
-transfer-batch-name = 批量下载（{ $count } 个文件）
+transfer-batch-name = { $source } · { $count } 个文件
 transfer-tab-log = 日志
 
 connection-title = 连接
@@ -410,7 +410,7 @@ detail-created = 创建时间
 detail-started = 开始时间
 detail-time-remaining = 剩余时间
 detail-tab-details = 详情
-detail-tab-file-list = 文件列表（128）
+detail-tab-file-list = 文件列表
 detail-verification = 文件校验
 
 log-connected = 已连接到节点
@@ -794,7 +794,7 @@ vault-error-conflict = 已经配置了密钥库。
 vault-error-capacity = 此操作超出了支持的大小或存储限制。
 vault-error-cancelled = 密钥库操作已取消。
 vault-error-persistence = 无法安全读取、验证或保存密钥库数据。
-upload-file-picker-prompt = 选择一个要加密上传到 TeleArk 的文件
+upload-file-picker-prompt = 选择文件
 upload-no-file-selected = 尚未选择文件
 upload-select-file-description = 请选择源文件；其原始路径不会上传。
 storage-channel-managed-vault-locked = 解锁以验证文件并显示原始名称。无需解锁即可查看原始文件。
@@ -1092,3 +1092,37 @@ action-close-details = 关闭详情
 storage-scan-summary = { $count } 个文件 · 已跳过 { $rejected } 个未验证清单 · 最近 1,000 个清单
 
 shell-refresh-channels = 刷新频道
+
+# Navigation, batches, and local filesystem observations
+shell-expand-navigation = 展开导航
+shell-collapse-navigation = 收起导航
+shell-free-disk-space = 磁盘可用 { $free }
+shell-disk-space-unavailable = 无法获取磁盘空间
+transfer-batch-progress = 已完成 { $completed } / { $total } · 失败 { $failed }
+transfer-batch-created = 添加时间
+transfer-expand-batch = 展开批次文件
+transfer-collapse-batch = 收起批次文件
+local-file-present = 本地可用
+local-file-missing = 已从磁盘删除
+local-file-size-changed = 本地文件已更改
+local-file-unavailable = 无法访问本地文件
+local-file-checking = 正在检查本地文件
+
+local-file-status = 本地文件
+transfer-download-again = 重新下载
+
+upload-selection-summary = { $count } 个文件 · { $size }
+upload-batch-limit = 一次最多选择 128 个文件，每个文件均独立保存。
+upload-remove-file = 从选择中移除文件
+upload-stop-after-current = 完成当前文件后停止
+transfer-batch-upload-name = 批量上传 · { $count } 个文件
+
+about-changelog-unreleased =
+    ## 尚未发布 · 日常使用改进
+
+    - 新增可收起的图标导航、本地文件库直达入口和独立频道列表，主界面显示下载磁盘可用空间。
+    - 修复原始文件和传输详情的滚动，详情面板与底层列表互不干扰。
+    - 批次显示来源、文件名、数量、时间和真实成员列表。可一次检查多个上传文件；停止批次会在当前文件完成后跳过剩余文件。
+    - 后台检查已下载文件，区分文件缺失、大小变化和暂时无法访问。缺失的普通下载可作为新任务重新下载。
+    - 新增原创 TeleArk 图标及带应用图标的 macOS 应用包。
+    - 数据库 v10 保留按账户隔离的本地下载记录，重启后仍可检查。加密和清单格式保持不变。

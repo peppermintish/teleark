@@ -105,7 +105,7 @@ file-detail-empty-description = ファイルを読み込み、選択すると保
 file-detail-modified-at = 更新日時
 file-detail-verification-unavailable = このローカル項目では検証の詳細を利用できません。
 
-upload-dialog-title = Telegram にアップロード
+upload-dialog-title = TeleArk にアップロード
 upload-target-account = 対象アカウント
 upload-target-channel = 対象チャンネル
 upload-storage-method = 保存方法
@@ -125,7 +125,7 @@ upload-part-count = パート数：{ $count }
 upload-total-size = 合計サイズ：{ $size }
 upload-telegram-messages = Telegram メッセージ数：{ $count }
 upload-estimated-time = 推定時間：{ $time }
-upload-change-file = ファイルを変更
+upload-change-file = 選択を変更
 upload-add-to-queue = アップロードキューに追加
 upload-select-file = ファイルを選択
 
@@ -390,7 +390,7 @@ transfer-footer-total-live = { $count } タスク
 transfer-footer-downloading-live = ダウンロード中 { $count } 件
 transfer-footer-waiting-live = 待機中 { $count } 件
 transfer-empty = 転送はまだありません。Telegram ソースを選び、ファイルをダウンロードしてください。
-transfer-batch-name = 一括ダウンロード（{ $count } ファイル）
+transfer-batch-name = { $source } · { $count } ファイル
 transfer-tab-log = ログ
 
 connection-title = 接続
@@ -410,7 +410,7 @@ detail-created = 作成日時
 detail-started = 開始日時
 detail-time-remaining = 残り時間
 detail-tab-details = 詳細
-detail-tab-file-list = ファイル一覧（128）
+detail-tab-file-list = ファイル一覧
 detail-verification = ファイル検証
 
 log-connected = ピアに接続しました
@@ -794,7 +794,7 @@ vault-error-conflict = Key Vault はすでに設定されています。
 vault-error-capacity = 操作が対応サイズまたは保存上限を超えました。
 vault-error-cancelled = Vault 操作はキャンセルされました。
 vault-error-persistence = Vault データを安全に読み取り、検証、保存できませんでした。
-upload-file-picker-prompt = 暗号化して TeleArk にアップロードするファイルを選択
+upload-file-picker-prompt = ファイルを選択
 upload-no-file-selected = ファイルが選択されていません
 upload-select-file-description = ソースファイルを選択してください。元のパスはアップロードされません。
 storage-channel-managed-vault-locked = ロックを解除してファイルを検証し、元の名前を表示します。元のファイル一覧は解除せずに確認できます。
@@ -1092,3 +1092,37 @@ action-close-details = 詳細を閉じる
 storage-scan-summary = { $count } ファイル · 未検証 { $rejected } 件を除外 · 最新 1,000 件のマニフェスト
 
 shell-refresh-channels = チャンネルを更新
+
+# Navigation, batches, and local filesystem observations
+shell-expand-navigation = ナビゲーションを展開
+shell-collapse-navigation = ナビゲーションを折りたたむ
+shell-free-disk-space = 空き容量 { $free }
+shell-disk-space-unavailable = 空き容量を取得できません
+transfer-batch-progress = 完了 { $completed } / { $total } · 失敗 { $failed }
+transfer-batch-created = 追加日時
+transfer-expand-batch = バッチ内のファイルを展開
+transfer-collapse-batch = バッチ内のファイルを折りたたむ
+local-file-present = ローカルで利用可能
+local-file-missing = ディスクから削除済み
+local-file-size-changed = ローカルファイルが変更されました
+local-file-unavailable = ローカルファイルにアクセスできません
+local-file-checking = ローカルファイルを確認中
+
+local-file-status = ローカルファイル
+transfer-download-again = 再ダウンロード
+
+upload-selection-summary = { $count } ファイル · { $size }
+upload-batch-limit = 一度に最大128ファイル。各ファイルは個別に保存されます。
+upload-remove-file = 選択からファイルを除外
+upload-stop-after-current = 現在のファイルの完了後に停止
+transfer-batch-upload-name = アップロード · { $count } ファイル
+
+about-changelog-unreleased =
+    ## 未リリース · 日常操作の改善
+
+    - 折りたたみ可能なアイコンナビゲーション、ローカルライブラリへの直接アクセス、独立したチャンネル一覧、保存先ディスクの空き容量表示を追加しました。
+    - 元のファイルと転送の詳細パネルで、背後の一覧を動かさずにスクロールできるよう修正しました。
+    - バッチにソース、ファイル名、件数、時刻、実際のファイル一覧を表示します。複数のアップロードをまとめて確認でき、バッチの停止は現在のファイル完了後に残りをスキップします。
+    - ダウンロード済みファイルをバックグラウンドで確認し、削除、サイズ変更、一時的なアクセス不可を区別します。削除された通常のダウンロードは新しいタスクとして再取得できます。
+    - オリジナルの TeleArk アイコンと、アプリアイコンを含む macOS アプリバンドルを追加しました。
+    - データベース v10 はアカウント別のローカル保存記録を再起動後も保持します。暗号化とマニフェストの形式は変更していません。

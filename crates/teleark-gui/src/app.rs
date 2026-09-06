@@ -2,6 +2,7 @@ mod auth;
 mod background;
 mod browser;
 mod library;
+mod local_files;
 mod navigation;
 mod preferences;
 mod preview;
@@ -27,7 +28,7 @@ use teleark_core::{
 };
 use teleark_i18n::{
     Localizer, MessageArgs, MessageId, SupportedLocale,
-    format::{format_bytes, format_integer, format_speed},
+    format::{format_bytes, format_speed},
 };
 use teleark_runtime::{
     AppearancePreference, ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary,
@@ -234,8 +235,6 @@ pub struct TeleArkApp {
     pub(crate) storage_loading: bool,
     pub(crate) storage_error: Option<teleark_core::ApplicationErrorKind>,
     pub(crate) show_storage_guide: bool,
-    pub(crate) sidebar_channels_expanded: bool,
-    pub(crate) sidebar_tools_expanded: bool,
     pub(crate) settings_advanced_expanded: bool,
     pub(crate) about_show_licenses: bool,
     pub(crate) upload_advanced_expanded: bool,
@@ -264,7 +263,12 @@ pub struct TeleArkApp {
     pub(crate) show_transfer_detail: bool,
     pub(crate) transfer_controls_expanded: bool,
     pub(crate) focused_transfer_key: Option<u64>,
-    pub(crate) transfer_scroll: gpui_kit::UniformListScrollHandle,
+    pub(crate) transfer_scroll: gpui_kit::ListState,
+    pub(crate) transfer_list_keys: std::cell::RefCell<Vec<u64>>,
+    pub(crate) transfer_detail_scroll: gpui_kit::ScrollHandle,
+    pub(crate) raw_detail_scroll: gpui_kit::ScrollHandle,
+    pub(crate) upload_body_scroll: gpui_kit::ScrollHandle,
+    pub(crate) batch_detail_scroll: gpui_kit::UniformListScrollHandle,
     pub(crate) expanded_transfer_batches: BTreeSet<u64>,
     pub(crate) transfer_inspector_replay: bool,
     pub(crate) transfer_replay_cursor: usize,
@@ -278,7 +282,8 @@ pub struct TeleArkApp {
     pub(crate) vault_recovery_key: Entity<InputState>,
     pub(crate) managed_vault_files: Vec<ManagedVaultFile>,
     pub(crate) managed_vault_rejected: usize,
-    pub(crate) upload_source: Option<std::path::PathBuf>,
+    pub(crate) upload_sources: Vec<teleark_runtime::VaultUploadSource>,
+    pub(crate) upload_preparing: bool,
     pub(crate) nav_selection: &'static str,
     pub(crate) storage_view: StorageView,
     pub(crate) library_content: LibraryContent,
@@ -294,6 +299,8 @@ pub struct TeleArkApp {
     pub(crate) telegram_account: Option<TelegramAccount>,
     pub(crate) telegram_chats: Vec<TelegramChatSummary>,
     pub(crate) selected_chat_id: Option<i64>,
+    pub(crate) last_channel_id: Option<i64>,
+    pub(crate) preview_transfer_rows: Vec<crate::mock::TransferRow>,
     pub(crate) telegram_index: Option<TelegramIndexPage>,
     pub(crate) telegram_files: Vec<TelegramFileSummary>,
     pub(crate) telegram_files_next: Option<i64>,
@@ -324,6 +331,7 @@ pub struct TeleArkApp {
     pub(crate) settings_section: SettingsSection,
     pub(crate) preferences: DesktopPreferences,
     pub(crate) preference_persistence: PreferencePersistence,
+    pub(crate) volume_space: Option<teleark_runtime::VolumeSpace>,
     pub(crate) overall_storage_metrics: Option<ManagedStorageMetrics>,
     library: Option<DesktopLibrary>,
     telegram: Option<DesktopTelegram>,
@@ -345,6 +353,10 @@ pub struct TeleArkApp {
     preference_task: Option<Task<()>>,
     preference_picker_task: Option<Task<()>>,
     storage_metrics_task: Option<Task<()>>,
+    volume_space_task: Option<Task<()>>,
+    local_files_task: Option<Task<()>>,
+    pub(crate) local_downloads:
+        std::collections::BTreeMap<std::path::PathBuf, local_files::LocalDownloadObservation>,
     transfer_monitor_task: Option<Task<()>>,
     transfer_refresh_task: Option<Task<()>>,
     vault_task: Option<Task<()>>,
@@ -531,8 +543,12 @@ impl TeleArkApp {
             &channel_file_table,
             |this, table, event: &TableEvent, cx| {
                 if let TableEvent::SelectRow(row) = event {
-                    this.selected_telegram_message_id =
-                        table.read(cx).delegate().message_id_at(*row);
+                    let selected = table.read(cx).delegate().message_id_at(*row);
+                    if this.selected_telegram_message_id != selected {
+                        this.raw_detail_scroll
+                            .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+                    }
+                    this.selected_telegram_message_id = selected;
                     this.show_channel_detail = true;
                     cx.notify();
                 }
@@ -575,8 +591,6 @@ impl TeleArkApp {
             storage_loading: false,
             storage_error: None,
             show_storage_guide: false,
-            sidebar_channels_expanded: true,
-            sidebar_tools_expanded: false,
             settings_advanced_expanded: false,
             about_show_licenses: false,
             upload_advanced_expanded: false,
@@ -605,7 +619,12 @@ impl TeleArkApp {
             show_transfer_detail: false,
             transfer_controls_expanded: false,
             focused_transfer_key: None,
-            transfer_scroll: gpui_kit::UniformListScrollHandle::new(),
+            transfer_scroll: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, px(200.0)),
+            transfer_list_keys: Default::default(),
+            transfer_detail_scroll: gpui_kit::ScrollHandle::new(),
+            raw_detail_scroll: gpui_kit::ScrollHandle::new(),
+            upload_body_scroll: gpui_kit::ScrollHandle::new(),
+            batch_detail_scroll: gpui_kit::UniformListScrollHandle::new(),
             expanded_transfer_batches: BTreeSet::new(),
             transfer_inspector_replay: false,
             transfer_replay_cursor: 0,
@@ -623,7 +642,8 @@ impl TeleArkApp {
             vault_recovery_key,
             managed_vault_files: Vec::new(),
             managed_vault_rejected: 0,
-            upload_source: None,
+            upload_sources: Vec::new(),
+            upload_preparing: false,
             nav_selection,
             storage_view: StorageView::Files,
             library_content,
@@ -643,6 +663,8 @@ impl TeleArkApp {
             telegram_account: None,
             telegram_chats: Vec::new(),
             selected_chat_id: None,
+            last_channel_id: None,
+            preview_transfer_rows: Vec::new(),
             telegram_index: None,
             telegram_files: Vec::new(),
             telegram_files_next: None,
@@ -673,6 +695,7 @@ impl TeleArkApp {
             settings_section: SettingsSection::General,
             preferences,
             preference_persistence,
+            volume_space: None,
             overall_storage_metrics: None,
             library,
             telegram: telegram.ok(),
@@ -694,6 +717,9 @@ impl TeleArkApp {
             preference_task: None,
             preference_picker_task: None,
             storage_metrics_task: None,
+            volume_space_task: None,
+            local_files_task: None,
+            local_downloads: Default::default(),
             transfer_monitor_task: None,
             transfer_refresh_task: None,
             vault_task: None,
@@ -722,6 +748,7 @@ impl TeleArkApp {
         }
         app.start_transfer_refresh(cx);
         app.start_storage_metrics_refresh(cx);
+        app.start_local_file_refresh(cx);
         app.restore_telegram_session(cx);
         app
     }
@@ -867,6 +894,16 @@ pub(crate) fn is_preview_library_selection(selection: &str) -> bool {
 
 impl Drop for TeleArkApp {
     fn drop(&mut self) {
+        if let Some(vault) = self.vault.as_ref() {
+            let batches = vault
+                .transfers()
+                .into_iter()
+                .filter_map(|item| item.batch_id.map(|batch| (item.account_id, batch)))
+                .collect::<std::collections::BTreeSet<_>>();
+            for (account, batch) in batches {
+                let _ = vault.stop_upload_batch(account, batch);
+            }
+        }
         self.cancel_managed_scan();
         if let Some(cancellation) = self.telegram_file_cancellation.take() {
             cancellation.cancel();
@@ -876,7 +913,8 @@ impl Drop for TeleArkApp {
 
 impl Render for TeleArkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layout = LayoutPolicy::from_window(window);
+        let layout = LayoutPolicy::from_window(window)
+            .with_sidebar_collapsed(self.preferences.sidebar_collapsed);
         let modal_open =
             self.show_upload || self.show_telegram_api_id_prompt || self.unlock_intent.is_some();
         if modal_open != self.modal_was_open {
@@ -984,6 +1022,9 @@ impl Render for TeleArkApp {
                     .when(self.page != Page::Account, |body| {
                         body.child(self.render_sidebar(layout, cx))
                     })
+                    .when(self.page == Page::Channel, |body| {
+                        body.child(self.render_channels_sidebar(cx))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -994,7 +1035,17 @@ impl Render for TeleArkApp {
                             .when(self.page != Page::Account, |body| {
                                 body.child(self.render_header(window, layout, cx))
                             })
-                            .child(self.render_page(window, layout, cx)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(self.render_page(window, layout, cx)),
+                            )
+                            .when(self.page != Page::Account, |body| {
+                                body.child(self.render_status_bar(cx))
+                            }),
                     ),
             )
             .when(self.unlock_intent.is_some(), |root| {

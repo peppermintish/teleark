@@ -391,6 +391,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn download_managed_vault_file(&mut self, package_id: u64, cx: &mut Context<Self>) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
         if self.vault_locked {
             self.request_vault_unlock(UnlockIntent::Download(package_id), cx);
             return;
@@ -418,39 +421,51 @@ impl TeleArkApp {
     }
 
     pub(crate) fn choose_upload_file(&mut self, cx: &mut Context<Self>) {
+        if self.upload_preparing || self.vault_activity == VaultActivity::Working {
+            return;
+        }
         let selected = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some(self.tr("upload-file-picker-prompt")),
         });
+        self.upload_preparing = true;
         self.upload_picker_task = Some(cx.spawn(async move |this, cx| {
-            let path = match selected.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+            let result = match selected.await {
+                Ok(Ok(Some(paths))) => Some(
+                    cx.background_spawn(
+                        async move { teleark_runtime::inspect_upload_sources(&paths) },
+                    )
+                    .await,
+                ),
                 Ok(Ok(None)) => None,
-                Ok(Err(_)) | Err(_) => {
-                    let Some(this) = this.upgrade() else { return };
-                    this.update(cx, |this, cx| {
-                        this.vault_activity = VaultActivity::Failed(
-                            teleark_core::ApplicationErrorKind::PermissionDenied,
-                        );
-                        cx.notify();
-                    });
-                    return;
-                }
+                Ok(Err(_)) | Err(_) => Some(Err(ApplicationError::new(
+                    teleark_core::ApplicationErrorKind::PermissionDenied,
+                ))),
             };
-            let Some(path) = path else { return };
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
-                this.upload_source = Some(path);
-                this.vault_activity = VaultActivity::Idle;
+                this.upload_preparing = false;
+                if let Some(result) = result {
+                    match result {
+                        Ok(sources) => {
+                            this.upload_sources = sources;
+                            this.vault_activity = VaultActivity::Idle;
+                        }
+                        Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                    }
+                }
                 cx.notify();
             });
         }));
     }
 
     pub(crate) fn enqueue_vault_upload(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = self.upload_source.clone() else {
+        if self.upload_preparing || self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        if self.upload_sources.is_empty() {
             self.vault_activity =
                 VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
             cx.notify();
@@ -480,19 +495,44 @@ impl TeleArkApp {
         self.vault_activity = VaultActivity::Working;
         self.nav_selection = "nav-uploads";
         self.set_page(Page::Transfers, cx);
+        let sources = self
+            .upload_sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
         let work =
-            cx.background_spawn(async move { vault.upload_file(account_id, chat_id, source) });
+            cx.background_spawn(async move { vault.upload_files(account_id, chat_id, sources) });
         self.vault_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(file) => {
-                        this.managed_vault_files
-                            .retain(|item| item.package_numeric_id != file.package_numeric_id);
-                        this.managed_vault_files.insert(0, file);
-                        this.upload_source = None;
-                        this.vault_activity = VaultActivity::Succeeded;
+                    Ok(report) => {
+                        for file in report.completed {
+                            this.managed_vault_files
+                                .retain(|item| item.package_numeric_id != file.package_numeric_id);
+                            this.managed_vault_files.insert(0, file);
+                        }
+                        let retry_sources = report
+                            .failed
+                            .iter()
+                            .map(|failure| failure.source.clone())
+                            .chain(report.cancelled.iter().cloned())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        this.upload_sources
+                            .retain(|source| retry_sources.contains(&source.path));
+                        this.vault_activity = report.failed.first().map_or_else(
+                            || {
+                                if report.cancelled.is_empty() {
+                                    VaultActivity::Succeeded
+                                } else {
+                                    VaultActivity::Failed(
+                                        teleark_core::ApplicationErrorKind::Cancelled,
+                                    )
+                                }
+                            },
+                            |failure| VaultActivity::Failed(failure.kind),
+                        );
                     }
                     Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
                 }

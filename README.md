@@ -17,12 +17,13 @@ New uploads go only to the private TeleArk channel. Existing Saved Messages pack
 
 ## Available features
 
-- Apple-style GPUI Kit workspace with light/dark appearance, responsive layouts, keyboard shortcuts and English, Simplified Chinese and Japanese.
+- Apple-style GPUI Kit workspace with a collapsible icon sidebar, visible free disk space, light/dark appearance, responsive layouts, keyboard shortcuts and English, Simplified Chinese and Japanese.
 - Bounded channel browsing with a virtualized file table, search, time/type filters, single/multiple downloads and channel batches.
 - Persistent native download history, missing-part restart resume, bounded retries/FloodWait handling and Balanced/Max Throughput strategies.
-- Encrypted content/name/metadata upload, authenticated manifest discovery, verified restoration and non-overwriting final publication.
+- Encrypted single/multi-file upload with reviewable batches, authenticated manifest discovery, verified restoration and non-overwriting final publication.
+- Background checks for missing/changed local downloads, safe new-task re-download and account-scoped local output history.
 - Password/recovery unlock, explicit recovery-bundle export/restore, password change and recovery rotation. Advanced controls stay folded until needed.
-- Local Library under Utilities: metadata import, persistent search/filtering, details and open/reveal in Finder. Importing metadata is separate from uploading a file.
+- Direct Local Library navigation: metadata import, persistent search/filtering, details and open/reveal in Finder. Importing metadata is separate from uploading a file.
 - Configurable managed storage, privacy-bounded diagnostics, live/replay transfer details and the full localized [changelog](CHANGELOG.md) in **Settings → About**.
 
 Native downloads currently verify byte length rather than a cryptographic content hash. Encrypted transfers use bounded buffers and a temporary 60 MiB plaintext part ceiling; their task controls/checkpoints are not yet durable. OS Credential unlock remains visibly disabled until its platform adapter is reviewed. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for precise limits.

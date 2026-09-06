@@ -19,5 +19,8 @@ teleark-i18n.workspace = true
 teleark-runtime.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

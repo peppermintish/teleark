@@ -1,7 +1,11 @@
 use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -33,6 +37,7 @@ use crate::{
 };
 
 const VAULT_QUEUE_CAPACITY: usize = 16;
+pub const MAX_VAULT_UPLOAD_BATCH: usize = 128;
 const MAX_MANIFEST_SCAN: usize = 1_000;
 const RECOVERY_BUNDLE_PREFIX: &str = "TARK-RB1-";
 const TRANSFER_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
@@ -69,7 +74,9 @@ pub enum VaultTransferDirection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultTransferState {
+    Queued,
     Running,
+    Cancelled,
     Completed,
     Failed(ApplicationErrorKind),
 }
@@ -77,6 +84,10 @@ pub enum VaultTransferState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultTransferSnapshot {
     pub id: u64,
+    pub account_id: i64,
+    pub chat_id: i64,
+    pub batch_id: Option<u64>,
+    pub queued_at_unix_ms: i64,
     pub direction: VaultTransferDirection,
     pub file_name: String,
     pub package_id: Option<String>,
@@ -115,6 +126,106 @@ pub struct ManagedVaultScan {
     pub rejected_manifests: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultUploadSource {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub size_bytes: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultUploadFailure {
+    pub source: PathBuf,
+    pub kind: ApplicationErrorKind,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VaultUploadReport {
+    pub completed: Vec<ManagedVaultFile>,
+    pub failed: Vec<VaultUploadFailure>,
+    pub cancelled: Vec<PathBuf>,
+}
+
+/// Bounded picker preflight. The worker repeats it before queuing a batch and
+/// each item checks its size/mtime again before any encryption or publication.
+pub fn inspect_upload_sources(
+    paths: &[PathBuf],
+) -> Result<Vec<VaultUploadSource>, ApplicationError> {
+    if paths.is_empty() || paths.len() > MAX_VAULT_UPLOAD_BATCH {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sources = Vec::with_capacity(paths.len());
+    let mut total = 0_u64;
+    for path in paths {
+        let canonical = path.canonicalize().map_err(map_source_io)?;
+        if !seen.insert(canonical) {
+            continue;
+        }
+        let metadata = std::fs::metadata(path).map_err(map_source_io)?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
+            .to_owned();
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        sources.push(VaultUploadSource {
+            path: path.clone(),
+            file_name,
+            size_bytes: metadata.len(),
+            modified: metadata.modified().ok(),
+        });
+    }
+    Ok(sources)
+}
+
+#[derive(Default)]
+struct UploadBatchPolicy {
+    blocked: Option<ApplicationErrorKind>,
+}
+impl UploadBatchPolicy {
+    fn execute<T>(
+        &mut self,
+        cancelled: &AtomicBool,
+        upload: impl FnOnce() -> Result<T, ApplicationError>,
+    ) -> Result<T, ApplicationError> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        if let Some(kind) = self.blocked {
+            return Err(ApplicationError::new(kind));
+        }
+        let result = upload();
+        if let Err(error) = &result
+            && matches!(
+                error.kind(),
+                ApplicationErrorKind::Authorization
+                    | ApplicationErrorKind::PermissionDenied
+                    | ApplicationErrorKind::Network
+            )
+        {
+            self.blocked = Some(error.kind());
+        }
+        result
+    }
+}
+
+struct QueuedUpload {
+    id: u64,
+    batch_id: u64,
+    queued_at: i64,
+    source: VaultUploadSource,
+}
+
+type ActiveUploadBatch = Arc<Mutex<Option<(i64, u64, Arc<AtomicBool>)>>>;
+
 #[derive(Clone)]
 pub struct DesktopVault {
     inner: Arc<VaultInner>,
@@ -124,6 +235,7 @@ struct VaultInner {
     sender: Mutex<Option<mpsc::SyncSender<VaultCommand>>>,
     status: Arc<Mutex<VaultStatus>>,
     transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>,
+    active_upload_batch: ActiveUploadBatch,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -167,6 +279,12 @@ enum VaultCommand {
         source: PathBuf,
         reply: mpsc::SyncSender<Result<ManagedVaultFile, ApplicationError>>,
     },
+    UploadBatch {
+        account_id: i64,
+        chat_id: i64,
+        sources: Vec<PathBuf>,
+        reply: mpsc::SyncSender<Result<VaultUploadReport, ApplicationError>>,
+    },
     Download {
         account_id: i64,
         chat_id: i64,
@@ -183,6 +301,7 @@ struct VaultOwner {
     master_key: Option<VaultMasterKey>,
     status: Arc<Mutex<VaultStatus>>,
     transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>,
+    active_upload_batch: ActiveUploadBatch,
 }
 
 impl DesktopVault {
@@ -198,6 +317,8 @@ impl DesktopVault {
         let transfers = Arc::new(Mutex::new(Vec::new()));
         let owner_status = Arc::clone(&status);
         let owner_transfers = Arc::clone(&transfers);
+        let active_upload_batch: ActiveUploadBatch = Arc::new(Mutex::new(None));
+        let owner_upload_batch = active_upload_batch.clone();
         let (sender, receiver) = mpsc::sync_channel(VAULT_QUEUE_CAPACITY);
         let join = thread::Builder::new()
             .name("teleark-vault".to_owned())
@@ -209,6 +330,7 @@ impl DesktopVault {
                     master_key: None,
                     status: owner_status,
                     transfers: owner_transfers,
+                    active_upload_batch: owner_upload_batch,
                 }
                 .run(receiver);
             })
@@ -218,6 +340,7 @@ impl DesktopVault {
                 sender: Mutex::new(Some(sender)),
                 status,
                 transfers,
+                active_upload_batch,
                 join: Mutex::new(Some(join)),
             }),
         })
@@ -317,6 +440,45 @@ impl DesktopVault {
         })
     }
 
+    pub fn upload_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        sources: Vec<PathBuf>,
+    ) -> Result<VaultUploadReport, ApplicationError> {
+        if sources.is_empty() || sources.len() > MAX_VAULT_UPLOAD_BATCH {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        self.request(|reply| VaultCommand::UploadBatch {
+            account_id,
+            chat_id,
+            sources,
+            reply,
+        })
+    }
+
+    /// Stops queued files after the current file finishes safely. This is an
+    /// in-memory batch boundary, not a durable Vault pause/checkpoint promise.
+    pub fn stop_upload_batch(
+        &self,
+        account_id: i64,
+        batch_id: u64,
+    ) -> Result<(), ApplicationError> {
+        let active = self
+            .inner
+            .active_upload_batch
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let Some((owner, id, cancelled)) = active.as_ref() else {
+            return Err(ApplicationError::new(ApplicationErrorKind::NotFound));
+        };
+        if *owner != account_id || *id != batch_id {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        cancelled.store(true, Ordering::Release);
+        Ok(())
+    }
+
     pub fn download_file(
         &self,
         account_id: i64,
@@ -354,6 +516,11 @@ impl DesktopVault {
 
 impl Drop for VaultInner {
     fn drop(&mut self) {
+        if let Ok(active) = self.active_upload_batch.lock()
+            && let Some((_, _, cancel)) = active.as_ref()
+        {
+            cancel.store(true, Ordering::Release);
+        }
         if let Ok(sender) = self.sender.get_mut()
             && let Some(sender) = sender.take()
         {
@@ -416,7 +583,15 @@ impl VaultOwner {
                     source,
                     reply,
                 } => {
-                    let _ = reply.send(self.upload(account_id, chat_id, &source));
+                    let _ = reply.send(self.upload(account_id, chat_id, &source, None));
+                }
+                VaultCommand::UploadBatch {
+                    account_id,
+                    chat_id,
+                    sources,
+                    reply,
+                } => {
+                    let _ = reply.send(self.upload_batch(account_id, chat_id, sources));
                 }
                 VaultCommand::Download {
                     account_id,
@@ -652,12 +827,115 @@ impl VaultOwner {
         })
     }
 
+    fn upload_batch(
+        &mut self,
+        account_id: i64,
+        chat_id: i64,
+        paths: Vec<PathBuf>,
+    ) -> Result<VaultUploadReport, ApplicationError> {
+        if self.master_key.is_none() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        if self.library.storage_channel_id(account_id)? != Some(chat_id) {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::PermissionDenied,
+            ));
+        }
+        self.telegram
+            .validate_storage_channel(account_id, chat_id)?;
+        let sources = inspect_upload_sources(&paths)?;
+        let batch_id = random_transfer_id()?;
+        let queued_at = now_unix_ms()?;
+        let plans = sources
+            .into_iter()
+            .map(|source| {
+                Ok(QueuedUpload {
+                    id: random_transfer_id()?,
+                    batch_id,
+                    queued_at,
+                    source,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let queued_telemetry = transfer_controller(
+            true,
+            0,
+            self.library.preferences()?.transfer_soft_limit_policy,
+        )?
+        .snapshot();
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self
+            .active_upload_batch
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? =
+            Some((account_id, batch_id, cancel.clone()));
+        for plan in &plans {
+            self.push_transfer(VaultTransferSnapshot {
+                id: plan.id,
+                account_id,
+                chat_id,
+                batch_id: Some(batch_id),
+                queued_at_unix_ms: queued_at,
+                direction: VaultTransferDirection::Upload,
+                file_name: plan.source.file_name.clone(),
+                package_id: None,
+                size_bytes: plan.source.size_bytes,
+                transferred_bytes: 0,
+                completed_parts: 0,
+                part_count: 0,
+                started_at_unix_ms: 0,
+                duration_ms: None,
+                average_bytes_per_second: None,
+                destination: None,
+                session_log_path: None,
+                telemetry: queued_telemetry.clone(),
+                state: VaultTransferState::Queued,
+            });
+        }
+        let mut report = VaultUploadReport::default();
+        let mut policy = UploadBatchPolicy::default();
+        for plan in &plans {
+            let result = policy.execute(&cancel, || {
+                self.upload(account_id, chat_id, &plan.source.path, Some(plan))
+            });
+            match result {
+                Ok(file) => report.completed.push(file),
+                Err(error) => {
+                    self.update_transfer(plan.id, |snapshot| {
+                        snapshot.state = if error.kind() == ApplicationErrorKind::Cancelled {
+                            VaultTransferState::Cancelled
+                        } else {
+                            VaultTransferState::Failed(error.kind())
+                        }
+                    });
+                    if error.kind() == ApplicationErrorKind::Cancelled {
+                        report.cancelled.push(plan.source.path.clone());
+                    } else {
+                        report.failed.push(VaultUploadFailure {
+                            source: plan.source.path.clone(),
+                            kind: error.kind(),
+                        });
+                    }
+                }
+            }
+        }
+        *self
+            .active_upload_batch
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? = None;
+        Ok(report)
+    }
+
     fn upload(
         &mut self,
         account_id: i64,
         chat_id: i64,
         source: &Path,
+        queued: Option<&QueuedUpload>,
     ) -> Result<ManagedVaultFile, ApplicationError> {
+        if self.master_key.is_none() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
         // Destination policy is enforced before touching plaintext or allocating
         // keys. A frontend cannot turn Saved Messages or an arbitrary channel
         // into a TeleArk upload target by supplying its numeric id.
@@ -672,6 +950,12 @@ impl VaultOwner {
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
         }
+        if queued.is_some_and(|plan| {
+            metadata.len() != plan.source.size_bytes
+                || metadata.modified().ok() != plan.source.modified
+        }) {
+            return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+        }
         let logical_name = source
             .file_name()
             .and_then(|name| name.to_str())
@@ -680,7 +964,9 @@ impl VaultOwner {
             .to_owned();
         let part_sizes = encrypted_part_sizes(metadata.len()).map_err(map_transfer_error)?;
         let package_id = random_nonzero_u64()?;
-        let transfer_id = random_nonzero_u64()?;
+        let transfer_id = queued
+            .map(|plan| plan.id)
+            .map_or_else(random_transfer_id, Ok)?;
         let part_count = u32::try_from(part_sizes.len())
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
         let started_at = now_unix_ms()?;
@@ -701,6 +987,10 @@ impl VaultOwner {
         )?;
         self.push_transfer(VaultTransferSnapshot {
             id: transfer_id,
+            account_id,
+            chat_id,
+            batch_id: queued.map(|plan| plan.batch_id),
+            queued_at_unix_ms: queued.map_or(started_at, |plan| plan.queued_at),
             direction: VaultTransferDirection::Upload,
             file_name: logical_name.clone(),
             package_id: None,
@@ -1021,7 +1311,7 @@ impl VaultOwner {
             .map(|part| AccountId::new(part.remote_locator.account_id))
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
         let destination = self.library.next_download_destination(&logical_name)?;
-        let transfer_id = random_nonzero_u64()?;
+        let transfer_id = random_transfer_id()?;
         let started_at = now_unix_ms()?;
         let mut controller = transfer_controller(
             false,
@@ -1039,9 +1329,13 @@ impl VaultOwner {
         )?;
         self.push_transfer(VaultTransferSnapshot {
             id: transfer_id,
+            account_id: expected_account_id,
+            chat_id,
+            batch_id: None,
+            queued_at_unix_ms: started_at,
             direction: VaultTransferDirection::Download,
             file_name: logical_name,
-            package_id: Some(package_text),
+            package_id: Some(package_text.clone()),
             size_bytes,
             transferred_bytes: 0,
             completed_parts: 0,
@@ -1155,6 +1449,15 @@ impl VaultOwner {
             files
                 .atomic_finalize(destination_id)
                 .map_err(map_transfer_error)?;
+            self.library
+                .record_vault_download(teleark_storage::VaultDownloadRecord {
+                    account_id: expected_account_id,
+                    chat_id,
+                    package_id: package_text.clone(),
+                    destination: destination.clone(),
+                    size_bytes,
+                    completed_at_unix_ms: now_unix_ms()?,
+                })?;
             Ok(destination.clone())
         })();
         if result.is_err() {
@@ -1176,10 +1479,7 @@ impl VaultOwner {
 
     fn push_transfer(&self, snapshot: VaultTransferSnapshot) {
         if let Ok(mut transfers) = self.transfers.lock() {
-            if transfers.len() >= 256 {
-                transfers.remove(0);
-            }
-            transfers.push(snapshot);
+            retain_transfer_snapshot(&mut transfers, snapshot);
         }
     }
 
@@ -1448,6 +1748,45 @@ fn recommended_encryption_worker_count() -> u16 {
         .clamp(1, MAX_ENCRYPTION_WORKERS)
 }
 
+fn retain_transfer_snapshot(
+    transfers: &mut Vec<VaultTransferSnapshot>,
+    snapshot: VaultTransferSnapshot,
+) {
+    if let Some(existing) = transfers.iter_mut().find(|item| item.id == snapshot.id) {
+        *existing = snapshot;
+        return;
+    }
+    if transfers.len() >= 256 {
+        // The serialized owner can have at most one 128-file active batch.
+        // Evict a complete historical group, never truncate its member count.
+        let Some(index) = transfers.iter().position(|item| {
+            !matches!(
+                item.state,
+                VaultTransferState::Queued | VaultTransferState::Running
+            ) && item.batch_id.is_none_or(|batch| {
+                transfers.iter().all(|member| {
+                    member.batch_id != Some(batch)
+                        || member.account_id != item.account_id
+                        || !matches!(
+                            member.state,
+                            VaultTransferState::Queued | VaultTransferState::Running
+                        )
+                })
+            })
+        }) else {
+            return;
+        };
+        if let Some(batch_id) = transfers[index].batch_id {
+            let account_id = transfers[index].account_id;
+            transfers
+                .retain(|item| item.batch_id != Some(batch_id) || item.account_id != account_id);
+        } else {
+            transfers.remove(index);
+        }
+    }
+    transfers.push(snapshot);
+}
+
 fn transfer_controller(
     upload: bool,
     encryption_worker_count: u16,
@@ -1664,6 +2003,10 @@ fn package_bytes(package_id: u64) -> [u8; 16] {
     let mut bytes = *b"TARKPKG1\0\0\0\0\0\0\0\0";
     bytes[8..].copy_from_slice(&package_id.to_be_bytes());
     bytes
+}
+
+fn random_transfer_id() -> Result<u64, ApplicationError> {
+    Ok((random_nonzero_u64()? & 0x1fff_ffff_ffff_ffff).max(1))
 }
 
 fn random_nonzero_u64() -> Result<u64, ApplicationError> {
@@ -1891,5 +2234,145 @@ mod tests {
         assert!(recovered.status().configured);
         assert!(!recovered.status().locked);
         Ok(())
+    }
+    #[test]
+    fn bounded_history_evicts_whole_completed_batches_and_keeps_active_members() {
+        let fixture = VaultTransferSnapshot {
+            id: 1,
+            account_id: 7,
+            chat_id: 90,
+            batch_id: Some(1),
+            queued_at_unix_ms: 1,
+            direction: VaultTransferDirection::Upload,
+            file_name: "fixture.bin".into(),
+            package_id: None,
+            size_bytes: 12,
+            transferred_bytes: 12,
+            completed_parts: 1,
+            part_count: 1,
+            started_at_unix_ms: 1,
+            duration_ms: Some(10),
+            average_bytes_per_second: None,
+            destination: None,
+            session_log_path: None,
+            telemetry: transfer_controller(true, 1, teleark_transfer::SoftLimitPolicy::Respect)
+                .expect("controller")
+                .snapshot(),
+            state: VaultTransferState::Completed,
+        };
+        let mut history = Vec::new();
+        for id in 1..=256 {
+            let mut item = fixture.clone();
+            item.id = id;
+            if id > 128 {
+                item.batch_id = Some(2);
+                item.state = VaultTransferState::Queued;
+            }
+            retain_transfer_snapshot(&mut history, item);
+        }
+        let mut next = fixture.clone();
+        next.id = 257;
+        next.batch_id = None;
+        retain_transfer_snapshot(&mut history, next);
+        assert_eq!(history.len(), 129);
+        assert!(history.iter().all(|item| item.batch_id != Some(1)));
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.batch_id == Some(2))
+                .count(),
+            128
+        );
+        let mut running = fixture;
+        running.id = 129;
+        running.batch_id = Some(2);
+        running.state = VaultTransferState::Running;
+        retain_transfer_snapshot(&mut history, running);
+        assert_eq!(history.len(), 129);
+        assert_eq!(
+            history
+                .iter()
+                .find(|item| item.id == 129)
+                .expect("running")
+                .state,
+            VaultTransferState::Running
+        );
+    }
+
+    #[test]
+    fn upload_preflight_is_bounded_deduplicates_sources_and_keeps_names() {
+        let root = tempfile::tempdir().expect("fixture");
+        let source = root.path().join("旅の写真.zip");
+        std::fs::write(&source, b"test archive").expect("fixture file");
+        let files = inspect_upload_sources(&[source.clone(), source.clone()]).expect("preflight");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name, "旅の写真.zip");
+        assert_eq!(files[0].size_bytes, 12);
+        assert!(inspect_upload_sources(&[]).is_err());
+        assert!(inspect_upload_sources(&vec![source.clone(); MAX_VAULT_UPLOAD_BATCH + 1]).is_err());
+        std::fs::remove_file(&source).expect("remove source");
+        assert!(inspect_upload_sources(&[source]).is_err());
+    }
+
+    #[test]
+    fn batch_cancellation_and_shared_failures_never_start_remaining_files() {
+        let cancel = AtomicBool::new(false);
+        let mut policy = UploadBatchPolicy::default();
+        let mut calls = 0;
+        assert_eq!(
+            policy.execute(&cancel, || {
+                calls += 1;
+                Ok(10)
+            }),
+            Ok(10)
+        );
+        let changed = policy.execute::<()>(&cancel, || {
+            calls += 1;
+            Err(ApplicationError::new(ApplicationErrorKind::SourceChanged))
+        });
+        assert_eq!(
+            changed.expect_err("source changed").kind(),
+            ApplicationErrorKind::SourceChanged
+        );
+        assert!(
+            policy
+                .execute(&cancel, || {
+                    calls += 1;
+                    Ok(())
+                })
+                .is_ok()
+        );
+        assert_eq!(calls, 3, "one changed source does not discard other files");
+        let network = policy.execute::<()>(&cancel, || {
+            calls += 1;
+            Err(ApplicationError::new(ApplicationErrorKind::Network))
+        });
+        assert_eq!(
+            network.expect_err("network").kind(),
+            ApplicationErrorKind::Network
+        );
+        assert_eq!(
+            policy
+                .execute(&cancel, || {
+                    calls += 1;
+                    Ok(())
+                })
+                .expect_err("shared failure")
+                .kind(),
+            ApplicationErrorKind::Network
+        );
+        assert_eq!(calls, 4);
+        cancel.store(true, Ordering::Release);
+        assert_eq!(
+            policy
+                .execute(&cancel, || {
+                    calls += 1;
+                    Ok(())
+                })
+                .expect_err("cancelled")
+                .kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        assert_eq!(calls, 4);
     }
 }

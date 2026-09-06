@@ -1,4 +1,5 @@
 mod collections;
+mod downloaded_files;
 mod index;
 mod native_downloads;
 mod remote;

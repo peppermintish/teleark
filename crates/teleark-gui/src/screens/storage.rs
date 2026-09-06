@@ -2,7 +2,7 @@
 use crate::assets::Symbol;
 use crate::{
     app::{Page, StorageView, TeleArkApp, UnlockIntent},
-    components,
+    components::{self, Tone},
     layout::LayoutPolicy,
     theme,
 };
@@ -444,6 +444,16 @@ impl TeleArkApp {
                     .map(|file| {
                         let message_id = file.manifest_message_id;
                         let package_id = file.package_numeric_id;
+                        let local = this
+                            .selected_chat_id
+                            .and_then(|chat_id| {
+                                this.local_download_for_source(
+                                    chat_id,
+                                    None,
+                                    Some(&file.package_id),
+                                )
+                            })
+                            .cloned();
                         gpui_kit::base::Button::new(("managed-file", package_id))
                             .accessibility_label(file.logical_name.clone())
                             .w_full()
@@ -492,6 +502,18 @@ impl TeleArkApp {
                                     .text_color(theme::green())
                                     .child(this.tr("storage-channel-manifest-authenticated")),
                             )
+                            .when_some(local.as_ref(), |row, observation| {
+                                row.child(components::badge(
+                                    this.local_presence_label(Some(observation.presence)),
+                                    if observation.presence
+                                        == teleark_runtime::LocalFilePresence::Present
+                                    {
+                                        Tone::Green
+                                    } else {
+                                        Tone::Amber
+                                    },
+                                ))
+                            })
                             .child(
                                 components::icon_button(
                                     ("managed-download", package_id),
@@ -507,6 +529,10 @@ impl TeleArkApp {
                                 )),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.selected_telegram_message_id != Some(message_id) {
+                                    this.raw_detail_scroll
+                                        .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+                                }
                                 this.selected_telegram_message_id = Some(message_id);
                                 this.show_channel_detail = true;
                                 cx.notify();
@@ -631,16 +657,12 @@ impl TeleArkApp {
                 selected.filter(|_| self.show_channel_detail),
                 |body, selected| {
                     body.child(
-                        components::card()
+                        components::inspector_panel("managed-file-inspector", 340.0)
                             .absolute()
                             .right_0()
                             .top_0()
                             .bottom_0()
-                            .w(px(330.0))
                             .shadow_lg()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
                             .child(
                                 div().px_3().py_2().flex().justify_end().child(
                                     components::icon_button(

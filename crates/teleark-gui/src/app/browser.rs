@@ -24,6 +24,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_channel(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.last_channel_id = Some(chat_id);
         self.nav_selection = "nav-channel";
         self.storage_view = StorageView::RawFiles;
         self.set_page(Page::Channel, cx);
@@ -311,6 +312,9 @@ impl TeleArkApp {
             cx.notify();
             return;
         };
+        let Some(account_id) = self.telegram_account.as_ref().map(|account| account.id) else {
+            return;
+        };
         let suggested_name = safe_suggested_file_name(&file.file_name, file.message_id);
         let destination_work = cx.background_spawn({
             let suggested_name = suggested_name.clone();
@@ -330,6 +334,9 @@ impl TeleArkApp {
             };
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
+                if this.telegram_account.as_ref().map(|account| account.id) != Some(account_id) {
+                    return;
+                }
                 this.enqueue_telegram_download(
                     transfers,
                     chat_id,

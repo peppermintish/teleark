@@ -33,6 +33,11 @@ const SYMBOLS: [(&str, &[u8]); 5] = [
 pub(crate) struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "teleark/app-icon.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/teleark.png"
+            ))));
+        }
         if let Some((_, bytes)) = SYMBOLS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
@@ -40,6 +45,9 @@ impl AssetSource for Assets {
     }
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
+        if "teleark/app-icon.png".starts_with(path) {
+            paths.push("teleark/app-icon.png".into());
+        }
         paths.extend(
             SYMBOLS
                 .iter()

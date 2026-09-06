@@ -3,15 +3,11 @@
 use crate::assets::Symbol;
 
 use super::*;
-use gpui_kit::{
-    base::Button as NavButton,
-    component::{
-        avatar::Avatar,
-        button::ButtonVariants as _,
-        collapsible::Collapsible,
-        input::Input,
-        sidebar::{Sidebar, SidebarMenuItem},
-    },
+use gpui_kit::component::{
+    avatar::Avatar,
+    button::ButtonVariants as _,
+    input::Input,
+    sidebar::{Sidebar, SidebarMenuItem},
 };
 
 impl TeleArkApp {
@@ -118,23 +114,18 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = self.tr(label);
-        NavButton::new(id)
+        components::button(id, "", Some(icon), false)
+            .ghost()
+            .tooltip(title.clone())
             .accessibility_label(title.clone())
-            .selected(selected)
             .w_full()
-            .h(px(38.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .rounded(px(8.0))
-            .text_size(px(13.0))
-            .text_color(if selected {
-                theme::blue()
-            } else {
-                theme::text_primary()
+            .h(px(42.0))
+            .when(!self.preferences.sidebar_collapsed, |button| {
+                button.label(title).justify_start()
             })
-            .when(selected, |button| button.bg(theme::blue_soft()))
+            .when(selected, |button| {
+                button.bg(theme::blue_soft()).text_color(theme::blue())
+            })
             .on_click(cx.listener(move |this, _, _, cx| match id {
                 "nav-storage" => {
                     this.page = Page::Storage;
@@ -143,6 +134,24 @@ impl TeleArkApp {
                 "nav-transfers-all" => {
                     this.nav_selection = id;
                     this.set_page(Page::Transfers, cx);
+                }
+                "nav-channels" => {
+                    let eligible = |chat: &&TelegramChatSummary| {
+                        chat.kind == TelegramChatKind::Channel
+                            && Some(chat.id) != this.storage_channel_id()
+                    };
+                    let target = this
+                        .telegram_chats
+                        .iter()
+                        .filter(eligible)
+                        .find(|chat| Some(chat.id) == this.last_channel_id)
+                        .or_else(|| this.telegram_chats.iter().find(eligible))
+                        .map(|chat| chat.id);
+                    if let Some(chat_id) = target {
+                        this.select_channel(chat_id, cx);
+                    } else {
+                        this.set_page(Page::Channel, cx);
+                    }
                 }
                 "nav-settings" => {
                     this.nav_selection = id;
@@ -157,47 +166,6 @@ impl TeleArkApp {
                     this.set_page(Page::Account, cx);
                 }
             }))
-            .child(
-                Icon::new(icon)
-                    .size(px(18.0))
-                    .text_color(if id == "nav-storage" {
-                        theme::blue()
-                    } else {
-                        theme::text_secondary()
-                    }),
-            )
-            .child(div().flex_1().text_left().child(title))
-            .when(id == "nav-storage", |button| {
-                button.child(
-                    Icon::new(Symbol::Lock)
-                        .size(px(12.0))
-                        .text_color(theme::blue()),
-                )
-            })
-            .when(id == "nav-transfers-all", |button| {
-                let active = self
-                    .transfer_rows()
-                    .iter()
-                    .filter(|row| {
-                        !row.batch_child
-                            && matches!(
-                                row.state,
-                                crate::mock::TransferState::Uploading
-                                    | crate::mock::TransferState::Downloading
-                                    | crate::mock::TransferState::Waiting
-                                    | crate::mock::TransferState::Paused
-                            )
-                    })
-                    .count();
-                button.when(active > 0, |button| {
-                    button.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(format_integer(self.locale(), active as u64)),
-                    )
-                })
-            })
             .into_any_element()
     }
 
@@ -206,26 +174,50 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let header = div()
-            .w_full()
+        let collapsed = self.preferences.sidebar_collapsed;
+        div()
+            .w(px(layout.sidebar_width()))
+            .h_full()
+            .flex_none()
             .flex()
             .flex_col()
-            .gap_1()
+            .px_2()
+            .py_3()
+            .gap_2()
+            .bg(theme::sidebar())
+            .border_r_1()
+            .border_color(theme::border())
             .child(
                 div()
-                    .h(px(52.0))
-                    .px_2()
+                    .h(px(50.0))
                     .flex()
                     .items_center()
+                    .justify_center()
                     .gap_3()
-                    .child(components::app_mark(30.0))
-                    .child(
-                        div()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_size(px(17.0))
-                            .child("TeleArk"),
-                    ),
+                    .child(components::app_mark(36.0))
+                    .when(!collapsed, |brand| {
+                        brand.child(
+                            div()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .text_size(px(17.0))
+                                .child("TeleArk"),
+                        )
+                    }),
             )
+            .child(self.primary_nav(
+                "nav-storage",
+                "storage-nav-title",
+                IconName::FolderOpen,
+                self.page == Page::Storage,
+                cx,
+            ))
+            .child(self.primary_nav(
+                "nav-channels",
+                "nav-channels",
+                IconName::Globe,
+                self.page == Page::Channel,
+                cx,
+            ))
             .child(self.primary_nav(
                 "nav-transfers-all",
                 "transfer-title",
@@ -234,42 +226,91 @@ impl TeleArkApp {
                 cx,
             ))
             .child(self.primary_nav(
-                "nav-storage",
-                "storage-nav-title",
-                IconName::FolderOpen,
-                self.page == Page::Storage,
+                "nav-library",
+                "shell-local-library",
+                IconName::Folder,
+                self.page == Page::Library || self.page == Page::FileDetail,
                 cx,
             ))
+            .child(div().flex_1())
+            .child(self.primary_nav(
+                "nav-settings",
+                "settings-title",
+                IconName::Settings,
+                self.page == Page::Settings,
+                cx,
+            ))
+            .child(self.primary_nav(
+                "nav-account",
+                "shell-account",
+                IconName::User,
+                self.page == Page::Account,
+                cx,
+            ))
+            .child(div().h(px(1.0)).my_1().bg(theme::border()))
             .child(
+                components::button(
+                    "sidebar-toggle",
+                    "",
+                    Some(if collapsed {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    }),
+                    false,
+                )
+                .ghost()
+                .w_full()
+                .h(px(36.0))
+                .accessibility_label(self.tr(if collapsed {
+                    "shell-expand-navigation"
+                } else {
+                    "shell-collapse-navigation"
+                }))
+                .tooltip(self.tr(if collapsed {
+                    "shell-expand-navigation"
+                } else {
+                    "shell-collapse-navigation"
+                }))
+                .when(!collapsed, |button| {
+                    button
+                        .label(self.tr("shell-collapse-navigation"))
+                        .justify_start()
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.preferences.sidebar_collapsed = !this.preferences.sidebar_collapsed;
+                    this.persist_preferences(cx);
+                    cx.notify();
+                })),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_channels_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let channels = self
+            .telegram_chats
+            .iter()
+            .filter(|chat| {
+                chat.kind == TelegramChatKind::Channel && Some(chat.id) != self.storage_channel_id()
+            })
+            .map(|chat| {
+                let chat_id = chat.id;
+                SidebarMenuItem::new(chat.name.clone())
+                    .icon(Icon::new(Symbol::Hash).size(px(16.0)))
+                    .active(self.selected_chat_id == Some(chat_id))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_channel(chat_id, cx)))
+            })
+            .collect::<Vec<_>>();
+        Sidebar::new("channels-sidebar")
+            .collapsible(false)
+            .w(px(208.0))
+            .header(
                 div()
-                    .mt_4()
-                    .h(px(26.0))
-                    .px_2()
+                    .h(px(42.0))
                     .flex()
                     .items_center()
-                    .child(
-                        NavButton::new("channels-disclosure")
-                            .accessibility_label(self.tr("nav-channels"))
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(11.0))
-                            .text_color(theme::text_muted())
-                            .child(
-                                Icon::new(if self.sidebar_channels_expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(12.0)),
-                            )
-                            .child(self.tr("nav-channels"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_channels_expanded = !this.sidebar_channels_expanded;
-                                cx.notify();
-                            })),
-                    )
+                    .justify_between()
+                    .child(div().text_sm().child(self.tr("nav-channels")))
                     .child(
                         components::icon_button(
                             "channels-refresh",
@@ -277,32 +318,14 @@ impl TeleArkApp {
                             self.tr("shell-refresh-channels"),
                         )
                         .ghost()
-                        .size(px(26.0))
                         .on_click(cx.listener(|this, _, _, cx| this.load_telegram_dialogs(cx))),
                     ),
-            );
-        let channels: Vec<_> = if self.sidebar_channels_expanded {
-            self.telegram_chats
-                .iter()
-                .filter(|chat| {
-                    chat.kind == TelegramChatKind::Channel
-                        && Some(chat.id) != self.storage_channel_id()
-                })
-                .map(|chat| {
-                    let chat_id = chat.id;
-                    SidebarMenuItem::new(chat.name.clone())
-                        .icon(Icon::new(Symbol::Hash).size(px(16.0)))
-                        .active(
-                            self.page == Page::Channel && self.selected_chat_id == Some(chat_id),
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_channel(chat_id, cx)),
-                        )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            )
+            .children(channels)
+            .into_any_element()
+    }
+
+    pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rates = self
             .transfers
             .as_ref()
@@ -328,142 +351,60 @@ impl TeleArkApp {
                 }
             }
         }
-        let footer = div()
-            .w_full()
+        div()
+            .h(px(32.0))
+            .flex_none()
+            .px_4()
             .flex()
-            .flex_col()
-            .gap_1()
+            .items_center()
+            .gap_4()
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::surface())
+            .text_xs()
+            .text_color(theme::text_secondary())
             .child(
-                Collapsible::new()
-                    .open(self.sidebar_tools_expanded)
-                    .child(
-                        NavButton::new("utilities-disclosure")
-                            .accessibility_label(self.tr("shell-utilities"))
-                            .w_full()
-                            .h(px(30.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(
-                                Icon::new(if self.sidebar_tools_expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(12.0)),
+                components::button(
+                    "status-disk-space",
+                    self.volume_space
+                        .map(|space| {
+                            self.tr_with(
+                                "shell-free-disk-space",
+                                MessageArgs::new().with(
+                                    "free",
+                                    format_bytes(self.locale(), space.available_bytes),
+                                ),
                             )
-                            .child(self.tr("shell-utilities"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_tools_expanded = !this.sidebar_tools_expanded;
-                                cx.notify();
-                            })),
-                    )
-                    .content(self.primary_nav(
-                        "nav-library",
-                        "shell-local-library",
-                        IconName::Folder,
-                        self.page == Page::Library,
-                        cx,
-                    )),
+                        })
+                        .unwrap_or_else(|| self.tr("shell-disk-space-unavailable")),
+                    Some(IconName::HardDrive),
+                    false,
+                )
+                .ghost()
+                .h(px(28.0))
+                .tooltip(self.tr("settings-managed-root-picker"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings_section = SettingsSection::Storage;
+                    this.set_page(Page::Settings, cx);
+                })),
             )
-            .child(self.primary_nav(
-                "nav-settings",
-                "settings-title",
-                IconName::Settings,
-                self.page == Page::Settings,
-                cx,
-            ))
+            .child(div().flex_1())
             .child(
-                NavButton::new("sidebar-account")
-                    .accessibility_label(self.tr("shell-account"))
-                    .h(px(48.0))
-                    .w_full()
-                    .px_3()
+                div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(self.account_avatar_element(27.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_left()
-                            .truncate()
-                            .text_size(px(12.0))
-                            .child(
-                                self.telegram_account
-                                    .as_ref()
-                                    .map(|a| SharedString::from(a.display_name.clone()))
-                                    .unwrap_or_else(|| self.tr("telegram-header-login-action")),
-                            ),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size(px(12.0))
-                            .text_color(theme::text_muted()),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.set_page(Page::Account, cx))),
+                    .gap_1()
+                    .child(Icon::new(IconName::ArrowDown).size(px(12.0)))
+                    .child(format_speed(self.locale(), rates.download_bytes_per_second)),
             )
             .child(
                 div()
-                    .mx_3()
-                    .pt_3()
-                    .pb_2()
-                    .border_t_1()
-                    .border_color(theme::border())
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .text_size(px(10.0))
-                    .text_color(theme::text_muted())
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(Icon::new(IconName::ArrowDown).size(px(11.0)))
-                            .child(format_speed(self.locale(), rates.download_bytes_per_second)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(Icon::new(IconName::ArrowUp).size(px(11.0)))
-                            .child(format_speed(self.locale(), rates.upload_bytes_per_second)),
-                    ),
+                    .gap_1()
+                    .child(Icon::new(IconName::ArrowUp).size(px(12.0)))
+                    .child(format_speed(self.locale(), rates.upload_bytes_per_second)),
             )
-            .when_some(self.overall_storage_metrics.as_ref(), |footer, metrics| {
-                footer.child(
-                    div()
-                        .px_3()
-                        .pb_2()
-                        .text_size(px(10.0))
-                        .text_color(theme::text_muted())
-                        .child(
-                            self.tr_with(
-                                "shell-disk-summary",
-                                MessageArgs::new()
-                                    .with(
-                                        "free",
-                                        format_bytes(self.locale(), metrics.available_bytes),
-                                    )
-                                    .with(
-                                        "used",
-                                        format_bytes(self.locale(), metrics.app_used_bytes),
-                                    ),
-                            ),
-                        ),
-                )
-            });
-        Sidebar::new("teleark-sidebar")
-            .collapsible(false)
-            .w(px(layout.sidebar_width()))
-            .bg(theme::sidebar())
-            .header(header)
-            .children(channels)
-            .footer(footer)
             .into_any_element()
     }
 

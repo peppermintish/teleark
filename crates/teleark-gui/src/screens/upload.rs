@@ -17,12 +17,24 @@ pub fn render_upload_overlay(
     layout: LayoutPolicy,
     cx: &mut Context<TeleArkApp>,
 ) -> AnyElement {
-    let file_name = app
-        .upload_source
-        .as_ref()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| app.tr("upload-no-file-selected").to_string());
+    let source_summary = app.tr_with(
+        "upload-selection-summary",
+        teleark_i18n::MessageArgs::new()
+            .with(
+                "count",
+                teleark_i18n::format::format_integer(app.locale(), app.upload_sources.len() as u64),
+            )
+            .with(
+                "size",
+                teleark_i18n::format::format_bytes(
+                    app.locale(),
+                    app.upload_sources
+                        .iter()
+                        .map(|source| source.size_bytes)
+                        .sum(),
+                ),
+            ),
+    );
     let channel_name = match &app.storage_status {
         teleark_runtime::StorageChannelStatus::Ready(channel) => channel.name.clone(),
         _ => app.tr("storage-nav-title").to_string(),
@@ -30,14 +42,24 @@ pub fn render_upload_overlay(
     let popup = components::card()
         .relative()
         .w(px(520.0))
-        .max_h(px(layout.upload_dialog_height()))
+        .h(px((if app.upload_sources.is_empty() {
+            512.0_f32
+        } else {
+            640.0_f32
+        })
+        .min(layout.upload_dialog_height())))
         .shadow_xl()
         .id("upload-popup")
-        .overflow_y_scroll()
-        .h_auto()
-        .p_6()
+        .overflow_hidden()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .flex()
+        .flex_col()
         .child(
             div()
+                .flex_none()
+                .px_6()
+                .py_5()
                 .flex()
                 .items_center()
                 .gap_3()
@@ -62,165 +84,232 @@ pub fn render_upload_overlay(
                     })),
                 ),
         )
-        .child(
+        .child(components::inspector_body(
+            "upload-body",
+            &app.upload_body_scroll,
             div()
-                .mt_5()
-                .p_5()
-                .rounded(theme::RADIUS_LARGE)
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::canvas())
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_3()
-                .child(
-                    Icon::new(IconName::File)
-                        .size(px(42.0))
-                        .text_color(theme::blue()),
-                )
+                .px_6()
+                .pb_4()
                 .child(
                     div()
-                        .w_full()
-                        .truncate()
-                        .text_center()
-                        .text_sm()
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .child(file_name),
-                )
-                .when_some(app.upload_source.as_ref(), |area, path| {
-                    area.child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_center()
-                            .text_xs()
-                            .text_color(theme::text_muted())
-                            .child(path.to_string_lossy().into_owned()),
-                    )
-                })
-                .child(
-                    components::button(
-                        "upload-choose",
-                        app.tr(if app.upload_source.is_some() {
-                            "upload-change-file"
-                        } else {
-                            "upload-choose-file"
-                        }),
-                        Some(IconName::FolderOpen),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_upload_file(cx))),
-                ),
-        )
-        .child(
-            div()
-                .mt_5()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    Icon::new(Symbol::Lock)
-                        .size(px(18.0))
-                        .text_color(theme::blue()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .child(div().text_sm().child(channel_name))
+                        .mt_5()
+                        .p_4()
+                        .rounded(theme::RADIUS_MEDIUM)
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::canvas())
                         .child(
                             div()
-                                .mt_1()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    Icon::new(IconName::File)
+                                        .size(px(26.0))
+                                        .text_color(theme::blue()),
+                                )
+                                .child(div().flex_1().text_sm().child(
+                                    if app.upload_sources.is_empty() {
+                                        app.tr("upload-no-file-selected")
+                                    } else {
+                                        source_summary
+                                    },
+                                ))
+                                .child(
+                                    components::button(
+                                        "upload-choose",
+                                        app.tr(if app.upload_sources.is_empty() {
+                                            "upload-choose-file"
+                                        } else {
+                                            "upload-change-file"
+                                        }),
+                                        Some(IconName::FolderOpen),
+                                        false,
+                                    )
+                                    .disabled(app.upload_preparing)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.choose_upload_file(cx)),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
                                 .text_xs()
                                 .text_color(theme::text_muted())
+                                .child(app.tr("upload-batch-limit")),
+                        )
+                        .when(!app.upload_sources.is_empty(), |area| {
+                            area.child(
+                                div()
+                                    .id("upload-selected-files")
+                                    .max_h(px(168.0))
+                                    .overflow_y_scroll()
+                                    .mt_3()
+                                    .children(app.upload_sources.iter().enumerate().map(
+                                        |(index, source)| {
+                                            let tooltip =
+                                                source.path.to_string_lossy().into_owned();
+                                            div()
+                                        .id(("upload-source-row", index))
+                                        .h(px(48.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .border_t_1()
+                                        .border_color(theme::border())
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .truncate()
+                                                        .child(source.file_name.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::text_muted())
+                                                        .child(teleark_i18n::format::format_bytes(
+                                                            app.locale(),
+                                                            source.size_bytes,
+                                                        )),
+                                                ),
+                                        )
+                                        .child(
+                                            components::icon_button(
+                                                ("upload-remove-source", index),
+                                                IconName::Close,
+                                                app.tr("upload-remove-file"),
+                                            )
+                                            .ghost()
+                                            .tooltip(tooltip)
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if index < this.upload_sources.len() {
+                                                        this.upload_sources.remove(index);
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
+                                        },
+                                    )),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .mt_5()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            Icon::new(Symbol::Lock)
+                                .size(px(18.0))
+                                .text_color(theme::blue()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(div().text_sm().child(channel_name))
                                 .child(
-                                    app.telegram_account
-                                        .as_ref()
-                                        .map(|account| account.display_name.clone())
-                                        .unwrap_or_default(),
+                                    div()
+                                        .mt_1()
+                                        .text_xs()
+                                        .text_color(theme::text_muted())
+                                        .child(
+                                            app.telegram_account
+                                                .as_ref()
+                                                .map(|account| account.display_name.clone())
+                                                .unwrap_or_default(),
+                                        ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(app.tr("channel-private")),
                         ),
                 )
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(app.tr("channel-private")),
-                ),
-        )
-        .child(
-            div()
-                .mt_4()
-                .text_sm()
-                .text_color(theme::text_secondary())
-                .child(app.tr("upload-simple-description")),
-        )
-        .child(
-            components::button(
-                "upload-options",
-                app.tr("settings-advanced"),
-                Some(if app.upload_advanced_expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                }),
-                false,
-            )
-            .ghost()
-            .mt_4()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.upload_advanced_expanded = !this.upload_advanced_expanded;
-                cx.notify();
-            })),
-        )
-        .when(app.upload_advanced_expanded, |popup| {
-            popup.child(
-                div()
-                    .mt_3()
-                    .p_4()
-                    .rounded(theme::RADIUS_SMALL)
-                    .bg(theme::canvas())
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(app.tr_with(
-                        "upload-current-part-size-description",
-                        teleark_i18n::MessageArgs::new().with(
-                            "size",
-                            teleark_i18n::format::format_bytes(
-                                app.locale(),
-                                teleark_runtime::encrypted_part_plaintext_limit(),
-                            ),
-                        ),
-                    ))
-                    .child(
-                        div()
-                            .mt_2()
-                            .child(app.tr("upload-hide-filename-description")),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
-                            .child(app.tr("upload-encrypt-metadata-description")),
-                    )
-                    .child(div().mt_2().child(app.tr("upload-source-checked"))),
-            )
-        })
-        .when_some(
-            super::settings::vault_activity_message(app),
-            |popup, (message, tone)| {
-                popup.child(
-                    div()
-                        .mt_3()
+                        .mt_4()
                         .text_sm()
-                        .text_color(tone.foreground())
-                        .child(message),
+                        .text_color(theme::text_secondary())
+                        .child(app.tr("upload-simple-description")),
                 )
-            },
-        )
+                .child(
+                    components::button(
+                        "upload-options",
+                        app.tr("settings-advanced"),
+                        Some(if app.upload_advanced_expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        }),
+                        false,
+                    )
+                    .ghost()
+                    .mt_4()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.upload_advanced_expanded = !this.upload_advanced_expanded;
+                        cx.notify();
+                    })),
+                )
+                .when(app.upload_advanced_expanded, |popup| {
+                    popup.child(
+                        div()
+                            .mt_3()
+                            .p_4()
+                            .rounded(theme::RADIUS_SMALL)
+                            .bg(theme::canvas())
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(app.tr_with(
+                                "upload-current-part-size-description",
+                                teleark_i18n::MessageArgs::new().with(
+                                    "size",
+                                    teleark_i18n::format::format_bytes(
+                                        app.locale(),
+                                        teleark_runtime::encrypted_part_plaintext_limit(),
+                                    ),
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .child(app.tr("upload-hide-filename-description")),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .child(app.tr("upload-encrypt-metadata-description")),
+                            )
+                            .child(div().mt_2().child(app.tr("upload-source-checked"))),
+                    )
+                })
+                .when_some(
+                    super::settings::vault_activity_message(app),
+                    |popup, (message, tone)| {
+                        popup.child(
+                            div()
+                                .mt_3()
+                                .text_sm()
+                                .text_color(tone.foreground())
+                                .child(message),
+                        )
+                    },
+                ),
+        ))
         .child(
             div()
-                .mt_5()
-                .pt_4()
+                .flex_none()
+                .px_6()
+                .py_4()
                 .border_t_1()
                 .border_color(theme::border())
                 .flex()
@@ -246,7 +335,9 @@ pub fn render_upload_overlay(
                         true,
                     )
                     .disabled(
-                        app.upload_source.is_none()
+                        app.visual_preview
+                            || app.upload_sources.is_empty()
+                            || app.upload_preparing
                             || app.vault_activity == VaultActivity::Working
                             || app.storage_channel_id().is_none(),
                     )

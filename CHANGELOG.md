@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased · Everyday usability
+
+- Added a collapsible icon sidebar, direct Local Library access, a separate channel browser, and visible free space for the download disk.
+- Fixed scrolling in Raw Files and transfer inspectors so details scroll independently of the underlying list.
+- Batch rows now show their source, file names, counts, time, and real member lists. Multiple uploads can be reviewed together; stopping a batch skips remaining files after the current file finishes.
+- Downloaded files are checked in the background. Missing, changed, and unavailable files have distinct states; a missing native download can be downloaded again as a new task.
+- Added original TeleArk artwork and a macOS app bundle with an application icon.
+- Schema v10 preserves account-scoped local output identities across restarts. Encryption and manifest formats are unchanged.
+
 ## 0.4.0 · A new home for your files
 
 ### Made for the Mac

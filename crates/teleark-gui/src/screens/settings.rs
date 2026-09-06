@@ -385,6 +385,7 @@ impl TeleArkApp {
         let content = div()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .h_full()
             .overflow_y_scrollbar()
             .child(
@@ -398,6 +399,7 @@ impl TeleArkApp {
         div()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .h_full()
             .flex()
             .flex_col()
@@ -1328,7 +1330,11 @@ impl TeleArkApp {
                     .text_sm()
                     .child(gpui_kit::base::TextView::markdown(
                         "about-release-notes",
-                        self.tr("about-changelog-v040"),
+                        format!(
+                            "{}\n\n{}",
+                            self.tr("about-changelog-unreleased"),
+                            self.tr("about-changelog-v040")
+                        ),
                     )),
             )
             .child(
@@ -2142,7 +2148,12 @@ mod tests {
         let changelog = include_str!("../../../../CHANGELOG.md")
             .strip_prefix("# Changelog\n\n")
             .expect("changelog heading");
-        assert_eq!(about.trim(), changelog.trim());
+        let unreleased =
+            localizer.translate_or_id(teleark_i18n::MessageId::new("about-changelog-unreleased"));
+        assert_eq!(
+            format!("{}\n\n{}", unreleased.trim(), about.trim()),
+            changelog.trim()
+        );
     }
 
     #[test]

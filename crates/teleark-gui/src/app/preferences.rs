@@ -4,6 +4,11 @@ use super::*;
 
 impl TeleArkApp {
     pub(crate) fn persist_preferences(&mut self, cx: &mut Context<Self>) {
+        if self.visual_preview {
+            self.preference_persistence = PreferencePersistence::Idle;
+            cx.notify();
+            return;
+        }
         if self.preference_persistence == PreferencePersistence::Saving {
             return;
         }
@@ -15,6 +20,7 @@ impl TeleArkApp {
         let preferences = self.preferences.clone();
         self.preference_persistence = PreferencePersistence::Saving;
         cx.notify();
+        let saved_preferences = preferences.clone();
         let work = cx.background_spawn(async move { library.set_preferences(&preferences) });
         self.preference_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -25,6 +31,9 @@ impl TeleArkApp {
                 } else {
                     PreferencePersistence::Failed
                 };
+                if result.is_ok() && this.preferences != saved_preferences {
+                    this.persist_preferences(cx);
+                }
                 cx.notify();
             });
         }));

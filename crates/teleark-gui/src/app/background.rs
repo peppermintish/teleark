@@ -3,7 +3,7 @@
 use super::*;
 
 impl TeleArkApp {
-    pub(super) fn monitor_channel_download(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn monitor_channel_download(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(transfers) = self.transfers.clone() else {
             return;
         };
@@ -162,6 +162,23 @@ impl TeleArkApp {
         let Some(library) = self.library.clone() else {
             return;
         };
+        let volume_library = library.clone();
+        self.volume_space_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let library = volume_library.clone();
+                let space = cx
+                    .background_spawn(async move { library.download_volume_space().ok() })
+                    .await;
+                let Some(entity) = this.upgrade() else { return };
+                entity.update(cx, |this, cx| {
+                    this.volume_space = space;
+                    cx.notify();
+                });
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+            }
+        }));
         self.storage_metrics_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let library = library.clone();

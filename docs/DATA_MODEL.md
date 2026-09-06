@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current pre-release schema is version **9**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate provisional contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current pre-release schema is version **10**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate provisional contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -26,10 +26,10 @@ index_jobs, index_ranges, telegram_index_state
 transfer_tasks, transfer_parts
 native_download_batches, native_download_tasks
 collections, collection_items
-settings, id_allocators, vault_metadata
+settings, id_allocators, vault_metadata, vault_downloaded_files
 ```
 
-Migrations 1–6 establish the catalog, FTS triggers, checkpoints/ranges, tagged paths, monotonic IDs, remote-object identities, cursors and native history. Version 7 adds native batch identity and source sent-time/caption/MIME metadata; version 8 adds wrapped Vault metadata; version 9 adds native account scope. Tests cover empty-to-latest and every prior-version upgrade, preserving indexed data.
+Migrations 1–6 establish the catalog, FTS triggers, checkpoints/ranges, tagged paths, monotonic IDs, remote-object identities, cursors and native history. Version 7 adds native batch identity and source sent-time/caption/MIME metadata; version 8 adds wrapped Vault metadata; version 9 adds native account scope; version 10 adds the Vault output inventory. Tests cover empty-to-latest and every prior-version upgrade, preserving indexed data.
 
 Connections enable foreign keys, an untrusted schema, busy timeout and WAL for file databases. Strict tables, checks, prepared statements and transactions enforce repository invariants. SQL remains exclusively in Storage. Future schema versions/application IDs are rejected rather than guessed.
 
@@ -42,6 +42,14 @@ Existing version-8 rows migrate with NULL ownership. Before the first configured
 Runtime snapshots preserve `Option<i64>` for legacy ownership. Native scheduling, resume/retry and the actual serialized Telegram operation enforce expected account identity. Switching pauses queued/running work and waits for worker release before sign-out. Local completed files are retained. Tests exercise upgrade/reopen, unknown provenance, attempted reassignment and cross-account operation rejection.
 
 Native history also retains durable task/batch IDs, destination, original message metadata, size, progress, timestamps, attempts, verification and structured failure. Its restart/partial-file behavior is specified in [Transfer](TRANSFER_ENGINE.md); the `TARKDPM1` bitmap and schema-1 session log are explicit independent formats, unchanged by schema 9.
+
+## Local output inventory: version 10
+
+`vault_downloaded_files` stores a positive account/chat identity, canonical 32-character lowercase hexadecimal package ID, destination using the existing explicit platform path codec, nonnegative size and completion time. `(account_id, path_encoding, destination_path)` is unique; a new successful output at that path updates its identity. This local metadata is plaintext SQLite and is not a crypto/manifest format or a transfer checkpoint.
+
+The account-scoped read API projects completed native history together with Vault outputs, at most 128 rows per page. Each source uses an account/ID index and applies its cursor/128-row bound before the union; no deep OFFSET or whole-history sort is required. Its typed cursor is `(kind, id)`, with native kind 0 before Vault kind 1 and IDs descending within each kind. Unknown-account history is excluded. No speculative backfill or legacy-account reassignment occurs. The literal `v10-vault-download.sql` fixture covers the Unix path encoding and Unicode name; upgrade/reopen, pagination and account isolation have deterministic tests.
+
+Vault restore records its output after verified atomic publication and before reporting success. If the database write fails, the file remains intact and the operation reports a persistence failure. A crash in this narrow interval can leave an unregistered output; automatic filesystem discovery and reconciliation are not implemented. Pre-v10 Vault outputs have no durable local inventory. Native history deletion removes its observation source but never the user file; external deletion does not delete history or change historical completion.
 
 ## Core transfer and index records
 
