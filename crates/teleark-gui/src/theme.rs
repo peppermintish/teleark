@@ -43,6 +43,7 @@ pub fn apply_appearance<T>(
     theme.colors.primary_foreground = rgb(0xffffff).into();
     theme.colors.ring = blue().into();
     theme.colors.border = border().into();
+    theme.colors.input = color(0xc7cbd3, 0x66666e).into();
     theme.colors.background = canvas().into();
     theme.colors.foreground = text_primary().into();
     theme.colors.sidebar = sidebar().into();
@@ -64,6 +65,7 @@ pub fn apply_appearance<T>(
     theme.colors.sidebar_accent_foreground = blue().into();
     theme.colors.table = surface().into();
     theme.colors.table_head = sidebar().into();
+    theme.colors.table_head_foreground = text_secondary().into();
     theme.colors.table_active = blue_soft().into();
     theme.colors.table_hover = blue_pale().into();
     theme.colors.table_active_border = blue_soft().into();
