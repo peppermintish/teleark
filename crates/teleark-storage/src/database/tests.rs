@@ -210,6 +210,7 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
     let destination = std::env::temp_dir()
         .join("TeleArk")
         .join("restored-video.mp4");
+    assert!(!database.native_download_destination_in_use(&destination)?);
     let mut task = database.insert_native_download(&NewNativeDownloadTaskRecord {
         account_id: 1,
         chat_id: 101,
@@ -224,6 +225,7 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
     })?;
     assert!(task.id > 0);
     assert_eq!(task.state, StoredNativeDownloadState::Queued);
+    assert!(database.native_download_destination_in_use(&destination)?);
     task.state = StoredNativeDownloadState::Running;
     task.transferred_bytes = 524_288;
     task.started_at_unix_ms = Some(11);
@@ -243,6 +245,7 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
     let restored = database.native_downloads()?;
     assert_eq!(restored, vec![task]);
     assert_eq!(restored[0].destination, destination);
+    assert!(database.native_download_destination_in_use(&destination)?);
     Ok(())
 }
 

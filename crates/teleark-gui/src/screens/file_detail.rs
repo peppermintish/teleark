@@ -328,11 +328,17 @@ impl TeleArkApp {
                             .flex_col()
                             .gap_4()
                             .child(div().text_sm().text_color(theme::text_secondary()).child(
-                                self.tr(if file.source_account_id.is_some() {
-                                    "file-detail-indexed-source-note"
-                                } else {
-                                    "file-detail-local-source-note"
-                                }),
+                                self.tr(
+                                    if file.local_source_path.is_some()
+                                        && file.source_account_id.is_some()
+                                    {
+                                        "file-detail-downloaded-source-note"
+                                    } else if file.source_account_id.is_some() {
+                                        "file-detail-indexed-source-note"
+                                    } else {
+                                        "file-detail-local-source-note"
+                                    },
+                                ),
                             ))
                             .when(file.source_account_id.is_some(), |body| {
                                 body.children([

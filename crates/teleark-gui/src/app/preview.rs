@@ -2,6 +2,70 @@
 use super::*;
 
 impl TeleArkApp {
+    pub(super) fn refresh_preview_library(&mut self, cx: &mut Context<Self>) {
+        let local = self.library_view == LibraryView::Local;
+        let names = [
+            "京都の春 — 旅行写真.jpg",
+            "Project notes.pdf",
+            "Archive.zip",
+            "Field recording.flac",
+            "Documentary.mp4",
+        ];
+        let text = self.search_input.read(cx).value().to_lowercase();
+        let kind = library_kind_for_selection(self.library_kind_selection);
+        let rows = names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                let file_kind = teleark_runtime::classify_file(std::path::Path::new(name));
+                if kind.is_some_and(|kind| kind != file_kind)
+                    || !name.to_lowercase().contains(&text)
+                {
+                    return None;
+                }
+                Some(crate::library_state::LibraryRowView {
+                    id: if local {
+                        crate::library_state::LibraryRowId::Local(
+                            teleark_runtime::LocalLibraryKey::NativeDownload(index as u64 + 1),
+                        )
+                    } else {
+                        crate::library_state::LibraryRowId::Catalog(
+                            teleark_core::LogicalFileId::new(index as u64 + 1),
+                        )
+                    },
+                    name: (*name).into(),
+                    size_bytes: 1024 * 1024 * 123,
+                    kind: file_kind,
+                    source_name: Some("Design Library".into()),
+                    local_source_path: local.then(|| {
+                        std::path::PathBuf::from("/tmp/teleark-preview/Downloads").join(name)
+                    }),
+                    source_chat_id: Some(101),
+                    source_account_id: Some(1),
+                    source_message_id: Some(index as i64 + 1),
+                    modified_at_unix_ms: Some(1_788_624_000_000),
+                    remote_state: if local {
+                        teleark_core::RemoteState::LocalOnly
+                    } else {
+                        teleark_core::RemoteState::Uploaded
+                    },
+                    encryption_state: teleark_core::EncryptionState::Unencrypted,
+                    verification_state: teleark_core::VerificationState::Unverified,
+                    package_id: None,
+                    part_count: 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.library_content = LibraryContent::from_snapshot(LibrarySnapshot {
+            total_matching: rows.len() as u64,
+            rows,
+            next_cursor: None,
+            statistics: LibraryStatistics::default(),
+        });
+        self.selected_file = 0;
+        cx.notify();
+    }
+
     pub(super) fn initialize_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.visual_preview {
             return;
@@ -96,33 +160,7 @@ impl TeleArkApp {
             .collect();
         self.telegram_files_exhausted = true;
         self.refresh_channel_file_table(cx);
-        let rows = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| crate::library_state::LibraryRowView {
-                id: teleark_core::LogicalFileId::new(index as u64 + 1),
-                name: (*name).into(),
-                size_bytes: 1024 * 1024 * 123,
-                kind: FileKind::Document,
-                source_name: Some("TeleArk".into()),
-                local_source_path: None,
-                source_chat_id: Some(9000),
-                source_account_id: Some(1),
-                source_message_id: Some(100 + index as i64),
-                modified_at_unix_ms: Some(1_788_624_000_000),
-                remote_state: teleark_core::RemoteState::Uploaded,
-                encryption_state: teleark_core::EncryptionState::Unencrypted,
-                verification_state: teleark_core::VerificationState::Unverified,
-                package_id: None,
-                part_count: 1,
-            })
-            .collect();
-        self.library_content = LibraryContent::Ready(LibrarySnapshot {
-            rows,
-            total_matching: names.len() as u64,
-            next_cursor: None,
-            statistics: LibraryStatistics::default(),
-        });
+        self.refresh_preview_library(cx);
         let fixture = crate::mock::transfers(false);
         let mut rows = Vec::new();
         for (batch_id, upload) in [(42_u64, false), (17_u64, true)] {

@@ -3,6 +3,12 @@
 //! This crate owns adapter worker lifecycles so frontends never execute SQL or
 //! other blocking infrastructure work directly.
 
+mod local_library;
+pub use local_library::{
+    LocalLibraryCancellation, LocalLibraryCursor, LocalLibraryFile, LocalLibraryKey,
+    LocalLibraryPage,
+};
+
 mod local_files;
 pub use local_files::{
     LOCAL_FILE_PROBE_LIMIT, LocalFilePresence, VolumeSpace, local_file_presence, probe_local_files,
@@ -1186,7 +1192,15 @@ fn storage_loop(
                         prepare_managed_directories(&database_path, &preferences)
                     })
                     .and_then(|directories| {
-                        available_download_destination(&directories.downloads, &suggested_file_name)
+                        channel_transfer::available_download_destination_with_reservations(
+                            &directories.downloads,
+                            &suggested_file_name,
+                            |candidate| {
+                                database
+                                    .native_download_destination_in_use(candidate)
+                                    .map_err(map_storage_error)
+                            },
+                        )
                     });
                 let _ = reply.send(result);
             }

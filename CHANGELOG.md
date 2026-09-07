@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2 · Clearer Library, compact Transfers
+
+- Replaced All Files with Local files and Remote files tabs. Local files shows accessible downloads for the current account and imported originals; remote files shows the account's indexed Telegram catalog. File types have a separate filter.
+- Local file pages read current disk metadata, omit deleted or inaccessible files, and support cancellable paging and search without starting transfers.
+- Transfer files and batch rows now use the same compact 42-point height as Library rows. Upload and download arrows identify Transfers; batch details and controls remain available.
+- Fixed downloading again after deleting a local output: new tasks avoid paths retained by transfer history and preserve earlier records.
+- Updated English, Simplified Chinese, Japanese and macOS bundle version metadata. Schema and encryption formats are unchanged.
+
 ## 0.4.1 · Everyday usability
 
 - Library file details now offer account-scoped downloads for indexed Telegram files, with explicit guidance for unavailable sources. Local files retain Open and Reveal actions.

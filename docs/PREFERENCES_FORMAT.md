@@ -67,7 +67,7 @@ decision and a session-log event. Missing older values adopt the recommended
 The managed root is not a permission grant. The runtime creates only its
 `Downloads`, `Cache`, and `Logs` children, validates requested filenames, refuses path
 traversal, and chooses a unique `name (n).extension` download destination
-instead of replacing an existing file. SQLite and the Telegram session stay in
+instead of replacing an existing file. Candidates also skip destinations retained in native transfer history, even after their local files are deleted. SQLite and the Telegram session stay in
 the platform application-data directory so changing this preference cannot
 move files that are open by live workers.
 

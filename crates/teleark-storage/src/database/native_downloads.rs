@@ -22,6 +22,19 @@ const COLUMNS: &str = r#"
 "#;
 
 impl Database {
+    /// Historical destinations remain reserved even after their files are removed.
+    pub fn native_download_destination_in_use(
+        &self,
+        destination: &std::path::Path,
+    ) -> StorageResult<bool> {
+        let destination = path_text(destination)?;
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_download_tasks WHERE destination_path = ?1)",
+            [destination],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Resolve pre-v9 history once, before a new login can replace the old session.
     /// Unknown provenance stays NULL permanently instead of being assigned on a later launch.
     pub fn resolve_legacy_native_download_accounts(

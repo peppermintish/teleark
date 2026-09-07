@@ -43,6 +43,14 @@ pub fn available_download_destination(
     directory: &Path,
     suggested_file_name: &str,
 ) -> Result<PathBuf, ApplicationError> {
+    available_download_destination_with_reservations(directory, suggested_file_name, |_| Ok(false))
+}
+
+pub(crate) fn available_download_destination_with_reservations(
+    directory: &Path,
+    suggested_file_name: &str,
+    mut reserved: impl FnMut(&Path) -> Result<bool, ApplicationError>,
+) -> Result<PathBuf, ApplicationError> {
     let suggested = Path::new(suggested_file_name);
     if suggested_file_name.trim().is_empty()
         || suggested.file_name().and_then(|name| name.to_str()) != Some(suggested_file_name)
@@ -66,8 +74,8 @@ pub fn available_download_destination(
         };
         let candidate = directory.join(file_name);
         match candidate.try_exists() {
-            Ok(false) => return Ok(candidate),
-            Ok(true) => {}
+            Ok(false) if !reserved(&candidate)? => return Ok(candidate),
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 return Err(ApplicationError::new(
                     ApplicationErrorKind::PermissionDenied,
@@ -2955,6 +2963,83 @@ mod tests {
             ApplicationErrorKind::InvalidRequest
         );
     }
+    #[test]
+    fn destination_reservation_errors_fail_closed_and_search_is_bounded() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let error = available_download_destination_with_reservations(
+            directory.path(),
+            "archive.zip",
+            |_| Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+        )
+        .expect_err("cannot ignore unavailable history");
+        assert_eq!(error.kind(), ApplicationErrorKind::Persistence);
+        let mut probes = 0;
+        let error = available_download_destination_with_reservations(
+            directory.path(),
+            "archive.zip",
+            |_| {
+                probes += 1;
+                Ok(true)
+            },
+        )
+        .expect_err("all candidate paths reserved");
+        assert_eq!(error.kind(), ApplicationErrorKind::Capacity);
+        assert_eq!(probes, 10_000);
+    }
+
+    #[test]
+    fn library_download_after_external_deletion_allocates_a_fresh_history_path() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let library = library(&directory);
+        library
+            .set_preferences(&crate::DesktopPreferences {
+                managed_files_root: Some(directory.path().join("managed")),
+                ..crate::DesktopPreferences::default()
+            })
+            .expect("isolated downloads");
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend, library.clone()).expect("worker");
+        let destination = library
+            .next_download_destination("archive.zip")
+            .expect("first destination");
+        let first = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("first download");
+        assert_eq!(
+            wait_for_terminal(&transfers, first).state,
+            ChannelDownloadState::Completed
+        );
+        std::fs::remove_file(&destination).expect("external deletion");
+
+        // All Files prepares a destination and enqueues from catalog metadata.
+        let repeated_destination = library
+            .next_download_destination("archive.zip")
+            .expect("second destination");
+        let second = transfers
+            .enqueue_channel_download(request(repeated_destination.clone()))
+            .expect("download again from Library");
+        assert_ne!(first, second);
+        assert_ne!(destination, repeated_destination);
+        assert_eq!(
+            wait_for_terminal(&transfers, second).state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(
+            std::fs::read(&repeated_destination).expect("restored bytes"),
+            b"telegram bytes"
+        );
+        let history = library.native_downloads().expect("history");
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .any(|item| item.id == first && item.destination == destination)
+        );
+    }
+
     #[test]
     fn redownload_preserves_history_and_rejects_another_account() {
         let directory = tempfile::tempdir().expect("fixture");

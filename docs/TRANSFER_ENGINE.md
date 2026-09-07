@@ -10,6 +10,8 @@ The cooperative generic engine advances through bounded steps. Its scheduler req
 
 ## Connected native downloads
 
+Managed destination allocation checks both the filesystem and the indexed native-history destination column, across all task states and accounts. A deleted output does not free its historical path; a fresh download receives a numbered path and a new task while preserving prior history. Allocation is bounded to 10,000 candidates and fails closed on storage errors. This is candidate selection, not an atomic reservation; insertion constraints and final no-overwrite publication still reject concurrent collisions.
+
 Requests carry positive account/chat/message identity and a runtime-allocated non-overwriting destination under managed Downloads. The adapter validates the actual account and refetches source identity before transport. Schema 9 records account scope; [Data model](DATA_MODEL.md) specifies one-time legacy attribution. Unknown/other-account work cannot enqueue, resume or retry. Switching pauses eligible work, waits up to 30 seconds for retained workers to release requests/partials, then signs out; failure leaves a visible error rather than switching under active work.
 
 Native states are Queued, Running, Paused, Completed, Failed and Cancelled. Resume requests missing ranges; retry accepts Failed and Cancelled while retaining task/source/destination identity. Cancelled retries clear cancelled progress and wait for the previous worker to retire before starting. This lifecycle is separate from the generic Core transition table below.

@@ -28,7 +28,7 @@ Dependencies point toward project-owned contracts. Traits belong at meaningful s
 
 - **TeleArk** is a dedicated private broadcast channel owned by the active account. Its Files view shows authenticated manifests as complete logical files; Raw Files exposes original Telegram documents and candidate encrypted objects.
 - **Channels** browse ordinary Telegram sources. Their account/chat/message identities remain attached to all file and download requests.
-- **Local Library**, a direct navigation destination, is the persistent catalog and FTS projection. Import records local metadata; browsing/indexing also adds remote file metadata. These catalog records are distinct from transfer history and do not prove an upload or download.
+- **Library** has separate Local files and Remote files projections. Local files pages account-scoped native/Vault completed outputs and imported originals, with cancellable Runtime filesystem observations that exclude missing/inaccessible files and use current size/date. Local copy keys stay distinct from catalog LogicalFile IDs. Remote files is the active account’s persistent catalog/FTS projection populated by browsing/indexing; those records do not prove a download. File type filtering is independent of source tabs.
 - **Transfers** is a fixed primary destination. Refreshing or scrolling channels cannot replace the route, selected transfer, filter or transfer scroll owner.
 - Existing Saved Messages packages remain available through Settings → Key Vault → Advanced → legacy recovery. New uploads never use Saved Messages, and migration never moves or deletes remote objects.
 

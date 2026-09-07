@@ -109,12 +109,13 @@ impl TeleArkApp {
         &self,
         id: &'static str,
         label: &'static str,
-        icon: IconName,
+        icon: impl Into<Icon>,
         selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = self.tr(label);
-        components::button(id, "", Some(icon), false)
+        components::button(id, "", None, false)
+            .icon(icon)
             .ghost()
             .tooltip(title.clone())
             .accessibility_label(title.clone())
@@ -221,13 +222,13 @@ impl TeleArkApp {
             .child(self.primary_nav(
                 "nav-transfers-all",
                 "transfer-title",
-                IconName::ArrowDown,
+                Symbol::Transfer,
                 self.page == Page::Transfers,
                 cx,
             ))
             .child(self.primary_nav(
                 "nav-library",
-                "shell-local-library",
+                "nav-library",
                 IconName::Folder,
                 self.page == Page::Library || self.page == Page::FileDetail,
                 cx,

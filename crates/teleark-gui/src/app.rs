@@ -23,8 +23,7 @@ use gpui_kit::{
     Window, div, prelude::FluentBuilder as _, px,
 };
 use teleark_core::{
-    ApplicationError, FileKind, LibraryFilter, LibraryPage, LibraryQuery, LibrarySort,
-    LibraryStatistics,
+    ApplicationError, FileKind, LibraryFilter, LibraryQuery, LibrarySort, LibraryStatistics,
 };
 use teleark_i18n::{
     Localizer, MessageArgs, MessageId, SupportedLocale,
@@ -44,7 +43,10 @@ use crate::{
     ShowTransfers, ToggleFullscreen, UploadFile, ZoomWindow,
     components::{self, Tone},
     layout::LayoutPolicy,
-    library_state::{ImportActivity, ImportFeedback, LibraryContent, LibrarySnapshot},
+    library_state::{
+        ImportActivity, ImportFeedback, LibraryContent, LibraryPageCursor, LibrarySnapshot,
+        LibraryView,
+    },
     screens::{
         self,
         channel::{
@@ -287,6 +289,9 @@ pub struct TeleArkApp {
     pub(crate) nav_selection: &'static str,
     pub(crate) storage_view: StorageView,
     pub(crate) library_content: LibraryContent,
+    pub(crate) library_view: LibraryView,
+    pub(crate) library_kind_selection: &'static str,
+    library_scan_cancellation: teleark_runtime::LocalLibraryCancellation,
     pub(crate) import_activity: ImportActivity,
     pub(crate) import_feedback: Option<ImportFeedback>,
     pub(crate) library_loading_more: bool,
@@ -651,6 +656,9 @@ impl TeleArkApp {
             nav_selection,
             storage_view: StorageView::Files,
             library_content,
+            library_view: LibraryView::Local,
+            library_kind_selection: "library-types-all",
+            library_scan_cancellation: Default::default(),
             import_activity: ImportActivity::Idle,
             import_feedback: None,
             library_loading_more: false,
@@ -791,6 +799,10 @@ impl TeleArkApp {
         if self.page != page {
             self.cancel_managed_scan();
         }
+        if self.page == Page::Library && page != Page::Library {
+            self.library_scan_cancellation.cancel();
+            self.library_query_generation = self.library_query_generation.wrapping_add(1);
+        }
         self.page = page;
         self.show_upload = false;
         if page == Page::Library {
@@ -902,6 +914,7 @@ pub(crate) fn is_preview_library_selection(selection: &str) -> bool {
 
 impl Drop for TeleArkApp {
     fn drop(&mut self) {
+        self.library_scan_cancellation.cancel();
         if let Some(vault) = self.vault.as_ref() {
             let batches = vault
                 .transfers()
@@ -1234,5 +1247,44 @@ mod tests {
             vec![20, 19, 18]
         );
         assert_eq!(files[1].file_name, "duplicate");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn preview_app(
+        cx: &mut gpui_kit::TestAppContext,
+        page: Page,
+    ) -> (
+        gpui_kit::Entity<TeleArkApp>,
+        &mut gpui_kit::VisualTestContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.add_window_view(move |window, cx| {
+            let unavailable =
+                || ApplicationError::new(teleark_core::ApplicationErrorKind::Authorization);
+            TeleArkApp::new(
+                window,
+                cx,
+                Localizer::new(SupportedLocale::EnUs).expect("catalog"),
+                RuntimeStartup {
+                    library: Err(unavailable()),
+                    telegram: Err(unavailable()),
+                    transfers: Err(unavailable()),
+                    vault: Err(unavailable()),
+                },
+                AppStartup {
+                    page,
+                    visual_preview: true,
+                    show_upload: false,
+                    locale: LocaleStartup {
+                        system_locale: SupportedLocale::EnUs,
+                        follows_system_locale: false,
+                    },
+                },
+            )
+        })
     }
 }

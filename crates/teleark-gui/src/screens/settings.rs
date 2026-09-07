@@ -2141,6 +2141,17 @@ mod tests {
     use super::TELEGRAM_API_PANEL_URL;
 
     #[test]
+    fn macos_bundle_version_matches_the_running_application() {
+        let plist = include_str!("../../assets/macos/Info.plist");
+        for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+            assert!(plist.contains(&format!(
+                "<key>{key}</key><string>{}</string>",
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+    }
+
+    #[test]
     fn about_contains_the_complete_canonical_release_record() {
         let localizer =
             teleark_i18n::Localizer::new(teleark_i18n::SupportedLocale::EnUs).expect("locale");

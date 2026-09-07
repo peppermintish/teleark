@@ -915,7 +915,7 @@ impl TeleArkApp {
                         .justify_center()
                         .gap_3()
                         .child(
-                            Icon::new(IconName::ArrowDown)
+                            Icon::new(crate::assets::Symbol::Transfer)
                                 .size(px(34.0))
                                 .text_color(theme::blue()),
                         )
@@ -1270,12 +1270,9 @@ impl TeleArkApp {
         .then(|| self.local_presence_for_path(std::path::Path::new(transfer.destination.as_ref())));
         div()
             .id(("transfer-row", selection_key))
+            .debug_selector(move || format!("transfer-row-{selection_key}"))
             .w_full()
-            .h(px(if transfer.batch_summary.is_some() {
-                108.0
-            } else {
-                72.0
-            }))
+            .h(theme::ROW_HEIGHT)
             .px_3()
             .flex()
             .items_center()
@@ -1385,46 +1382,43 @@ impl TeleArkApp {
                             .flex_1()
                             .min_w_0()
                             .pr_4()
-                            .child(div().text_size(px(13.0)).truncate().child(transfer.name))
-                            .when_some(transfer.batch_summary.as_ref(), |name, batch| {
-                                name.child(
-                                    div()
-                                        .mt_1()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .child(
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .line_height(px(16.0))
+                                    .truncate()
+                                    .child(if let Some(batch) = transfer.batch_summary.as_ref() {
+                                        format!(
+                                            "{} · {}",
+                                            transfer.name,
                                             batch
                                                 .file_names
                                                 .iter()
                                                 .map(|name| name.as_ref())
                                                 .collect::<Vec<_>>()
-                                                .join(" · "),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .mt_1()
-                                        .truncate()
-                                        .text_size(px(11.0))
-                                        .text_color(theme::text_muted())
-                                        .child(format!(
-                                            "{} · {}",
-                                            self.batch_progress_label(batch),
-                                            format_unix_millis(
-                                                self.locale(),
-                                                batch.queued_at_unix_ms
-                                            )
-                                        )),
-                                )
-                            })
+                                                .join(" · ")
+                                        )
+                                        .into()
+                                    } else {
+                                        transfer.name
+                                    }),
+                            )
                             .child(
                                 div()
-                                    .mt_1()
                                     .text_size(px(11.0))
+                                    .line_height(px(14.0))
                                     .text_color(theme::text_muted())
                                     .truncate()
-                                    .child(format!("{} · {}", transfer.size, transfer.source)),
+                                    .child(if let Some(batch) = transfer.batch_summary.as_ref() {
+                                        format!(
+                                            "{} · {} · {}",
+                                            transfer.source,
+                                            self.batch_progress_label(batch),
+                                            transfer.size
+                                        )
+                                    } else {
+                                        format!("{} · {}", transfer.size, transfer.source)
+                                    }),
                             ),
                     ),
             )
@@ -1447,40 +1441,45 @@ impl TeleArkApp {
                                 0,
                             )),
                     )
-                    .child(div().mt_1().child(components::progress(
-                        transfer.progress,
-                        tone,
-                        self.tr("table-progress"),
-                    )))
                     .child(
                         div()
-                            .mt_1()
-                            .text_size(px(10.0))
-                            .text_color(theme::text_muted())
-                            .truncate()
-                            .when(
-                                local_presence.is_some_and(|presence| {
-                                    presence.is_some_and(|presence| {
-                                        presence != teleark_runtime::LocalFilePresence::Present
-                                    })
-                                }),
-                                |label| label.text_color(theme::amber()),
-                            )
-                            .child(if let Some(presence) = local_presence {
-                                self.local_presence_label(presence)
-                            } else if matches!(
-                                transfer.state,
-                                TransferState::Uploading | TransferState::Downloading
-                            ) {
-                                transfer.speed
-                            } else if matches!(
-                                transfer.state,
-                                TransferState::Waiting | TransferState::Paused
-                            ) {
-                                transfer.eta
-                            } else {
-                                "".into()
-                            }),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().child(components::progress(
+                                transfer.progress,
+                                tone,
+                                self.tr("table-progress"),
+                            )))
+                            .child(
+                                div()
+                                    .max_w(px(100.0))
+                                    .text_size(px(10.0))
+                                    .line_height(px(14.0))
+                                    .text_color(theme::text_muted())
+                                    .truncate()
+                                    .when(
+                                        local_presence.flatten().is_some_and(|presence| {
+                                            presence != teleark_runtime::LocalFilePresence::Present
+                                        }),
+                                        |label| label.text_color(theme::amber()),
+                                    )
+                                    .child(if let Some(presence) = local_presence {
+                                        self.local_presence_label(presence)
+                                    } else if matches!(
+                                        transfer.state,
+                                        TransferState::Uploading | TransferState::Downloading
+                                    ) {
+                                        transfer.speed
+                                    } else if matches!(
+                                        transfer.state,
+                                        TransferState::Waiting | TransferState::Paused
+                                    ) {
+                                        transfer.eta
+                                    } else {
+                                        "".into()
+                                    }),
+                            ),
                     ),
             )
             .child(actions)
@@ -1929,12 +1928,12 @@ impl TeleArkApp {
                         gpui_kit::base::Button::new(("batch-member", selection_key))
                             .accessibility_label(row.name.clone())
                             .w_full()
-                            .h(px(82.0))
+                            .h(theme::ROW_HEIGHT)
                             .px_4()
                             .flex()
                             .flex_col()
                             .justify_center()
-                            .gap_2()
+                            .gap_0()
                             .border_b_1()
                             .border_color(theme::border())
                             .hover(|row| row.bg(theme::blue_pale()))
@@ -3271,6 +3270,29 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn batch_and_file_rows_match_library_height(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        cx.simulate_resize(gpui_kit::size(px(1360.0), px(760.0)));
+        let keys = app.update(cx, |app, cx| {
+            app.expanded_transfer_batches.insert(42);
+            cx.notify();
+            app.transfer_rows()
+                .iter()
+                .take(2)
+                .enumerate()
+                .map(|(index, row)| transfer_selection_key(row, index))
+                .collect::<Vec<_>>()
+        });
+        cx.run_until_parked();
+        for key in keys {
+            // The GPUI debug selector API requires static test labels.
+            let selector: &'static str = Box::leak(format!("transfer-row-{key}").into_boxed_str());
+            let bounds = cx.debug_bounds(selector).expect("rendered transfer row");
+            assert_eq!(bounds.size.height, theme::ROW_HEIGHT);
+        }
+    }
 
     #[test]
     fn searching_or_filtering_reaches_members_of_collapsed_batches() {

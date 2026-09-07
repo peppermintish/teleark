@@ -41,6 +41,8 @@ Existing version-8 rows migrate with NULL ownership. Before the first configured
 
 Runtime snapshots preserve `Option<i64>` for legacy ownership. Native scheduling, resume/retry and the actual serialized Telegram operation enforce expected account identity. Switching pauses queued/running work and waits for worker release before sign-out. Local completed files are retained. Tests exercise upgrade/reopen, unknown provenance, attempted reassignment and cross-account operation rejection.
 
+Native destinations are globally unique across retained history, including terminal and legacy account-unknown rows. Runtime destination selection checks this indexed column even when the corresponding file is absent; deleting a local output does not release its history path.
+
 Native history also retains durable task/batch IDs, destination, original message metadata, size, progress, timestamps, attempts, verification and structured failure. Its restart/partial-file behavior is specified in [Transfer](TRANSFER_ENGINE.md); the `TARKDPM1` bitmap and schema-1 session log are explicit independent formats, unchanged by schema 9.
 
 ## Local output inventory: version 10
@@ -70,3 +72,9 @@ FTS5 covers normalized filename/path/caption projections while preserving origin
 Current ordering is modified-time descending with logical-file ID as a unique tie-breaker. Opaque versioned keyset cursors bind the query/facet fingerprint; changed queries reject old cursors. Never concatenate user text into SQL or use deep OFFSET for scale.
 
 Deleting catalog/history rows is distinct from deleting remote content. Collection removal does not remove files. Terminal native-history deletion removes owned logs/partials/bitmaps but never a completed user file. Remote package cleanup requires explicit reachability and recovery policy; it is not a database cascade. Smart-collection rule evaluation, other sort orders and million-record performance claims remain future work.
+
+## Library local-copy projection
+
+The local Library reads native/Vault completed-output inventory for the current account and imported originals with local-only catalog state. Runtime checks file metadata off the UI thread and excludes missing/inaccessible/non-file paths. Current file size/date are observations, never new cryptographic verification. Native-download, Vault-download and imported catalog keys remain separate; local copies do not invent LogicalFile IDs. No schema changes or backfill are needed.
+
+Local pages read at most 128 candidates per storage request, cooperatively skipping empty/unmatched pages until results or exhaustion. An ephemeral typed cursor binds account, filename search and type filter; it is not serialized or persisted. Cancellation is checked between candidates and storage pages. The UI resets/cancels on source/filter/navigation changes and rejects stale account/generation responses. Imported originals remain available without a signed-in account. Remote catalog queries require and filter by the current account. The local view does not scan arbitrary disk directories or recover outputs absent from retained inventory.

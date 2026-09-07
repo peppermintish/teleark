@@ -1118,6 +1118,14 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.2 · 更清晰的文件库，更紧凑的传输列表
+
+    - 用“本地文件”和“远端文件”替代“所有文件”。本地文件显示当前账号仍可访问的下载文件及手动导入的原文件；远端文件显示当前账号已索引的 Telegram 文件。文件类型使用独立筛选。
+    - 本地文件分页读取当前磁盘信息，排除已删除或无法访问的文件，支持可取消的分页与搜索，不会触发传输。
+    - 传输文件及批次行统一采用与文件库相同的 42 点紧凑高度。传输入口使用上传和下载双向箭头，批次详情与操作保持可用。
+    - 修复本地文件删除后无法再次下载的问题：新任务避开历史记录占用的路径，并保留原记录。
+    - 同步更新英语、简体中文、日语及 macOS 应用包版本信息。数据库结构与加密格式不变。
+
     ## 0.4.1 · 日常使用改进
 
     - 资料库文件详情现支持按来源账号下载已索引的 Telegram 文件，并说明来源不可用的原因。本地文件保留打开和定位操作。
@@ -1148,3 +1156,16 @@ file-detail-source-chat-id = 来源频道 ID
 library-action-account-required = 请登录索引此文件的 Telegram 账号后下载。
 library-action-source-unavailable = 此记录缺少唯一的可下载消息，请前往来源频道查找文件。
 library-action-managed-source = 请前往 TeleArk → 文件，解锁并恢复此加密文件。
+
+library-tab-local = 本地文件
+library-tab-remote = 远端文件
+library-types-all = 所有类型
+library-type-filter = 按文件类型筛选
+library-visible-files = 已显示 { $count } 个文件
+library-visible-size = 已显示 { $size }
+library-local-explanation = 显示当前账号已下载及手动导入、且磁盘上仍可访问的文件。刷新可重新检查。
+library-remote-explanation = 显示当前账号已索引的 Telegram 文件。浏览或索引频道可将文件添加到这里；这些记录不代表已下载到本地。
+library-local-empty-title = 未找到本地文件
+library-local-empty-description = 下载文件或从这台电脑导入文件。已删除或无法访问的文件不会显示；也可以清除搜索和类型筛选。
+library-remote-empty-description = 浏览或索引频道以添加远端文件，或清除搜索和类型筛选。
+file-detail-downloaded-source-note = 此本地副本从以下来源下载。当前大小和日期来自磁盘文件。

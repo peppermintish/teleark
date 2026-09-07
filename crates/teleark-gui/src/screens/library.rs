@@ -1,4 +1,9 @@
-use gpui_kit::component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
+use gpui_kit::component::{
+    Disableable as _, Icon, IconName,
+    menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::ScrollableElement as _,
+    tab::{Tab, TabBar},
+};
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -16,7 +21,7 @@ use crate::{
     app::{Page, TeleArkApp, is_preview_library_selection},
     components::{self, Tone},
     layout::LayoutPolicy,
-    library_state::{ImportActivity, ImportFeedback, LibraryContent, LibraryRowView},
+    library_state::{ImportActivity, ImportFeedback, LibraryContent, LibraryRowView, LibraryView},
     theme,
 };
 
@@ -37,7 +42,11 @@ impl TeleArkApp {
                 .map_or(0, |snapshot| snapshot.total_matching)
         };
         let result_label = self.tr_with(
-            "library-result-count-dynamic",
+            if self.library_view == LibraryView::Local {
+                "library-visible-files"
+            } else {
+                "library-result-count-dynamic"
+            },
             MessageArgs::new().with("count", result_count),
         );
         let import_label = match self.import_activity {
@@ -100,28 +109,82 @@ impl TeleArkApp {
                     .child(table_header(self.tr("table-parts"), Some(54.0)))
             });
 
+        let facets = [
+            (LibraryView::Local, "library-tab-local"),
+            (LibraryView::Remote, "library-tab-remote"),
+        ];
+        let kinds = [
+            ("library-types-all", "library-types-all"),
+            ("nav-videos", "nav-videos"),
+            ("nav-docs", "nav-documents"),
+            ("nav-archives", "nav-archives"),
+            ("nav-images", "library-images"),
+            ("nav-audio", "library-audio"),
+            ("nav-disk-images", "library-disk-images"),
+            ("nav-other", "library-other"),
+        ];
+        let type_label = kinds
+            .iter()
+            .find(|(id, _)| *id == self.library_kind_selection)
+            .map_or("library-types-all", |(_, label)| *label);
+        let labels = kinds.map(|(id, label)| (id, self.tr(label)));
+        let selected_kind = self.library_kind_selection;
+        let owner = cx.entity().downgrade();
+        let type_menu = components::button(
+            "library-type-filter",
+            self.tr(type_label),
+            Some(IconName::ChevronDown),
+            false,
+        )
+        .h(px(28.0))
+        .accessibility_label(self.tr("library-type-filter"))
+        .dropdown_menu(move |mut menu, _, _| {
+            for (id, label) in &labels {
+                let id = *id;
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(label.clone())
+                        .checked(id == selected_kind)
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                this.library_kind_selection = id;
+                                this.refresh_library(cx);
+                            });
+                        }),
+                );
+            }
+            menu
+        });
         let categories = div()
             .flex_none()
-            .min_h(px(42.0))
             .px(px(padding))
-            .py_1()
+            .pb_3()
             .flex()
             .items_center()
-            .gap_2()
-            .border_t_1()
-            .border_color(theme::border_subtle())
-            .flex_wrap()
-            .children([
-                self.library_category_button("nav-all", "nav-all-files", cx),
-                self.library_category_button("nav-recent", "nav-recent", cx),
-                self.library_category_button("nav-videos", "nav-videos", cx),
-                self.library_category_button("nav-docs", "nav-documents", cx),
-                self.library_category_button("nav-archives", "nav-archives", cx),
-                self.library_category_button("nav-images", "library-images", cx),
-                self.library_category_button("nav-audio", "library-audio", cx),
-                self.library_category_button("nav-disk-images", "library-disk-images", cx),
-                self.library_category_button("nav-other", "library-other", cx),
-            ]);
+            .gap_3()
+            .child(
+                TabBar::new("library-facets")
+                    .segmented()
+                    .selected_index(if self.library_view == LibraryView::Local {
+                        0
+                    } else {
+                        1
+                    })
+                    .children(facets.iter().map(|(_, label)| {
+                        let label = *label;
+                        Tab::new()
+                            .label(self.tr(label))
+                            .debug_selector(move || label.into())
+                    }))
+                    .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                        if let Some((view, _)) = facets.get(*index) {
+                            this.library_view = *view;
+                            this.refresh_library(cx);
+                        }
+                    })),
+            )
+            .child(div().flex_1())
+            .child(type_menu);
 
         let body = if preview_collection {
             self.render_library_state(
@@ -149,8 +212,16 @@ impl TeleArkApp {
                 ),
                 LibraryContent::Empty(_) => self.render_library_state(
                     IconName::FolderOpen,
-                    "library-empty-title",
-                    "library-empty-description-local",
+                    if self.library_view == LibraryView::Local {
+                        "library-local-empty-title"
+                    } else {
+                        "library-empty-title"
+                    },
+                    if self.library_view == LibraryView::Local {
+                        "library-local-empty-description"
+                    } else {
+                        "library-remote-empty-description"
+                    },
                     Some("action-import-files"),
                     cx,
                 ),
@@ -203,33 +274,17 @@ impl TeleArkApp {
                     .py_2()
                     .text_sm()
                     .text_color(theme::text_secondary())
-                    .child(self.tr("library-catalog-explanation")),
+                    .child(self.tr(if self.library_view == LibraryView::Local {
+                        "library-local-explanation"
+                    } else {
+                        "library-remote-explanation"
+                    })),
             )
             .when_some(self.import_feedback, |page, feedback| {
                 page.child(self.render_import_feedback(feedback, padding))
             })
             .child(table)
             .into_any_element()
-    }
-
-    fn library_category_button(
-        &self,
-        selection: &'static str,
-        label_id: &'static str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        components::button(
-            category_element_id(selection),
-            self.tr(label_id),
-            None,
-            self.nav_selection == selection,
-        )
-        .flex_none()
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.nav_selection = selection;
-            this.refresh_library(cx);
-        }))
-        .into_any_element()
     }
 
     fn render_library_state(
@@ -382,14 +437,21 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let total_files = self.tr_with(
-            "library-total-files-dynamic",
-            MessageArgs::new().with("count", snapshot.statistics.logical_file_count),
+            "library-visible-files",
+            MessageArgs::new().with("count", snapshot.rows.len() as u64),
         );
         let total_size = self.tr_with(
-            "library-local-index-size",
+            "library-visible-size",
             MessageArgs::new().with(
                 "size",
-                format_bytes(self.locale(), snapshot.statistics.logical_bytes),
+                format_bytes(
+                    self.locale(),
+                    snapshot
+                        .rows
+                        .iter()
+                        .map(|row| row.size_bytes)
+                        .fold(0_u64, u64::saturating_add),
+                ),
             ),
         );
 
@@ -488,7 +550,7 @@ impl TeleArkApp {
         let action_path = file.local_source_path.clone();
         let download_source = file.download_source(self.telegram_account.as_ref().map(|a| a.id));
         let action = components::icon_button(
-            ("library-row-action", file.id.get()),
+            file.id.element_id("library-row-action"),
             if action_path.is_some() {
                 IconName::FolderOpen
             } else {
@@ -518,7 +580,7 @@ impl TeleArkApp {
         }));
 
         div()
-            .id(("library-row", file.id.get()))
+            .id(file.id.element_id("library-row"))
             .h(theme::ROW_HEIGHT)
             .px_4()
             .flex()
@@ -592,20 +654,6 @@ impl TeleArkApp {
                 )
             })
             .into_any_element()
-    }
-}
-
-fn category_element_id(selection: &str) -> &'static str {
-    match selection {
-        "nav-all" => "library-category-all",
-        "nav-recent" => "library-category-recent",
-        "nav-videos" => "library-category-videos",
-        "nav-docs" => "library-category-documents",
-        "nav-archives" => "library-category-archives",
-        "nav-images" => "library-category-images",
-        "nav-audio" => "library-category-audio",
-        "nav-disk-images" => "library-category-disk-images",
-        _ => "library-category-other",
     }
 }
 

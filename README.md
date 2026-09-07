@@ -3,7 +3,7 @@
 TeleArk turns Telegram collections into a desktop file workspace. Browse ordinary channels, keep encrypted logical files in your own private TeleArk channel, and follow uploads/downloads from a permanent Transfers page. One logical file stays one file even when its encrypted storage uses multiple objects.
 
 > [!IMPORTANT]
-> v0.4.0 is an early alpha. Real Telegram browsing/native downloads and encrypted upload/discovery/restore are connected. Crypto formats remain provisional; independent security review, durable encrypted transfer controls and signed packaging are unfinished. Keep independent copies of important data and recovery material.
+> v0.4.2 is an early alpha. Real Telegram browsing/native downloads and encrypted upload/discovery/restore are connected. Crypto formats remain provisional; independent security review, durable encrypted transfer controls and signed packaging are unfinished. Keep independent copies of important data and recovery material.
 
 ## Start using the workspace
 
@@ -23,7 +23,7 @@ New uploads go only to the private TeleArk channel. Existing Saved Messages pack
 - Encrypted single/multi-file upload with reviewable batches, authenticated manifest discovery, verified restoration and non-overwriting final publication.
 - Background checks for missing/changed local downloads, safe new-task re-download and account-scoped local output history.
 - Password/recovery unlock, explicit recovery-bundle export/restore, password change and recovery rotation. Advanced controls stay folded until needed.
-- Direct Local Library navigation: metadata import, persistent search/filtering, details and open/reveal in Finder. Importing metadata is separate from uploading a file.
+- Library separates accessible local downloads/imports from the current account’s indexed remote files, with independent type filtering, search, paging, details and Open/Reveal/Download actions. Importing metadata is separate from uploading a file.
 - Configurable managed storage, privacy-bounded diagnostics, live/replay transfer details and the full localized [changelog](CHANGELOG.md) in **Settings → About**.
 
 Native downloads currently verify byte length rather than a cryptographic content hash. Encrypted transfers use bounded buffers and a temporary 60 MiB plaintext part ceiling; their task controls/checkpoints are not yet durable. OS Credential unlock remains visibly disabled until its platform adapter is reviewed. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for precise limits.

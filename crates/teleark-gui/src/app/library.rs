@@ -74,11 +74,20 @@ impl TeleArkApp {
             cx.notify();
             return;
         }
+        self.library_scan_cancellation.cancel();
+        self.library_scan_cancellation = Default::default();
+        if self.visual_preview {
+            self.refresh_preview_library(cx);
+            return;
+        }
         let Some(library) = self.library.clone() else {
             cx.notify();
             return;
         };
         let query = self.library_query(cx);
+        let view = self.library_view;
+        let account = self.telegram_account.as_ref().map(|a| a.id);
+        let cancellation = self.library_scan_cancellation.clone();
         self.library_query_generation = self.library_query_generation.wrapping_add(1);
         let generation = self.library_query_generation;
         self.library_content = LibraryContent::Loading;
@@ -88,9 +97,7 @@ impl TeleArkApp {
         cx.notify();
 
         let load = cx.background_spawn(async move {
-            let page = library.search(&query)?;
-            let statistics = library.statistics()?;
-            Ok::<(LibraryPage, LibraryStatistics), ApplicationError>((page, statistics))
+            load_library_snapshot(&library, view, account, query, None, &cancellation)
         });
         self.library_task = Some(cx.spawn(async move |this, cx| {
             let result = load.await;
@@ -98,13 +105,13 @@ impl TeleArkApp {
                 return;
             };
             this.update(cx, |this, cx| {
-                if this.library_query_generation != generation {
+                if this.library_query_generation != generation
+                    || this.telegram_account.as_ref().map(|a| a.id) != account
+                {
                     return;
                 }
                 this.library_content = match result {
-                    Ok((page, statistics)) => {
-                        LibraryContent::from_snapshot(LibrarySnapshot::from_core(page, statistics))
-                    }
+                    Ok(snapshot) => LibraryContent::from_snapshot(snapshot),
                     Err(error) => LibraryContent::Failed(error.kind()),
                 };
                 cx.notify();
@@ -126,28 +133,34 @@ impl TeleArkApp {
         let Some(library) = self.library.clone() else {
             return;
         };
-        let mut query = self.library_query(cx);
-        query.after = Some(after);
+        let query = self.library_query(cx);
+        let view = self.library_view;
+        let account = self.telegram_account.as_ref().map(|a| a.id);
+        let cancellation = self.library_scan_cancellation.clone();
         let generation = self.library_query_generation;
         self.library_loading_more = true;
         self.library_load_more_error = None;
         cx.notify();
 
-        let load = cx.background_spawn(async move { library.search(&query) });
+        let load = cx.background_spawn(async move {
+            load_library_snapshot(&library, view, account, query, Some(after), &cancellation)
+        });
         self.library_more_task = Some(cx.spawn(async move |this, cx| {
             let result = load.await;
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |this, cx| {
-                if this.library_query_generation != generation {
+                if this.library_query_generation != generation
+                    || this.telegram_account.as_ref().map(|a| a.id) != account
+                {
                     return;
                 }
                 this.library_loading_more = false;
                 match result {
                     Ok(page) => {
                         if let Some(snapshot) = this.library_content.snapshot_mut() {
-                            snapshot.append_page(page);
+                            snapshot.append_snapshot(page);
                         }
                     }
                     Err(error) => this.library_load_more_error = Some(error.kind()),
@@ -228,13 +241,14 @@ impl TeleArkApp {
             this.update(cx, |this, cx| {
                 this.import_activity = ImportActivity::Idle;
                 this.import_feedback = feedback;
+                this.library_view = LibraryView::Local;
                 this.refresh_library(cx);
             });
         }));
     }
 
     pub(super) fn library_query(&self, cx: &Context<Self>) -> LibraryQuery {
-        let kind = library_kind_for_selection(self.nav_selection);
+        let kind = library_kind_for_selection(self.library_kind_selection);
         LibraryQuery {
             text: self.search_input.read(cx).value().to_string(),
             filter: LibraryFilter {
@@ -245,5 +259,110 @@ impl TeleArkApp {
             page_size: 200,
             after: None,
         }
+    }
+}
+
+fn load_library_snapshot(
+    library: &DesktopLibrary,
+    view: LibraryView,
+    account: Option<i64>,
+    mut query: LibraryQuery,
+    after: Option<LibraryPageCursor>,
+    cancellation: &teleark_runtime::LocalLibraryCancellation,
+) -> Result<LibrarySnapshot, ApplicationError> {
+    match view {
+        LibraryView::Local => {
+            let after = match after {
+                Some(LibraryPageCursor::Local(cursor)) => Some(cursor),
+                None => None,
+                _ => {
+                    return Err(ApplicationError::new(
+                        teleark_core::ApplicationErrorKind::InvalidRequest,
+                    ));
+                }
+            };
+            library
+                .local_library_page(
+                    account,
+                    &query.text,
+                    query.filter.kinds.first().copied(),
+                    after,
+                    cancellation,
+                )
+                .map(LibrarySnapshot::from_local)
+        }
+        LibraryView::Remote => {
+            let account = account.ok_or_else(|| {
+                ApplicationError::new(teleark_core::ApplicationErrorKind::Authorization)
+            })?;
+            query.filter.source_account_id = Some(teleark_core::AccountId::new(account));
+            query.after = match after {
+                Some(LibraryPageCursor::Remote(cursor)) => Some(cursor),
+                None => None,
+                _ => {
+                    return Err(ApplicationError::new(
+                        teleark_core::ApplicationErrorKind::InvalidRequest,
+                    ));
+                }
+            };
+            let page = library.search(&query)?;
+            Ok(LibrarySnapshot::from_core(
+                page,
+                LibraryStatistics::default(),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn source_tabs_switch_local_and_remote_rows_and_preserve_type_filter(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Library);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert_eq!(app.library_view, LibraryView::Local);
+            assert!(!app.library_content.rows().is_empty());
+            assert!(
+                app.library_content
+                    .rows()
+                    .iter()
+                    .all(|row| row.local_source_path.is_some())
+            );
+        });
+        let remote_tab = cx
+            .debug_bounds("library-tab-remote")
+            .expect("remote tab")
+            .center();
+        cx.simulate_click(remote_tab, gpui::Modifiers::default());
+        app.update(cx, |app, cx| {
+            assert_eq!(app.library_view, LibraryView::Remote);
+            assert!(
+                app.library_content
+                    .rows()
+                    .iter()
+                    .all(|row| row.local_source_path.is_none())
+            );
+            app.library_kind_selection = "nav-docs";
+            app.refresh_library(cx);
+            assert_eq!(app.library_content.rows().len(), 1);
+        });
+        cx.run_until_parked();
+        let local_tab = cx
+            .debug_bounds("library-tab-local")
+            .expect("local tab")
+            .center();
+        cx.simulate_click(local_tab, gpui::Modifiers::default());
+        app.update(cx, |app, _| {
+            assert_eq!(app.library_view, LibraryView::Local);
+            assert_eq!(app.library_content.rows().len(), 1);
+            assert!(app.library_content.rows()[0].local_source_path.is_some());
+        });
     }
 }
