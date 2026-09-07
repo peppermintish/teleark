@@ -1146,7 +1146,9 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
-    ## Unreleased · Everyday usability
+    ## 0.4.1 · Everyday usability
+
+    - Library file details now offer account-scoped downloads for indexed Telegram files, with explicit guidance for unavailable sources. Local files retain Open and Reveal actions.
 
     - Fixed a channel pagination crash caused by re-entering the table update. Cancelled or stale requests cannot restart loading after navigation or account changes.
     - Local Library now explains indexed Telegram files, labels them as indexed instead of uploaded, and shows the original channel and scoped message ID. Removed the placeholder parts table.
@@ -1170,3 +1172,7 @@ file-detail-local-source-note = This file was imported from disk. Importing reco
 file-detail-source-account-id = Source account ID
 
 file-detail-source-chat-id = Source channel ID
+
+library-action-account-required = Download requires the Telegram account that indexed this file. Sign in to that account.
+library-action-source-unavailable = This record has no unique downloadable message. Browse its source channel to locate the file.
+library-action-managed-source = Open TeleArk → Files to unlock and restore this managed file.

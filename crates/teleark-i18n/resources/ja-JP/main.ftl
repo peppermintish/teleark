@@ -1118,7 +1118,9 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
-    ## 未リリース · 日常操作の改善
+    ## 0.4.1 · 日常操作の改善
+
+    - ライブラリの詳細から索引済み Telegram ファイルを元のアカウントでダウンロードできます。利用できない場合は理由を表示し、ローカルファイルの開く・場所を表示操作も維持します。
 
     - チャンネルの自動ページ読み込みでテーブル更新が再入して終了する問題を修正しました。キャンセル済み・古い要求は、画面やアカウントの変更後に読み込みを再開しません。
     - ローカルライブラリで Telegram 索引の意味を説明し、「アップロード済み」を「リモート索引済み」に変更しました。元のチャンネルとアカウント内のメッセージ ID を表示し、仮のパート表を削除しました。
@@ -1142,3 +1144,7 @@ file-detail-local-source-note = このファイルはディスクから取り込
 file-detail-source-account-id = 参照元アカウント ID
 
 file-detail-source-chat-id = 参照元チャンネル ID
+
+library-action-account-required = このファイルを索引した Telegram アカウントにログインしてダウンロードしてください。
+library-action-source-unavailable = この記録には一意のダウンロード元メッセージがありません。元のチャンネルでファイルを確認してください。
+library-action-managed-source = TeleArk → ファイルでロックを解除して、この管理ファイルを復元してください。

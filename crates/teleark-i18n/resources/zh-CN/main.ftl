@@ -1118,7 +1118,9 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
-    ## 尚未发布 · 日常使用改进
+    ## 0.4.1 · 日常使用改进
+
+    - 资料库文件详情现支持按来源账号下载已索引的 Telegram 文件，并说明来源不可用的原因。本地文件保留打开和定位操作。
 
     - 修复频道自动分页重复更新表格导致的崩溃；取消或过期请求不会在切换页面、账号后重新启动加载。
     - 本地文件库明确说明 Telegram 索引文件的来源，将“已上传”改为“已索引”，并显示原频道及账号范围内的消息 ID；移除占位分片表。
@@ -1142,3 +1144,7 @@ file-detail-local-source-note = 此文件从磁盘导入。导入仅记录元数
 file-detail-source-account-id = 来源账号 ID
 
 file-detail-source-chat-id = 来源频道 ID
+
+library-action-account-required = 请登录索引此文件的 Telegram 账号后下载。
+library-action-source-unavailable = 此记录缺少唯一的可下载消息，请前往来源频道查找文件。
+library-action-managed-source = 请前往 TeleArk → 文件，解锁并恢复此加密文件。

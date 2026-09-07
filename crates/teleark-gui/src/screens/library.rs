@@ -1,4 +1,4 @@
-use gpui_kit::component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_kit::component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -484,6 +484,39 @@ impl TeleArkApp {
             |timestamp| SharedString::from(format_unix_millis(self.locale(), timestamp)),
         );
 
+        let action_file = file.clone();
+        let action_path = file.local_source_path.clone();
+        let download_source = file.download_source(self.telegram_account.as_ref().map(|a| a.id));
+        let action = components::icon_button(
+            ("library-row-action", file.id.get()),
+            if action_path.is_some() {
+                IconName::FolderOpen
+            } else {
+                IconName::ArrowDown
+            },
+            self.tr(if action_path.is_some() {
+                "action-open-file"
+            } else {
+                download_source.err().unwrap_or("action-download")
+            }),
+        )
+        .disabled(
+            action_path.is_none()
+                && (download_source.is_err()
+                    || self.library_action_busy
+                    || self.transfers.is_none()),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            if let Some(path) = &action_path {
+                cx.open_with_system(path);
+            } else {
+                this.selected_file = index;
+                this.set_page(Page::FileDetail, cx);
+                this.download_library_file(action_file.clone(), cx);
+            }
+        }));
+
         div()
             .id(("library-row", file.id.get()))
             .h(theme::ROW_HEIGHT)
@@ -511,6 +544,7 @@ impl TeleArkApp {
                 }),
             )
             .child(name)
+            .child(action)
             .child(table_value(
                 format_bytes(self.locale(), file.size_bytes),
                 90.0,

@@ -25,6 +25,28 @@ pub(crate) struct LibraryRowView {
     pub(crate) part_count: u32,
 }
 
+impl LibraryRowView {
+    pub(crate) fn download_source(
+        &self,
+        account: Option<i64>,
+    ) -> Result<(i64, i64, i64), &'static str> {
+        if self.package_id.is_some() || self.encryption_state != EncryptionState::Unencrypted {
+            return Err("library-action-managed-source");
+        }
+        let (Some(owner), Some(chat), Some(message)) = (
+            self.source_account_id,
+            self.source_chat_id,
+            self.source_message_id,
+        ) else {
+            return Err("library-action-source-unavailable");
+        };
+        if account != Some(owner) {
+            return Err("library-action-account-required");
+        }
+        Ok((owner, chat, message))
+    }
+}
+
 impl From<LibraryItem> for LibraryRowView {
     fn from(item: LibraryItem) -> Self {
         let file = item.file;
@@ -183,6 +205,41 @@ mod tests {
             local_source_path: Some("/tmp/source.pdf".into()),
             part_count: 3,
         }
+    }
+
+    #[test]
+    fn indexed_download_keeps_source_identity_and_rejects_unsafe_sources() {
+        let mut row = LibraryRowView::from(item(7, "résumé.pdf"));
+        row.local_source_path = None;
+        row.source_account_id = Some(42);
+        row.source_chat_id = Some(-1007);
+        row.part_count = 1;
+        assert_eq!(row.download_source(Some(42)), Ok((42, -1007, 77)));
+        assert_eq!(
+            row.download_source(Some(43)),
+            Err("library-action-account-required")
+        );
+        assert_eq!(
+            row.download_source(None),
+            Err("library-action-account-required")
+        );
+        row.source_message_id = None;
+        assert_eq!(
+            row.download_source(Some(42)),
+            Err("library-action-source-unavailable")
+        );
+        row.source_message_id = Some(77);
+        row.encryption_state = EncryptionState::Encrypted;
+        assert_eq!(
+            row.download_source(Some(42)),
+            Err("library-action-managed-source")
+        );
+        row.encryption_state = EncryptionState::Unencrypted;
+        row.package_id = Some(PackageId::new(1));
+        assert_eq!(
+            row.download_source(Some(42)),
+            Err("library-action-managed-source")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use gpui_kit::component::{Icon, IconName, scroll::ScrollableElement as _};
+use gpui_kit::component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
 use gpui_kit::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
@@ -195,6 +195,46 @@ impl TeleArkApp {
                             ),
                     ),
             )
+            .when(file.local_source_path.is_none(), |hero| {
+                let source = file.download_source(self.telegram_account.as_ref().map(|a| a.id));
+                let download_file = file.clone();
+                hero.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            components::button(
+                                "library-download",
+                                self.tr("action-download"),
+                                Some(IconName::ArrowDown),
+                                true,
+                            )
+                            .disabled(
+                                source.is_err()
+                                    || self.library_action_busy
+                                    || self.transfers.is_none(),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.download_library_file(download_file.clone(), cx)
+                                },
+                            )),
+                        )
+                        .when_some(source.err(), |body, reason| {
+                            body.child(div().max_w(px(240.0)).text_sm().child(self.tr(reason)))
+                        })
+                        .when_some(self.library_action_error, |body, error| {
+                            body.child(
+                                div()
+                                    .max_w(px(240.0))
+                                    .text_sm()
+                                    .text_color(theme::red())
+                                    .child(self.tr(application_error_message_id(error))),
+                            )
+                        }),
+                )
+            })
             .when_some(file.local_source_path.clone(), |hero, path| {
                 let open_path = path.clone();
                 hero.child(
