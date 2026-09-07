@@ -8,14 +8,15 @@ use std::{
 
 use teleark_core::{ApplicationError, ApplicationErrorKind, FileKind};
 use teleark_telegram::{
-    DownloadObserver, PasswordChallenge, PasswordOutcome, PendingLogin, QrLoginOutcome,
-    ScanCancellation, SignInOutcome, TelegramAccount, TelegramChat, TelegramChatKind,
-    TelegramConfig, TelegramConnection, TelegramError, TelegramErrorKind,
+    ByteTransferObserver, DownloadObserver, PasswordChallenge, PasswordOutcome, PendingLogin,
+    QrLoginOutcome, ScanCancellation, SignInOutcome, TelegramAccount, TelegramChat,
+    TelegramChatKind, TelegramConfig, TelegramConnection, TelegramError, TelegramErrorKind,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    DesktopLibrary, StorageChannelStatus, TelegramCredentialSource, TelegramCredentialsStatus,
+    DesktopLibrary, ManagedStorageChannel, StorageChannelStatus, TelegramCredentialSource,
+    TelegramCredentialsStatus,
     credentials::{ActiveTelegramCredentials, distribution_credentials},
 };
 
@@ -121,11 +122,12 @@ enum TelegramRequest {
         account_id: i64,
         preferred: Option<i64>,
         create: Option<(String, String)>,
-        reply: mpsc::SyncSender<Result<StorageChannelStatus, ApplicationError>>,
+        reply: mpsc::SyncSender<Result<(StorageChannelStatus, bool), ApplicationError>>,
     },
     ValidateStorage {
         account_id: i64,
         chat_id: i64,
+        discover: bool,
         reply: mpsc::SyncSender<Result<TelegramChatSummary, ApplicationError>>,
     },
     AccountAvatar {
@@ -184,6 +186,7 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     DownloadBytes {
+        observer: Option<Arc<dyn ByteTransferObserver>>,
         account_id: i64,
         chat_id: i64,
         message_id: i64,
@@ -199,6 +202,7 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
     },
     UploadBytes {
+        observer: Option<Arc<dyn ByteTransferObserver>>,
         account_id: i64,
         chat_id: i64,
         file_name: String,
@@ -228,6 +232,7 @@ struct WorkerState {
     api_id: Option<i32>,
     login: LoginState,
     chats: BTreeMap<i64, TelegramChat>,
+    storage_creation_guard: crate::storage_channel::StorageCreationGuard,
 }
 
 impl Default for WorkerState {
@@ -237,6 +242,7 @@ impl Default for WorkerState {
             api_id: None,
             login: LoginState::None,
             chats: BTreeMap::new(),
+            storage_creation_guard: Default::default(),
         }
     }
 }
@@ -251,16 +257,29 @@ impl DesktopTelegram {
         self.resolve_storage_channel(library, account_id, None)
     }
 
-    /// Explicit setup action. Discovery runs first on the serialized Telegram
-    /// owner, so an existing channel or an ambiguous result never creates a copy.
-    pub fn create_storage_channel(
+    /// Discovers and manages storage without asking the frontend to choose a
+    /// channel. Creation follows a complete successful discovery only.
+    pub fn ensure_storage_channel(
         &self,
         library: &DesktopLibrary,
         account_id: i64,
         title: String,
         description: String,
-    ) -> Result<StorageChannelStatus, ApplicationError> {
-        self.resolve_storage_channel(library, account_id, Some((title, description)))
+    ) -> Result<ManagedStorageChannel, ApplicationError> {
+        let preferred = None; // SQLite never grants identity or authorizes creation.
+        let (status, created) = self.request("ensure_storage_channel", |reply| {
+            TelegramRequest::DiscoverStorage {
+                account_id,
+                preferred,
+                create: Some((title, description)),
+                reply,
+            }
+        })?;
+        let StorageChannelStatus::Ready(channel) = status else {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        };
+        library.save_storage_channel_id(account_id, channel.id)?;
+        Ok(ManagedStorageChannel { channel, created })
     }
 
     fn resolve_storage_channel(
@@ -270,7 +289,7 @@ impl DesktopTelegram {
         create: Option<(String, String)>,
     ) -> Result<StorageChannelStatus, ApplicationError> {
         let preferred = library.storage_channel_id(account_id)?;
-        let status = self.request("resolve_storage_channel", |reply| {
+        let (status, _) = self.request("resolve_storage_channel", |reply| {
             TelegramRequest::DiscoverStorage {
                 account_id,
                 preferred,
@@ -300,10 +319,28 @@ impl DesktopTelegram {
         account_id: i64,
         chat_id: i64,
     ) -> Result<TelegramChatSummary, ApplicationError> {
+        self.validate_storage_scope(account_id, chat_id, true)
+    }
+
+    pub(crate) fn validate_storage_target(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+    ) -> Result<TelegramChatSummary, ApplicationError> {
+        self.validate_storage_scope(account_id, chat_id, false)
+    }
+
+    fn validate_storage_scope(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        discover: bool,
+    ) -> Result<TelegramChatSummary, ApplicationError> {
         self.request("validate_storage_channel", |reply| {
             TelegramRequest::ValidateStorage {
                 account_id,
                 chat_id,
+                discover,
                 reply,
             }
         })
@@ -622,7 +659,19 @@ impl DesktopTelegram {
         message_id: i64,
         cancellation: Option<TelegramScanCancellation>,
     ) -> Result<Vec<u8>, ApplicationError> {
+        self.download_bytes_observed(account_id, chat_id, message_id, cancellation, None)
+    }
+
+    pub(crate) fn download_bytes_observed(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        message_id: i64,
+        cancellation: Option<TelegramScanCancellation>,
+        observer: Option<Arc<dyn ByteTransferObserver>>,
+    ) -> Result<Vec<u8>, ApplicationError> {
         self.request("download_bytes", |reply| TelegramRequest::DownloadBytes {
+            observer,
             account_id,
             chat_id,
             message_id,
@@ -657,11 +706,31 @@ impl DesktopTelegram {
         caption: impl Into<String>,
         bytes: Vec<u8>,
     ) -> Result<i64, ApplicationError> {
-        self.request("upload_bytes", |reply| TelegramRequest::UploadBytes {
+        self.upload_bytes_observed(
             account_id,
             chat_id,
-            file_name: file_name.into(),
-            caption: caption.into(),
+            file_name.into(),
+            caption.into(),
+            bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn upload_bytes_observed(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        file_name: String,
+        caption: String,
+        bytes: Vec<u8>,
+        observer: Option<Arc<dyn ByteTransferObserver>>,
+    ) -> Result<i64, ApplicationError> {
+        self.request("upload_bytes", |reply| TelegramRequest::UploadBytes {
+            observer,
+            account_id,
+            chat_id,
+            file_name,
+            caption,
             bytes,
             reply,
         })
@@ -731,7 +800,8 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 reply,
             } => {
                 // A timeout abandons the actual RPC future. Creation is not
-                // automatically retried: the next explicit attempt rediscovers.
+                // blindly retried: the guard permits only discovery after an
+                // uncertain create, including when this timeout drops its future.
                 let result = tokio::time::timeout(
                     Duration::from_secs(60),
                     discover_storage(&mut state, account_id, preferred, create),
@@ -744,11 +814,12 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
             TelegramRequest::ValidateStorage {
                 account_id,
                 chat_id,
+                discover,
                 reply,
             } => {
                 let result = tokio::time::timeout(
                     SCAN_PAGE_TIMEOUT,
-                    validate_storage(&state, account_id, chat_id),
+                    validate_storage(&mut state, account_id, chat_id, discover),
                 )
                 .await
                 .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
@@ -857,13 +928,15 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 let _ = reply.send(result);
             }
             TelegramRequest::DownloadBytes {
+                observer,
                 account_id,
                 chat_id,
                 message_id,
                 cancellation,
                 reply,
             } => {
-                let operation = download_bytes(&state, account_id, chat_id, message_id);
+                let operation =
+                    download_bytes(&state, account_id, chat_id, message_id, observer.as_deref());
                 let result = if let Some(cancellation) = cancellation {
                     tokio::select! {
                         biased;
@@ -896,6 +969,7 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 let _ = reply.send(result);
             }
             TelegramRequest::UploadBytes {
+                observer,
                 account_id,
                 chat_id,
                 file_name,
@@ -903,8 +977,16 @@ async fn telegram_loop(mut receiver: tokio::sync::mpsc::Receiver<TelegramRequest
                 bytes,
                 reply,
             } => {
-                let result =
-                    upload_bytes(&state, account_id, chat_id, &file_name, &caption, &bytes).await;
+                let result = upload_bytes(
+                    &state,
+                    account_id,
+                    chat_id,
+                    &file_name,
+                    &caption,
+                    &bytes,
+                    observer.as_deref(),
+                )
+                .await;
                 let _ = reply.send(result);
             }
             TelegramRequest::SignOut { reply } => {
@@ -1150,7 +1232,7 @@ async fn discover_storage(
     account_id: i64,
     preferred: Option<i64>,
     create: Option<(String, String)>,
-) -> Result<StorageChannelStatus, ApplicationError> {
+) -> Result<(StorageChannelStatus, bool), ApplicationError> {
     require_account(state, account_id).await?;
     let dialogs = connection_ref(state)?
         .list_dialogs(MAX_DIALOGS)
@@ -1160,30 +1242,88 @@ async fn discover_storage(
         .discover_storage_channels(&dialogs)
         .await
         .map_err(map_telegram_error)?;
-    let status = crate::storage_channel::resolve_storage_channel(
-        preferred,
-        candidates.iter().map(chat_summary).collect(),
-    );
+    let summaries = candidates.iter().map(chat_summary).collect();
+    let status = if create.is_some() {
+        crate::storage_channel::resolve_managed_storage_channel(preferred, summaries)
+    } else {
+        crate::storage_channel::resolve_storage_channel(preferred, summaries)
+    };
     state.chats = dialogs.into_iter().map(|chat| (chat.id(), chat)).collect();
-    if let (StorageChannelStatus::Missing, Some((title, description))) = (&status, create) {
+    if let (StorageChannelStatus::Ready(summary), Some((title, description))) = (&status, &create) {
+        let chat = state
+            .chats
+            .get(&summary.id)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
         let channel = connection_ref(state)?
-            .create_storage_channel(&title, &description)
+            .ensure_storage_branding(chat, title, description)
             .await
             .map_err(map_telegram_error)?;
         let summary = chat_summary(&channel);
         state.chats.insert(channel.id(), channel);
-        Ok(StorageChannelStatus::Ready(summary))
+        state.storage_creation_guard.resolved(account_id);
+        return Ok((StorageChannelStatus::Ready(summary), false));
+    }
+    if let (StorageChannelStatus::Missing, Some((title, description))) = (&status, create) {
+        state.storage_creation_guard.begin(account_id)?;
+        let channel = connection_ref(state)?
+            .create_storage_channel(&title, &description)
+            .await
+            .map_err(map_telegram_error)?;
+        state.chats.insert(channel.id(), channel.clone());
+        // Creation is not atomic across devices. Re-discover before enabling
+        // storage and reject competing remote candidates rather than choosing.
+        let dialogs = connection_ref(state)?
+            .list_dialogs(MAX_DIALOGS)
+            .await
+            .map_err(map_telegram_error)?;
+        let candidates = connection_ref(state)?
+            .discover_storage_channels(&dialogs)
+            .await
+            .map_err(map_telegram_error)?;
+        if candidates.len() != 1 || candidates[0].id() != channel.id() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        let channel = connection_ref(state)?
+            .ensure_storage_branding(&channel, &title, &description)
+            .await
+            .map_err(map_telegram_error)?;
+        let summary = chat_summary(&channel);
+        state.chats.insert(channel.id(), channel);
+        state.storage_creation_guard.resolved(account_id);
+        Ok((StorageChannelStatus::Ready(summary), true))
     } else {
-        Ok(status)
+        Ok((status, false))
     }
 }
 
 async fn validate_storage(
-    state: &WorkerState,
+    state: &mut WorkerState,
     account_id: i64,
     chat_id: i64,
+    discover: bool,
 ) -> Result<TelegramChatSummary, ApplicationError> {
     require_account(state, account_id).await?;
+    if discover {
+        let dialogs = connection_ref(state)?
+            .list_dialogs(MAX_DIALOGS)
+            .await
+            .map_err(map_telegram_error)?;
+        let candidates = connection_ref(state)?
+            .discover_storage_channels(&dialogs)
+            .await
+            .map_err(map_telegram_error)?;
+        let [chat] = candidates.as_slice() else {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        };
+        if chat.id() != chat_id {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::PermissionDenied,
+            ));
+        }
+        state.chats = dialogs.into_iter().map(|chat| (chat.id(), chat)).collect();
+    }
+    // The retained peer is only an addressing hint. Fresh Telegram metadata and
+    // the pinned account/channel identity remain mandatory for every file.
     let chat = state
         .chats
         .get(&chat_id)
@@ -1353,11 +1493,12 @@ async fn download_bytes(
     account_id: i64,
     chat_id: i64,
     message_id: i64,
+    observer: Option<&dyn ByteTransferObserver>,
 ) -> Result<Vec<u8>, ApplicationError> {
     require_account(state, account_id).await?;
     let (connection, file) = fetch_file(state, chat_id, message_id).await?;
     connection
-        .download_bytes(&file)
+        .download_bytes_observed(&file, observer)
         .await
         .map_err(map_telegram_error)
 }
@@ -1375,7 +1516,12 @@ async fn search_files(
         .get(&chat_id)
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
     connection_ref(state)?
-        .search_files_exact_caption(chat, caption, limit)
+        .search_files_exact_caption_with_recent(
+            chat,
+            caption,
+            limit,
+            caption == crate::transfer::MANIFEST_CAPTION,
+        )
         .await
         .map_err(map_telegram_error)
         .map(|files| files.iter().map(file_summary).collect())
@@ -1388,6 +1534,7 @@ async fn upload_bytes(
     file_name: &str,
     caption: &str,
     bytes: &[u8],
+    observer: Option<&dyn ByteTransferObserver>,
 ) -> Result<i64, ApplicationError> {
     require_account(state, account_id).await?;
     let chat = state
@@ -1395,7 +1542,7 @@ async fn upload_bytes(
         .get(&chat_id)
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
     connection_ref(state)?
-        .upload_bytes(chat, bytes, file_name, caption)
+        .upload_bytes_observed(chat, bytes, file_name, caption, observer)
         .await
         .map(|sent| sent.message_id)
         .map_err(map_telegram_error)

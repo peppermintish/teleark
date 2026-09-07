@@ -991,21 +991,18 @@ storage-nav-title = TeleArk
 
 storage-private-label = 専用のプライベートチャンネル
 
-storage-remote-description = TeleArk が管理する非公開の暗号化ファイル保管場所です。復元のため、このチャンネルとファイルを保持してください。
+storage-remote-description = TeleArkが作成・自動管理する専用ストレージです。他のアプリでこのチャンネルやメッセージ・ファイルを編集・削除しないでください。ファイルを読み取れなくなったり、復元できなくなるおそれがあります。ファイルはTeleArkで管理してください。
 
-storage-setup-title = ファイルの保管場所を作成
+storage-setup-title = プライベートストレージを準備中
 
-storage-setup-description = あなたが所有する Telegram のプライベートチャンネルを作成します。TeleArk は暗号化ファイルをここに保存し、自動で認識します。保存済みメッセージは自由にお使いいただけます。
+storage-setup-description = TeleArkはすべての端末でTelegramから直接チャンネルを検索し、利用前に識別情報を検証します。候補の重複や識別情報の破損がある場合は準備を停止し、任意のチャンネルを選びません。
 
-storage-create-action = プライベートチャンネルを作成
 
-storage-discover-action = 既存の TeleArk チャンネルを探す
 
-storage-loading = プライベートストレージを確認中…
+storage-loading = TeleArkがプライベートチャンネルを検索・準備しています…
 
-storage-unavailable = 保存されたチャンネルを利用できません。更新するか、下から既存の TeleArk チャンネルを選んでください。自動で置き換わることはありません。
 
-storage-setup-error = チャンネルを確認できませんでした。更新してください。中断前に作成が完了している場合があります。
+storage-setup-error = チャンネルの準備を完了できませんでした。一時的なエラーは自動で再確認し、この画面に戻った際にも確認します。既存のファイルは変更されません。
 
 storage-locked-title = ファイルはロックされています
 
@@ -1015,7 +1012,7 @@ storage-guide-done = わかりました
 
 storage-guide-private-title = 1. あなた専用のチャンネル
 
-storage-guide-private-body = あなたが所有者です。メンバーや公開リンクは追加されません。再インストール時に見つけられるよう、説明文の識別行を残してください。
+storage-guide-private-body = TeleArkはアカウントごとに1つの非公開ストレージチャンネルを管理します。他のアプリでチャンネルやメッセージ・ファイルを編集・削除すると、読み取りや復元ができなくなるおそれがあります。ファイルはTeleArkで管理してください。
 
 storage-guide-files-title = 2. 完全なファイルを扱う
 
@@ -1118,6 +1115,16 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.4.3 · アップロードの各段階を表示
+
+    - 保存先の確認、読み込みと暗号化、Telegram の応答待ち、データ送信、リモート確認、再ダウンロードと検証、一覧情報の公開を表示し、経過時間と現在のオブジェクトのバイト進捗を確認できます。
+    - 暗号化パート全体の送信と検証が終わるまで進捗がゼロのままになる問題を修正しました。Telegram が送信ストリームを読み込むたびに進捗を更新し、最終処理の完了後にのみ 100% を表示します。
+    - 折りたたんだアップロードバッチにも現在のファイルの処理状況を表示します。通信前の確認に先立ってキューを表示し、保存先の完全な検出はバッチごとに一度実施します。各ファイルの送信先は引き続き再確認します。
+    - プライベートストレージのリモート識別情報を自動確認し、別の端末からの検出に対応しました。管理対象チャンネルのメッセージを保持する理由を説明し、識別情報の競合や破損がある場合はアップロードを停止します。
+    - 新規ログインは QR コードを標準とし、電話番号でのログインも選択できます。アカウント切り替えには確認が必要で、準備中や実行中のアップロードを中断しません。
+    - ライブラリで選択したファイルの保存場所の一括表示と、アカウントを確認した一括ダウンロードに対応しました。アップロードしたファイルは直ちに表示され、古いスキャン結果で完了記録が置き換わる問題を修正しました。
+    - 英語、簡体字中国語、日本語と macOS のバージョン情報を更新しました。データベースと暗号化形式は変更していません。暗号化転送の操作と独立したセキュリティ検証は引き続き整備中です。
+
     ## 0.4.2 · わかりやすいライブラリとコンパクトな転送一覧
 
     - 「すべてのファイル」を「ローカルファイル」と「リモートファイル」に分けました。ローカルには現在のアカウントでダウンロードしたアクセス可能なファイルと取り込んだ元ファイル、リモートにはアカウントの索引済み Telegram ファイルを表示します。種類は別のフィルターで絞り込めます。
@@ -1169,3 +1176,39 @@ library-local-empty-title = ローカルファイルが見つかりません
 library-local-empty-description = ファイルをダウンロードするか、このコンピューターから取り込んでください。削除済みやアクセスできないファイルは表示されません。検索と種類の絞り込みも確認してください。
 library-remote-empty-description = チャンネルを閲覧または索引作成するか、検索と種類の絞り込みを解除してください。
 file-detail-downloaded-source-note = このローカルコピーは以下のソースからダウンロードされました。現在のサイズと日時はディスク上のファイルから取得しています。
+
+library-select-loaded = 読み込み済みファイルを選択（最大5,000件）
+library-select-file = ファイルを選択
+library-selected-count = { $count } 件を選択中
+
+account-switch-confirm-title = アカウントを切り替えますか？
+account-switch-confirm-description = 続行すると現在のアカウントからログアウトします。再び使用するにはログインが必要です。ダウンロード済みファイルと転送履歴は保持されます。
+account-switch-confirm-action = ログアウトして切り替える
+account-use-phone = 電話番号でログイン
+account-use-qr = QRコードでログイン
+account-qr-loading = QRコードを読み込み中…
+account-qr-unavailable = QRコードを表示できません
+
+storage-auto-created = TeleArkがプライベートストレージ用チャンネルを作成しました。準備が整い、自動で管理されます。
+
+storage-auto-found = TeleArkがプライベートストレージ用チャンネルを見つけて接続しました。自動で管理されます。
+
+
+storage-remote-title = 🔒 TeleArk · Managed Storage
+
+storage-identity-conflict = ストレージ用チャンネルを一意に確認できないため、誤った書き込みを防ぐために準備を停止しました。既存のチャンネルやファイルは変更しません。
+
+storage-identity-invalid = チャンネルの識別情報またはプライバシー設定が一致しないため、準備を停止しました。チャンネルやファイルを削除しないでください。
+
+transfer-upload-preparing = 選択したファイルをアップロードキューに追加する準備をしています…
+
+transfer-upload-checking-storage = 保存チャンネルを確認中
+transfer-upload-checking-target = アップロード先を確認中
+transfer-upload-reading-encrypting = 読み込み・暗号化中
+transfer-upload-sending-bytes = 暗号化データを送信中
+transfer-upload-confirming-message = リモートメッセージを確認中
+transfer-upload-verifying-bytes = 再ダウンロード・検証中
+transfer-upload-publishing-manifest = ファイル一覧情報を公開中
+transfer-upload-activity-elapsed = { $phase } · 経過 { $elapsed }
+transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
+transfer-upload-waiting-telegram = Telegram の応答待ち

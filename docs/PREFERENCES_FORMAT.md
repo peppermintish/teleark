@@ -84,24 +84,50 @@ Max Throughput save/reopen round trip. See ADRs [0010](adr/0010-native-download-
 
 ## Account-scoped private channel binding
 
-Outside the preference namespace, `storage-channel.v1.account.<account-id>`
-stores the canonical positive base-10 chat ID. Account IDs are likewise positive
-canonical decimal integers. Unknown/malformed bindings are errors rather than
-permission to create or select an arbitrary channel. Display names are never
-identity. SQLite is a convenience binding; Telegram metadata supports
-rediscovery after local database loss.
+`storage-channel.v1.account.<account-id>` retains its canonical positive decimal
+chat ID encoding as a cache for compatibility. Desktop automatic management
+never reads it to establish identity or authorize creation/repair. Successful
+remote verification replaces a stale cache. No local creation-intent key exists.
 
-The remote channel description begins with the exact line `teleark:storage:v1`.
-Following lines may contain a localized description. Discovery requires full
-metadata: creator, private broadcast, not left/min/mega/gigagroup, no username or
-username aliases, and the marker on the matching full channel. It checks at most
-64 owned-private candidates from a dialog snapshot bounded to 10,000; a snapshot
-at that ceiling or incomplete inspection fails rather than proving absence.
-A saved valid ID survives rename. Missing/invalid saved bindings report
-Unavailable; multiple unbound candidates report Choose. The user must select a
-validated candidate. Create first discovers, creates only from Missing, and does
-not blindly retry. Creation/discovery has a 60-second deadline; validation has
-20 seconds. No public username, invite, member or message is added by creation.
+Remote text is explicit UTF-8, not Rust/Serde layout. The v2 description is:
+
+```text
+teleark:storage:v2
+identity:<positive canonical decimal i32 message ID>
+<localized warning, at most 200 Unicode scalar values>
+```
+
+The identified pinned, non-forwarded message has this v1 record:
+
+```text
+teleark:channel-identity:v1
+account:<current positive canonical decimal i64 account ID>
+channel:<actual positive canonical decimal i64 channel ID>
+
+<nonempty localized warning>
+```
+
+Writers use LF separators without a trailing LF. Readers require the exact
+record prefix and account/channel values, and bound the whole message to 2,048
+UTF-8 bytes. Description parsing uses lines and rejects noncanonical, zero,
+negative, overflowing or unknown-version pointers. The warning body is display
+text, not identity authority. Fixtures `storage-identity-v1.txt` and
+`storage-description-v2.txt` in `teleark-telegram/tests/fixtures` freeze these
+encodings. Existing `teleark:storage:v1` first-line descriptions remain a legacy
+upgrade input only when remote title/ownership/privacy checks also pass; they
+are not accepted for Vault writes until upgraded and reverified.
+
+Discovery is bounded to a complete snapshot below 10,000 dialogs and 64 owned
+or reserved-name channel inspections, including owned public channels. It checks
+full creator/private broadcast metadata, no username/aliases, one participant
+and administrator, no bots, linked discussion or message TTL. The description
+pointer must resolve to a pinned original message whose account/channel IDs
+match Telegram. Multiple candidates and damaged recognizable channels fail
+closed. Setup is bounded to 60 seconds; Vault validation to 20 seconds. Legacy
+initialization searches up to 64 identity-message results before sending/pinning
+a record, writes the pointer and verifies again. No members, public username or
+invitation are created. See [ADR 0015](adr/0015-remote-authoritative-storage-identity.md)
+for atomic-creation and app-origin proof limitations.
 
 `native-download-account-migration.v1` is a separate one-time migration marker.
 Its writer emits `resolved`; presence prevents later reassignment of legacy

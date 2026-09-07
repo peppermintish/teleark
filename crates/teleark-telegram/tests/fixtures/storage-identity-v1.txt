@@ -1,0 +1,5 @@
+teleark:channel-identity:v1
+account:100
+channel:700
+
+Created and managed by TeleArk. Do not edit or delete.

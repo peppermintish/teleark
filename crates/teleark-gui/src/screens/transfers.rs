@@ -21,7 +21,7 @@ use teleark_runtime::{
     ChannelDownloadVerification, ControllerDecision, ControllerDecisionOutcome,
     ControllerDecisionReason, ControllerPhase, DownloadPartState, TransferBottleneck,
     TransferControlParameters, TransferTelemetrySnapshot, TunableParameter, VaultTransferDirection,
-    VaultTransferSnapshot, VaultTransferState,
+    VaultTransferSnapshot, VaultTransferState, VaultUploadActivity, VaultUploadPhase,
 };
 
 use crate::{
@@ -151,7 +151,16 @@ impl TeleArkApp {
                 .map(|path| path.to_string_lossy().into_owned().into())
                 .unwrap_or_else(|| self.tr("transfer-value-unavailable")),
         };
+        let activity = snapshot.upload_activity.as_ref().filter(|_| {
+            matches!(
+                snapshot.state,
+                VaultTransferState::Queued | VaultTransferState::Running
+            )
+        });
+        let transferred = vault_display_bytes(snapshot);
         TransferRow {
+            activity: activity.map(|activity| self.tr(upload_phase_message_id(activity.phase))),
+            activity_detail: activity.map(|activity| self.upload_activity_detail(activity)),
             runtime_task_id: None,
             vault_transfer_id: Some(snapshot.id),
             vault_batch_id: snapshot.batch_id,
@@ -166,9 +175,9 @@ impl TeleArkApp {
             source: self.tr("storage-channel-title"),
             direction,
             size: format_bytes(self.locale(), snapshot.size_bytes).into(),
-            transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
+            transferred: format_bytes(self.locale(), transferred).into(),
             progress: transfer_progress(
-                snapshot.transferred_bytes,
+                transferred,
                 snapshot.size_bytes,
                 state == TransferState::Completed,
             ),
@@ -197,6 +206,30 @@ impl TeleArkApp {
             ),
             state,
             destination,
+        }
+    }
+
+    fn upload_activity_detail(&self, activity: &VaultUploadActivity) -> SharedString {
+        let args = MessageArgs::new()
+            .with(
+                "phase",
+                self.tr(upload_phase_message_id(activity.phase)).to_string(),
+            )
+            .with(
+                "elapsed",
+                format_duration_millis(
+                    self.locale(),
+                    u64::try_from(activity.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
+            );
+        if activity.total > 0 {
+            self.tr_with(
+                "transfer-upload-activity-bytes",
+                args.with("done", format_bytes(self.locale(), activity.bytes))
+                    .with("total", format_bytes(self.locale(), activity.total)),
+            )
+        } else {
+            self.tr_with("transfer-upload-activity-elapsed", args)
         }
     }
 
@@ -233,8 +266,23 @@ impl TeleArkApp {
             .iter()
             .fold(0_u64, |sum, item| sum.saturating_add(item.size_bytes));
         let transferred = items.iter().fold(0_u64, |sum, item| {
-            sum.saturating_add(item.transferred_bytes)
+            sum.saturating_add(vault_display_bytes(item))
         });
+        let active = items
+            .iter()
+            .find(|item| item.state == VaultTransferState::Running)
+            .or_else(|| {
+                items.iter().find(|item| {
+                    item.state == VaultTransferState::Queued && item.upload_activity.is_some()
+                })
+            });
+        let active_row = active.map(|item| self.transfer_row_from_vault_snapshot(item));
+        row.activity = active_row.as_ref().and_then(|row| row.activity.clone());
+        row.activity_detail = active_row
+            .as_ref()
+            .and_then(|row| row.activity_detail.clone());
+        row.speed =
+            active_row.map_or_else(|| self.tr("transfer-value-unavailable"), |row| row.speed);
         row.state = aggregate_transfer_states(
             &items
                 .iter()
@@ -269,6 +317,8 @@ impl TeleArkApp {
         );
         let source = self.telegram_source_name(snapshot.chat_id);
         TransferRow {
+            activity: None,
+            activity_detail: None,
             runtime_task_id: Some(snapshot.id),
             vault_transfer_id: None,
             vault_batch_id: None,
@@ -343,6 +393,8 @@ impl TeleArkApp {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         TransferRow {
+            activity: None,
+            activity_detail: None,
             runtime_task_id: None,
             vault_transfer_id: None,
             vault_batch_id: None,
@@ -496,6 +548,10 @@ impl TeleArkApp {
                     total.saturating_add(snapshot.telemetry.goodput_bytes_per_second)
                 })
         });
+        let upload_activity = all_transfer_rows
+            .iter()
+            .filter(|row| row.direction == TransferDirection::Upload)
+            .find_map(|row| row.activity_detail.clone());
         let transfer_rows = visible_transfer_rows(
             all_transfer_rows,
             self.nav_selection,
@@ -558,7 +614,11 @@ impl TeleArkApp {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::blue())
-                    .child(format_speed(self.locale(), total_speed)),
+                    .child(if total_speed == 0 && uploading > 0 {
+                        self.tr("transfer-value-unavailable").to_string()
+                    } else {
+                        format_speed(self.locale(), total_speed)
+                    }),
             )
             .child(
                 components::button(
@@ -891,43 +951,45 @@ impl TeleArkApp {
             ))
             .when(!layout.is_compact(), |footer| footer.child(div().flex_1()));
 
-        let table = div()
-            .flex_1()
-            .min_h_0()
-            .mx(px(padding))
-            .rounded(theme::RADIUS_MEDIUM)
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::surface())
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(header)
-            .when(has_rows, |table| table.child(virtual_rows))
-            .when(!has_rows, |table| {
-                table.child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap_3()
-                        .child(
-                            Icon::new(crate::assets::Symbol::Transfer)
-                                .size(px(34.0))
-                                .text_color(theme::blue()),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme::text_secondary())
-                                .child(self.tr("transfer-empty")),
-                        ),
-                )
-            })
-            .child(table_footer);
+        let table =
+            div()
+                .flex_1()
+                .min_h_0()
+                .mx(px(padding))
+                .rounded(theme::RADIUS_MEDIUM)
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::surface())
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(header)
+                .when(has_rows, |table| table.child(virtual_rows))
+                .when(!has_rows, |table| {
+                    table.child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_3()
+                            .child(
+                                Icon::new(crate::assets::Symbol::Transfer)
+                                    .size(px(34.0))
+                                    .text_color(theme::blue()),
+                            )
+                            .child(div().text_sm().text_color(theme::text_secondary()).child(
+                                self.tr(if self.upload_in_flight {
+                                    "transfer-waiting"
+                                } else {
+                                    "transfer-empty"
+                                }),
+                            )),
+                    )
+                })
+                .child(table_footer);
 
         let main = div()
             .flex_1()
@@ -937,6 +999,21 @@ impl TeleArkApp {
             .flex_col()
             .child(summary)
             .child(filters)
+            .when(self.upload_in_flight || upload_activity.is_some(), |main| {
+                main.child(
+                    div()
+                        .id("upload-preflight-status")
+                        .debug_selector(|| "upload-preflight-status".into())
+                        .flex_none()
+                        .px(px(padding))
+                        .py_2()
+                        .text_sm()
+                        .text_color(theme::blue())
+                        .child(
+                            upload_activity.unwrap_or_else(|| self.tr("transfer-upload-preparing")),
+                        ),
+                )
+            })
             .when(
                 self.transfer_controls_expanded
                     || selection_count > 0
@@ -1165,37 +1242,21 @@ impl TeleArkApp {
             let available = self.local_presence_for_path(&destination)
                 == Some(teleark_runtime::LocalFilePresence::Present);
             if available {
-                actions = actions
-                    .child(
-                        components::icon_button(
-                            ("transfer-open", index),
-                            IconName::ArrowRight,
-                            self.tr("action-open-file"),
-                        )
-                        .ghost()
-                        .h(px(26.0))
-                        .w(px(26.0))
-                        .disabled(self.visual_preview)
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            cx.open_with_system(&destination);
-                        }),
+                actions = actions.child(
+                    components::icon_button(
+                        ("transfer-reveal", index),
+                        IconName::FolderOpen,
+                        self.tr("action-show-in-folder"),
                     )
-                    .child(
-                        components::icon_button(
-                            ("transfer-reveal", index),
-                            IconName::FolderOpen,
-                            self.tr("action-show-in-folder"),
-                        )
-                        .ghost()
-                        .h(px(26.0))
-                        .w(px(26.0))
-                        .disabled(self.visual_preview)
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            cx.reveal_path(&reveal);
-                        }),
-                    );
+                    .ghost()
+                    .h(px(26.0))
+                    .w(px(26.0))
+                    .disabled(self.visual_preview)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.reveal_path(&reveal);
+                    }),
+                );
             }
             if !available && let Some(id) = transfer.runtime_task_id {
                 actions = actions.child(
@@ -1434,12 +1495,23 @@ impl TeleArkApp {
                             .justify_between()
                             .text_size(px(10.0))
                             .text_color(tone.foreground())
-                            .child(self.tr(transfer.state.message_id()))
-                            .child(format_percent(
-                                self.locale(),
-                                f64::from(transfer.progress) / 100.0,
-                                0,
-                            )),
+                            .child(
+                                div().min_w_0().truncate().child(
+                                    transfer
+                                        .activity
+                                        .clone()
+                                        .unwrap_or_else(|| self.tr(transfer.state.message_id())),
+                                ),
+                            )
+                            .child(if transfer.activity.is_some() && transfer.progress == 0.0 {
+                                self.tr("transfer-value-unavailable").to_string()
+                            } else {
+                                format_percent(
+                                    self.locale(),
+                                    f64::from(transfer.progress) / 100.0,
+                                    0,
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -2593,7 +2665,10 @@ impl TeleArkApp {
                             .text_xs()
                             .child(self.tr("table-status"))
                             .child(components::badge(
-                                self.tr(transfer.state.message_id()),
+                                transfer
+                                    .activity
+                                    .clone()
+                                    .unwrap_or_else(|| self.tr(transfer.state.message_id())),
                                 tone,
                             )),
                     )
@@ -2604,12 +2679,25 @@ impl TeleArkApp {
                             .justify_between()
                             .text_sm()
                             .child(self.tr("table-progress"))
-                            .child(format_percent(
-                                self.locale(),
-                                f64::from(transfer.progress) / 100.0,
-                                1,
-                            )),
+                            .child(if transfer.activity.is_some() && transfer.progress == 0.0 {
+                                self.tr("transfer-value-unavailable").to_string()
+                            } else {
+                                format_percent(
+                                    self.locale(),
+                                    f64::from(transfer.progress) / 100.0,
+                                    1,
+                                )
+                            }),
                     )
+                    .when_some(transfer.activity_detail.clone(), |header, activity| {
+                        header.child(
+                            div()
+                                .mt_2()
+                                .text_xs()
+                                .text_color(theme::blue())
+                                .child(activity),
+                        )
+                    })
                     .child(div().mt_2().child(components::progress(
                         transfer.progress,
                         tone,
@@ -3092,11 +3180,37 @@ fn transfer_state(state: ChannelDownloadState) -> TransferState {
     }
 }
 
+fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
+    match phase {
+        VaultUploadPhase::CheckingStorage => "transfer-upload-checking-storage",
+        VaultUploadPhase::CheckingTarget => "transfer-upload-checking-target",
+        VaultUploadPhase::Preparing => "transfer-upload-reading-encrypting",
+        VaultUploadPhase::WaitingForTelegram => "transfer-upload-waiting-telegram",
+        VaultUploadPhase::Uploading => "transfer-upload-sending-bytes",
+        VaultUploadPhase::SendingMessage => "transfer-upload-confirming-message",
+        VaultUploadPhase::Verifying => "transfer-upload-verifying-bytes",
+        VaultUploadPhase::Publishing => "transfer-upload-publishing-manifest",
+    }
+}
+
+fn vault_display_bytes(snapshot: &VaultTransferSnapshot) -> u64 {
+    snapshot
+        .upload_activity
+        .as_ref()
+        .map_or(snapshot.transferred_bytes, |activity| {
+            snapshot
+                .transferred_bytes
+                .max(activity.uploaded_bytes)
+                .min(snapshot.size_bytes)
+        })
+}
+
 fn transfer_progress(transferred: u64, total: u64, completed: bool) -> f32 {
     if total == 0 {
         if completed { 100.0 } else { 0.0 }
     } else {
-        (transferred as f64 * 100.0 / total as f64).clamp(0.0, 100.0) as f32
+        (transferred as f64 * 100.0 / total as f64).clamp(0.0, if completed { 100.0 } else { 99.0 })
+            as f32
     }
 }
 
@@ -3270,6 +3384,111 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn upload_phases_remain_visible_in_collapsed_batches_and_terminal_rows_are_final(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        let mut completed = VaultTransferSnapshot {
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
+            id: 1,
+            account_id: 7,
+            chat_id: 90,
+            batch_id: Some(1),
+            queued_at_unix_ms: 1,
+            direction: VaultTransferDirection::Upload,
+            file_name: "京都 — fixture.bin".into(),
+            package_id: None,
+            size_bytes: 60 * 1024 * 1024,
+            transferred_bytes: 0,
+            completed_parts: 0,
+            part_count: 1,
+            started_at_unix_ms: 1,
+            duration_ms: None,
+            average_bytes_per_second: None,
+            destination: None,
+            session_log_path: None,
+            telemetry: TransferTelemetrySnapshot {
+                phase: ControllerPhase::Ramp,
+                parameters: TransferControlParameters::conservative_upload(),
+                goodput_bytes_per_second: 0,
+                encryption_bytes_per_second: 0,
+                disk_bytes_per_second: 0,
+                round_trip_time_p95_millis: 0,
+                estimated_bdp_bytes: 0,
+                inflight_bytes: 0,
+                target_inflight_bytes: 0,
+                cpu_utilization_basis_points: 0,
+                encrypted_queue_length: 0,
+                network_waiting_for_encryption_millis: 0,
+                encryption_waiting_for_network_millis: 0,
+                bottleneck: TransferBottleneck::Unknown,
+                parts: Default::default(),
+                queues: Default::default(),
+                memory: Default::default(),
+                memory_budget_bytes: 512 * 1024 * 1024,
+                lanes: vec![],
+                decisions: vec![],
+            },
+            state: VaultTransferState::Running,
+        };
+        completed.state = VaultTransferState::Completed;
+        completed.transferred_bytes = completed.size_bytes;
+        let mut active = completed.clone();
+        active.id = 2;
+        active.state = VaultTransferState::Running;
+        active.transferred_bytes = 0;
+        for phase in [
+            VaultUploadPhase::CheckingStorage,
+            VaultUploadPhase::CheckingTarget,
+            VaultUploadPhase::Preparing,
+            VaultUploadPhase::WaitingForTelegram,
+            VaultUploadPhase::Uploading,
+            VaultUploadPhase::SendingMessage,
+            VaultUploadPhase::Verifying,
+            VaultUploadPhase::Publishing,
+        ] {
+            let mut activity = VaultUploadActivity::new(phase);
+            activity.uploaded_bytes = active.size_bytes / 2;
+            activity.bytes = 512 * 1024;
+            activity.total = 64 * 1024 * 1024;
+            active.upload_activity = Some(activity);
+            app.update(cx, |app, cx| {
+                let row = app.transfer_row_from_vault_snapshot(&active);
+                assert_eq!(row.progress, 50.0);
+                assert_eq!(row.activity, Some(app.tr(upload_phase_message_id(phase))));
+                let batch = app
+                    .transfer_row_from_vault_batch(1, &[&completed, &active])
+                    .expect("batch row");
+                assert_eq!(batch.activity, row.activity);
+                app.preview_transfer_rows = vec![batch];
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("upload-preflight-status").is_some());
+        }
+        app.update(cx, |app, cx| {
+            active
+                .upload_activity
+                .as_mut()
+                .expect("upload activity")
+                .uploaded_bytes = active.size_bytes;
+            assert_eq!(app.transfer_row_from_vault_snapshot(&active).progress, 99.0);
+            active.state = VaultTransferState::Failed(teleark_core::ApplicationErrorKind::Network);
+            let row = app.transfer_row_from_vault_snapshot(&active);
+            assert!(row.activity.is_none());
+            assert!(row.activity_detail.is_none());
+            assert_eq!(row.state, TransferState::Failed);
+            app.preview_transfer_rows = vec![row];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upload-preflight-status").is_none());
+        assert_eq!(transfer_progress(100, 100, false), 99.0);
+        assert_eq!(transfer_progress(100, 100, true), 100.0);
+    }
 
     #[gpui_kit::test]
     fn batch_and_file_rows_match_library_height(cx: &mut gpui_kit::TestAppContext) {

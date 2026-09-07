@@ -112,11 +112,12 @@ impl TeleArkApp {
             .collect();
         let storage = TelegramChatSummary {
             id: 9000,
-            name: "TeleArk".into(),
+            name: self.tr("storage-remote-title").to_string(),
             username: None,
             kind: TelegramChatKind::Channel,
         };
         self.storage_status = teleark_runtime::StorageChannelStatus::Ready(storage);
+        self.storage_notice = Some("storage-auto-found");
         self.selected_chat_id = Some(9000);
         self.vault_status.configured = true;
         self.vault_status.locked = state == "locked" || state == "unlock";
@@ -278,9 +279,50 @@ impl TeleArkApp {
         self.preview_transfer_rows = rows;
         match state.as_str() {
             "returning" => self.page = Page::Account,
+            "upload-progress" => {
+                self.page = Page::Transfers;
+                self.nav_selection = "nav-uploads";
+                self.upload_in_flight = true;
+                self.vault_activity = VaultActivity::Working;
+                let mut row = fixture[0].clone();
+                row.name = "京都 — Archive.zip".into();
+                row.source = "TeleArk".into();
+                row.direction = crate::mock::TransferDirection::Upload;
+                row.state = crate::mock::TransferState::Uploading;
+                row.progress = 26.0 / 60.0 * 100.0;
+                row.activity = Some(self.tr("transfer-upload-sending-bytes"));
+                row.activity_detail = Some(
+                    self.tr_with(
+                        "transfer-upload-activity-bytes",
+                        MessageArgs::new()
+                            .with(
+                                "phase",
+                                self.tr("transfer-upload-sending-bytes").to_string(),
+                            )
+                            .with("done", format_bytes(self.locale(), 26 * 1024 * 1024))
+                            .with("total", format_bytes(self.locale(), 60 * 1024 * 1024))
+                            .with(
+                                "elapsed",
+                                teleark_i18n::format::format_duration_millis(self.locale(), 28_000),
+                            ),
+                    ),
+                );
+                row.size = format_bytes(self.locale(), 60 * 1024 * 1024).into();
+                row.transferred = format_bytes(self.locale(), 26 * 1024 * 1024).into();
+                row.speed = self.tr("transfer-value-unavailable");
+                self.preview_transfer_rows = vec![row];
+            }
+            "upload-preflight" => {
+                self.page = Page::Transfers;
+                self.preview_transfer_rows.clear();
+                self.upload_in_flight = true;
+                self.vault_activity = VaultActivity::Working;
+            }
             "setup" => {
                 self.page = Page::Storage;
                 self.storage_status = teleark_runtime::StorageChannelStatus::Missing;
+                self.storage_notice = None;
+                self.storage_loading = true;
             }
             "raw" => {
                 self.page = Page::Storage;

@@ -138,6 +138,12 @@ impl TeleArkApp {
                         this.telegram_credential_source = Some(TelegramCredentialSource::User);
                         this.telegram_api_id_persistence = TelegramApiIdPersistence::Saved;
                         this.show_telegram_api_id_prompt = false;
+                        if matches!(this.telegram_auth, TelegramAuthState::Unauthorized)
+                            && this.telegram_activity != TelegramActivity::Working
+                        {
+                            this.telegram_activity = TelegramActivity::Idle;
+                        }
+                        this.ensure_telegram_qr_login(cx);
                     }
                     Err(error) => {
                         this.telegram_api_id_persistence =

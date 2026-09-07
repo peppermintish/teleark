@@ -10,12 +10,87 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, button::ButtonVariants as _, scroll::ScrollableElement as _,
 };
 use gpui_kit::{
-    AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use teleark_runtime::TelegramAuthState;
 
 impl TeleArkApp {
+    pub(crate) fn render_account_switch_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        let popup = components::card()
+            .id("account-switch-dialog")
+            .debug_selector(|| "account-switch-dialog".into())
+            .w(px(420.0))
+            .p_6()
+            .shadow_lg()
+            .child(
+                div()
+                    .text_size(px(20.0))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(self.tr("account-switch-confirm-title")),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("account-switch-confirm-description")),
+            )
+            .when(self.show_account_switch, |popup| {
+                popup.child(
+                    div()
+                        .mt_3()
+                        .text_sm()
+                        .text_color(theme::amber())
+                        .child(self.tr("account-switch-busy")),
+                )
+            })
+            .child(
+                div()
+                    .mt_5()
+                    .flex()
+                    .justify_end()
+                    .gap_3()
+                    .child(
+                        components::button(
+                            "account-switch-cancel",
+                            self.tr("common-cancel"),
+                            None,
+                            false,
+                        )
+                        .debug_selector(|| "account-switch-cancel".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.confirm_account_switch = false;
+                            this.show_account_switch = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        components::button(
+                            "account-switch-confirm",
+                            self.tr("account-switch-confirm-action"),
+                            None,
+                            true,
+                        )
+                        .debug_selector(|| "account-switch-confirm".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.switch_telegram_account(window, cx)
+                        })),
+                    ),
+            );
+        gpui_kit::base::Dialog::new(cx)
+            .focus_handle(self.modal_focus.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .backdrop(div().absolute().inset_0().bg(gpui_kit::rgba(0x10182060)))
+            .popup(popup)
+            .close_on_backdrop_press(false)
+            .on_cancel(|_, _, _| false)
+            .on_ok(|_, _, _| false)
+            .into_any_element()
+    }
+
     pub(crate) fn render_account(
         &self,
         _window: &mut Window,
@@ -67,9 +142,8 @@ impl TeleArkApp {
                     components::button("account-switch", self.tr("account-switch"), None, false)
                         .ghost()
                         .disabled(self.telegram_activity == TelegramActivity::Working)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.switch_telegram_account(window, cx)
-                        })),
+                        .debug_selector(|| "account-switch".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.request_account_switch(cx))),
                 )
                 .child(
                     div()
@@ -119,8 +193,7 @@ impl TeleArkApp {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap_4()
-                .child(components::app_mark(52.0))
+                .gap_3()
                 .child(
                     div()
                         .text_size(px(26.0))

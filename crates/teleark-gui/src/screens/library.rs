@@ -1,5 +1,6 @@
 use gpui_kit::component::{
     Disableable as _, Icon, IconName,
+    checkbox::Checkbox,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     tab::{Tab, TabBar},
@@ -60,6 +61,23 @@ impl TeleArkApp {
             IconName::LoaderCircle
         };
 
+        let selectable = self
+            .library_content
+            .snapshot()
+            .map(|snapshot| {
+                snapshot
+                    .rows
+                    .iter()
+                    .filter(|file| self.library_row_selectable(file))
+                    .map(|file| file.id.clone())
+                    .take(5000)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let all_selected = !selectable.is_empty()
+            && selectable
+                .iter()
+                .all(|id| self.library_selection.contains(id));
         let toolbar = components::page_toolbar(padding)
             .child(
                 div()
@@ -91,6 +109,22 @@ impl TeleArkApp {
             .bg(theme::sidebar())
             .border_b_1()
             .border_color(theme::border())
+            .child(
+                div().w(px(28.0)).flex_none().child(
+                    Checkbox::new("library-select-all")
+                        .debug_selector(|| "library-select-all".into())
+                        .accessibility_label(self.tr("library-select-loaded"))
+                        .checked(all_selected)
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            this.library_selection = if *checked {
+                                selectable.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            cx.notify();
+                        })),
+                ),
+            )
             .child(table_header(self.tr("table-name"), None))
             .child(table_header(self.tr("table-size"), Some(90.0)))
             .when(!layout.is_compact(), |header| {
@@ -107,7 +141,8 @@ impl TeleArkApp {
                 header
                     .child(table_header(self.tr("table-encrypted"), Some(72.0)))
                     .child(table_header(self.tr("table-parts"), Some(54.0)))
-            });
+            })
+            .child(div().w(px(32.0)).flex_none());
 
         let facets = [
             (LibraryView::Local, "library-tab-local"),
@@ -185,6 +220,46 @@ impl TeleArkApp {
             )
             .child(div().flex_1())
             .child(type_menu);
+        let bulk = div()
+            .px(px(padding))
+            .pb_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().text_sm().child(self.tr_with(
+                "library-selected-count",
+                MessageArgs::new().with("count", self.library_selection.len() as u64),
+            )))
+            .child(
+                components::button(
+                    "library-bulk-action",
+                    self.tr(if self.library_view == LibraryView::Local {
+                        "action-show-in-folder"
+                    } else {
+                        "action-download"
+                    }),
+                    Some(if self.library_view == LibraryView::Local {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::ArrowDown
+                    }),
+                    false,
+                )
+                .disabled(self.library_action_busy || self.visual_preview)
+                .on_click(cx.listener(|this, _, _, cx| this.act_on_library_selection(cx))),
+            )
+            .child(
+                components::button(
+                    "library-clear-selection",
+                    self.tr("telegram-files-clear-selection"),
+                    None,
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.library_selection.clear();
+                    cx.notify();
+                })),
+            );
 
         let body = if preview_collection {
             self.render_library_state(
@@ -267,6 +342,7 @@ impl TeleArkApp {
             .bg(theme::canvas())
             .child(toolbar)
             .child(categories)
+            .when(!self.library_selection.is_empty(), |view| view.child(bulk))
             .child(
                 div()
                     .flex_none()
@@ -280,6 +356,33 @@ impl TeleArkApp {
                         "library-remote-explanation"
                     })),
             )
+            .when_some(self.library_action_error, |page, error| {
+                page.child(
+                    div()
+                        .px(px(padding))
+                        .pb_3()
+                        .text_sm()
+                        .text_color(theme::red())
+                        .child(self.tr(application_error_message_id(error))),
+                )
+            })
+            .when(self.library_action_busy, |page| {
+                page.child(
+                    components::button(
+                        "library-cancel-batch",
+                        self.tr("common-cancel"),
+                        None,
+                        false,
+                    )
+                    .mx(px(padding))
+                    .mb_3()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.library_batch_cancellation
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        cx.notify();
+                    })),
+                )
+            })
             .when_some(self.import_feedback, |page, feedback| {
                 page.child(self.render_import_feedback(feedback, padding))
             })
@@ -557,28 +660,41 @@ impl TeleArkApp {
                 IconName::ArrowDown
             },
             self.tr(if action_path.is_some() {
-                "action-open-file"
+                "action-show-in-folder"
             } else {
                 download_source.err().unwrap_or("action-download")
             }),
         )
         .disabled(
-            action_path.is_none()
-                && (download_source.is_err()
-                    || self.library_action_busy
-                    || self.transfers.is_none()),
+            self.visual_preview
+                || action_path.is_none()
+                    && (download_source.is_err()
+                        || self.library_action_busy
+                        || self.transfers.is_none()),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             if let Some(path) = &action_path {
-                cx.open_with_system(path);
+                cx.reveal_path(path);
             } else {
                 this.selected_file = index;
-                this.set_page(Page::FileDetail, cx);
                 this.download_library_file(action_file.clone(), cx);
             }
         }));
 
+        let selection_id = file.id.clone();
+        let checkbox = Checkbox::new(file.id.element_id("library-select"))
+            .accessibility_label(self.tr("library-select-file"))
+            .checked(self.library_selection.contains(&file.id))
+            .disabled(!self.library_row_selectable(&file))
+            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                cx.stop_propagation();
+                this.library_selection.retain(|id| id != &selection_id);
+                if *checked && this.library_selection.len() < 5000 {
+                    this.library_selection.push(selection_id.clone());
+                }
+                cx.notify();
+            }));
         div()
             .id(file.id.element_id("library-row"))
             .h(theme::ROW_HEIGHT)
@@ -605,8 +721,8 @@ impl TeleArkApp {
                     }
                 }),
             )
+            .child(div().w(px(28.0)).flex_none().child(checkbox))
             .child(name)
-            .child(action)
             .child(table_value(
                 format_bytes(self.locale(), file.size_bytes),
                 90.0,
@@ -653,6 +769,7 @@ impl TeleArkApp {
                         .child(format_integer(self.locale(), u64::from(file.part_count))),
                 )
             })
+            .child(div().w(px(32.0)).flex_none().child(action))
             .into_any_element()
     }
 }

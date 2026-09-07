@@ -31,7 +31,7 @@ Recovery rotation replaces the active local record, preventing ordinary unlock w
 - A bounded retained Vault owner alone holds the unwrapped Master Key. GUI secret inputs are cleared on dismissal/locking. Active-window auto-lock is configurable; changing pages does not lock. Sleep/logout and platform behavior still require release qualification.
 - A lock request does not revoke keys already held by an active encrypted transfer. Account switching is blocked until Vault work finishes and pauses/drains native workers before sign-out.
 - Every native task and Telegram request carries the expected account. Runtime checks the actual session, and schema 9 prevents rebinding existing known task ownership. A one-time transaction resolves legacy NULL rows only from the actual initial restored session; an unauthorized first connection leaves them non-executable permanently. See [Data model](DATA_MODEL.md).
-- New encrypted uploads validate the bound channel's current creator/private-broadcast metadata before accessing plaintext or keys. Missing/invalid bindings fail closed; candidate discovery is bounded. The exact `teleark:storage:v1` marker classifies a channel but never authenticates file content.
+- Each upload batch repeats complete remote storage discovery; each member refetches the target’s fully verified v2 identity before accessing plaintext or keys. Independent candidates are inspected with a fixed fan-out of four. Local bindings grant no permission. Conflicting, incomplete or damaged evidence fails closed. See the remote storage identity section and ADR 0015 for creation and provenance limits.
 - QR links are short-lived authorization secrets: memory-only, debug-redacted, refreshed on expiry/token updates and absent from databases, sessions, diagnostics and fixtures. Never capture real login/recovery secrets during UI review.
 
 Each immutable package writer owns an AEAD-usage registry and fresh File Key identities. Full restart-time hydration of previously used encryption identities remains a stabilization requirement.
@@ -77,3 +77,7 @@ Internal tests, fake remotes and UI demonstrations do not substitute for indepen
 ## Vulnerability reports
 
 Until a private security contact exists, contact repository owners through an available private channel rather than publishing exploitable details. Include revision, impact, reproduction and embargo needs; omit real sessions, keys and user data.
+
+## Remote storage identity
+
+Storage identity is remote-authoritative: current creator/private metadata, single-member/admin checks, no bots/discussion/TTL, an exact versioned description pointer and a pinned non-forwarded account/channel-bound record are cross-checked before use. SQLite cannot authorize repair or writes. Conflicting candidates or damaged recognizable markers stop setup. Legacy marker/title upgrades are explicitly weaker compatibility evidence and must complete v2 verification before Vault writes. Public metadata can be forged by the account owner; this is not cryptographic app-origin authentication. Concurrent first creation lacks a Telegram atomic uniqueness primitive. [ADR 0015](adr/0015-remote-authoritative-storage-identity.md) records these limits; Vault manifest authentication remains independent.

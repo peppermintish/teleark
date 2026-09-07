@@ -47,6 +47,8 @@ pub struct BatchSummary {
 
 #[derive(Clone, Debug)]
 pub struct TransferRow {
+    pub activity: Option<SharedString>,
+    pub activity_detail: Option<SharedString>,
     pub runtime_task_id: Option<u64>,
     pub vault_transfer_id: Option<u64>,
     pub vault_batch_id: Option<u64>,
@@ -85,6 +87,8 @@ macro_rules! transfer_row {
         destination: $destination:expr $(,)?
     ) => {
         TransferRow {
+            activity: None,
+            activity_detail: None,
             runtime_task_id: None,
             vault_transfer_id: None,
             vault_batch_id: None,

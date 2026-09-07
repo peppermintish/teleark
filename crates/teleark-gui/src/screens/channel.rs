@@ -539,11 +539,6 @@ impl TeleArkApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        Icon::new(crate::assets::Symbol::Hash)
-                            .size(px(26.0))
-                            .text_color(theme::text_secondary()),
-                    )
-                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
@@ -579,149 +574,161 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let credentials_enabled = telegram_login_controls_enabled(self.configured_telegram_api_id);
-        let phone_panel = div()
-            .min_w_0()
-            .pr(px(if layout.is_compact() { 16.0 } else { 24.0 }))
-            .child(components::section_title(
-                self.tr("telegram-phone-login-title"),
-            ))
-            .child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("telegram-phone-login-description")),
-            )
-            .child(div().mt_4().child(labeled_input(
-                self.tr("telegram-phone-label"),
-                &self.telegram_phone,
-                !credentials_enabled,
-            )))
-            .child(primary_action(
-                "telegram-connect-phone",
-                self.tr("telegram-connect-action"),
-                IconName::ArrowRight,
-                !credentials_enabled,
-                cx.listener(|this, _, _, cx| this.begin_telegram_login(cx)),
-            ));
-
+        let working = self.telegram_activity == crate::app::TelegramActivity::Working;
+        let target_size = if layout.is_compact() { 228.0 } else { 300.0 };
+        let qr_link = qr_deep_link.or_else(|| {
+            self.visual_preview
+                .then_some("TeleArk UI preview - not a login token")
+        });
         let qr = if !credentials_enabled {
             credential_qr_placeholder(
-                if layout.is_compact() { 140.0 } else { 196.0 },
+                target_size + 40.0,
                 self.tr("telegram-qr-credentials-placeholder"),
             )
+        } else if let Some(link) = qr_link {
+            qr_code_element(link, target_size)
         } else {
-            qr_deep_link.map_or_else(
-                || {
+            div()
+                .size(px(target_size + 40.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(if self.telegram_error_message().is_some() {
+                    Icon::new(IconName::TriangleAlert)
+                        .size(px(40.0))
+                        .text_color(theme::text_secondary())
+                        .into_any_element()
+                } else {
+                    Spinner::new().large().into_any_element()
+                })
+                .child(
                     div()
-                        .size(px(if layout.is_compact() { 140.0 } else { 196.0 }))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap_3()
-                        .rounded(theme::RADIUS_MEDIUM)
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::border_subtle())
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr(if self.telegram_error_message().is_some() {
+                            "account-qr-unavailable"
+                        } else {
+                            "account-qr-loading"
+                        })),
+                )
+                .into_any_element()
+        };
+        let panel = if self.phone_login {
+            div()
+                .w_full()
+                .max_w(px(360.0))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(components::section_title(
+                    self.tr("telegram-phone-login-title"),
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("telegram-phone-login-description")),
+                )
+                .child(labeled_input(
+                    self.tr("telegram-phone-label"),
+                    &self.telegram_phone,
+                    !credentials_enabled || working,
+                ))
+                .child(primary_action(
+                    "telegram-connect-phone",
+                    self.tr("telegram-connect-action"),
+                    IconName::ArrowRight,
+                    !credentials_enabled || working,
+                    cx.listener(|this, _, _, cx| this.begin_telegram_login(cx)),
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .child(qr)
+                .child(
+                    div()
+                        .max_w(px(420.0))
                         .text_center()
                         .text_sm()
                         .text_color(theme::text_secondary())
-                        .child(Icon::new(IconName::Frame).size(px(40.0)))
-                        .child(self.tr("telegram-qr-placeholder"))
-                        .into_any_element()
-                },
-                |deep_link| {
-                    qr_code_element(deep_link, if layout.is_compact() { 132.0 } else { 180.0 })
-                },
-            )
+                        .child(self.tr("telegram-qr-description")),
+                )
+                .into_any_element()
         };
-        let qr_action = if qr_deep_link.is_some() {
-            primary_action(
-                "telegram-connect-qr",
-                self.tr("telegram-qr-refresh-action"),
-                IconName::Redo2,
-                !credentials_enabled,
-                cx.listener(|this, _, _, cx| this.refresh_telegram_qr_login(cx)),
-            )
-        } else {
-            primary_action(
-                "telegram-connect-qr",
-                self.tr("telegram-connect-qr-action"),
-                IconName::Frame,
-                !credentials_enabled,
-                cx.listener(|this, _, _, cx| this.begin_telegram_qr_login(cx)),
-            )
-        };
-        let qr_panel = div()
-            .min_w_0()
-            .pl(px(if layout.is_compact() { 16.0 } else { 24.0 }))
-            .border_l_1()
-            .border_color(theme::border())
-            .child(components::section_title(self.tr("telegram-qr-title")))
-            .child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("telegram-qr-description")),
-            )
-            .child(div().mt_4().flex().justify_center().child(qr))
-            .child(
-                div()
-                    .mt_4()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("telegram-qr-refresh-note")),
-            )
-            .child(qr_action);
-
-        components::card()
+        div()
             .w_full()
-            .max_w(px(760.0))
-            .mx_auto()
-            .p(px(layout.content_padding().max(20.0)))
-            .when_some(self.telegram_error_message(), |card, message| {
-                card.child(error_banner(message))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_3()
+            .child(panel)
+            .when_some(self.telegram_error_message(), |body, message| {
+                body.child(error_banner(message))
             })
-            .when(!credentials_enabled, |card| {
-                card.child(
+            .when(
+                !self.phone_login && self.telegram_error_message().is_some() && credentials_enabled,
+                |body| {
+                    body.child(
+                        components::button(
+                            "account-qr-retry",
+                            self.tr("common-retry"),
+                            None,
+                            false,
+                        )
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_telegram_qr_login(cx))),
+                    )
+                },
+            )
+            .child(
+                gpui_kit::component::button::Button::new("account-login-method")
+                    .ghost()
+                    .h(px(34.0))
+                    .accessibility_label(self.tr(if self.phone_login {
+                        "account-use-qr"
+                    } else {
+                        "account-use-phone"
+                    }))
+                    .child(div().text_size(px(11.0)).underline().child(self.tr(
+                        if self.phone_login {
+                            "account-use-qr"
+                        } else {
+                            "account-use-phone"
+                        },
+                    )))
+                    .debug_selector(|| "account-login-method".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.change_telegram_login_method(!this.phone_login, window, cx)
+                    })),
+            )
+            .when(!credentials_enabled, |body| {
+                body.child(
                     div()
-                        .mt_4()
-                        .p_4()
+                        .max_w(px(440.0))
                         .flex()
+                        .flex_col()
                         .items_center()
-                        .gap_3()
-                        .rounded(theme::RADIUS_MEDIUM)
-                        .border_1()
-                        .border_color(theme::amber())
-                        .bg(theme::amber_soft())
-                        .child(Icon::new(IconName::TriangleAlert).text_color(theme::amber()))
+                        .gap_2()
                         .child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child(self.tr("telegram-api-id-required-title")),
-                                )
-                                .child(
-                                    div()
-                                        .mt_1()
-                                        .text_xs()
-                                        .text_color(theme::text_secondary())
-                                        .child(self.tr("telegram-api-id-required-description")),
-                                ),
+                                .text_center()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("telegram-api-id-required-description")),
                         )
                         .child(
                             components::button(
                                 "telegram-open-api-settings",
                                 self.tr("telegram-api-id-open-settings-action"),
                                 Some(IconName::Settings),
-                                true,
+                                false,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_telegram_api_id_prompt = true;
@@ -730,15 +737,6 @@ impl TeleArkApp {
                         ),
                 )
             })
-            .child(
-                div()
-                    .mt_4()
-                    .grid()
-                    .grid_cols(login_method_columns(layout))
-                    .when(!credentials_enabled, |methods| methods.opacity(0.46))
-                    .child(phone_panel)
-                    .child(qr_panel),
-            )
             .into_any_element()
     }
 
@@ -1829,6 +1827,7 @@ fn qr_code_element(deep_link: &str, target_size: f32) -> AnyElement {
     let colors = code.to_colors();
     let cell = (target_size / width as f32).floor().max(2.0);
     div()
+        .debug_selector(|| "account-qr-code".into())
         .p(px(cell * 4.0))
         .bg(gpui_kit::rgb(0xffffff))
         .border_1()
@@ -1845,12 +1844,6 @@ fn qr_code_element(deep_link: &str, target_size: f32) -> AnyElement {
             }))
         }))
         .into_any_element()
-}
-
-fn login_method_columns(_layout: LayoutPolicy) -> u16 {
-    // The supported minimum is 900 px. Both methods fit at that width and
-    // staying side by side makes the choice immediately discoverable.
-    2
 }
 
 fn labeled_input(
@@ -1901,22 +1894,6 @@ fn error_banner(message: gpui_kit::SharedString) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn login_methods_remain_visible_at_every_supported_window_class() {
-        assert_eq!(
-            login_method_columns(LayoutPolicy::from_size(900.0, 600.0)),
-            2
-        );
-        assert_eq!(
-            login_method_columns(LayoutPolicy::from_size(1_360.0, 760.0)),
-            2
-        );
-        assert_eq!(
-            login_method_columns(LayoutPolicy::from_size(1_920.0, 1_080.0)),
-            2
-        );
-    }
-
     #[test]
     fn one_channel_page_supports_five_thousand_filtered_rows() {
         let now = 2_000_000_000_000;

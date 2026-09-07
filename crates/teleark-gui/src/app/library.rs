@@ -1,8 +1,102 @@
 //! Library presentation owner. Business operations stay in the runtime.
 
 use super::*;
+use teleark_core::ApplicationErrorKind;
 
 impl TeleArkApp {
+    pub(crate) fn library_row_selectable(
+        &self,
+        file: &crate::library_state::LibraryRowView,
+    ) -> bool {
+        file.local_source_path.is_some()
+            || file
+                .download_source(self.telegram_account.as_ref().map(|a| a.id))
+                .is_ok()
+    }
+
+    pub(crate) fn act_on_library_selection(&mut self, cx: &mut Context<Self>) {
+        if self.library_action_busy || self.visual_preview {
+            return;
+        }
+        let files = self
+            .library_content
+            .snapshot()
+            .map(|snapshot| {
+                snapshot
+                    .rows
+                    .iter()
+                    .filter(|file| {
+                        self.library_selection.contains(&file.id)
+                            && self.library_row_selectable(file)
+                    })
+                    .take(5000)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if files.is_empty() {
+            return;
+        }
+        if self.library_view == LibraryView::Local {
+            let mut folders = BTreeSet::new();
+            for file in files {
+                if let Some(path) = file.local_source_path
+                    && let Some(parent) = path.parent()
+                    && folders.insert(parent.to_owned())
+                {
+                    cx.reveal_path(&path);
+                }
+            }
+            return;
+        }
+        let (Some(library), Some(transfers), Some(account_id)) = (
+            self.library.clone(),
+            self.transfers.clone(),
+            self.telegram_account.as_ref().map(|a| a.id),
+        ) else {
+            return;
+        };
+        self.library_action_busy = true;
+        self.library_action_error = None;
+        self.library_batch_cancellation = Default::default();
+        let cancellation = self.library_batch_cancellation.clone();
+        let work = cx.background_spawn(async move {
+            let prepared =
+                prepare_library_downloads(files, account_id, &cancellation, |name, reserved| {
+                    next_reserved_download_destination(&library, name, reserved)
+                });
+            match prepared {
+                Ok(groups) => enqueue_library_groups(groups, &cancellation, |requests| {
+                    transfers.enqueue_channel_download_batch(requests)
+                }),
+                Err(error) => (Vec::new(), Vec::new(), Err(error)),
+            }
+        });
+        self.library_action_task = Some(cx.spawn(async move |this, cx| {
+            let (queued, batches, result) = work.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.library_action_busy = false;
+                if this.telegram_account.as_ref().map(|a| a.id) != Some(account_id) {
+                    this.library_action_error = Some(ApplicationErrorKind::Authorization);
+                    cx.notify();
+                    return;
+                }
+                this.library_selection.retain(|id| !queued.contains(id));
+                this.expanded_transfer_batches.extend(batches);
+                match result {
+                    Ok(()) if this.page == Page::Library => this.set_page(Page::Transfers, cx),
+                    Ok(()) => {}
+                    Err(error) => this.library_action_error = Some(error.kind()),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     pub(crate) fn download_library_file(
         &mut self,
         file: crate::library_state::LibraryRowView,
@@ -22,6 +116,8 @@ impl TeleArkApp {
         };
         self.library_action_busy = true;
         self.library_action_error = None;
+        self.library_batch_cancellation = Default::default();
+        let cancellation = self.library_batch_cancellation.clone();
         let file_name = safe_suggested_file_name(&file.name, message_id);
         let work = cx.background_spawn(async move {
             library
@@ -39,7 +135,13 @@ impl TeleArkApp {
                 })
         });
         self.library_action_task = Some(cx.spawn(async move |this, cx| {
-            let request = work.await;
+            let request = work.await.and_then(|request| {
+                if cancellation.load(std::sync::atomic::Ordering::Relaxed) {
+                    Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+                } else {
+                    Ok(request)
+                }
+            });
             let Some(this) = this.upgrade() else {
                 return;
             };
@@ -66,6 +168,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
+        self.library_selection.clear();
         if is_preview_library_selection(self.nav_selection) {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
             self.library_loading_more = false;
@@ -314,10 +417,188 @@ fn load_library_snapshot(
     }
 }
 
+type LibraryDownloadGroups = std::collections::BTreeMap<
+    i64,
+    (
+        Vec<crate::library_state::LibraryRowId>,
+        Vec<ChannelDownloadRequest>,
+    ),
+>;
+
+fn enqueue_library_groups(
+    groups: LibraryDownloadGroups,
+    cancellation: &std::sync::atomic::AtomicBool,
+    mut enqueue: impl FnMut(Vec<ChannelDownloadRequest>) -> Result<u64, ApplicationError>,
+) -> (
+    Vec<crate::library_state::LibraryRowId>,
+    Vec<u64>,
+    Result<(), ApplicationError>,
+) {
+    let mut queued = Vec::new();
+    let mut batches = Vec::new();
+    let result = (|| {
+        for (ids, requests) in groups.into_values() {
+            if cancellation.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            batches.push(enqueue(requests)?);
+            queued.extend(ids);
+        }
+        Ok(())
+    })();
+    (queued, batches, result)
+}
+
+fn prepare_library_downloads(
+    files: Vec<crate::library_state::LibraryRowView>,
+    account_id: i64,
+    cancellation: &std::sync::atomic::AtomicBool,
+    mut destination: impl FnMut(
+        &str,
+        &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<std::path::PathBuf, ApplicationError>,
+) -> Result<LibraryDownloadGroups, ApplicationError> {
+    if files.is_empty() || files.len() > 5000 {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    let mut reserved = BTreeSet::new();
+    let mut groups = LibraryDownloadGroups::new();
+    for file in files {
+        if cancellation.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        let (_, chat_id, message_id) = file
+            .download_source(Some(account_id))
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+        let file_name = safe_suggested_file_name(&file.name, message_id);
+        let destination = destination(&file_name, &mut reserved)?;
+        let (ids, requests) = groups.entry(chat_id).or_default();
+        ids.push(file.id);
+        requests.push(ChannelDownloadRequest {
+            account_id,
+            chat_id,
+            message_id,
+            message_sent_at_unix_ms: None,
+            file_name,
+            caption: None,
+            mime_type: None,
+            size_bytes: file.size_bytes,
+            destination,
+        });
+    }
+    Ok(groups)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui_kit as gpui;
+    use teleark_core::ApplicationErrorKind;
+
+    #[gpui::test]
+    fn library_selection_is_scoped_to_loaded_results_and_clears_on_filter(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Library);
+        cx.run_until_parked();
+        let select = cx
+            .debug_bounds("library-select-all")
+            .expect("select all")
+            .center();
+        cx.simulate_click(select, gpui::Modifiers::default());
+        app.update(cx, |app, cx| {
+            assert_eq!(
+                app.library_selection.len(),
+                app.library_content.rows().len()
+            );
+            assert!(!app.library_selection.is_empty());
+            assert_eq!(app.page, Page::Library);
+            app.library_kind_selection = "nav-docs";
+            app.refresh_library(cx);
+            assert!(app.library_selection.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_download_preparation_groups_channels_reserves_names_and_checks_account_and_cancel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Library);
+        let mut files = app.update(cx, |app, cx| {
+            app.library_view = LibraryView::Remote;
+            app.refresh_library(cx);
+            app.library_content.rows().to_vec()
+        });
+        files.truncate(3);
+        for (index, file) in files.iter_mut().enumerate() {
+            file.source_account_id = Some(7);
+            file.source_chat_id = Some(if index == 2 { 20 } else { 10 });
+            file.source_message_id = Some(index as i64 + 1);
+            file.encryption_state = teleark_core::EncryptionState::Unencrypted;
+            file.package_id = None;
+            file.name = "same.txt".into();
+        }
+        let cancellation = std::sync::atomic::AtomicBool::new(false);
+        let groups =
+            prepare_library_downloads(files.clone(), 7, &cancellation, |name, reserved| {
+                assert_eq!(name, "same.txt");
+                let path = std::path::PathBuf::from(format!("/tmp/{}.txt", reserved.len()));
+                assert!(reserved.insert(path.clone()));
+                Ok(path)
+            })
+            .expect("prepare");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[&10].1.len(), 2);
+        assert_eq!(groups[&20].1.len(), 1);
+        assert_eq!(
+            groups
+                .values()
+                .flat_map(|(_, requests)| requests.iter().map(|r| &r.destination))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+        let (queued, batches, result) =
+            enqueue_library_groups(groups.clone(), &cancellation, |requests| {
+                if requests[0].chat_id == 10 {
+                    Ok(42)
+                } else {
+                    Err(ApplicationError::new(ApplicationErrorKind::Persistence))
+                }
+            });
+        assert_eq!(queued, groups[&10].0);
+        assert_eq!(batches, vec![42]);
+        assert_eq!(
+            result.expect_err("partial failure").kind(),
+            ApplicationErrorKind::Persistence
+        );
+        let (queued, batches, result) = enqueue_library_groups(groups, &cancellation, |_| {
+            cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(43)
+        });
+        assert_eq!(queued.len(), 2);
+        assert_eq!(batches, vec![43]);
+        assert_eq!(
+            result.expect_err("cancel between groups").kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        cancellation.store(false, std::sync::atomic::Ordering::Relaxed);
+        let wrong_account = prepare_library_downloads(files.clone(), 8, &cancellation, |_, _| {
+            panic!("must reject account before allocating")
+        });
+        assert_eq!(
+            wrong_account.expect_err("wrong account").kind(),
+            ApplicationErrorKind::Authorization
+        );
+        cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = prepare_library_downloads(files, 7, &cancellation, |_, _| {
+            panic!("must cancel before allocating")
+        });
+        assert_eq!(
+            cancelled.expect_err("cancelled").kind(),
+            ApplicationErrorKind::Cancelled
+        );
+    }
 
     #[gpui::test]
     fn source_tabs_switch_local_and_remote_rows_and_preserve_type_filter(

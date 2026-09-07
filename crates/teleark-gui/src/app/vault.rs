@@ -461,8 +461,34 @@ impl TeleArkApp {
         }));
     }
 
+    fn apply_completed_vault_uploads(
+        &mut self,
+        account_id: i64,
+        chat_id: i64,
+        files: Vec<teleark_runtime::ManagedVaultFile>,
+    ) {
+        if files.is_empty()
+            || self.vault_locked
+            || self.telegram_account.as_ref().map(|account| account.id) != Some(account_id)
+            || self.active_storage_chat_id() != Some(chat_id)
+        {
+            return;
+        }
+        // A scan started before publication may complete after this callback.
+        // Invalidate its snapshot before installing authenticated upload receipts.
+        self.cancel_managed_scan();
+        for file in files {
+            self.managed_vault_files
+                .retain(|item| item.package_numeric_id != file.package_numeric_id);
+            self.managed_vault_files.insert(0, file);
+        }
+    }
+
     pub(crate) fn enqueue_vault_upload(&mut self, cx: &mut Context<Self>) {
-        if self.upload_preparing || self.vault_activity == VaultActivity::Working {
+        if self.upload_in_flight
+            || self.upload_preparing
+            || self.vault_activity == VaultActivity::Working
+        {
             return;
         }
         if self.upload_sources.is_empty() {
@@ -492,6 +518,7 @@ impl TeleArkApp {
         }
         self.show_upload = false;
         self.upload_queued = false;
+        self.upload_in_flight = true;
         self.vault_activity = VaultActivity::Working;
         self.nav_selection = "nav-uploads";
         self.set_page(Page::Transfers, cx);
@@ -500,19 +527,22 @@ impl TeleArkApp {
             .iter()
             .map(|source| source.path.clone())
             .collect();
+        let login_generation = self.telegram_login_generation;
         let work =
             cx.background_spawn(async move { vault.upload_files(account_id, chat_id, sources) });
         self.vault_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
+                if this.telegram_login_generation != login_generation
+                    || this.telegram_account.as_ref().map(|account| account.id) != Some(account_id)
+                {
+                    return;
+                }
+                this.upload_in_flight = false;
                 match result {
                     Ok(report) => {
-                        for file in report.completed {
-                            this.managed_vault_files
-                                .retain(|item| item.package_numeric_id != file.package_numeric_id);
-                            this.managed_vault_files.insert(0, file);
-                        }
+                        this.apply_completed_vault_uploads(account_id, chat_id, report.completed);
                         let retry_sources = report
                             .failed
                             .iter()
@@ -539,5 +569,79 @@ impl TeleArkApp {
                 cx.notify();
             });
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn pending_upload_displays_feedback_before_runtime_rows_exist(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            app.preview_transfer_rows.clear();
+            app.upload_in_flight = true;
+            app.vault_activity = VaultActivity::Idle;
+            app.enqueue_vault_upload(cx);
+            assert_eq!(app.vault_activity, VaultActivity::Idle);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upload-preflight-status").is_some());
+        app.update(cx, |app, cx| app.request_account_switch(cx));
+        cx.run_until_parked();
+        let confirm = cx
+            .debug_bounds("account-switch-confirm")
+            .expect("confirm")
+            .center();
+        cx.simulate_click(confirm, gpui::Modifiers::default());
+        app.update(cx, |app, _| {
+            assert!(app.upload_in_flight);
+            assert!(app.telegram_account.is_some());
+            assert!(app.confirm_account_switch);
+            assert!(app.show_account_switch);
+            app.confirm_account_switch = false;
+        });
+        app.update(cx, |app, cx| {
+            app.upload_in_flight = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upload-preflight-status").is_none());
+    }
+
+    #[gpui::test]
+    fn completed_upload_invalidates_older_scan_and_preserves_account_and_lock_scope(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            let account = app.telegram_account.as_ref().expect("preview account").id;
+            let chat = app.active_storage_chat_id().expect("preview storage");
+            let file = app.managed_vault_files[0].clone();
+            app.managed_vault_files.clear();
+            let cancellation = TelegramScanCancellation::new();
+            app.managed_scan_cancellation = Some(cancellation.clone());
+            app.managed_scan_loading = true;
+            let old_scan = app.managed_scan_generation;
+            app.apply_completed_vault_uploads(account, chat, vec![file.clone()]);
+            assert!(cancellation.is_cancelled());
+            assert_ne!(app.managed_scan_generation, old_scan);
+            assert!(!app.managed_scan_loading);
+            assert_eq!(app.managed_vault_files, vec![file.clone()]);
+            app.apply_completed_vault_uploads(account, chat, vec![file.clone()]);
+            assert_eq!(app.managed_vault_files.len(), 1);
+            app.managed_vault_files.clear();
+            app.apply_completed_vault_uploads(account + 1, chat, vec![file.clone()]);
+            app.apply_completed_vault_uploads(account, chat + 1, vec![file.clone()]);
+            assert!(app.managed_vault_files.is_empty());
+            app.vault_locked = true;
+            app.apply_completed_vault_uploads(account, chat, vec![file]);
+            assert!(app.managed_vault_files.is_empty());
+        });
     }
 }

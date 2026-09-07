@@ -117,6 +117,16 @@ impl TeleArkApp {
                 .when(self.show_storage_guide, |body| {
                     body.child(self.storage_guide(true, cx))
                 })
+                .when(!legacy, |body| {
+                    body.when_some(self.storage_notice, |body, message| {
+                        body.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr(message)),
+                        )
+                    })
+                })
                 .child(div().flex_1().min_h_0().child(content))
                 .into_any_element()
         } else {
@@ -153,29 +163,6 @@ impl TeleArkApp {
                                         .text_color(theme::text_secondary())
                                         .child(self.tr("storage-setup-description")),
                                 )
-                                .when(
-                                    matches!(self.storage_status, StorageChannelStatus::Missing),
-                                    |card| {
-                                        card.child(
-                                            components::button(
-                                                "storage-create",
-                                                self.tr("storage-create-action"),
-                                                Some(IconName::Plus),
-                                                true,
-                                            )
-                                            .mt_5()
-                                            .disabled(
-                                                self.storage_loading
-                                                    || self.telegram_account.is_none(),
-                                            )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.create_storage_channel(cx)
-                                                }),
-                                            ),
-                                        )
-                                    },
-                                )
                                 .when(self.storage_loading, |card| {
                                     card.child(
                                         div()
@@ -198,68 +185,12 @@ impl TeleArkApp {
                                             teleark_core::ApplicationErrorKind::Authorization => {
                                                 "telegram-error-authorization"
                                             }
+                                            teleark_core::ApplicationErrorKind::Conflict => "storage-identity-conflict",
+                                            teleark_core::ApplicationErrorKind::PermissionDenied => "storage-identity-invalid",
                                             _ => "storage-setup-error",
                                         })),
                                     )
-                                })
-                                .when(
-                                    matches!(
-                                        self.storage_status,
-                                        StorageChannelStatus::Unavailable { .. }
-                                    ),
-                                    |card| {
-                                        card.child(
-                                            div()
-                                                .mt_3()
-                                                .text_sm()
-                                                .text_color(theme::amber())
-                                                .child(self.tr("storage-unavailable")),
-                                        )
-                                    },
-                                )
-                                .children(
-                                    match &self.storage_status {
-                                        StorageChannelStatus::Choose(channels)
-                                        | StorageChannelStatus::Unavailable {
-                                            candidates: channels,
-                                            ..
-                                        } => channels.as_slice(),
-                                        _ => &[],
-                                    }
-                                    .iter()
-                                    .map(|channel| {
-                                        let id = channel.id;
-                                        components::button(
-                                            ("storage-candidate", id.unsigned_abs()),
-                                            channel.name.clone(),
-                                            None,
-                                            false,
-                                        )
-                                        .icon(Symbol::Lock)
-                                        .mt_3()
-                                        .w_full()
-                                        .disabled(self.storage_loading)
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.choose_storage_channel(id, cx)
-                                            }),
-                                        )
-                                    }),
-                                )
-                                .child(
-                                    components::button(
-                                        "storage-discover",
-                                        self.tr("storage-discover-action"),
-                                        Some(IconName::Redo2),
-                                        false,
-                                    )
-                                    .mt_4()
-                                    .ghost()
-                                    .disabled(self.storage_loading)
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| this.refresh_storage_channel(cx),
-                                    )),
-                                ),
+                                }),
                         )
                         .child(div().mt_4().child(self.storage_guide(false, cx))),
                 )

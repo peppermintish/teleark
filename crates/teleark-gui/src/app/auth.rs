@@ -3,6 +3,36 @@
 use super::*;
 
 impl TeleArkApp {
+    pub(crate) fn ensure_telegram_qr_login(&mut self, cx: &mut Context<Self>) {
+        if !self.visual_preview
+            && !self.phone_login
+            && self.page == Page::Account
+            && !self.account_restoring
+            && self.configured_telegram_api_id.is_some()
+            && self.telegram_activity == TelegramActivity::Idle
+            && matches!(self.telegram_auth, TelegramAuthState::Unauthorized)
+        {
+            self.begin_telegram_qr_login(cx);
+        }
+    }
+
+    pub(crate) fn change_telegram_login_method(
+        &mut self,
+        phone: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.phone_login = phone;
+        self.reset_telegram_login(window, cx);
+    }
+
+    pub(crate) fn request_account_switch(&mut self, cx: &mut Context<Self>) {
+        if self.telegram_account.is_some() && self.telegram_activity != TelegramActivity::Working {
+            self.confirm_account_switch = true;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn reset_telegram_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
         self.qr_poll_task = None;
@@ -11,25 +41,39 @@ impl TeleArkApp {
         for input in [&self.telegram_code, &self.telegram_password] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
+        self.ensure_telegram_qr_login(cx);
         cx.notify();
     }
 
     pub(crate) fn switch_telegram_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.telegram_activity == TelegramActivity::Working {
+        if !self.confirm_account_switch || self.telegram_activity == TelegramActivity::Working {
             return;
         }
-        if self.vault.as_ref().is_some_and(|vault| {
-            vault
-                .transfers()
-                .iter()
-                .any(|transfer| transfer.state == teleark_runtime::VaultTransferState::Running)
-        }) {
+        if self.upload_in_flight
+            || self.vault.as_ref().is_some_and(|vault| {
+                vault.transfers().iter().any(|transfer| {
+                    matches!(
+                        transfer.state,
+                        teleark_runtime::VaultTransferState::Queued
+                            | teleark_runtime::VaultTransferState::Running
+                    )
+                })
+            })
+        {
             self.show_account_switch = true;
             cx.notify();
             return;
         }
+        self.confirm_account_switch = false;
+        self.show_account_switch = false;
+        self.phone_login = false;
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
         self.transfers_account_ready = false;
+        self.storage_retry_task = None;
+        self.storage_loading = false;
+        self.storage_notice = None;
+        self.library_batch_cancellation
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.cancel_managed_scan();
         self.cancel_telegram_file_load(cx);
         self.clear_vault_inputs(window, cx);
@@ -83,6 +127,7 @@ impl TeleArkApp {
                             this.telegram_file_generation =
                                 this.telegram_file_generation.wrapping_add(1);
                             this.refresh_channel_file_table(cx);
+                            this.ensure_telegram_qr_login(cx);
                         }
                         Err(error) => {
                             this.telegram_activity = TelegramActivity::Failed(error.kind())
@@ -111,6 +156,8 @@ impl TeleArkApp {
             cx.notify();
             return;
         };
+        self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
+        let generation = self.telegram_login_generation;
         let phone = self.telegram_phone.read(cx).value().to_string();
         self.telegram_activity = TelegramActivity::Working;
         cx.notify();
@@ -130,7 +177,11 @@ impl TeleArkApp {
         self.telegram_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| this.apply_telegram_auth_result(result, cx));
+            this.update(cx, |this, cx| {
+                if this.telegram_login_generation == generation {
+                    this.apply_telegram_auth_result(result, cx);
+                }
+            });
         }));
     }
 
@@ -173,29 +224,6 @@ impl TeleArkApp {
                     this.apply_telegram_auth_result(result, cx);
                 }
             });
-        }));
-    }
-
-    pub(crate) fn refresh_telegram_qr_login(&mut self, cx: &mut Context<Self>) {
-        if self.telegram_activity == TelegramActivity::Working {
-            return;
-        }
-        let Some(telegram) = self.telegram.clone() else {
-            return;
-        };
-        let Some(library) = self.library.clone() else {
-            self.telegram_activity =
-                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
-            cx.notify();
-            return;
-        };
-        self.telegram_activity = TelegramActivity::Working;
-        cx.notify();
-        let work = cx.background_spawn(async move { telegram.begin_qr_login_configured(&library) });
-        self.telegram_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| this.apply_telegram_auth_result(result, cx));
         }));
     }
 
@@ -266,6 +294,9 @@ impl TeleArkApp {
                 }
             }
             Err(error) => self.telegram_activity = TelegramActivity::Failed(error.kind()),
+        }
+        if restoring {
+            self.ensure_telegram_qr_login(cx);
         }
         cx.notify();
     }
@@ -399,5 +430,117 @@ impl TeleArkApp {
                 });
             }
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn account_switch_requires_explicit_confirmation_and_ignores_escape_and_backdrop(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Account);
+        app.update(cx, |app, _| {
+            assert!(app.telegram_account.is_some());
+        });
+        cx.run_until_parked();
+        let switch = cx.debug_bounds("account-switch").expect("switch").center();
+        cx.simulate_click(switch, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(app.confirm_account_switch);
+            assert!(app.telegram_account.is_some());
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_click(gpui::point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(app.confirm_account_switch);
+            assert!(app.telegram_account.is_some());
+        });
+        let cancel = cx
+            .debug_bounds("account-switch-cancel")
+            .expect("cancel")
+            .center();
+        cx.simulate_click(cancel, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            assert!(!app.confirm_account_switch);
+            assert!(app.telegram_account.is_some());
+            app.request_account_switch(cx);
+        });
+        cx.run_until_parked();
+        let confirm = cx
+            .debug_bounds("account-switch-confirm")
+            .expect("confirm")
+            .center();
+        cx.simulate_click(confirm, gpui::Modifiers::default());
+        app.update(cx, |app, _| {
+            assert!(!app.confirm_account_switch);
+            assert!(app.telegram_account.is_none());
+            assert!(!app.phone_login);
+        });
+    }
+
+    #[gpui::test]
+    fn qr_is_default_and_method_switch_invalidates_pending_auth(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Account);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            app.telegram_account = None;
+            app.telegram_auth = TelegramAuthState::Unauthorized;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let qr = cx
+            .debug_bounds("account-qr-code")
+            .expect("automatic preview QR");
+        assert!(qr.size.width >= px(250.0));
+        let method = cx
+            .debug_bounds("account-login-method")
+            .expect("phone link")
+            .center();
+        let generation = app.update(cx, |app, _| app.telegram_login_generation);
+        cx.simulate_click(method, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(app.phone_login);
+            assert!(app.telegram_login_generation > generation);
+        });
+        assert!(cx.debug_bounds("account-qr-code").is_none());
+        let method = cx
+            .debug_bounds("account-login-method")
+            .expect("QR link")
+            .center();
+        cx.simulate_click(method, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("account-qr-code").is_some());
+    }
+
+    #[gpui::test]
+    fn unauthorized_restore_starts_qr_without_user_action_but_phone_mode_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Account);
+        app.update(cx, |app, cx| {
+            // Runtime owners are absent in this isolated fixture: an attempted start
+            // produces a typed local failure without constructing a real session.
+            app.visual_preview = false;
+            app.telegram_account = None;
+            app.account_restoring = true;
+            app.apply_telegram_auth_result(Ok(TelegramAuthState::Unauthorized), cx);
+            assert_eq!(
+                app.telegram_activity,
+                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
+            );
+            app.phone_login = true;
+            app.account_restoring = true;
+            app.apply_telegram_auth_result(Ok(TelegramAuthState::Unauthorized), cx);
+            assert_eq!(app.telegram_activity, TelegramActivity::Idle);
+            app.visual_preview = true;
+        });
     }
 }

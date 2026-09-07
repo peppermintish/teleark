@@ -1019,21 +1019,18 @@ storage-nav-title = TeleArk
 
 storage-private-label = Your dedicated private channel
 
-storage-remote-description = Private encrypted file storage managed by TeleArk. Keep this channel and its files for recovery.
+storage-remote-description = Created and managed by TeleArk. Do not edit this channel or delete it or its messages: this can break file access and recovery. Manage files through TeleArk.
 
-storage-setup-title = A home for your files
+storage-setup-title = Preparing your private storage
 
-storage-setup-description = Create a private Telegram channel owned by your account. TeleArk will store encrypted files here and recognize them automatically. Your Saved Messages stay yours.
+storage-setup-description = TeleArk discovers and verifies your storage directly on Telegram, on every device. It checks the channel’s identity before use. Conflicting or damaged identifiers stop setup; no channel is chosen arbitrarily.
 
-storage-create-action = Create Private Channel
 
-storage-discover-action = Find an existing TeleArk channel
 
-storage-loading = Checking your private storage…
+storage-loading = TeleArk is finding or preparing your private channel…
 
-storage-unavailable = The saved channel is unavailable. Refresh or choose an existing TeleArk channel below. TeleArk will not silently replace it.
 
-storage-setup-error = The channel could not be verified. Refresh to check again; an interrupted creation may already have succeeded.
+storage-setup-error = TeleArk could not finish preparing the channel. Temporary errors are rechecked automatically; it will check again when you return. Existing files remain unchanged.
 
 storage-locked-title = Your files are safely locked
 
@@ -1043,7 +1040,7 @@ storage-guide-done = Got it
 
 storage-guide-private-title = 1. A channel just for you
 
-storage-guide-private-body = You own this private channel. TeleArk adds no members or public links. Keep its description marker so it can be found after reinstalling.
+storage-guide-private-body = TeleArk manages one private storage channel per account. Do not edit or delete the channel or its messages in other apps: files may become unreadable or unrecoverable. Manage files through TeleArk.
 
 storage-guide-files-title = 2. Work with complete files
 
@@ -1146,6 +1143,16 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.3 · Upload activity at every step
+
+    - Uploads now show storage checks, reading and encryption, waiting for Telegram, data transfer, remote confirmation, readback verification and manifest publication, with elapsed time and current object bytes.
+    - Fixed progress remaining at zero until an entire encrypted part finished uploading and verification. In-flight progress updates as Telegram reads the byte stream; 100% is reserved for completed finalization.
+    - Collapsed upload batches show the current member's activity. Queue rows appear before network preflight, and complete storage discovery runs once per batch while each file still rechecks its destination.
+    - Private storage setup automatically verifies remote identity, preserves cross-device discovery, and explains why managed channel messages must be kept. Conflicting or damaged identities stop uploads.
+    - New sign-ins start with QR login and offer a secondary phone method. Switching accounts requires confirmation and cannot interrupt pending uploads.
+    - Library selection supports bulk reveal and account-scoped downloads. Newly uploaded files appear immediately, and older scans cannot replace their completion records.
+    - Updated English, Simplified Chinese, Japanese and macOS bundle metadata. Database and encryption formats are unchanged; encrypted transfer controls and independent security qualification remain incomplete.
+
     ## 0.4.2 · Clearer Library, compact Transfers
 
     - Replaced All Files with Local files and Remote files tabs. Local files shows accessible downloads for the current account and imported originals; remote files shows the account's indexed Telegram catalog. File types have a separate filter.
@@ -1197,3 +1204,39 @@ library-local-empty-title = No local files found
 library-local-empty-description = Download a file or import one from this computer. Deleted and inaccessible files are excluded; try clearing the search or type filter.
 library-remote-empty-description = Browse or index a channel to add remote files, or clear the search and type filter.
 file-detail-downloaded-source-note = This local copy was downloaded from the source below. Its current size and date come from the filesystem.
+
+library-select-loaded = Select loaded files (up to 5,000)
+library-select-file = Select file
+library-selected-count = { $count } selected
+
+account-switch-confirm-title = Switch account?
+account-switch-confirm-description = Continuing will sign out the current account. You will need to sign in again to use it. Downloaded files and transfer history will be kept.
+account-switch-confirm-action = Sign out and switch
+account-use-phone = Log in with phone number
+account-use-qr = Log in with QR code
+account-qr-loading = Loading QR code…
+account-qr-unavailable = QR code unavailable
+
+storage-auto-created = TeleArk created your private storage channel. It is ready and will be managed automatically.
+
+storage-auto-found = TeleArk found and connected your private storage channel. It is managed automatically.
+
+
+storage-remote-title = 🔒 TeleArk · Managed Storage
+
+storage-identity-conflict = TeleArk could not confirm one unique storage channel. It has stopped setup to avoid writing to the wrong channel. Existing channels and files are unchanged.
+
+storage-identity-invalid = The channel’s remote identity or privacy settings do not match. TeleArk has stopped setup. Do not delete the channel or its files.
+
+transfer-upload-preparing = Preparing the selected files for the upload queue…
+
+transfer-upload-checking-storage = Checking storage channel
+transfer-upload-checking-target = Checking upload destination
+transfer-upload-reading-encrypting = Reading and encrypting
+transfer-upload-sending-bytes = Uploading encrypted data
+transfer-upload-confirming-message = Confirming remote message
+transfer-upload-verifying-bytes = Reading back and verifying
+transfer-upload-publishing-manifest = Publishing file manifest
+transfer-upload-activity-elapsed = { $phase } · Elapsed { $elapsed }
+transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · Elapsed { $elapsed }
+transfer-upload-waiting-telegram = Waiting for Telegram

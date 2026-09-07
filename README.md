@@ -3,7 +3,7 @@
 TeleArk turns Telegram collections into a desktop file workspace. Browse ordinary channels, keep encrypted logical files in your own private TeleArk channel, and follow uploads/downloads from a permanent Transfers page. One logical file stays one file even when its encrypted storage uses multiple objects.
 
 > [!IMPORTANT]
-> v0.4.2 is an early alpha. Real Telegram browsing/native downloads and encrypted upload/discovery/restore are connected. Crypto formats remain provisional; independent security review, durable encrypted transfer controls and signed packaging are unfinished. Keep independent copies of important data and recovery material.
+> v0.4.3 is an early alpha. Real Telegram browsing/native downloads and encrypted upload/discovery/restore are connected. Crypto formats remain provisional; independent security review, durable encrypted transfer controls and signed packaging are unfinished. Keep independent copies of important data and recovery material.
 
 ## Start using the workspace
 

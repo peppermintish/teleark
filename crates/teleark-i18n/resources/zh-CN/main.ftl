@@ -991,21 +991,18 @@ storage-nav-title = TeleArk
 
 storage-private-label = 你的专属私有频道
 
-storage-remote-description = 由 TeleArk 管理的私有加密文件存储。请保留此频道及其中的文件，以便恢复数据。
+storage-remote-description = 由 TeleArk 创建并自动管理的专用存储频道。请勿在其他应用中修改或删除此频道，也不要编辑或删除其中的消息和文件，否则可能导致文件无法读取或恢复。请通过 TeleArk 管理文件。
 
-storage-setup-title = 为文件建立专属空间
+storage-setup-title = 正在准备你的私有存储
 
-storage-setup-description = 创建一个由你拥有的 Telegram 私有频道。TeleArk 会在这里存储并自动识别加密文件，你的 Saved Messages 仍由你自行使用。
+storage-setup-description = TeleArk 在每台设备上都会直接从 Telegram 查找并验证托管频道，使用前核对远端身份。发现多个候选或标识损坏时会停止准备，不会随意选择频道。
 
-storage-create-action = 创建私有频道
 
-storage-discover-action = 查找已有的 TeleArk 频道
 
-storage-loading = 正在检查私有存储…
+storage-loading = TeleArk 正在查找或准备你的私有频道…
 
-storage-unavailable = 原来绑定的频道当前不可用。请刷新，或选择下面已有的 TeleArk 频道。应用不会自动替换原频道。
 
-storage-setup-error = 暂时无法验证频道。请刷新重试；中断前的创建操作可能已经成功。
+storage-setup-error = TeleArk 暂时无法完成频道准备。临时错误会自动重试，返回此页面时也会重新检查。现有文件保持不变。
 
 storage-locked-title = 文件已安全锁定
 
@@ -1015,7 +1012,7 @@ storage-guide-done = 知道了
 
 storage-guide-private-title = 1. 仅属于你的频道
 
-storage-guide-private-body = 你拥有这个私有频道。TeleArk 不会添加成员或公开链接。保留频道简介中的标记，重装后即可重新发现它。
+storage-guide-private-body = 每个账号仅使用一个 TeleArk 托管的私有存储频道。请勿在其他应用中修改、删除此频道或其中的消息和文件，否则可能导致文件无法读取或恢复。请通过 TeleArk 管理文件。
 
 storage-guide-files-title = 2. 使用完整文件
 
@@ -1118,6 +1115,16 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.3 · 上传的每一步都看得见
+
+    - 上传现在会显示存储检查、读取与加密、等待 Telegram、数据传输、远程确认、回读校验和清单发布，并展示阶段耗时与当前对象的字节进度。
+    - 修复必须等整个加密分片上传并校验完毕才从零更新进度的问题。Telegram 读取传输字节流时即更新进度，全部收尾完成后才显示 100%。
+    - 折叠的上传批次也会显示当前文件的处理阶段。网络预检前即显示队列，每批只进行一次完整存储发现，同时每个文件仍会重新检查上传目标。
+    - 私有存储自动检查远程身份，支持跨设备发现，并解释保留托管频道消息的原因。身份冲突或损坏时停止上传。
+    - 新登录默认显示二维码，并保留手机登录入口。切换账号需要确认，且不会中断正在准备或执行的上传。
+    - 文件库选择支持批量显示本地位置和按账号下载。新上传文件立即显示，旧扫描结果不会覆盖其完成记录。
+    - 同步更新英语、简体中文、日语和 macOS 应用版本。数据库与加密格式不变；加密传输控制和独立安全验证仍有待完善。
+
     ## 0.4.2 · 更清晰的文件库，更紧凑的传输列表
 
     - 用“本地文件”和“远端文件”替代“所有文件”。本地文件显示当前账号仍可访问的下载文件及手动导入的原文件；远端文件显示当前账号已索引的 Telegram 文件。文件类型使用独立筛选。
@@ -1169,3 +1176,39 @@ library-local-empty-title = 未找到本地文件
 library-local-empty-description = 下载文件或从这台电脑导入文件。已删除或无法访问的文件不会显示；也可以清除搜索和类型筛选。
 library-remote-empty-description = 浏览或索引频道以添加远端文件，或清除搜索和类型筛选。
 file-detail-downloaded-source-note = 此本地副本从以下来源下载。当前大小和日期来自磁盘文件。
+
+library-select-loaded = 选择已加载文件（最多 5,000 个）
+library-select-file = 选择文件
+library-selected-count = 已选择 { $count } 个
+
+account-switch-confirm-title = 切换账号？
+account-switch-confirm-description = 继续操作将退出当前账号。再次使用此账号时需要重新登录。已下载的文件和传输记录会保留。
+account-switch-confirm-action = 退出并切换
+account-use-phone = 使用手机号登录
+account-use-qr = 使用二维码登录
+account-qr-loading = 正在加载二维码…
+account-qr-unavailable = 二维码暂不可用
+
+storage-auto-created = TeleArk 已创建你的私有存储频道，现已就绪，并将自动管理。
+
+storage-auto-found = TeleArk 已找到并连接你的私有存储频道，将自动管理。
+
+
+storage-remote-title = 🔒 TeleArk · Managed Storage
+
+storage-identity-conflict = 暂时无法确认唯一的托管频道。TeleArk 已停止准备，避免向错误的频道写入。现有频道和文件不会被删除。
+
+storage-identity-invalid = 频道的远端身份标识或隐私设置不一致，TeleArk 已停止准备。请勿删除频道或其中的文件。
+
+transfer-upload-preparing = 正在准备所选文件并加入上传队列…
+
+transfer-upload-checking-storage = 正在检查存储频道
+transfer-upload-checking-target = 正在检查上传目标
+transfer-upload-reading-encrypting = 正在读取并加密
+transfer-upload-sending-bytes = 正在上传加密数据
+transfer-upload-confirming-message = 正在确认远程消息
+transfer-upload-verifying-bytes = 正在回读并校验
+transfer-upload-publishing-manifest = 正在发布文件清单
+transfer-upload-activity-elapsed = { $phase } · 已耗时 { $elapsed }
+transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 已耗时 { $elapsed }
+transfer-upload-waiting-telegram = 正在等待 Telegram

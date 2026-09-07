@@ -31,6 +31,10 @@ use grammers_session::{
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod byte_progress;
+use byte_progress::UploadReader;
+pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
+
 mod session;
 mod storage_channel;
 
@@ -39,6 +43,7 @@ use session::FileSession;
 const MAX_DIALOGS_PER_REQUEST: usize = 10_000;
 const MAX_MESSAGES_PER_SCAN: usize = 10_000;
 const MAX_SEARCH_RESULTS: usize = 1_000;
+const RECENT_SEARCH_MESSAGES: usize = 512;
 pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const DOWNLOAD_CHUNK_SIZE: u64 = 512 * 1024;
 pub const DOWNLOAD_PART_SIZE_BYTES: u64 = 1024 * 1024;
@@ -299,7 +304,7 @@ pub struct TelegramChat {
     username: Option<String>,
     kind: TelegramChatKind,
     peer_ref: PeerRef,
-    owned_private_broadcast: bool,
+    owned_channel: bool,
 }
 
 impl TelegramChat {
@@ -624,8 +629,8 @@ impl TelegramConnection {
                 username: peer.username().map(ToOwned::to_owned),
                 kind,
                 peer_ref: dialog.peer_ref(),
-                owned_private_broadcast: matches!(peer, grammers_client::peer::Peer::Channel(channel)
-                    if storage_channel::is_private_storage_candidate(&channel.raw)),
+                owned_channel: matches!(peer, grammers_client::peer::Peer::Channel(channel)
+                    if channel.raw.creator),
             });
         }
         Ok(chats)
@@ -728,14 +733,25 @@ impl TelegramConnection {
         file_from_message(message)
     }
 
-    /// Searches a bounded set of document messages and retains only exact
-    /// caption matches. The exact comparison turns Telegram's fuzzy text
-    /// search into a safe reconciliation lookup for opaque transfer keys.
+    /// Searches exact document captions through Telegram's search index.
     pub async fn search_files_exact_caption(
         &self,
         chat: &TelegramChat,
         caption: &str,
         limit: usize,
+    ) -> Result<Vec<TelegramFile>, TelegramError> {
+        self.search_files_exact_caption_with_recent(chat, caption, limit, false)
+            .await
+    }
+
+    /// Optionally supplements indexed results with bounded recent history,
+    /// so freshly published manifests need not wait for search indexing.
+    pub async fn search_files_exact_caption_with_recent(
+        &self,
+        chat: &TelegramChat,
+        caption: &str,
+        limit: usize,
+        include_recent: bool,
     ) -> Result<Vec<TelegramFile>, TelegramError> {
         validate_limit(limit, MAX_SEARCH_RESULTS)?;
         if caption.is_empty() {
@@ -755,7 +771,25 @@ impl TelegramConnection {
                 files.push(file);
             }
         }
-        Ok(files)
+        if !include_recent {
+            return Ok(files);
+        }
+        let mut recent_messages = self
+            .client
+            .iter_messages(chat.peer_ref)
+            .limit(RECENT_SEARCH_MESSAGES);
+        let mut recent = Vec::new();
+        while let Some(message) = recent_messages.next().await.map_err(map_invocation)? {
+            if message.text() != caption {
+                continue;
+            }
+            if let Some(file) = file_from_message(message)? {
+                recent.push(file);
+            }
+        }
+        Ok(merge_search_candidates(files, recent, limit, |file| {
+            file.message_id
+        }))
     }
 
     /// Downloads a previously indexed document to an explicit caller-selected path.
@@ -946,10 +980,24 @@ impl TelegramConnection {
     /// Downloads one bounded transfer object without creating a temporary
     /// ciphertext file. Application-part policy keeps this buffer bounded.
     pub async fn download_bytes(&self, file: &TelegramFile) -> Result<Vec<u8>, TelegramError> {
+        self.download_bytes_observed(file, None).await
+    }
+
+    pub async fn download_bytes_observed(
+        &self,
+        file: &TelegramFile,
+        observer: Option<&dyn ByteTransferObserver>,
+    ) -> Result<Vec<u8>, TelegramError> {
         let expected = usize::try_from(file.size_bytes)
             .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
         if expected > MAX_TRANSFER_OBJECT_BYTES {
             return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
+        }
+        if let Some(observer) = observer {
+            observer.observe(ByteTransferEvent::Downloading {
+                bytes: 0,
+                total: expected as u64,
+            });
         }
         let mut bytes = Vec::with_capacity(expected);
         let mut download = self.client.iter_download(&file.document);
@@ -962,6 +1010,12 @@ impl TelegramConnection {
                 return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
             }
             bytes.extend_from_slice(&chunk);
+            if let Some(observer) = observer {
+                observer.observe(ByteTransferEvent::Downloading {
+                    bytes: bytes.len() as u64,
+                    total: expected as u64,
+                });
+            }
         }
         if bytes.len() != expected {
             return Err(TelegramError::new(TelegramErrorKind::Network));
@@ -1015,6 +1069,18 @@ impl TelegramConnection {
         file_name: &str,
         caption: &str,
     ) -> Result<SentDocument, TelegramError> {
+        self.upload_bytes_observed(chat, bytes, file_name, caption, None)
+            .await
+    }
+
+    pub async fn upload_bytes_observed(
+        &self,
+        chat: &TelegramChat,
+        bytes: &[u8],
+        file_name: &str,
+        caption: &str,
+        observer: Option<&dyn ByteTransferObserver>,
+    ) -> Result<SentDocument, TelegramError> {
         if bytes.is_empty()
             || bytes.len() > MAX_TRANSFER_OBJECT_BYTES
             || file_name.is_empty()
@@ -1022,12 +1088,15 @@ impl TelegramConnection {
         {
             return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
         }
-        let mut stream = std::io::Cursor::new(bytes);
+        let mut stream = UploadReader::new(bytes, observer);
         let uploaded = self
             .client
             .upload_stream(&mut stream, bytes.len(), file_name.to_owned())
             .await
             .map_err(map_io)?;
+        if let Some(observer) = observer {
+            observer.observe(ByteTransferEvent::SendingMessage);
+        }
         let message = InputMessage::new().text(caption).document(uploaded);
         let sent = self
             .client
@@ -1674,9 +1743,52 @@ fn map_io(error: std::io::Error) -> TelegramError {
     }
 }
 
+/// Recent history wins when the same message is present in both responses.
+/// Newest messages remain visible when the caller's result bound is reached.
+fn merge_search_candidates<T>(
+    indexed: Vec<T>,
+    recent: Vec<T>,
+    limit: usize,
+    id: impl Fn(&T) -> i64,
+) -> Vec<T> {
+    let mut unique = std::collections::BTreeMap::new();
+    for file in indexed.into_iter().chain(recent) {
+        unique.insert(id(&file), file);
+    }
+    unique
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|(_, file)| file)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_history_fills_a_lagging_index_and_deduplicates_publications() {
+        assert_eq!(
+            merge_search_candidates(
+                Vec::<(i64, &str)>::new(),
+                vec![(7, "new manifest")],
+                10,
+                |file| file.0
+            ),
+            vec![(7, "new manifest")]
+        );
+        assert_eq!(
+            merge_search_candidates(
+                vec![(7, "indexed"), (4, "older")],
+                vec![(7, "fresh metadata"), (8, "not indexed yet")],
+                2,
+                |file| file.0
+            ),
+            vec![(8, "not indexed yet"), (7, "fresh metadata")]
+        );
+        assert!(merge_search_candidates(vec![(7, "indexed")], vec![], 0, |file| file.0).is_empty());
+    }
 
     #[test]
     fn invalid_config_is_rejected_without_opening_a_session() {

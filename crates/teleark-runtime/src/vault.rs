@@ -31,6 +31,7 @@ use teleark_transfer::{
 use zeroize::Zeroizing;
 
 use crate::transfer::{hex_id, package_id_from_bytes};
+use crate::vault_progress::{VaultUploadActivity, VaultUploadObserver, VaultUploadPhase};
 use crate::{
     DesktopLibrary, DesktopTelegram, EncryptedRemoteTransport, ManifestPublishRequest,
     TelegramObjectStore, encrypted_part_sizes, recover_remote_manifests,
@@ -83,6 +84,7 @@ pub enum VaultTransferState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultTransferSnapshot {
+    pub upload_activity: Option<VaultUploadActivity>,
     pub id: u64,
     pub account_id: i64,
     pub chat_id: i64,
@@ -833,16 +835,24 @@ impl VaultOwner {
         chat_id: i64,
         paths: Vec<PathBuf>,
     ) -> Result<VaultUploadReport, ApplicationError> {
+        self.upload_batch_with_validation(account_id, chat_id, paths, |owner| {
+            owner
+                .telegram
+                .validate_storage_channel(account_id, chat_id)
+                .map(|_| ())
+        })
+    }
+
+    fn upload_batch_with_validation(
+        &mut self,
+        account_id: i64,
+        chat_id: i64,
+        paths: Vec<PathBuf>,
+        validate: impl FnOnce(&Self) -> Result<(), ApplicationError>,
+    ) -> Result<VaultUploadReport, ApplicationError> {
         if self.master_key.is_none() {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
-        if self.library.storage_channel_id(account_id)? != Some(chat_id) {
-            return Err(ApplicationError::new(
-                ApplicationErrorKind::PermissionDenied,
-            ));
-        }
-        self.telegram
-            .validate_storage_channel(account_id, chat_id)?;
         let sources = inspect_upload_sources(&paths)?;
         let batch_id = random_transfer_id()?;
         let queued_at = now_unix_ms()?;
@@ -871,6 +881,7 @@ impl VaultOwner {
             Some((account_id, batch_id, cancel.clone()));
         for plan in &plans {
             self.push_transfer(VaultTransferSnapshot {
+                upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::CheckingStorage)),
                 id: plan.id,
                 account_id,
                 chat_id,
@@ -892,8 +903,20 @@ impl VaultOwner {
                 state: VaultTransferState::Queued,
             });
         }
+        // Publish all queue rows before any network preflight. One complete
+        // discovery covers the batch; each file still revalidates its target.
+        let validation = if cancel.load(Ordering::Acquire) {
+            Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+        } else {
+            validate(self)
+        };
         let mut report = VaultUploadReport::default();
-        let mut policy = UploadBatchPolicy::default();
+        let mut policy = UploadBatchPolicy {
+            blocked: validation.err().map(|error| error.kind()),
+        };
+        for plan in &plans {
+            self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
+        }
         for plan in &plans {
             let result = policy.execute(&cancel, || {
                 self.upload(account_id, chat_id, &plan.source.path, Some(plan))
@@ -939,13 +962,14 @@ impl VaultOwner {
         // Destination policy is enforced before touching plaintext or allocating
         // keys. A frontend cannot turn Saved Messages or an arbitrary channel
         // into a TeleArk upload target by supplying its numeric id.
-        if self.library.storage_channel_id(account_id)? != Some(chat_id) {
-            return Err(ApplicationError::new(
-                ApplicationErrorKind::PermissionDenied,
-            ));
+        if let Some(plan) = queued {
+            VaultUploadObserver::new(self.transfers.clone(), plan.id)
+                .phase(VaultUploadPhase::CheckingTarget);
+            self.telegram.validate_storage_target(account_id, chat_id)?;
+        } else {
+            self.telegram
+                .validate_storage_channel(account_id, chat_id)?;
         }
-        self.telegram
-            .validate_storage_channel(account_id, chat_id)?;
         let metadata = std::fs::metadata(source).map_err(map_source_io)?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
@@ -986,6 +1010,7 @@ impl VaultOwner {
             &controller.snapshot(),
         )?;
         self.push_transfer(VaultTransferSnapshot {
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: transfer_id,
             account_id,
             chat_id,
@@ -1017,7 +1042,12 @@ impl VaultOwner {
                 .source_identity(source_id)
                 .map_err(map_transfer_error)?;
             let file_key = generate_file_key(&mut OsRandom).map_err(map_crypto_error)?;
-            let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id);
+            let observer = Arc::new(VaultUploadObserver::new(
+                self.transfers.clone(),
+                transfer_id,
+            ));
+            let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
+                .with_observer(observer.clone());
             let mut remote = EncryptedRemoteTransport::new(
                 store,
                 AccountId::new(account_id),
@@ -1100,6 +1130,7 @@ impl VaultOwner {
                 },
                 |part_index, prepared| {
                     let plaintext_length = prepared.manifest_part.plaintext_length;
+                    observer.begin_part(plaintext_length);
                     if let Ok(mut duration) = encryption_time.lock() {
                         *duration = duration.saturating_add(prepared.encryption_duration_micros);
                     }
@@ -1192,6 +1223,7 @@ impl VaultOwner {
                         snapshot.average_bytes_per_second = Some(average_bytes_per_second);
                         snapshot.telemetry = telemetry;
                     });
+                    observer.phase(VaultUploadPhase::Preparing);
                     Ok::<(), TransferError>(())
                 },
             )
@@ -1213,6 +1245,7 @@ impl VaultOwner {
             {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
+            observer.phase(VaultUploadPhase::Publishing);
             let manifest_object = remote
                 .publish_manifest(
                     self.master_key.as_ref().ok_or_else(|| {
@@ -1328,6 +1361,7 @@ impl VaultOwner {
             &controller.snapshot(),
         )?;
         self.push_transfer(VaultTransferSnapshot {
+            upload_activity: None,
             id: transfer_id,
             account_id: expected_account_id,
             chat_id,
@@ -2152,6 +2186,166 @@ mod tests {
     }
 
     #[test]
+    fn upload_activity_advances_before_first_verified_part_and_never_claims_completion() {
+        use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
+        let fixture = VaultTransferSnapshot {
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
+            id: 1,
+            account_id: 7,
+            chat_id: 90,
+            batch_id: Some(1),
+            queued_at_unix_ms: 1,
+            direction: VaultTransferDirection::Upload,
+            file_name: "京都 — fixture.bin".into(),
+            package_id: None,
+            size_bytes: 60 * 1024 * 1024,
+            transferred_bytes: 0,
+            completed_parts: 0,
+            part_count: 1,
+            started_at_unix_ms: 1,
+            duration_ms: None,
+            average_bytes_per_second: None,
+            destination: None,
+            session_log_path: None,
+            telemetry: transfer_controller(true, 1, teleark_transfer::SoftLimitPolicy::Respect)
+                .expect("controller")
+                .snapshot(),
+            state: VaultTransferState::Running,
+        };
+        let transfers = Arc::new(Mutex::new(vec![fixture]));
+        let observer = VaultUploadObserver::new(transfers.clone(), 1);
+        let snapshot = || transfers.lock().expect("test snapshot lock")[0].clone();
+        observer.begin_part(60 * 1024 * 1024);
+        observer.observe(ByteTransferEvent::Uploading {
+            bytes: 512 * 1024,
+            total: 64 * 1024 * 1024,
+        });
+        let row = snapshot();
+        assert_eq!(row.transferred_bytes, 0);
+        assert_eq!(row.completed_parts, 0);
+        assert!(row.upload_activity.expect("upload activity").uploaded_bytes > 0);
+        observer.observe(ByteTransferEvent::Uploading {
+            bytes: 64 * 1024 * 1024,
+            total: 64 * 1024 * 1024,
+        });
+        observer.observe(ByteTransferEvent::SendingMessage);
+        assert_eq!(
+            snapshot().upload_activity.expect("upload activity").phase,
+            VaultUploadPhase::SendingMessage
+        );
+        observer.observe(ByteTransferEvent::Downloading {
+            bytes: 512 * 1024,
+            total: 64 * 1024 * 1024,
+        });
+        let row = snapshot();
+        let activity = row.upload_activity.expect("upload activity");
+        assert_eq!(activity.phase, VaultUploadPhase::Verifying);
+        assert_eq!(activity.uploaded_bytes, row.size_bytes);
+        assert_eq!(row.transferred_bytes, 0);
+        assert_eq!(row.state, VaultTransferState::Running);
+        observer.phase(VaultUploadPhase::Publishing);
+        observer.observe(ByteTransferEvent::Uploading {
+            bytes: 100,
+            total: 100,
+        });
+        observer.observe(ByteTransferEvent::Downloading {
+            bytes: 100,
+            total: 100,
+        });
+        assert_eq!(
+            snapshot().upload_activity.expect("upload activity").phase,
+            VaultUploadPhase::Publishing
+        );
+        transfers.lock().expect("test snapshot lock")[0].state =
+            VaultTransferState::Failed(ApplicationErrorKind::Network);
+        let before = snapshot();
+        observer.phase(VaultUploadPhase::Preparing);
+        observer.observe(ByteTransferEvent::Uploading {
+            bytes: u64::MAX,
+            total: 0,
+        });
+        assert_eq!(snapshot(), before);
+    }
+
+    #[test]
+    fn batch_publishes_queue_before_remote_validation_and_keeps_failures_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let paths = vec![temp.path().join("one.txt"), temp.path().join("two.txt")];
+        for path in &paths {
+            std::fs::write(path, b"synthetic upload")?;
+        }
+        for cancel_during_validation in [false, true] {
+            let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3"))?;
+            assert_eq!(library.storage_channel_id(100)?, None);
+            let mut owner = VaultOwner {
+                telegram: DesktopTelegram::open(temp.path().join("test.session"))?,
+                library,
+                record: None,
+                master_key: Some(VaultMasterKey::from_bytes([7; 32])),
+                status: Arc::new(Mutex::new(VaultStatus::unconfigured())),
+                transfers: Arc::new(Mutex::new(Vec::new())),
+                active_upload_batch: Arc::new(Mutex::new(None)),
+            };
+            let mut calls = 0;
+            let report = owner.upload_batch_with_validation(100, 700, paths.clone(), |owner| {
+                calls += 1;
+                let rows = owner.transfers.lock().expect("snapshots");
+                assert_eq!(rows.len(), 2);
+                assert!(
+                    rows.iter()
+                        .all(|row| row.state == VaultTransferState::Queued)
+                );
+                assert!(
+                    rows.iter()
+                        .all(|row| row.transferred_bytes == 0 && row.package_id.is_none())
+                );
+                assert!(rows.iter().all(|row| {
+                    row.upload_activity
+                        .as_ref()
+                        .is_some_and(|activity| activity.phase == VaultUploadPhase::CheckingStorage)
+                }));
+                let active = owner.active_upload_batch.lock().expect("active batch");
+                let (_, _, cancel) = active.as_ref().expect("cancellable before network");
+                if cancel_during_validation {
+                    cancel.store(true, Ordering::Release);
+                    Ok(())
+                } else {
+                    Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                }
+            })?;
+            assert_eq!(calls, 1);
+            assert!(report.completed.is_empty());
+            if cancel_during_validation {
+                assert_eq!(report.cancelled.len(), 2);
+            } else {
+                assert_eq!(report.failed.len(), 2);
+            }
+            assert!(
+                owner
+                    .active_upload_batch
+                    .lock()
+                    .expect("batch released")
+                    .is_none()
+            );
+            assert!(
+                owner
+                    .transfers
+                    .lock()
+                    .expect("snapshots")
+                    .iter()
+                    .all(|row| row.state
+                        == if cancel_during_validation {
+                            VaultTransferState::Cancelled
+                        } else {
+                            VaultTransferState::Failed(ApplicationErrorKind::Conflict)
+                        })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn recovery_bundle_encoding_has_a_fixed_candidate_vector() {
         let key = RecoveryKey::from_bytes([0x5a; 32]);
         let wrap = RecoveryWrap {
@@ -2238,6 +2432,7 @@ mod tests {
     #[test]
     fn bounded_history_evicts_whole_completed_batches_and_keeps_active_members() {
         let fixture = VaultTransferSnapshot {
+            upload_activity: None,
             id: 1,
             account_id: 7,
             chat_id: 90,

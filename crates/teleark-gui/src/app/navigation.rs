@@ -189,6 +189,41 @@ impl TeleArkApp {
             .border_r_1()
             .border_color(theme::border())
             .child(
+                components::button(
+                    "sidebar-toggle",
+                    "",
+                    Some(if collapsed {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    }),
+                    false,
+                )
+                .ghost()
+                .w_full()
+                .h(px(36.0))
+                .accessibility_label(self.tr(if collapsed {
+                    "shell-expand-navigation"
+                } else {
+                    "shell-collapse-navigation"
+                }))
+                .tooltip(self.tr(if collapsed {
+                    "shell-expand-navigation"
+                } else {
+                    "shell-collapse-navigation"
+                }))
+                .when(!collapsed, |button| {
+                    button
+                        .label(self.tr("shell-collapse-navigation"))
+                        .justify_start()
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.preferences.sidebar_collapsed = !this.preferences.sidebar_collapsed;
+                    this.persist_preferences(cx);
+                    cx.notify();
+                })),
+            )
+            .child(
                 div()
                     .h(px(50.0))
                     .flex()
@@ -248,42 +283,6 @@ impl TeleArkApp {
                 self.page == Page::Account,
                 cx,
             ))
-            .child(div().h(px(1.0)).my_1().bg(theme::border()))
-            .child(
-                components::button(
-                    "sidebar-toggle",
-                    "",
-                    Some(if collapsed {
-                        IconName::PanelLeftOpen
-                    } else {
-                        IconName::PanelLeftClose
-                    }),
-                    false,
-                )
-                .ghost()
-                .w_full()
-                .h(px(36.0))
-                .accessibility_label(self.tr(if collapsed {
-                    "shell-expand-navigation"
-                } else {
-                    "shell-collapse-navigation"
-                }))
-                .tooltip(self.tr(if collapsed {
-                    "shell-expand-navigation"
-                } else {
-                    "shell-collapse-navigation"
-                }))
-                .when(!collapsed, |button| {
-                    button
-                        .label(self.tr("shell-collapse-navigation"))
-                        .justify_start()
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.preferences.sidebar_collapsed = !this.preferences.sidebar_collapsed;
-                    this.persist_preferences(cx);
-                    cx.notify();
-                })),
-            )
             .into_any_element()
     }
 
@@ -297,7 +296,6 @@ impl TeleArkApp {
             .map(|chat| {
                 let chat_id = chat.id;
                 SidebarMenuItem::new(chat.name.clone())
-                    .icon(Icon::new(Symbol::Hash).size(px(16.0)))
                     .active(self.selected_chat_id == Some(chat_id))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_channel(chat_id, cx)))
             })

@@ -43,6 +43,8 @@ mod diagnostics;
 mod telegram;
 mod transfer;
 mod vault;
+mod vault_progress;
+pub use vault_progress::{VaultUploadActivity, VaultUploadPhase};
 
 pub use channel_transfer::{
     ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
@@ -53,7 +55,7 @@ pub use channel_transfer::{
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
 pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
-pub use storage_channel::StorageChannelStatus;
+pub use storage_channel::{ManagedStorageChannel, StorageChannelStatus};
 pub use teleark_telegram::DownloadPartState;
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,

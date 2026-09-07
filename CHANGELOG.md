@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3 · Upload activity at every step
+
+- Uploads now show storage checks, reading and encryption, waiting for Telegram, data transfer, remote confirmation, readback verification and manifest publication, with elapsed time and current object bytes.
+- Fixed progress remaining at zero until an entire encrypted part finished uploading and verification. In-flight progress updates as Telegram reads the byte stream; 100% is reserved for completed finalization.
+- Collapsed upload batches show the current member's activity. Queue rows appear before network preflight, and complete storage discovery runs once per batch while each file still rechecks its destination.
+- Private storage setup automatically verifies remote identity, preserves cross-device discovery, and explains why managed channel messages must be kept. Conflicting or damaged identities stop uploads.
+- New sign-ins start with QR login and offer a secondary phone method. Switching accounts requires confirmation and cannot interrupt pending uploads.
+- Library selection supports bulk reveal and account-scoped downloads. Newly uploaded files appear immediately, and older scans cannot replace their completion records.
+- Updated English, Simplified Chinese, Japanese and macOS bundle metadata. Database and encryption formats are unchanged; encrypted transfer controls and independent security qualification remain incomplete.
+
 ## 0.4.2 · Clearer Library, compact Transfers
 
 - Replaced All Files with Local files and Remote files tabs. Local files shows accessible downloads for the current account and imported originals; remote files shows the account's indexed Telegram catalog. File types have a separate filter.

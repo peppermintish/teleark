@@ -1,5 +1,4 @@
-//! Account-scoped private storage selection. SQLite is a convenience binding;
-//! the Telegram description marker permits rediscovery after database loss.
+//! Remote-authoritative private storage discovery; local bindings are caches.
 
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_storage::{Database, SettingRecord};
@@ -18,6 +17,46 @@ pub enum StorageChannelStatus {
         candidates: Vec<TelegramChatSummary>,
     },
     Choose(Vec<TelegramChatSummary>),
+}
+
+/// Result of automatic management; this is transient presentation metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedStorageChannel {
+    pub channel: TelegramChatSummary,
+    pub created: bool,
+}
+
+/// Complete remote discovery must yield exactly one candidate. Local identity
+/// caches never resolve conflicting remote evidence or authorize repair.
+pub(crate) fn resolve_managed_storage_channel(
+    preferred: Option<i64>,
+    candidates: Vec<TelegramChatSummary>,
+) -> StorageChannelStatus {
+    let _ = preferred; // Compatibility argument; remote evidence alone selects storage.
+    match candidates.as_slice() {
+        [] => StorageChannelStatus::Missing,
+        [channel] => StorageChannelStatus::Ready(channel.clone()),
+        _ => StorageChannelStatus::Choose(candidates),
+    }
+}
+
+/// An ambiguous creation may have reached Telegram. Subsequent automatic work
+/// may discover its result but must not issue another create in this process.
+#[derive(Default)]
+pub(crate) struct StorageCreationGuard(std::collections::BTreeSet<i64>);
+
+impl StorageCreationGuard {
+    pub(crate) fn begin(&mut self, account: i64) -> Result<(), ApplicationError> {
+        if self.0.insert(account) {
+            Ok(())
+        } else {
+            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+        }
+    }
+
+    pub(crate) fn resolved(&mut self, account: i64) {
+        self.0.remove(&account);
+    }
 }
 
 pub(crate) fn resolve_storage_channel(
@@ -131,6 +170,50 @@ mod tests {
             username: None,
             kind: TelegramChatKind::Channel,
         }
+    }
+
+    #[test]
+    fn automatic_management_uses_only_unique_remote_evidence() {
+        for cached in [None, Some(7), Some(99)] {
+            assert_eq!(
+                resolve_managed_storage_channel(cached, vec![channel(8, "TeleArk")]),
+                StorageChannelStatus::Ready(channel(8, "TeleArk"))
+            );
+            assert_eq!(
+                resolve_managed_storage_channel(cached, vec![]),
+                StorageChannelStatus::Missing
+            );
+            for candidates in [
+                vec![channel(7, "A"), channel(8, "B")],
+                vec![channel(8, "B"), channel(7, "A")],
+            ] {
+                assert_eq!(
+                    resolve_managed_storage_channel(cached, candidates.clone()),
+                    StorageChannelStatus::Choose(candidates)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uncertain_creation_blocks_duplicate_requests_until_discovery_resolves_it() {
+        let mut guard = StorageCreationGuard::default();
+        assert!(guard.begin(100).is_ok());
+        // Includes dropped/timeout RPC futures: begin remains recorded.
+        assert_eq!(
+            guard.begin(100).expect_err("no duplicate").kind(),
+            ApplicationErrorKind::Conflict
+        );
+        assert!(guard.begin(200).is_ok());
+        guard.resolved(100);
+        assert!(guard.begin(100).is_ok());
+        assert_eq!(
+            guard
+                .begin(200)
+                .expect_err("other account still unresolved")
+                .kind(),
+            ApplicationErrorKind::Conflict
+        );
     }
 
     #[test]

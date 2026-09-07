@@ -50,7 +50,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `unlock`, `about`, `appearance` |
+| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress` |
 | `--locale` | `en-US`, `zh-CN`, `ja-JP` |
 | `--window-size` | Minimum 900×600; review 960×640, 1360×760, 1920×1080 |
 

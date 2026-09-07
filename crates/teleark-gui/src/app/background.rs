@@ -142,7 +142,20 @@ impl TeleArkApp {
                         .map(|snapshot| {
                             (
                                 snapshot.id,
-                                format!("vault:{:?}", snapshot.state),
+                                format!(
+                                    "vault:{:?}:{:?}:{}",
+                                    snapshot.state,
+                                    snapshot.upload_activity,
+                                    snapshot
+                                        .upload_activity
+                                        .as_ref()
+                                        .filter(|_| matches!(
+                                            snapshot.state,
+                                            teleark_runtime::VaultTransferState::Queued
+                                                | teleark_runtime::VaultTransferState::Running
+                                        ))
+                                        .map_or(0, |activity| activity.since.elapsed().as_secs())
+                                ),
                                 snapshot.transferred_bytes,
                                 snapshot.average_bytes_per_second,
                                 snapshot.completed_parts,

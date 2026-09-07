@@ -30,7 +30,7 @@ use crate::DesktopTelegram;
 const FRAME_PLAINTEXT_BYTES: u32 = 8 * 1024 * 1024;
 const ENCRYPTED_PART_PLAINTEXT_BYTES: u64 = 60 * 1024 * 1024;
 const MAX_RECONCILIATION_RESULTS: usize = 1_000;
-const MANIFEST_CAPTION: &str = "teleark-manifest-v1";
+pub(crate) const MANIFEST_CAPTION: &str = "teleark-manifest-v1";
 const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"TARKCP01";
 
@@ -124,6 +124,7 @@ pub trait RemoteObjectStore {
 
 /// Real Telegram implementation of the byte-store boundary.
 pub struct TelegramObjectStore {
+    observer: Option<Arc<dyn teleark_telegram::ByteTransferObserver>>,
     cancellation: Option<crate::TelegramScanCancellation>,
     account_id: i64,
     telegram: DesktopTelegram,
@@ -138,11 +139,20 @@ impl TelegramObjectStore {
             account_id,
             chat_id,
             cancellation: None,
+            observer: None,
         }
     }
 }
 
 impl TelegramObjectStore {
+    pub(crate) fn with_observer(
+        mut self,
+        observer: Arc<dyn teleark_telegram::ByteTransferObserver>,
+    ) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     pub fn with_cancellation(mut self, cancellation: crate::TelegramScanCancellation) -> Self {
         self.cancellation = Some(cancellation);
         self
@@ -186,10 +196,17 @@ impl RemoteObjectStore for TelegramObjectStore {
         bytes: Vec<u8>,
     ) -> Result<RemoteByteObject, UploadError> {
         let encoded_size = bytes.len() as u64;
-        match self
-            .telegram
-            .upload_bytes(self.account_id, self.chat_id, name, caption, bytes)
-        {
+        if let Some(observer) = &self.observer {
+            observer.observe(teleark_telegram::ByteTransferEvent::WaitingForUpload);
+        }
+        match self.telegram.upload_bytes_observed(
+            self.account_id,
+            self.chat_id,
+            name.to_owned(),
+            caption.to_owned(),
+            bytes,
+            self.observer.clone(),
+        ) {
             Ok(message_id) => Ok(RemoteByteObject {
                 object_id: u64::try_from(message_id)
                     .map_err(|_| UploadError::Definite(TransferError::RemoteMissing))?,
@@ -205,12 +222,17 @@ impl RemoteObjectStore for TelegramObjectStore {
 
     fn download(&mut self, object_id: u64) -> Result<Vec<u8>, TransferError> {
         let message_id = i64::try_from(object_id).map_err(|_| TransferError::RemoteMissing)?;
+        if let Some(observer) = &self.observer {
+            observer
+                .observe(teleark_telegram::ByteTransferEvent::Downloading { bytes: 0, total: 0 });
+        }
         self.telegram
-            .download_bytes(
+            .download_bytes_observed(
                 self.account_id,
                 self.chat_id,
                 message_id,
                 self.cancellation.clone(),
+                self.observer.clone(),
             )
             .map_err(map_application_error)
     }

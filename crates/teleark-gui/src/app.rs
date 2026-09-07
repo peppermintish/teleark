@@ -235,6 +235,8 @@ pub struct TeleArkApp {
     pub(crate) page: Page,
     pub(crate) storage_status: teleark_runtime::StorageChannelStatus,
     pub(crate) storage_loading: bool,
+    pub(crate) storage_notice: Option<&'static str>,
+    storage_retry_task: Option<Task<()>>,
     pub(crate) storage_error: Option<teleark_core::ApplicationErrorKind>,
     pub(crate) show_storage_guide: bool,
     pub(crate) settings_advanced_expanded: bool,
@@ -245,6 +247,8 @@ pub struct TeleArkApp {
     pub(crate) transfers_account_ready: bool,
     pub(crate) account_avatar: Option<std::sync::Arc<gpui_kit::Image>>,
     pub(crate) show_account_switch: bool,
+    pub(crate) confirm_account_switch: bool,
+    pub(crate) phone_login: bool,
     pub(crate) unlock_intent: Option<UnlockIntent>,
     main_focus: gpui_kit::FocusHandle,
     modal_was_open: bool,
@@ -256,6 +260,7 @@ pub struct TeleArkApp {
     pub(crate) search_input: Entity<InputState>,
     pub(crate) show_upload: bool,
     pub(crate) upload_queued: bool,
+    pub(crate) upload_in_flight: bool,
     pub(crate) selected_file: usize,
     pub(crate) selected_transfer_keys: BTreeSet<u64>,
     pub(crate) pending_transfer_delete: Option<u64>,
@@ -289,6 +294,8 @@ pub struct TeleArkApp {
     pub(crate) nav_selection: &'static str,
     pub(crate) storage_view: StorageView,
     pub(crate) library_content: LibraryContent,
+    pub(crate) library_batch_cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) library_selection: Vec<crate::library_state::LibraryRowId>,
     pub(crate) library_view: LibraryView,
     pub(crate) library_kind_selection: &'static str,
     library_scan_cancellation: teleark_runtime::LocalLibraryCancellation,
@@ -598,6 +605,8 @@ impl TeleArkApp {
             page,
             storage_status: teleark_runtime::StorageChannelStatus::Missing,
             storage_loading: false,
+            storage_notice: None,
+            storage_retry_task: None,
             storage_error: None,
             show_storage_guide: false,
             settings_advanced_expanded: false,
@@ -608,6 +617,8 @@ impl TeleArkApp {
             transfers_account_ready: false,
             account_avatar: None,
             show_account_switch: false,
+            confirm_account_switch: false,
+            phone_login: false,
             unlock_intent: None,
             main_focus: cx.focus_handle(),
             modal_was_open: false,
@@ -619,6 +630,7 @@ impl TeleArkApp {
             search_input,
             show_upload,
             upload_queued: false,
+            upload_in_flight: false,
             selected_file: 0,
             selected_transfer_keys: BTreeSet::new(),
             pending_transfer_delete: None,
@@ -656,6 +668,8 @@ impl TeleArkApp {
             nav_selection,
             storage_view: StorageView::Files,
             library_content,
+            library_batch_cancellation: Default::default(),
+            library_selection: Vec::new(),
             library_view: LibraryView::Local,
             library_kind_selection: "library-types-all",
             library_scan_cancellation: Default::default(),
@@ -805,6 +819,9 @@ impl TeleArkApp {
         }
         self.page = page;
         self.show_upload = false;
+        if page == Page::Account {
+            self.ensure_telegram_qr_login(cx);
+        }
         if page == Page::Library {
             self.refresh_library(cx);
         } else {
@@ -914,6 +931,8 @@ pub(crate) fn is_preview_library_selection(selection: &str) -> bool {
 
 impl Drop for TeleArkApp {
     fn drop(&mut self) {
+        self.library_batch_cancellation
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.library_scan_cancellation.cancel();
         if let Some(vault) = self.vault.as_ref() {
             let batches = vault
@@ -936,8 +955,10 @@ impl Render for TeleArkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = LayoutPolicy::from_window(window)
             .with_sidebar_collapsed(self.preferences.sidebar_collapsed);
-        let modal_open =
-            self.show_upload || self.show_telegram_api_id_prompt || self.unlock_intent.is_some();
+        let modal_open = self.show_upload
+            || self.show_telegram_api_id_prompt
+            || self.unlock_intent.is_some()
+            || self.confirm_account_switch;
         if modal_open != self.modal_was_open {
             window.focus(
                 if modal_open {
@@ -962,6 +983,9 @@ impl Render for TeleArkApp {
             .font_family(".SystemUIFont")
             .text_color(theme::text_primary())
             .on_action(cx.listener(|this, _: &DismissOverlay, window, cx| {
+                if this.confirm_account_switch {
+                    return;
+                }
                 match escape_behavior(
                     window.is_fullscreen(),
                     this.unlock_intent.is_some(),
@@ -1069,6 +1093,9 @@ impl Render for TeleArkApp {
                             }),
                     ),
             )
+            .when(self.confirm_account_switch, |root| {
+                root.child(self.render_account_switch_dialog(cx))
+            })
             .when(self.unlock_intent.is_some(), |root| {
                 root.child(self.render_unlock_dialog(layout, cx))
             })
