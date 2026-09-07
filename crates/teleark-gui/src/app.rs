@@ -369,6 +369,7 @@ pub struct TeleArkApp {
     qr_poll_task: Option<Task<()>>,
     telegram_login_generation: u64,
     telegram_file_generation: u64,
+    telegram_file_auto_load: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -732,6 +733,7 @@ impl TeleArkApp {
             qr_poll_task: None,
             telegram_login_generation: 0,
             telegram_file_generation: 0,
+            telegram_file_auto_load: false,
             _subscriptions: vec![
                 search_subscription,
                 appearance_subscription,

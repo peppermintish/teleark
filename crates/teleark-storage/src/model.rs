@@ -405,9 +405,16 @@ impl Default for SearchQuery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchPage {
     pub files: Vec<LogicalFileRecord>,
+    pub sources: std::collections::BTreeMap<LogicalFileId, LibrarySourceRecord>,
     pub next_cursor: Option<PageCursor>,
     /// Number of rows matching the query before keyset pagination is applied.
     pub total_matching: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibrarySourceRecord {
+    pub name: String,
+    pub message_id: Option<MessageId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

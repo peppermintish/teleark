@@ -103,7 +103,7 @@ error-library-unknown = 文件库操作意外失败。
 file-detail-empty-title = 请从文件库中选择一个文件
 file-detail-empty-description = 导入文件并将其选中，即可查看已保存的详细信息。
 file-detail-modified-at = 修改时间
-file-detail-verification-unavailable = 此本机项目暂无验证详情。
+file-detail-verification-unavailable = 此目录未保存已验证的分片或内容哈希证据。
 
 upload-dialog-title = 上传到 TeleArk
 upload-target-account = 目标账号
@@ -1120,9 +1120,25 @@ transfer-batch-upload-name = 批量上传 · { $count } 个文件
 about-changelog-unreleased =
     ## 尚未发布 · 日常使用改进
 
+    - 修复频道自动分页重复更新表格导致的崩溃；取消或过期请求不会在切换页面、账号后重新启动加载。
+    - 本地文件库明确说明 Telegram 索引文件的来源，将“已上传”改为“已索引”，并显示原频道及账号范围内的消息 ID；移除占位分片表。
     - 新增可收起的图标导航、本地文件库直达入口和独立频道列表，主界面显示下载磁盘可用空间。
     - 修复原始文件和传输详情的滚动，详情面板与底层列表互不干扰。
     - 批次显示来源、文件名、数量、时间和真实成员列表。可一次检查多个上传文件；停止批次会在当前文件完成后跳过剩余文件。
     - 后台检查已下载文件，区分文件缺失、大小变化和暂时无法访问。缺失的普通下载可作为新任务重新下载。
     - 新增原创 TeleArk 图标及带应用图标的 macOS 应用包。
     - 数据库 v10 保留按账户隔离的本地下载记录，重启后仍可检查。加密和清单格式保持不变。
+
+file-state-remote-indexed = 已索引
+
+library-catalog-explanation = 此本地目录包含浏览或索引 Telegram 时发现的文件，以及手动导入的文件。索引记录不代表上传或下载记录。
+
+file-detail-source-record = 来源记录
+
+file-detail-indexed-source-note = 此元数据来自 Telegram 来源，不代表 TeleArk 上传或下载过该文件。以下标识共同定位原账号、频道中的消息；当前远端是否仍可访问尚未重新检查。
+
+file-detail-local-source-note = 此文件从磁盘导入。导入仅记录元数据，不会将文件内容上传到 Telegram。
+
+file-detail-source-account-id = 来源账号 ID
+
+file-detail-source-chat-id = 来源频道 ID

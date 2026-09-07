@@ -35,7 +35,9 @@ Legacy Saved Messages recovery lives under Key Vault → Advanced. It is a recov
 
 Transfers leads with the list, speed and filters. Select rows or expand Manage for bulk operations; expose only lifecycle actions supported by that runtime. Native tasks support pause/resume/cancel/retry and confirmed terminal-history deletion. Vault controls remain limited by the current owner. Deletion never deletes successfully downloaded user files. Stable task identities survive sort/filter changes. Ordinary rows are 72 points and batch headers 108 points, using a variable-height virtual list. Batch headers show source, names, completed/failed counts and time; a separate chevron expands children and Info opens actual virtualized members. File availability is distinct from historical completion, with explicit missing/changed/unavailable states.
 
-Details retain file/message metadata, verification, timing, failure guidance and Live/Replay telemetry. Unknown physical connection/DC values stay unavailable. Preview data is labeled and must never substitute for a failed runtime.
+Details retain file/message metadata, verification, timing, failure guidance and Live/Replay telemetry. Unknown physical connection/DC values stay unavailable. Preview data is labeled and must never substitute for a failed runtime. Local Library identifies remote metadata as indexed, explains how browsing populates the catalog, and shows actual source account/channel/message IDs. It does not invent parts, upload timestamps or verification evidence.
+
+DataTable pagination defers owner callbacks until the table entity is released. Account/chat/generation checks reject stale callbacks; cancellation disables automatic loading until an explicit load, and failures require explicit retry.
 
 The upload dialog keeps its title and bottom actions visible while the body scrolls. It supports up to 128 files with a scrollable review/removal list and total count/size, followed by real account and destination, a short explanation and queue action. Crypto/splitting mechanics are collapsed. Content/name/metadata encryption and the current part ceiling are runtime policy, not inactive editable options.
 

@@ -65,6 +65,8 @@ The `settings` table stores explicitly versioned preferences, locale override, A
 
 ## Search and deletion
 
-FTS5 covers normalized filename/path/caption projections while preserving original text. Structured facets include account/channel, type, date, size, extension and local/remote/encryption/verification state. Current ordering is modified-time descending with logical-file ID as a unique tie-breaker. Opaque versioned keyset cursors bind the query/facet fingerprint; changed queries reject old cursors. Never concatenate user text into SQL or use deep OFFSET for scale.
+FTS5 covers normalized filename/path/caption projections while preserving original text. Structured facets include account/channel, type, date, size, extension and local/remote/encryption/verification state. Library query DTOs also project the exact source channel title and an optional native message ID, scoped by the file's account/chat. Only a single matching non-package remote object supplies that ID; ambiguous multi-object projections remain unavailable. These are read projections over existing tables, with no migration or persistent encoding change. The durable `uploaded` enum indicates recorded remote presence, not who uploaded it; the catalog UI labels unverified records as indexed.
+
+Current ordering is modified-time descending with logical-file ID as a unique tie-breaker. Opaque versioned keyset cursors bind the query/facet fingerprint; changed queries reject old cursors. Never concatenate user text into SQL or use deep OFFSET for scale.
 
 Deleting catalog/history rows is distinct from deleting remote content. Collection removal does not remove files. Terminal native-history deletion removes owned logs/partials/bitmaps but never a completed user file. Remote package cleanup requires explicit reachability and recovery policy; it is not a database cascade. Smart-collection rule evaluation, other sort orders and million-record performance claims remain future work.

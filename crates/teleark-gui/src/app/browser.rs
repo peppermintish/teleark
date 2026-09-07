@@ -3,6 +3,25 @@
 use super::*;
 
 impl TeleArkApp {
+    pub(crate) fn channel_file_load_scope(&self) -> Option<(i64, i64, u64)> {
+        if !self.telegram_file_auto_load
+            || self.library.is_none()
+            || self.telegram.is_none()
+            || !matches!(
+                self.page,
+                Page::Channel | Page::Storage | Page::LegacyRecovery
+            )
+            || self.storage_view != StorageView::RawFiles
+        {
+            return None;
+        }
+        Some((
+            self.telegram_account.as_ref()?.id,
+            self.selected_chat_id?,
+            self.telegram_file_generation,
+        ))
+    }
+
     pub(crate) fn select_telegram_chat(&mut self, chat_id: i64, cx: &mut Context<Self>) {
         self.cancel_telegram_file_load(cx);
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
@@ -131,6 +150,7 @@ impl TeleArkApp {
             self.selected_channel_message_ids.clear();
         }
         self.telegram_files_loading = true;
+        self.telegram_file_auto_load = true;
         self.telegram_files_scanned = 0;
         self.telegram_files_scan_target = u64::try_from(target).unwrap_or(u64::MAX);
         self.telegram_files_slow = false;
@@ -279,11 +299,13 @@ impl TeleArkApp {
     }
 
     pub(crate) fn cancel_telegram_file_load(&mut self, cx: &mut Context<Self>) {
+        // Invalidate deferred pagination even before its worker has started.
+        self.telegram_file_auto_load = false;
+        self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         if let Some(cancellation) = self.telegram_file_cancellation.take() {
             cancellation.cancel();
         }
         if self.telegram_files_loading {
-            self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
             self.telegram_files_loading = false;
             self.telegram_files_slow = false;
             self.telegram_activity = TelegramActivity::Idle;
@@ -488,5 +510,117 @@ impl TeleArkApp {
                 cx.notify();
             });
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit as gpui;
+    use gpui_kit::TestAppContext;
+    use gpui_kit::component::table::TableDelegate as _;
+
+    #[gpui::test]
+    fn pagination_can_refresh_its_table_after_the_delegate_update(cx: &mut TestAppContext) {
+        use crate::app::{AppStartup, LocaleStartup, Page, RuntimeStartup};
+        use teleark_core::{ApplicationError, ApplicationErrorKind};
+        use teleark_i18n::{Localizer, SupportedLocale};
+        use teleark_runtime::{DesktopLibrary, DesktopTelegram, TelegramAccount};
+
+        cx.update(gpui_kit::init);
+        let (app, cx) = cx.add_window_view(|window, cx| {
+            let unavailable = || ApplicationError::new(ApplicationErrorKind::Authorization);
+            TeleArkApp::new(
+                window,
+                cx,
+                Localizer::new(SupportedLocale::EnUs).expect("valid catalog"),
+                RuntimeStartup {
+                    library: Err(unavailable()),
+                    telegram: Err(unavailable()),
+                    transfers: Err(unavailable()),
+                    vault: Err(unavailable()),
+                },
+                AppStartup {
+                    page: Page::Account,
+                    visual_preview: false,
+                    show_upload: false,
+                    locale: LocaleStartup {
+                        system_locale: SupportedLocale::EnUs,
+                        follows_system_locale: false,
+                    },
+                },
+            )
+        });
+        let directory = std::env::temp_dir().join(format!(
+            "teleark-pagination-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("create isolated fixture");
+        let table = app.update(cx, |app, cx| {
+            // Assign isolated, unconfigured owners after startup: no session is restored.
+            app.library = Some(
+                DesktopLibrary::open(directory.join("library.sqlite3"))
+                    .expect("open isolated database"),
+            );
+            app.telegram = Some(
+                DesktopTelegram::open(directory.join("session"))
+                    .expect("open unconfigured adapter"),
+            );
+            app.telegram_account = Some(TelegramAccount {
+                id: 1,
+                display_name: "Pagination".into(),
+                username: None,
+            });
+            app.page = Page::Channel;
+            app.storage_view = StorageView::RawFiles;
+            app.selected_chat_id = Some(10);
+            app.telegram_files_exhausted = false;
+            app.telegram_file_auto_load = true;
+            app.telegram_activity = TelegramActivity::Idle;
+            app.refresh_channel_file_table(cx);
+            app.channel_file_table.clone()
+        });
+        cx.update(|window, cx| {
+            table.update(cx, |table, cx| {
+                assert!(table.delegate().has_more(cx));
+                table.delegate_mut().load_more(window, cx);
+                table.delegate_mut().load_more(window, cx);
+            });
+        });
+        app.update(cx, |app, cx| {
+            // The deferred request reached the real loader and refreshed TableState.
+            assert!(app.telegram_files_loading);
+            app.cancel_telegram_file_load(cx);
+        });
+        // Reject requests queued before navigation, cancellation or source changes.
+        for change in 0..4 {
+            app.update(cx, |app, cx| {
+                app.page = Page::Channel;
+                app.telegram_file_auto_load = true;
+                app.refresh_channel_file_table(cx);
+            });
+            cx.update(|window, cx| {
+                table.update(cx, |table, cx| {
+                    table.delegate_mut().load_more(window, cx);
+                    table.delegate_mut().load_more(window, cx);
+                });
+                app.update(cx, |app, cx| match change {
+                    0 => app.page = Page::Transfers,
+                    1 => app.cancel_telegram_file_load(cx),
+                    2 => app.telegram_account.as_mut().expect("fixture account").id = 2,
+                    _ => app.selected_chat_id = Some(20),
+                });
+            });
+            app.update(cx, |app, _| assert!(!app.telegram_files_loading));
+        }
+        app.update(cx, |app, _| {
+            app.library = None;
+            app.telegram = None;
+        });
+        std::fs::remove_dir_all(directory).expect("remove isolated fixture");
     }
 }

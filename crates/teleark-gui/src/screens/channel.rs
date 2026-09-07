@@ -52,6 +52,7 @@ pub(crate) struct ChannelFileTableDelegate {
     columns: Vec<Column>,
     rows: Vec<ChannelFileTableRow>,
     owner: Option<WeakEntity<TeleArkApp>>,
+    load_scope: Option<(i64, i64, u64)>,
     loading: bool,
     exhausted: bool,
     select_all_label: SharedString,
@@ -72,6 +73,7 @@ impl ChannelFileTableDelegate {
             columns: channel_table_columns(["", "", "", "", "", ""].map(Into::into)),
             rows: Vec::new(),
             owner: None,
+            load_scope: None,
             loading: false,
             exhausted: true,
             select_all_label: "".into(),
@@ -336,7 +338,7 @@ impl TableDelegate for ChannelFileTableDelegate {
     }
 
     fn has_more(&self, _cx: &App) -> bool {
-        !self.exhausted
+        !self.loading && !self.exhausted && !self.failed && self.load_scope.is_some()
     }
 
     fn load_more_threshold(&self) -> usize {
@@ -344,13 +346,25 @@ impl TableDelegate for ChannelFileTableDelegate {
     }
 
     fn load_more(&mut self, _window: &mut Window, cx: &mut Context<TableState<Self>>) {
-        if self.loading || self.exhausted {
+        if !self.has_more(cx) {
             return;
         }
         self.loading = true;
-        if let Some(owner) = self.owner.as_ref() {
-            let _ = owner.update(cx, |app, cx| {
-                app.load_selected_telegram_files(true, cx);
+        if let Some(owner) = self.owner.clone() {
+            let scope = self.load_scope;
+            // TableState calls its delegate while leased. Refreshing it through
+            // the owner in this stack would re-enter the same entity update.
+            // Use App::defer, not defer_in (which leases TableState again).
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |app, cx| {
+                    if app.channel_file_load_scope() == scope {
+                        app.load_selected_telegram_files(true, cx);
+                    }
+                    // Also release a queued load rejected after source/route change.
+                    if !app.telegram_files_loading {
+                        app.refresh_channel_file_table(cx);
+                    }
+                });
             });
         }
     }
@@ -389,6 +403,7 @@ impl TeleArkApp {
             "".into(),
         ]);
         let owner = cx.weak_entity();
+        let load_scope = self.channel_file_load_scope();
         let loading = self.telegram_files_loading;
         let exhausted = self.telegram_files_exhausted;
         let select_all_label = self.tr("telegram-files-select-all");
@@ -423,6 +438,7 @@ impl TeleArkApp {
             delegate.rows = rows;
             delegate.columns = columns;
             delegate.owner = Some(owner);
+            delegate.load_scope = load_scope;
             delegate.loading = loading;
             delegate.exhausted = exhausted;
             delegate.select_all_label = select_all_label;
@@ -1885,7 +1901,6 @@ fn error_banner(message: gpui_kit::SharedString) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn login_methods_remain_visible_at_every_supported_window_class() {
         assert_eq!(

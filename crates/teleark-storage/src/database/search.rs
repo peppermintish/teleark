@@ -6,7 +6,7 @@ use super::{
     unsigned_to_sql, verification_state_code,
 };
 use crate::error::{CursorError, InputReason};
-use crate::model::{FileSearchFacets, PageCursor, SearchPage, SearchQuery};
+use crate::model::{FileSearchFacets, LibrarySourceRecord, PageCursor, SearchPage, SearchQuery};
 use crate::{StorageError, StorageResult};
 
 const MAX_PAGE_SIZE: u32 = 500;
@@ -42,7 +42,13 @@ impl Database {
 
         let fts_query = query.text.as_deref().and_then(fts_phrase);
         let mut sql = format!(
-            "SELECT {SEARCH_COLUMNS}, COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}) AS sort_value FROM logical_files f"
+            "SELECT {SEARCH_COLUMNS}, COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}) AS sort_value,
+             (SELECT title FROM chats WHERE account_id = f.source_account_id AND id = f.source_chat_id),
+             (SELECT MIN(r.message_id) FROM remote_objects r
+              WHERE r.logical_file_id = f.id AND r.account_id = f.source_account_id
+                AND r.chat_id = f.source_chat_id AND f.package_id IS NULL
+              HAVING COUNT(*) = 1)
+             FROM logical_files f"
         );
         let mut count_sql = String::from("SELECT COUNT(*) FROM logical_files f");
         if fts_query.is_some() {
@@ -97,15 +103,30 @@ impl Database {
         let mut statement = self.connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(values.iter()))?;
         let mut found = Vec::with_capacity(query.limit as usize + 1);
+        let mut sources = std::collections::BTreeMap::new();
         while let Some(row) = rows.next()? {
             let file = row_to_logical_file(row)?;
             let sort_value: i64 = row.get(19)?;
             let raw_id: i64 = row.get(0)?;
+            if let Some(name) = row.get::<_, Option<String>>(20)? {
+                sources.insert(
+                    file.id,
+                    LibrarySourceRecord {
+                        name,
+                        message_id: row
+                            .get::<_, Option<i64>>(21)?
+                            .map(teleark_core::MessageId::new),
+                    },
+                );
+            }
             found.push((file, sort_value, raw_id));
         }
 
         let has_more = found.len() > query.limit as usize;
         if has_more {
+            if let Some((extra, _, _)) = found.last() {
+                sources.remove(&extra.id);
+            }
             found.truncate(query.limit as usize);
         }
         let next_cursor = if has_more {
@@ -118,6 +139,7 @@ impl Database {
 
         Ok(SearchPage {
             files: found.into_iter().map(|(file, _, _)| file).collect(),
+            sources,
             next_cursor,
             total_matching,
         })

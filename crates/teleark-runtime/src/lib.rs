@@ -1420,13 +1420,16 @@ fn search_database(
         limit: u32::try_from(query.page_size)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?,
     };
-    let page = database
+    let mut page = database
         .search_files(&storage_query)
         .map_err(map_storage_error)?;
     let items = page
         .files
         .into_iter()
-        .map(record_to_library_item)
+        .map(|record| {
+            let source = page.sources.remove(&record.id);
+            record_to_library_item(record, source)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(LibraryPage {
         items,
@@ -1435,12 +1438,16 @@ fn search_database(
     })
 }
 
-fn record_to_library_item(record: LogicalFileRecord) -> Result<LibraryItem, ApplicationError> {
+fn record_to_library_item(
+    record: LogicalFileRecord,
+    source: Option<teleark_storage::LibrarySourceRecord>,
+) -> Result<LibraryItem, ApplicationError> {
     let local_source_path = record.local_source_path.clone();
     let part_count = u32::from(record.package_id.is_none());
     record_to_logical_file(record).map(|file| LibraryItem {
         file,
-        source_name: None,
+        source_message_id: source.as_ref().and_then(|source| source.message_id),
+        source_name: source.map(|source| source.name),
         local_source_path,
         part_count,
     })
@@ -1911,6 +1918,8 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total_matching, 1);
         assert_eq!(page.items[0].file.name, "example.pdf");
+        assert_eq!(page.items[0].source_name, None);
+        assert_eq!(page.items[0].source_message_id, None);
         assert_eq!(
             page.items[0].local_source_path.as_deref(),
             Some(source_path.as_path())
@@ -2301,7 +2310,29 @@ mod tests {
             library
                 .cached_telegram_files(account.id, chat.id, 5_000)
                 .expect("read cached file"),
-            vec![file]
+            vec![file.clone()]
+        );
+        let page = library
+            .search(&LibraryQuery::default())
+            .expect("query catalog");
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.source_name.as_deref(), Some(chat.name.as_str()));
+        assert_eq!(
+            item.source_message_id.map(|id| id.get()),
+            Some(file.message_id)
+        );
+        assert_eq!(
+            item.file.source_account_id.map(|id| id.get()),
+            Some(account.id)
+        );
+        assert_eq!(item.file.source_chat_id.map(|id| id.get()), Some(chat.id));
+        assert!(
+            library
+                .worker
+                .native_downloads()
+                .expect("download history")
+                .is_empty()
         );
         assert_eq!(
             library

@@ -107,12 +107,14 @@ impl TeleArkApp {
                 source_name: Some("TeleArk".into()),
                 local_source_path: None,
                 source_chat_id: Some(9000),
+                source_account_id: Some(1),
+                source_message_id: Some(100 + index as i64),
                 modified_at_unix_ms: Some(1_788_624_000_000),
                 remote_state: teleark_core::RemoteState::Uploaded,
-                encryption_state: teleark_core::EncryptionState::Encrypted,
-                verification_state: teleark_core::VerificationState::Verified,
+                encryption_state: teleark_core::EncryptionState::Unencrypted,
+                verification_state: teleark_core::VerificationState::Unverified,
                 package_id: None,
-                part_count: 3,
+                part_count: 1,
             })
             .collect();
         self.library_content = LibraryContent::Ready(LibrarySnapshot {

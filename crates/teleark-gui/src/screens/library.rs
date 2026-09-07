@@ -196,6 +196,15 @@ impl TeleArkApp {
             .bg(theme::canvas())
             .child(toolbar)
             .child(categories)
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(padding))
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("library-catalog-explanation")),
+            )
             .when_some(self.import_feedback, |page, feedback| {
                 page.child(self.render_import_feedback(feedback, padding))
             })
@@ -628,7 +637,7 @@ pub(crate) fn file_status(
         VerificationState::Unverified => match remote_state {
             RemoteState::LocalOnly => ("file-state-local", Tone::Neutral),
             RemoteState::Uploading => ("file-state-uploading", Tone::Blue),
-            RemoteState::Uploaded => ("file-state-uploaded", Tone::Green),
+            RemoteState::Uploaded => ("file-state-remote-indexed", Tone::Neutral),
             RemoteState::RemoteMissing => ("file-state-remote-missing", Tone::Red),
             _ => ("file-state-local", Tone::Neutral),
         },
@@ -687,6 +696,10 @@ mod tests {
         assert_eq!(
             file_status(RemoteState::Uploaded, VerificationState::Verified),
             ("file-state-verified", Tone::Green)
+        );
+        assert_eq!(
+            file_status(RemoteState::Uploaded, VerificationState::Unverified),
+            ("file-state-remote-indexed", Tone::Neutral)
         );
         assert_eq!(
             file_status(RemoteState::RemoteMissing, VerificationState::Unverified),

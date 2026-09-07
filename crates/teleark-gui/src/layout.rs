@@ -62,9 +62,6 @@ impl LayoutPolicy {
     pub(crate) fn shows_library_encryption_parts(self) -> bool {
         !self.is_compact()
     }
-    pub(crate) fn file_detail_part_columns(self) -> u16 {
-        if self.is_compact() { 3 } else { 5 }
-    }
 }
 #[cfg(test)]
 mod tests {

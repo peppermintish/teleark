@@ -3,7 +3,7 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use teleark_core::{EncryptionState, RemoteState, VerificationState};
+use teleark_core::EncryptionState;
 use teleark_i18n::{
     MessageArgs,
     format::{format_bytes, format_integer, format_unix_millis},
@@ -131,7 +131,6 @@ impl TeleArkApp {
             |id| SharedString::from(id.to_string()),
         );
         let encryption = self.tr(encryption_message_id(file.encryption_state));
-        let verified = file.verification_state == VerificationState::Verified;
         let local_path_display = file.local_source_path.as_ref().map_or_else(
             || not_applicable.clone(),
             |path| SharedString::from(path.to_string_lossy().into_owned()),
@@ -272,75 +271,59 @@ impl TeleArkApp {
                 ]),
             ));
 
-        let part_count = file.part_count.max(1);
-        let parts = components::card()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(48.0))
-                    .px_4()
-                    .flex()
-                    .items_end()
-                    .gap_6()
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(tab(self.tr("file-detail-tab-parts"), true))
-                    .child(tab(self.tr("file-detail-tab-details"), false))
-                    .child(tab(self.tr("file-detail-tab-activity"), false)),
-            )
-            .child(parts_header(self, layout))
-            .child(div().flex_1().min_h_0().overflow_y_scrollbar().children(
-                part_indices(part_count).into_iter().map(|index| {
-                    if index == u32::MAX {
-                        part_ellipsis()
-                    } else {
-                        part_row(self, index, part_count, &file, layout)
-                    }
-                }),
-            ))
-            .child(
-                div()
-                    .min_h(px(46.0))
-                    .px_4()
-                    .py_2()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .child(
-                        Icon::new(if verified {
-                            IconName::CircleCheck
-                        } else {
-                            IconName::Info
-                        })
-                        .text_color(if verified {
-                            theme::green()
-                        } else {
-                            theme::text_secondary()
-                        }),
-                    )
-                    .child(
+        let provenance =
+            components::card()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(card_header(self.tr("file-detail-source-record")))
+                .child(
+                    div().flex_1().min_h_0().overflow_y_scrollbar().child(
                         div()
-                            .text_sm()
-                            .text_color(if verified {
-                                theme::green()
-                            } else {
-                                theme::text_secondary()
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(div().text_sm().text_color(theme::text_secondary()).child(
+                                self.tr(if file.source_account_id.is_some() {
+                                    "file-detail-indexed-source-note"
+                                } else {
+                                    "file-detail-local-source-note"
+                                }),
+                            ))
+                            .when(file.source_account_id.is_some(), |body| {
+                                body.children([
+                                    source_id_row(
+                                        self.tr("file-detail-source-account-id"),
+                                        file.source_account_id
+                                            .map(|id| id.to_string())
+                                            .unwrap_or_else(|| not_applicable.to_string()),
+                                    ),
+                                    source_id_row(
+                                        self.tr("file-detail-source-chat-id"),
+                                        file.source_chat_id
+                                            .map(|id| id.to_string())
+                                            .unwrap_or_else(|| not_applicable.to_string()),
+                                    ),
+                                    source_id_row(
+                                        self.tr("file-detail-remote-id"),
+                                        file.source_message_id
+                                            .map(|id| id.to_string())
+                                            .unwrap_or_else(|| not_applicable.to_string()),
+                                    ),
+                                ])
                             })
-                            .child(if verified {
-                                self.tr("file-detail-all-parts-verified")
-                            } else {
-                                self.tr("file-detail-verification-unavailable")
-                            }),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::text_secondary())
+                                    .child(self.tr("file-detail-verification-unavailable")),
+                            ),
                     ),
-            );
+                );
 
         div()
             .flex_1()
@@ -359,7 +342,7 @@ impl TeleArkApp {
                     .flex()
                     .gap_4()
                     .child(properties)
-                    .child(parts),
+                    .child(provenance),
             )
             .into_any_element()
     }
@@ -447,156 +430,13 @@ fn property_row(label: impl Into<SharedString>, value: impl Into<SharedString>) 
         .into_any_element()
 }
 
-fn tab(label: impl Into<SharedString>, selected: bool) -> AnyElement {
+fn source_id_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> AnyElement {
     div()
-        .h_full()
-        .pb_3()
         .flex()
-        .items_end()
+        .flex_col()
+        .gap_1()
         .text_sm()
-        .text_color(if selected {
-            theme::blue()
-        } else {
-            theme::text_secondary()
-        })
-        .when(selected, |tab| tab.border_b_2().border_color(theme::blue()))
-        .child(label.into())
+        .child(div().text_color(theme::text_muted()).child(label.into()))
+        .child(div().text_color(theme::text_primary()).child(value.into()))
         .into_any_element()
-}
-
-fn parts_header(app: &TeleArkApp, layout: LayoutPolicy) -> AnyElement {
-    div()
-        .h(px(36.0))
-        .px_4()
-        .grid()
-        .grid_cols(layout.file_detail_part_columns())
-        .items_center()
-        .bg(theme::sidebar())
-        .border_b_1()
-        .border_color(theme::border())
-        .text_xs()
-        .text_color(theme::text_muted())
-        .child(app.tr("file-detail-part-index"))
-        .child(app.tr("table-size"))
-        .child(app.tr("table-status"))
-        .when(!layout.is_compact(), |header| {
-            header
-                .child(app.tr("file-detail-remote-id"))
-                .child(app.tr("file-detail-upload-time"))
-        })
-        .into_any_element()
-}
-
-fn part_indices(total: u32) -> Vec<u32> {
-    if total <= 9 {
-        return (1..=total).collect();
-    }
-    let mut indices: Vec<_> = (1..=6).collect();
-    indices.push(u32::MAX);
-    indices.extend(total.saturating_sub(2)..=total);
-    indices
-}
-
-fn part_row(
-    app: &TeleArkApp,
-    index: u32,
-    total: u32,
-    file: &LibraryRowView,
-    layout: LayoutPolicy,
-) -> AnyElement {
-    let size = format_bytes(
-        app.locale(),
-        logical_part_size(file.size_bytes, total, index),
-    );
-    let (state_id, tone) = file_status(file.remote_state, file.verification_state);
-    div()
-        .h(px(40.0))
-        .px_4()
-        .grid()
-        .grid_cols(layout.file_detail_part_columns())
-        .items_center()
-        .border_b_1()
-        .border_color(theme::border_subtle())
-        .text_xs()
-        .text_color(theme::text_secondary())
-        .child(format!("{index:03}"))
-        .child(size)
-        .child(
-            div()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .gap_2()
-                .text_color(tone.foreground())
-                .child(
-                    Icon::new(status_icon(file))
-                        .flex_none()
-                        .text_color(tone.foreground()),
-                )
-                .child(div().min_w_0().truncate().child(app.tr(state_id))),
-        )
-        .when(!layout.is_compact(), |row| {
-            row.child(app.tr("common-not-applicable"))
-                .child(app.tr("common-not-applicable"))
-        })
-        .into_any_element()
-}
-
-fn status_icon(file: &LibraryRowView) -> IconName {
-    if file.verification_state == VerificationState::Verified {
-        IconName::Check
-    } else if matches!(
-        file.remote_state,
-        RemoteState::Uploading | RemoteState::Uploaded
-    ) {
-        IconName::LoaderCircle
-    } else {
-        IconName::Info
-    }
-}
-
-fn logical_part_size(total_size_bytes: u64, total_parts: u32, index: u32) -> u64 {
-    if total_parts == 0 || index == 0 || index > total_parts {
-        return 0;
-    }
-    let total_parts = u64::from(total_parts);
-    let base_size = total_size_bytes / total_parts;
-    let remainder = total_size_bytes % total_parts;
-    base_size + u64::from(u64::from(index) <= remainder)
-}
-
-fn part_ellipsis() -> AnyElement {
-    div()
-        .h(px(38.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .border_b_1()
-        .border_color(theme::border_subtle())
-        .text_color(theme::text_muted())
-        .child("•••")
-        .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn displayed_part_sizes_preserve_each_logical_file_size() {
-        for (size, parts) in [(73_600_000_000, 39), (42, 1), (7, 3)] {
-            let total: u64 = (1..=parts)
-                .map(|index| logical_part_size(size, parts, index))
-                .sum();
-
-            assert_eq!(total, size);
-        }
-    }
-
-    #[test]
-    fn invalid_part_indices_have_no_displayed_bytes() {
-        assert_eq!(logical_part_size(10, 0, 1), 0);
-        assert_eq!(logical_part_size(10, 2, 0), 0);
-        assert_eq!(logical_part_size(10, 2, 3), 0);
-    }
 }

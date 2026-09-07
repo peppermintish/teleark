@@ -11,7 +11,7 @@ Telegram history port -> Index coordinator -> transactional records/evidence
 
 `grammers` stays in Telegram; SQL stays in Storage. Every source, query, cursor, index job and remote upsert carries account/chat identity. Runtime checks the expected authorized account at network execution. Source records preserve message sent time separately from modification time, and revisions upsert idempotently on account/chat/message identity.
 
-Interactive browsing and indexing have different authority. Browsing can show previously cached rows and upsert newly observed files, but does not advance `telegram_index_state` or prove coverage. Only a committed indexing page advances its checkpoint. Cancellation discards uncommitted response data; GUI generations reject late results after account/source changes.
+Interactive browsing and indexing have different authority. Browsing can show previously cached rows and upsert newly observed files, but does not advance `telegram_index_state` or prove coverage. The Local Library includes these cached/indexed file records and explains that they are not transfer history. Query results retain original channel titles and unambiguous account/chat/message provenance. Only a committed indexing page advances its checkpoint. Cancellation discards uncommitted response data; GUI generations reject late results after account/source changes.
 
 ## Connected desktop bounds
 

@@ -808,6 +808,62 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
 }
 
 #[test]
+fn search_source_identity_is_scoped_paged_and_unambiguous() -> Result<(), Box<dyn Error>> {
+    let mut database = Database::open_in_memory()?;
+    for account_id in [1, 2] {
+        database.upsert_account(&account(account_id))?;
+        let mut source = chat(account_id, 7);
+        source.title = format!("京都・设计稿 {account_id}");
+        database.upsert_chat(&source)?;
+        database.upsert_remote_file(&RemoteFileUpsert {
+            account_id: AccountId::new(account_id),
+            chat_id: ChatId::new(7),
+            message_id: MessageId::new(77),
+            revision: 1,
+            remote_key: vec![1],
+            name: "source.pdf".into(),
+            size_bytes: 42,
+            kind: FileKind::Document,
+            mime_type: None,
+            caption: None,
+            sent_at_unix_ms: 100,
+            modified_at_unix_ms: 100,
+        })?;
+    }
+    let first = database.search_files(&SearchQuery {
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(first.files.len(), 1);
+    assert_eq!(first.sources.len(), 1); // Excludes the pagination look-ahead row.
+    let first_id = first.files[0].id;
+    assert_eq!(first.sources[&first_id].name, "京都・设计稿 2");
+    assert_eq!(
+        first.sources[&first_id].message_id,
+        Some(MessageId::new(77))
+    );
+    let second = database.search_files(&SearchQuery {
+        cursor: first.next_cursor,
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(second.sources[&second.files[0].id].name, "京都・设计稿 1");
+    assert_ne!(first_id, second.files[0].id);
+
+    // A future multi-object projection must not invent one authoritative source message.
+    database.connection.execute(
+        "INSERT INTO remote_objects (id, logical_file_id, account_id, chat_id, message_id,
+          revision, remote_key, encoded_size_bytes, modified_at_unix_ms)
+         VALUES (100, ?1, 2, 7, 78, 1, X'01', 42, 100)",
+        [i64::try_from(first_id.get())?],
+    )?;
+    let page = database.search_files(&SearchQuery::default())?;
+    assert_eq!(page.sources[&first_id].message_id, None);
+    assert_eq!(page.sources[&first_id].name, "京都・设计稿 2");
+    Ok(())
+}
+
+#[test]
 fn telegram_index_cursor_round_trips_for_restart_resume() -> Result<(), Box<dyn Error>> {
     let mut database = Database::open_in_memory()?;
     seed_account_chat(&mut database)?;

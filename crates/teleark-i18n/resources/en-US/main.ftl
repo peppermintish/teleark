@@ -127,7 +127,7 @@ error-library-unknown = The library operation failed unexpectedly.
 file-detail-empty-title = Select a file from the library
 file-detail-empty-description = Import a file, then select it to view its saved details.
 file-detail-modified-at = Modified At
-file-detail-verification-unavailable = Verification details are not available for this local item.
+file-detail-verification-unavailable = This catalog does not contain verified part or content-hash evidence.
 
 upload-dialog-title = Upload to TeleArk
 upload-target-account = Target Account
@@ -1148,9 +1148,25 @@ transfer-batch-upload-name = Upload · { $count } files
 about-changelog-unreleased =
     ## Unreleased · Everyday usability
 
+    - Fixed a channel pagination crash caused by re-entering the table update. Cancelled or stale requests cannot restart loading after navigation or account changes.
+    - Local Library now explains indexed Telegram files, labels them as indexed instead of uploaded, and shows the original channel and scoped message ID. Removed the placeholder parts table.
     - Added a collapsible icon sidebar, direct Local Library access, a separate channel browser, and visible free space for the download disk.
     - Fixed scrolling in Raw Files and transfer inspectors so details scroll independently of the underlying list.
     - Batch rows now show their source, file names, counts, time, and real member lists. Multiple uploads can be reviewed together; stopping a batch skips remaining files after the current file finishes.
     - Downloaded files are checked in the background. Missing, changed, and unavailable files have distinct states; a missing native download can be downloaded again as a new task.
     - Added original TeleArk artwork and a macOS app bundle with an application icon.
     - Schema v10 preserves account-scoped local output identities across restarts. Encryption and manifest formats are unchanged.
+
+file-state-remote-indexed = Indexed remote
+
+library-catalog-explanation = This local catalog includes files seen while browsing or indexing Telegram, plus files you import. Indexed files are not upload or download records.
+
+file-detail-source-record = Source record
+
+file-detail-indexed-source-note = This metadata was saved from a Telegram source. It does not mean TeleArk uploaded or downloaded the file. The identifiers below locate the original message within its account and channel; current remote availability has not been rechecked.
+
+file-detail-local-source-note = This file was imported from disk. Importing records metadata and does not upload its content to Telegram.
+
+file-detail-source-account-id = Source account ID
+
+file-detail-source-chat-id = Source channel ID

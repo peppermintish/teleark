@@ -15,6 +15,8 @@ pub(crate) struct LibraryRowView {
     pub(crate) source_name: Option<String>,
     pub(crate) local_source_path: Option<PathBuf>,
     pub(crate) source_chat_id: Option<i64>,
+    pub(crate) source_account_id: Option<i64>,
+    pub(crate) source_message_id: Option<i64>,
     pub(crate) modified_at_unix_ms: Option<i64>,
     pub(crate) remote_state: RemoteState,
     pub(crate) encryption_state: EncryptionState,
@@ -34,6 +36,8 @@ impl From<LibraryItem> for LibraryRowView {
             source_name: item.source_name,
             local_source_path: item.local_source_path,
             source_chat_id: file.source_chat_id.map(|id| id.get()),
+            source_account_id: file.source_account_id.map(|id| id.get()),
+            source_message_id: item.source_message_id.map(|id| id.get()),
             modified_at_unix_ms: file.modified_at_unix_ms,
             remote_state: file.remote_state,
             encryption_state: file.encryption_state,
@@ -175,6 +179,7 @@ mod tests {
             file: LogicalFile::new(LogicalFileId::new(id), name, 42, FileKind::Document)
                 .expect("valid file"),
             source_name: Some("Source name".to_owned()),
+            source_message_id: Some(teleark_core::MessageId::new(77)),
             local_source_path: Some("/tmp/source.pdf".into()),
             part_count: 3,
         }
@@ -200,6 +205,7 @@ mod tests {
         assert_eq!(snapshot.rows[0].id, LogicalFileId::new(7));
         assert_eq!(snapshot.rows[0].name, "résumé.pdf");
         assert_eq!(snapshot.rows[0].source_name.as_deref(), Some("Source name"));
+        assert_eq!(snapshot.rows[0].source_message_id, Some(77));
         assert_eq!(
             snapshot.rows[0].local_source_path.as_deref(),
             Some(std::path::Path::new("/tmp/source.pdf"))

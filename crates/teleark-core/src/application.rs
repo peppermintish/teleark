@@ -71,6 +71,9 @@ impl LibraryQuery {
 pub struct LibraryItem {
     pub file: LogicalFile,
     pub source_name: Option<String>,
+    /// Unambiguous native Telegram document identity, scoped by `file`'s account/chat.
+    /// Indexed presence is not evidence that this application uploaded the file.
+    pub source_message_id: Option<crate::MessageId>,
     /// Original local source, when this catalog item was imported from disk.
     ///
     /// Frontends may offer platform-native open and reveal actions for this

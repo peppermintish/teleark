@@ -2,6 +2,8 @@
 
 ## Unreleased · Everyday usability
 
+- Fixed a channel pagination crash caused by re-entering the table update. Cancelled or stale requests cannot restart loading after navigation or account changes.
+- Local Library now explains indexed Telegram files, labels them as indexed instead of uploaded, and shows the original channel and scoped message ID. Removed the placeholder parts table.
 - Added a collapsible icon sidebar, direct Local Library access, a separate channel browser, and visible free space for the download disk.
 - Fixed scrolling in Raw Files and transfer inspectors so details scroll independently of the underlying list.
 - Batch rows now show their source, file names, counts, time, and real member lists. Multiple uploads can be reviewed together; stopping a batch skips remaining files after the current file finishes.
