@@ -32,6 +32,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
 mod byte_progress;
+mod connection;
 use byte_progress::UploadReader;
 pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
 
@@ -419,7 +420,11 @@ impl TelegramConnection {
             runner,
             handle,
             mut updates,
-        } = SenderPool::new(Arc::clone(&session), config.api_id);
+        } = SenderPool::with_configuration(
+            Arc::clone(&session),
+            config.api_id,
+            connection::params(),
+        );
         let client = Client::new(handle);
         let runner = tokio::spawn(runner.run());
         // Grammers receives updates through an unbounded transport channel. Drain

@@ -25,15 +25,37 @@ GPUI Kit's development-only `test-support` feature drives actual wheel-event reg
 
 ```bash
 cargo run -p teleark-gui --bin teleark
-cargo build -p teleark-gui --release --locked
-scripts/package-macos.sh target/release/teleark dist/TeleArk.app
+scripts/build-local.sh &&
+  scripts/package-macos.sh target/release/teleark dist/TeleArk.app
 ```
 
 The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. The release archive contains this unsigned bundle.
 
 GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. A signed/notarized release and the macOS deployment floor, Apple Silicon/Intel matrix and other desktop platforms need separate qualification.
 
-Source builds use their own Telegram API ID/Hash configured from the login/settings UI. Distributors may set `TELEARK_DISTRIBUTION_TELEGRAM_API_ID` and `TELEARK_DISTRIBUTION_TELEGRAM_API_HASH` through protected build secrets. Both must be valid; personal saved credentials override them. Embedded identifiers are extractable and do not authorize a Telegram user. Never reuse Telegram Desktop credentials, log real pairs or commit them to fixtures.
+Source builds use their own Telegram API ID/Hash configured from the login/settings UI. Distributors may set `TELEARK_DISTRIBUTION_TELEGRAM_API_ID` and `TELEARK_DISTRIBUTION_TELEGRAM_API_HASH` through protected build secrets. Both must be valid; personal saved credentials override them. Embedded identifiers are extractable and do not authorize a Telegram user. For local testing, `.env.example` provides the [officially published TEST ONLY pair](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). These identifiers are server-limited and must not be used for distribution; obtain your own pair before publishing. Never log personal pairs or commit them to fixtures.
+
+## Local agent memory and development environment
+
+Keep temporary coding-agent notes and handoffs in `.agent-memory/`, with a concise `README.md` recording current context, validation and next steps. These notes are local, disposable working context; keep shared contracts in tracked documentation and credential values out of notes. Agents should consult and refresh the notes during ongoing development, checking them against the current working tree.
+
+Use `.env.local` for private development environment values. To initialize a new checkout, create `.agent-memory/` with mode `0700` and copy `.env.example` to `.env.local` only if the local file does not already exist. Use mode `0600` for local notes and environment files. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes the memory directory, `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
+
+Neither Cargo nor the application automatically loads dotenv files. A plain `cargo run -r` does not read `.env.example` or `.env.local`. `.env.example` is a template only: replace its sample values in `.env.local`, and never load the example for builds or packaging. `scripts/build-local.sh` enforces this local packaging workflow. For an authorized development run using the existing build-time Telegram credential variables, load the trusted, locally maintained file in a subshell from the repository root:
+
+```bash
+(
+  set +x
+  set -a
+  . ./.env.local || exit 1
+  set +a
+  cargo run -r -p teleark-gui --bin teleark --locked
+)
+```
+
+The variables apply to that subshell and its child processes. They are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.
+
+The embedded pair identifies the application and is extractable from the resulting binary. This workflow keeps development values out of Git and logs; it does not prevent others from reusing identifiers in a distributed build. Session credentials and Vault keys have separate protections described in [Security](SECURITY.md#local-data-api-configuration-and-logs).
 
 ## Isolated UI review
 

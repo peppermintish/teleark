@@ -138,3 +138,7 @@ Version 0.4.2 is synchronized across workspace packages, both lockfiles, localiz
 ### Optional custom Telegram API configuration
 
 Settings keeps custom API inputs collapsed until explicitly enabled, with a localized explanation before saving. Existing saved pairs retain their opt-in state. Disabling removes the pair through the background persistence owner and restores bundled credentials; failures remain visible and leave the controls enabled for retry. Builds without bundled credentials report the missing configuration. No persistent codec changes are required: the existing saved pair records the committed opt-in, and an unsaved editor choice is transient.
+
+## Local packaging identity
+
+Local release builds use `scripts/build-local.sh` to load and validate `.env.local`; the public `.env.example` is a template only. MTProto connections report TeleArk’s workspace version instead of the transport library version. The Telegram application name still belongs to the selected API ID; saved personal credentials override the embedded pair.

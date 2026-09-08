@@ -30,13 +30,44 @@ Native downloads currently verify byte length rather than a cryptographic conten
 
 ## Build and run
 
-There is no signed installer yet. On macOS with the repository's Rust toolchain and Apple Command Line Tools:
+For platform prerequisites, standalone executables and installers, see the [build and packaging guide](docs/PACKAGING.md). macOS is the current build/release baseline; Windows and Linux recipes remain unverified.
+
+### Load `.env` values before building
+
+Neither Cargo nor TeleArk automatically reads `.env`, `.env.local` or `.env.example`. The two `TELEARK_DISTRIBUTION_TELEGRAM_API_*` values are read **at compile time** using `option_env!`. A plain `cargo run -r` does not load the file, and setting variables only when launching an existing executable does not change its embedded credentials.
+
+[`.env.example`](.env.example) contains Telegram's [official public TEST ONLY identifiers](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). This file is a template only, not a build or packaging configuration. Create `.env.local` as described below and replace the samples with your own credentials, then use this temporary environment in bash/zsh on macOS/Linux, or **Git Bash with native Windows Rust** on Windows:
 
 ```bash
-cargo run -p teleark-gui --bin teleark
+(
+  set +x
+  set -a
+  . ./.env.local || exit 1
+  set +a
+  cargo run -r -p teleark-gui --bin teleark --locked
+)
 ```
 
-Source builds without distributor configuration provide an explicit API setup action on login or in Settings. Register your own Telegram application in its [API development panel](https://my.telegram.org/apps), then enter that application's API ID and API Hash. Personal settings override a distributor-owned pair; TeleArk never reuses Telegram Desktop credentials.
+For your own values, initialize a private file without overwriting an existing one:
+
+```bash
+if [ ! -e .env.local ]; then
+  (umask 077; set -C; cat .env.example > .env.local)
+fi
+chmod 600 .env.local
+```
+
+Edit `.env.local` locally, replacing both values with your application's API ID/Hash from [Telegram's API development panel](https://my.telegram.org/apps). Local builds and packaging use `.env.local`; `.env.example` is never a fallback. On Windows, restrict personal files with Windows file permissions as well; Git Bash's `chmod` does not guarantee a private Windows ACL. These local files are Git-ignored. Source only trusted files: shell sourcing executes their contents. Never print personal values, enable shell tracing or include these files in a package.
+
+To **build without launching**, use the helper below. It loads `.env.local`, validates both values and refuses the public sample API ID:
+
+```bash
+scripts/build-local.sh
+```
+
+Use this environment on every build/run that should embed the pair. Running Cargo later without the variables can rebuild without those defaults. The variables disappear when the subshell exits, but embedded identifiers remain extractable from the binary. The local packaging helper requires both values. Saved personal credentials in Settings take precedence over the embedded pair. No environment file is required alongside a built executable.
+
+### Local state and UI preview
 
 The default catalog lives at `~/Library/Application Support/TeleArk/library.sqlite3`. Settings exposes the managed root containing Downloads, Cache and Logs. Switching accounts pauses/drains native work and preserves completed files/history; old unknown-account work is retained without becoming executable under a new login.
 
