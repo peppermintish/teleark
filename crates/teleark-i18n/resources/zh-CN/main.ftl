@@ -577,7 +577,7 @@ telegram-password-description = 输入 Telegram 两步验证密码。
 telegram-password-hint = 密码提示：{ $hint }
 telegram-password-action = 解锁账号
 settings-telegram-credentials-title = Telegram API 凭据
-settings-telegram-credentials-description = 保存你自己的 Telegram 应用对应的 API ID 和 API Hash。手机号和二维码登录都需要完整的凭据组合。
+settings-telegram-credentials-description = 自定义 API 配置是可选功能，默认关闭。保存个人配置前，TeleArk 使用打包的默认配置。
 settings-telegram-credentials-save-action = 保存凭据
 settings-telegram-credentials-clear-action = 移除已保存的凭据
 settings-telegram-api-id-missing = 尚未配置
@@ -1212,3 +1212,7 @@ transfer-upload-publishing-manifest = 正在发布文件清单
 transfer-upload-activity-elapsed = { $phase } · 已耗时 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 已耗时 { $elapsed }
 transfer-upload-waiting-telegram = 正在等待 Telegram
+
+settings-telegram-custom-enable = 启用自定义 API 配置
+settings-telegram-custom-disable = 关闭并使用内置配置
+settings-telegram-custom-purpose = 此功能用于使用你自行注册的 Telegram 应用的 API ID 和 API Hash 连接 Telegram。填写两项并保存后生效。关闭会移除已保存的个人配置，恢复使用 TeleArk 打包的默认配置。

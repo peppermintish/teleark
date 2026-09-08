@@ -90,6 +90,30 @@ impl TeleArkApp {
         cx.notify();
     }
 
+    pub(crate) fn toggle_custom_telegram_credentials(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.telegram_api_id_persistence == TelegramApiIdPersistence::Saving {
+            return;
+        }
+        if !self.custom_telegram_credentials_enabled {
+            self.custom_telegram_credentials_enabled = true;
+            self.telegram_api_id_persistence = TelegramApiIdPersistence::Idle;
+            cx.notify();
+        } else if self.telegram_credential_source == Some(TelegramCredentialSource::User) {
+            self.clear_telegram_credentials(window, cx);
+        } else {
+            self.telegram_api_hash.update(cx, |input, cx| {
+                input.set_value(String::new(), window, cx);
+            });
+            self.custom_telegram_credentials_enabled = false;
+            self.telegram_api_id_persistence = TelegramApiIdPersistence::Idle;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn save_telegram_credentials(
         &mut self,
         window: &mut Window,
@@ -136,6 +160,7 @@ impl TeleArkApp {
                     Ok(()) => {
                         this.configured_telegram_api_id = Some(api_id);
                         this.telegram_credential_source = Some(TelegramCredentialSource::User);
+                        this.custom_telegram_credentials_enabled = true;
                         this.telegram_api_id_persistence = TelegramApiIdPersistence::Saved;
                         this.show_telegram_api_id_prompt = false;
                         if matches!(this.telegram_auth, TelegramAuthState::Unauthorized)
@@ -192,6 +217,7 @@ impl TeleArkApp {
                         this.configured_telegram_api_id = status.map(|status| status.api_id);
                         this.telegram_credential_source = status.map(|status| status.source);
                         this.telegram_api_id_persistence = TelegramApiIdPersistence::Removed;
+                        this.custom_telegram_credentials_enabled = false;
                         this.show_telegram_api_id_prompt = false;
                     }
                     Err(error) => {
@@ -299,5 +325,101 @@ impl TeleArkApp {
                 cx.notify();
             });
         }));
+    }
+}
+
+#[cfg(test)]
+mod custom_api_tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn custom_api_is_opt_in_and_unsaved_setup_can_be_disabled(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        cx.simulate_resize(gpui::size(px(1360.0), px(760.0)));
+        app.update(cx, |app, cx| {
+            app.settings_section = SettingsSection::Accounts;
+            assert!(!app.custom_telegram_credentials_enabled);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-save-telegram-credentials")
+                .is_none()
+        );
+        let toggle = cx
+            .debug_bounds("settings-toggle-custom-telegram-credentials")
+            .expect("enable")
+            .center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(app.custom_telegram_credentials_enabled)
+        });
+        assert!(
+            cx.debug_bounds("settings-save-telegram-credentials")
+                .is_some()
+        );
+        let toggle = cx
+            .debug_bounds("settings-toggle-custom-telegram-credentials")
+            .expect("disable")
+            .center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(!app.custom_telegram_credentials_enabled)
+        });
+        assert!(
+            cx.debug_bounds("settings-save-telegram-credentials")
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn custom_api_disable_waits_for_persistence_and_failure_keeps_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        cx.simulate_resize(gpui::size(px(1360.0), px(760.0)));
+        app.update(cx, |app, cx| {
+            app.settings_section = SettingsSection::Accounts;
+            app.custom_telegram_credentials_enabled = true;
+            app.telegram_credential_source = Some(TelegramCredentialSource::User);
+            app.telegram_api_id_persistence = TelegramApiIdPersistence::Saving;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let toggle = cx
+            .debug_bounds("settings-toggle-custom-telegram-credentials")
+            .expect("disable")
+            .center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        app.update(cx, |app, cx| {
+            assert!(app.custom_telegram_credentials_enabled);
+            assert_eq!(
+                app.telegram_api_id_persistence,
+                TelegramApiIdPersistence::Saving
+            );
+            app.telegram_api_id_persistence = TelegramApiIdPersistence::Saved;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(app.custom_telegram_credentials_enabled);
+            assert_eq!(
+                app.telegram_credential_source,
+                Some(TelegramCredentialSource::User)
+            );
+            assert!(matches!(
+                app.telegram_api_id_persistence,
+                TelegramApiIdPersistence::Failed(_)
+            ));
+        });
+        assert!(
+            cx.debug_bounds("settings-toggle-custom-telegram-credentials")
+                .is_some()
+        );
     }
 }

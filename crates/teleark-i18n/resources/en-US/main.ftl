@@ -605,7 +605,7 @@ telegram-password-description = Enter your Telegram two-step verification passwo
 telegram-password-hint = Password hint: { $hint }
 telegram-password-action = Unlock account
 settings-telegram-credentials-title = Telegram API credentials
-settings-telegram-credentials-description = Save the API ID and API Hash assigned to your own Telegram application. Both phone and QR sign-in require the complete pair.
+settings-telegram-credentials-description = Custom API credentials are optional and off by default. TeleArk uses its bundled credentials until you save your own.
 settings-telegram-credentials-save-action = Save credentials
 settings-telegram-credentials-clear-action = Remove saved credentials
 settings-telegram-api-id-missing = Not configured
@@ -1240,3 +1240,7 @@ transfer-upload-publishing-manifest = Publishing file manifest
 transfer-upload-activity-elapsed = { $phase } · Elapsed { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · Elapsed { $elapsed }
 transfer-upload-waiting-telegram = Waiting for Telegram
+
+settings-telegram-custom-enable = Enable custom API credentials
+settings-telegram-custom-disable = Disable and use built-in credentials
+settings-telegram-custom-purpose = Use this option to connect through the Telegram application registered to your own API ID and API Hash. Enter both values and save to apply them. Disabling removes the saved pair and restores the credentials bundled with TeleArk.

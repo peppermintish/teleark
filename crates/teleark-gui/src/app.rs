@@ -340,6 +340,7 @@ pub struct TeleArkApp {
     pub(crate) telegram_credential_source: Option<TelegramCredentialSource>,
     pub(crate) telegram_api_id_persistence: TelegramApiIdPersistence,
     pub(crate) show_telegram_api_id_prompt: bool,
+    pub(crate) custom_telegram_credentials_enabled: bool,
     pub(crate) settings_section: SettingsSection,
     pub(crate) preferences: DesktopPreferences,
     pub(crate) preference_persistence: PreferencePersistence,
@@ -718,6 +719,8 @@ impl TeleArkApp {
             telegram_credential_source,
             telegram_api_id_persistence,
             show_telegram_api_id_prompt: false,
+            custom_telegram_credentials_enabled: telegram_credential_source
+                == Some(TelegramCredentialSource::User),
             settings_section: SettingsSection::General,
             preferences,
             preference_persistence,

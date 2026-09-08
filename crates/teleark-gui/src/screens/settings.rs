@@ -232,119 +232,132 @@ impl TeleArkApp {
                     .child(self.tr("settings-telegram-credentials-description")),
             )
             .child(
-                div()
-                    .mt_4()
-                    .grid()
-                    .grid_cols(if layout.is_compact() { 1 } else { 2 })
-                    .items_end()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w_full()
-                            .child(
-                                div()
-                                    .mb_2()
-                                    .text_xs()
-                                    .text_color(theme::text_secondary())
-                                    .child(self.tr("telegram-api-id-label")),
-                            )
-                            .child(Input::new(&self.telegram_api_id).h(px(38.0))),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .child(
-                                div()
-                                    .mb_2()
-                                    .text_xs()
-                                    .text_color(theme::text_secondary())
-                                    .child(self.tr("telegram-api-hash-label")),
-                            )
-                            .child(Input::new(&self.telegram_api_hash).h(px(38.0))),
-                    ),
+                components::button(
+                    "settings-toggle-custom-telegram-credentials",
+                    self.tr(if self.custom_telegram_credentials_enabled {
+                        "settings-telegram-custom-disable"
+                    } else {
+                        "settings-telegram-custom-enable"
+                    }),
+                    None,
+                    false,
+                )
+                .debug_selector(|| "settings-toggle-custom-telegram-credentials".into())
+                .disabled(self.telegram_api_id_persistence == TelegramApiIdPersistence::Saving)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_custom_telegram_credentials(window, cx);
+                })),
             )
-            .child(
-                div()
-                    .mt_3()
-                    .flex()
-                    .when(layout.is_compact(), |row| row.flex_col())
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        components::button(
-                            "settings-save-telegram-credentials",
-                            self.tr("settings-telegram-credentials-save-action"),
-                            Some(IconName::Check),
-                            true,
+            .when(self.custom_telegram_credentials_enabled, |card| {
+                card.child(
+                    div()
+                        .mt_3()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("settings-telegram-custom-purpose")),
+                )
+                .child(
+                    div()
+                        .mt_4()
+                        .grid()
+                        .grid_cols(if layout.is_compact() { 1 } else { 2 })
+                        .items_end()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w_full()
+                                .child(
+                                    div()
+                                        .mb_2()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(self.tr("telegram-api-id-label")),
+                                )
+                                .child(Input::new(&self.telegram_api_id).h(px(38.0))),
                         )
-                        .disabled(matches!(
-                            self.telegram_api_id_persistence,
-                            TelegramApiIdPersistence::Saving
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.save_telegram_credentials(window, cx);
-                        })),
-                    )
-                    .child(
-                        components::button(
-                            "settings-clear-telegram-credentials",
-                            self.tr("settings-telegram-credentials-clear-action"),
-                            Some(IconName::Delete),
-                            false,
-                        )
-                        .disabled(
-                            self.telegram_credential_source != Some(TelegramCredentialSource::User)
-                                || matches!(
-                                    self.telegram_api_id_persistence,
-                                    TelegramApiIdPersistence::Saving
-                                ),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.clear_telegram_credentials(window, cx);
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .mt_4()
-                    .p_3()
-                    .rounded(theme::RADIUS_SMALL)
-                    .bg(theme::amber_soft())
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(Icon::new(IconName::Info).text_color(theme::amber()))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .whitespace_normal()
-                            .child(div().w_full().min_w_0().whitespace_normal().child(self.tr(
-                                if self.telegram_credential_source
-                                    == Some(TelegramCredentialSource::Distribution)
-                                {
-                                    "settings-telegram-credentials-distribution-note"
-                                } else {
-                                    "settings-telegram-credentials-storage-note"
+                        .child(
+                            div()
+                                .w_full()
+                                .child(
+                                    div()
+                                        .mb_2()
+                                        .text_xs()
+                                        .text_color(theme::text_secondary())
+                                        .child(self.tr("telegram-api-hash-label")),
+                                )
+                                .child(Input::new(&self.telegram_api_hash).h(px(38.0))),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .flex()
+                        .when(layout.is_compact(), |row| row.flex_col())
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            components::button(
+                                "settings-save-telegram-credentials",
+                                self.tr("settings-telegram-credentials-save-action"),
+                                Some(IconName::Check),
+                                true,
+                            )
+                            .debug_selector(|| "settings-save-telegram-credentials".into())
+                            .disabled(matches!(
+                                self.telegram_api_id_persistence,
+                                TelegramApiIdPersistence::Saving
+                            ))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.save_telegram_credentials(window, cx);
                                 },
-                            )))
-                            .child(
-                                div().mt_2().child(
-                                    components::button(
-                                        "settings-open-telegram-api-panel",
-                                        self.tr("settings-telegram-api-panel-action"),
-                                        Some(IconName::ExternalLink),
-                                        false,
-                                    )
-                                    .on_click(|_, _, cx| {
-                                        cx.open_url(TELEGRAM_API_PANEL_URL);
-                                    }),
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_4()
+                        .p_3()
+                        .rounded(theme::RADIUS_SMALL)
+                        .bg(theme::amber_soft())
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(Icon::new(IconName::Info).text_color(theme::amber()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_normal()
+                                .child(div().w_full().min_w_0().whitespace_normal().child(self.tr(
+                                    if self.telegram_credential_source
+                                        == Some(TelegramCredentialSource::Distribution)
+                                    {
+                                        "settings-telegram-credentials-distribution-note"
+                                    } else {
+                                        "settings-telegram-credentials-storage-note"
+                                    },
+                                )))
+                                .child(
+                                    div().mt_2().child(
+                                        components::button(
+                                            "settings-open-telegram-api-panel",
+                                            self.tr("settings-telegram-api-panel-action"),
+                                            Some(IconName::ExternalLink),
+                                            false,
+                                        )
+                                        .on_click(
+                                            |_, _, cx| {
+                                                cx.open_url(TELEGRAM_API_PANEL_URL);
+                                            },
+                                        ),
+                                    ),
                                 ),
-                            ),
-                    ),
-            );
+                        ),
+                )
+            });
 
         let active_content = match self.settings_section {
             SettingsSection::About => self.render_about(cx),
@@ -1656,7 +1669,7 @@ impl TeleArkApp {
             {
                 "settings-telegram-credentials-removed-using-distribution"
             }
-            TelegramApiIdPersistence::Removed => "settings-telegram-credentials-removed",
+            TelegramApiIdPersistence::Removed => "settings-telegram-api-id-missing",
             TelegramApiIdPersistence::Failed(
                 teleark_core::ApplicationErrorKind::InvalidRequest,
             ) => "settings-telegram-api-id-invalid",

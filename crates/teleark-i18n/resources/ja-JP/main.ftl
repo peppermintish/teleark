@@ -577,7 +577,7 @@ telegram-password-description = Telegram の 2 段階認証パスワードを入
 telegram-password-hint = パスワードのヒント：{ $hint }
 telegram-password-action = アカウントをロック解除
 settings-telegram-credentials-title = Telegram API 認証情報
-settings-telegram-credentials-description = 自分の Telegram アプリに割り当てられた API ID と API Hash を保存します。電話番号と QR コードのログインには完全な組み合わせが必要です。
+settings-telegram-credentials-description = カスタム API 設定は任意で、初期状態では無効です。個人の設定を保存するまでは内蔵設定を使用します。
 settings-telegram-credentials-save-action = 認証情報を保存
 settings-telegram-credentials-clear-action = 保存済み認証情報を削除
 settings-telegram-api-id-missing = 未設定
@@ -1212,3 +1212,7 @@ transfer-upload-publishing-manifest = ファイル一覧情報を公開中
 transfer-upload-activity-elapsed = { $phase } · 経過 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
 transfer-upload-waiting-telegram = Telegram の応答待ち
+
+settings-telegram-custom-enable = カスタム API 設定を有効にする
+settings-telegram-custom-disable = 無効にして内蔵設定を使う
+settings-telegram-custom-purpose = 自分で登録した Telegram アプリの API ID と API Hash で接続するための機能です。両方を入力して保存すると適用されます。無効にすると保存済みの設定を削除し、TeleArk に内蔵された設定に戻ります。
