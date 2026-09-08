@@ -410,6 +410,19 @@ pub fn seal_manifest(
     Ok(output)
 }
 
+/// Parse a bounded, unauthenticated key-routing hint. Callers must authenticate
+/// the complete manifest before trusting its identity, metadata or locators.
+/// This never returns decrypted metadata and must not authorize remote writes.
+pub fn manifest_vault_id_hint(
+    bytes: &[u8],
+    limits: ManifestLimits,
+) -> Result<[u8; 16], CryptoError> {
+    let envelope = parse_envelope(bytes, limits)?;
+    let header = decode_public_header(envelope.public_header, limits)?;
+    header.validate(limits)?;
+    Ok(header.vault_id)
+}
+
 /// Strictly parse, resolve the File Key, authenticate, and validate a recovery
 /// manifest. No encrypted names or locators are returned before authentication.
 pub fn open_manifest(

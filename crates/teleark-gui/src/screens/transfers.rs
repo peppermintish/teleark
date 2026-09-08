@@ -28,9 +28,15 @@ use crate::{
     app::TeleArkApp,
     components::{self, Tone},
     layout::LayoutPolicy,
-    mock::{BatchSummary, TransferDirection, TransferRow, TransferState, transfers},
+    mock::{BatchSummary, TransferDirection, TransferRow, TransferState},
     theme,
 };
+
+mod projection;
+#[cfg(test)]
+use crate::mock::transfers;
+pub(crate) use projection::TransferProjectionCache;
+use projection::{TransferItem, vault_transfer_state};
 
 // The view owns one command batch. Dropping the owner stops at the next task
 // boundary, without interrupting an atomic runtime operation already in progress.
@@ -47,98 +53,102 @@ impl Drop for TransferActionJob {
 }
 
 impl TeleArkApp {
-    pub(crate) fn transfer_rows(&self) -> Vec<TransferRow> {
+    fn transfer_items(&self) -> std::sync::Arc<Vec<TransferItem>> {
         if self.visual_preview {
-            return self.preview_transfer_rows.clone();
+            return std::sync::Arc::new(
+                self.preview_transfer_rows
+                    .iter()
+                    .cloned()
+                    .map(|row| TransferItem::Preview(std::sync::Arc::new(row)))
+                    .collect(),
+            );
         }
-        let mut snapshots = self
-            .transfers
-            .as_ref()
-            .and_then(|runtime| runtime.snapshots().ok())
-            .unwrap_or_default();
         let account = self.telegram_account.as_ref().map(|account| account.id);
-        snapshots.retain(|item| item.account_id.is_none() || item.account_id == account);
-        let mut rows = Vec::new();
-        let mut batches = std::collections::BTreeMap::<u64, Vec<&ChannelDownloadSnapshot>>::new();
-        for snapshot in &snapshots {
-            if let Some(id) = snapshot.batch_id {
-                batches.entry(id).or_default().push(snapshot);
+        if let Some(items) = self.transfer_projection_cache.borrow().get(self, account) {
+            return items;
+        }
+        let snapshots: Vec<_> = self
+            .native_transfer_view
+            .items
+            .iter()
+            .filter(|row| row.account_id.is_none() || row.account_id == account)
+            .cloned()
+            .collect();
+        let mut native_batches =
+            std::collections::BTreeMap::<u64, Vec<std::sync::Arc<ChannelDownloadSnapshot>>>::new();
+        for row in &snapshots {
+            if let Some(batch) = row.batch_id {
+                native_batches.entry(batch).or_default().push(row.clone());
             }
         }
-        for snapshot in snapshots.iter().rev() {
-            let Some(batch_id) = snapshot.batch_id else {
-                rows.push(self.transfer_row_from_snapshot(snapshot, false));
-                continue;
-            };
-            let Some(mut items) = batches.remove(&batch_id) else {
-                continue;
-            };
-            items.sort_by_key(|item| item.id);
-            rows.push(self.transfer_row_from_batch(batch_id, &items));
-            {
-                rows.extend(
-                    items
-                        .into_iter()
-                        .rev()
-                        .map(|item| self.transfer_row_from_snapshot(item, true)),
-                );
-            }
-        }
-        if let Some(vault) = self.vault.as_ref() {
-            let snapshots = vault
-                .transfers()
-                .into_iter()
-                .filter(|item| Some(item.account_id) == account)
-                .collect::<Vec<_>>();
-            let mut batches = std::collections::BTreeMap::<u64, Vec<&VaultTransferSnapshot>>::new();
-            for item in &snapshots {
-                if let Some(id) = item.batch_id {
-                    batches.entry(id).or_default().push(item);
+        let mut native = Vec::new();
+        for row in snapshots.iter().rev() {
+            if let Some(batch) = row.batch_id {
+                if let Some(mut members) = native_batches.remove(&batch) {
+                    members.sort_by_key(|row| row.id);
+                    native.push(TransferItem::NativeBatch(batch, members.clone().into()));
+                    native.extend(
+                        members
+                            .into_iter()
+                            .rev()
+                            .map(|row| TransferItem::Native(row, true)),
+                    );
                 }
+            } else {
+                native.push(TransferItem::Native(row.clone(), false));
             }
-            let mut vault_rows = Vec::new();
-            for snapshot in snapshots.iter().rev() {
-                if let Some(id) = snapshot.batch_id {
-                    if let Some(items) = batches.remove(&id) {
-                        if let Some(group) = self.transfer_row_from_vault_batch(id, &items) {
-                            vault_rows.push(group);
-                        }
-                        {
-                            vault_rows.extend(items.into_iter().map(|item| {
-                                let mut row = self.transfer_row_from_vault_snapshot(item);
-                                row.batch_child = true;
-                                row
-                            }));
-                        }
-                    }
-                } else {
-                    vault_rows.push(self.transfer_row_from_vault_snapshot(snapshot));
+        }
+        let snapshots: Vec<_> = self
+            .vault_transfer_view
+            .items
+            .iter()
+            .filter(|row| Some(row.account_id) == account)
+            .cloned()
+            .collect();
+        let mut batches =
+            std::collections::BTreeMap::<u64, Vec<std::sync::Arc<VaultTransferSnapshot>>>::new();
+        for row in &snapshots {
+            if let Some(batch) = row.batch_id {
+                batches.entry(batch).or_default().push(row.clone());
+            }
+        }
+        let mut items = Vec::new();
+        for row in snapshots.iter().rev() {
+            if let Some(batch) = row.batch_id {
+                if let Some(members) = batches.remove(&batch) {
+                    items.push(TransferItem::VaultBatch(
+                        batch,
+                        row.clone(),
+                        members.clone().into(),
+                    ));
+                    items.extend(
+                        members
+                            .into_iter()
+                            .map(|row| TransferItem::Vault(row, true)),
+                    );
                 }
+            } else {
+                items.push(TransferItem::Vault(row.clone(), false));
             }
-            rows.splice(0..0, vault_rows);
         }
-        if self.visual_preview
-            && self.upload_queued
-            && let Some(preview) = transfers(true).into_iter().find(|row| {
-                row.direction == TransferDirection::Upload && row.state == TransferState::Waiting
-            })
-        {
-            rows.insert(0, preview);
-        }
-        rows
+        items.extend(native);
+        let items = std::sync::Arc::new(items);
+        self.transfer_projection_cache
+            .borrow_mut()
+            .set(self, account, items.clone());
+        items
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transfer_rows(&self) -> Vec<TransferRow> {
+        self.transfer_items()
+            .iter()
+            .map(|item| item.row(self))
+            .collect()
     }
 
     fn transfer_row_from_vault_snapshot(&self, snapshot: &VaultTransferSnapshot) -> TransferRow {
-        let state = match snapshot.state {
-            VaultTransferState::Queued => TransferState::Waiting,
-            VaultTransferState::Cancelled => TransferState::Cancelled,
-            VaultTransferState::Running => match snapshot.direction {
-                VaultTransferDirection::Upload => TransferState::Uploading,
-                VaultTransferDirection::Download => TransferState::Downloading,
-            },
-            VaultTransferState::Completed => TransferState::Completed,
-            VaultTransferState::Failed(_) => TransferState::Failed,
-        };
+        let state = vault_transfer_state(snapshot);
         let direction = match snapshot.direction {
             VaultTransferDirection::Upload => TransferDirection::Upload,
             VaultTransferDirection::Download => TransferDirection::Download,
@@ -286,7 +296,7 @@ impl TeleArkApp {
         row.state = aggregate_transfer_states(
             &items
                 .iter()
-                .map(|item| self.transfer_row_from_vault_snapshot(item).state)
+                .map(|item| vault_transfer_state(item))
                 .collect::<Vec<_>>(),
         );
         row.name = self.tr_with(
@@ -469,21 +479,23 @@ impl TeleArkApp {
             })
     }
 
-    fn runtime_transfer_snapshot(&self, id: u64) -> Option<ChannelDownloadSnapshot> {
-        self.transfers
-            .as_ref()?
-            .snapshots()
-            .ok()?
-            .into_iter()
+    fn runtime_transfer_snapshot(
+        &self,
+        id: u64,
+    ) -> Option<std::sync::Arc<ChannelDownloadSnapshot>> {
+        self.native_transfer_view
+            .items
+            .iter()
             .find(|snapshot| snapshot.id == id)
+            .cloned()
     }
 
-    fn vault_transfer_snapshot(&self, id: u64) -> Option<VaultTransferSnapshot> {
-        self.vault
-            .as_ref()?
-            .transfers()
-            .into_iter()
+    fn vault_transfer_snapshot(&self, id: u64) -> Option<std::sync::Arc<VaultTransferSnapshot>> {
+        self.vault_transfer_view
+            .items
+            .iter()
             .find(|snapshot| snapshot.id == id)
+            .cloned()
     }
 
     pub(crate) fn render_transfers(
@@ -494,66 +506,64 @@ impl TeleArkApp {
     ) -> AnyElement {
         let padding = layout.content_padding();
         let query = self.search_input.read(cx).value().to_lowercase();
-        let all_transfer_rows = self.transfer_rows();
+        let all_transfer_rows = self.transfer_items();
         let uploading = all_transfer_rows
             .iter()
-            .filter(|transfer| !transfer.batch_child)
-            .filter(|transfer| transfer.state == TransferState::Uploading)
+            .filter(|transfer| !transfer.child())
+            .filter(|transfer| transfer.state() == TransferState::Uploading)
             .count();
         let downloading = all_transfer_rows
             .iter()
-            .filter(|transfer| !transfer.batch_child)
-            .filter(|transfer| transfer.state == TransferState::Downloading)
+            .filter(|transfer| !transfer.child())
+            .filter(|transfer| transfer.state() == TransferState::Downloading)
             .count();
         let waiting = all_transfer_rows
             .iter()
-            .filter(|transfer| !transfer.batch_child)
+            .filter(|transfer| !transfer.child())
             .filter(|transfer| {
                 matches!(
-                    transfer.state,
+                    transfer.state(),
                     TransferState::Waiting | TransferState::Paused
                 )
             })
             .count();
         let completed = all_transfer_rows
             .iter()
-            .filter(|transfer| !transfer.batch_child)
-            .filter(|transfer| transfer.state == TransferState::Completed)
+            .filter(|transfer| !transfer.child())
+            .filter(|transfer| transfer.state() == TransferState::Completed)
             .count();
         let failed = all_transfer_rows
             .iter()
-            .filter(|transfer| !transfer.batch_child)
+            .filter(|transfer| !transfer.child())
             .filter(|transfer| {
                 matches!(
-                    transfer.state,
+                    transfer.state(),
                     TransferState::Failed | TransferState::Cancelled
                 )
             })
             .count();
         let total_speed = self
-            .transfers
-            .as_ref()
-            .and_then(|transfers| transfers.snapshots().ok())
-            .into_iter()
-            .flatten()
+            .native_transfer_view
+            .items
+            .iter()
             .filter(|snapshot| snapshot.state == ChannelDownloadState::Running)
             .filter_map(|snapshot| snapshot.current_bytes_per_second)
             .fold(0_u64, u64::saturating_add);
-        let total_speed = self.vault.as_ref().map_or(total_speed, |vault| {
-            vault
-                .transfers()
-                .iter()
-                .filter(|snapshot| snapshot.state == VaultTransferState::Running)
-                .fold(total_speed, |total, snapshot| {
-                    total.saturating_add(snapshot.telemetry.goodput_bytes_per_second)
-                })
-        });
+        let total_speed = self
+            .vault_transfer_view
+            .items
+            .iter()
+            .filter(|snapshot| snapshot.state == VaultTransferState::Running)
+            .fold(total_speed, |total, snapshot| {
+                total.saturating_add(snapshot.telemetry.goodput_bytes_per_second)
+            });
         let upload_activity = all_transfer_rows
             .iter()
-            .filter(|row| row.direction == TransferDirection::Upload)
-            .find_map(|row| row.activity_detail.clone());
-        let transfer_rows = visible_transfer_rows(
-            all_transfer_rows,
+            .filter(|row| row.direction() == TransferDirection::Upload)
+            .find_map(|row| row.activity_detail(self));
+        let transfer_rows = projection::visible_items(
+            &all_transfer_rows,
+            self,
             self.nav_selection,
             &query,
             &self.expanded_transfer_batches,
@@ -561,30 +571,24 @@ impl TeleArkApp {
         let selected = transfer_rows
             .iter()
             .enumerate()
-            .find(|(index, transfer)| {
-                self.focused_transfer_key == Some(transfer_selection_key(transfer, *index))
-            })
-            .map(|(_, transfer)| transfer.clone());
+            .find(|(index, transfer)| self.focused_transfer_key == Some(transfer.key(*index)))
+            .map(|(_, transfer)| transfer.row(self));
         let visible_transfer_keys: Vec<_> = transfer_rows
             .iter()
             .enumerate()
-            .map(|(index, transfer)| transfer_selection_key(transfer, index))
+            .map(|(index, transfer)| transfer.key(index))
             .collect();
         let all_visible_selected = !visible_transfer_keys.is_empty()
             && visible_transfer_keys
                 .iter()
                 .all(|key| self.selected_transfer_keys.contains(key));
-        let runtime_snapshots = self
-            .transfers
-            .as_ref()
-            .and_then(|transfers| transfers.snapshots().ok())
-            .unwrap_or_default();
+        let runtime_snapshots = &self.native_transfer_view.items;
         let task_batches: Vec<_> = runtime_snapshots
             .iter()
             .map(|snapshot| (snapshot.id, snapshot.batch_id))
             .collect();
         let scoped_ids =
-            transfer_scope_ids(&transfer_rows, &self.selected_transfer_keys, &task_batches);
+            projection::scope_ids(&transfer_rows, &self.selected_transfer_keys, &task_batches);
         let selection_count = visible_transfer_keys
             .iter()
             .filter(|key| self.selected_transfer_keys.contains(key))
@@ -876,7 +880,7 @@ impl TeleArkApp {
         let keys = rows
             .iter()
             .enumerate()
-            .map(|(index, row)| transfer_selection_key(row, index))
+            .map(|(index, row)| row.key(index))
             .collect::<Vec<_>>();
         {
             let mut previous = self.transfer_list_keys.borrow_mut();
@@ -900,7 +904,10 @@ impl TeleArkApp {
             cx.processor(move |this, index: usize, _, cx| {
                 rows.get(index)
                     .cloned()
-                    .map(|row| this.render_transfer_row(index, row, layout, cx))
+                    .map(|item| {
+                        let row = item.row(this);
+                        this.render_transfer_row(index, row, layout, cx)
+                    })
                     .unwrap_or_else(|| div().into_any_element())
             }),
         )
@@ -908,6 +915,7 @@ impl TeleArkApp {
         .flex_1()
         .min_h_0();
 
+        let omitted_tasks = self.native_transfer_view.omitted_items;
         let table_footer = div()
             .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
             .px_3()
@@ -932,7 +940,11 @@ impl TeleArkApp {
                 ),
             ))
             .child(self.tr_with(
-                "transfer-footer-total-live",
+                if self.native_transfer_view.omitted_items > 0 {
+                    "transfer-footer-total-retained"
+                } else {
+                    "transfer-footer-total-live"
+                },
                 MessageArgs::new().with(
                     "count",
                     format_integer(
@@ -941,6 +953,12 @@ impl TeleArkApp {
                     ),
                 ),
             ))
+            .when(omitted_tasks > 0, |footer| {
+                footer.child(self.tr_with(
+                    "transfer-history-omitted",
+                    MessageArgs::new().with("count", format_integer(self.locale(), omitted_tasks)),
+                ))
+            })
             .child(self.tr_with(
                 "transfer-footer-downloading-live",
                 MessageArgs::new().with("count", format_integer(self.locale(), downloading as u64)),
@@ -1566,6 +1584,10 @@ impl TeleArkApp {
     ) -> AnyElement {
         let replay_mode = self.transfer_inspector_replay || !transfer_is_active;
         let decision_count = telemetry.decisions.len();
+        let omitted_decisions = telemetry
+            .decisions
+            .first()
+            .map_or(0, |decision| decision.sequence.saturating_sub(1));
         let replay_cursor = self
             .transfer_replay_cursor
             .min(decision_count.saturating_sub(1));
@@ -1789,6 +1811,17 @@ impl TeleArkApp {
                         .child(self.tr("transfer-controller-no-decisions")),
                 )
             })
+            .when(omitted_decisions > 0, |card| {
+                card.child(
+                    div().text_xs().text_color(theme::text_muted()).child(
+                        self.tr_with(
+                            "transfer-controller-history-omitted",
+                            MessageArgs::new()
+                                .with("count", format_integer(self.locale(), omitted_decisions)),
+                        ),
+                    ),
+                )
+            })
             .children(decision_rows)
             .when(replay_mode && decision_count != 0, |card| {
                 card.child(
@@ -1957,24 +1990,23 @@ impl TeleArkApp {
                         && row.vault_batch_id == transfer.vault_batch_id
                 })
                 .cloned()
+                .map(|row| TransferItem::Preview(std::sync::Arc::new(row)))
                 .collect::<Vec<_>>()
-        } else if let Some(batch_id) = transfer.runtime_batch_id {
-            self.transfers
-                .as_ref()
-                .and_then(|runtime| runtime.snapshots().ok())
-                .unwrap_or_default()
+        } else if let Some(batch) = transfer.runtime_batch_id {
+            self.native_transfer_view
+                .items
                 .iter()
-                .filter(|item| item.batch_id == Some(batch_id))
-                .map(|item| self.transfer_row_from_snapshot(item, true))
+                .filter(|row| row.batch_id == Some(batch))
+                .cloned()
+                .map(|row| TransferItem::Native(row, true))
                 .collect::<Vec<_>>()
         } else {
-            self.vault
-                .as_ref()
-                .map(|vault| vault.transfers())
-                .unwrap_or_default()
+            self.vault_transfer_view
+                .items
                 .iter()
-                .filter(|item| item.batch_id == transfer.vault_batch_id)
-                .map(|item| self.transfer_row_from_vault_snapshot(item))
+                .filter(|row| row.batch_id == transfer.vault_batch_id)
+                .cloned()
+                .map(|row| TransferItem::Vault(row, true))
                 .collect::<Vec<_>>()
         };
         let batch_key = transfer
@@ -1988,8 +2020,9 @@ impl TeleArkApp {
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .filter_map(|index| members.get(index))
-                    .map(|row| {
-                        let selection_key = transfer_selection_key(row, 0);
+                    .map(|item| {
+                        let row = item.row(this);
+                        let selection_key = transfer_selection_key(&row, 0);
                         let presence = (row.direction == TransferDirection::Download
                             && row.state == TransferState::Completed)
                             .then(|| {
@@ -2524,6 +2557,7 @@ impl TeleArkApp {
         }
         if let Some(path) = vault_snapshot
             .as_ref()
+            .filter(|_| !self.vault_locked)
             .and_then(|snapshot| snapshot.session_log_path.as_ref())
             .or_else(|| {
                 runtime_snapshot
@@ -2534,6 +2568,28 @@ impl TeleArkApp {
             details.push((
                 self.tr("transfer-session-log"),
                 path.to_string_lossy().into_owned().into(),
+            ));
+        }
+
+        let omitted_records = teleark_runtime::session_log_dropped_record_count();
+        if omitted_records > 0 {
+            details.push((
+                self.tr("transfer-session-log-omitted-label"),
+                self.tr_with(
+                    "transfer-session-log-omitted-count",
+                    MessageArgs::new()
+                        .with("count", format_integer(self.locale(), omitted_records)),
+                ),
+            ));
+        }
+
+        if let Some(snapshot) = vault_snapshot.as_ref()
+            && matches!(snapshot.state, VaultTransferState::Failed(_))
+            && let Some(activity) = snapshot.upload_activity.as_ref()
+        {
+            details.push((
+                self.tr("detail-failure-last-phase"),
+                self.tr(upload_phase_message_id(activity.phase)),
             ));
         }
 
@@ -2594,7 +2650,13 @@ impl TeleArkApp {
                 vault_snapshot.as_ref().and_then(|snapshot| {
                     if let VaultTransferState::Failed(kind) = snapshot.state {
                         Some((
-                            self.tr(native_download_error_message_id(kind)),
+                            self.tr(vault_transfer_error_message_id(
+                                kind,
+                                snapshot
+                                    .upload_activity
+                                    .as_ref()
+                                    .map(|activity| activity.phase),
+                            )),
                             self.tr("detail-failure-terminal"),
                         ))
                     } else {
@@ -2798,7 +2860,7 @@ impl TeleArkApp {
                         details.child(self.render_transfer_telemetry(telemetry, active, cx))
                     })
                     .when_some(runtime_snapshot, |details, snapshot| {
-                        let events = snapshot.events.into_iter().map(|event| {
+                        let events = snapshot.events.iter().map(|event| {
                             let label = self.tr(match event.kind {
                                 ChannelDownloadEventKind::Queued => "trace-event-queued",
                                 ChannelDownloadEventKind::Started => "trace-event-started",
@@ -2836,56 +2898,54 @@ impl TeleArkApp {
                                 )
                                 .child(div().text_color(theme::text_muted()).child(elapsed))
                         });
-                        let part_events =
-                            snapshot
-                                .part_events
-                                .into_iter()
-                                .rev()
-                                .take(20)
-                                .map(|event| {
-                                    let state = self.tr(match event.state {
-                                        DownloadPartState::Inflight => "transfer-part-inflight",
-                                        DownloadPartState::Completed => "transfer-part-completed",
-                                        DownloadPartState::Retry => "transfer-part-retry",
-                                        DownloadPartState::Failed => "transfer-part-failed",
-                                    });
-                                    div().py_1().flex().flex_col().gap_1().text_xs().child(
-                                        self.tr_with(
-                                            "transfer-part-event-value",
-                                            MessageArgs::new()
-                                                .with(
-                                                    "part",
-                                                    format_integer(self.locale(), event.part_index),
-                                                )
-                                                .with(
-                                                    "offset",
-                                                    format_integer(
-                                                        self.locale(),
-                                                        event.offset_bytes,
-                                                    ),
-                                                )
-                                                .with(
-                                                    "length",
-                                                    format_bytes(self.locale(), event.length_bytes),
-                                                )
-                                                .with("state", state.to_string())
-                                                .with(
-                                                    "attempt",
-                                                    format_integer(
-                                                        self.locale(),
-                                                        u64::from(event.attempt),
-                                                    ),
-                                                )
-                                                .with(
-                                                    "elapsed",
-                                                    format_duration_millis(
-                                                        self.locale(),
-                                                        event.elapsed_millis,
-                                                    ),
-                                                ),
+                        let shown_parts = snapshot.part_events.len().min(20);
+                        let omitted_parts = snapshot.part_events.omitted().saturating_add(
+                            snapshot.part_events.len().saturating_sub(shown_parts) as u64,
+                        );
+                        let part_retention = self.tr_with(
+                            "transfer-part-retention",
+                            MessageArgs::new()
+                                .with("shown", format_integer(self.locale(), shown_parts as u64))
+                                .with("omitted", format_integer(self.locale(), omitted_parts)),
+                        );
+                        let part_events = snapshot.part_events.iter().rev().take(20).map(|event| {
+                            let state = self.tr(match event.state {
+                                DownloadPartState::Inflight => "transfer-part-inflight",
+                                DownloadPartState::Completed => "transfer-part-completed",
+                                DownloadPartState::Retry => "transfer-part-retry",
+                                DownloadPartState::Failed => "transfer-part-failed",
+                            });
+                            div().py_1().flex().flex_col().gap_1().text_xs().child(
+                                self.tr_with(
+                                    "transfer-part-event-value",
+                                    MessageArgs::new()
+                                        .with(
+                                            "part",
+                                            format_integer(self.locale(), event.part_index),
+                                        )
+                                        .with(
+                                            "offset",
+                                            format_integer(self.locale(), event.offset_bytes),
+                                        )
+                                        .with(
+                                            "length",
+                                            format_bytes(self.locale(), event.length_bytes),
+                                        )
+                                        .with("state", state.to_string())
+                                        .with(
+                                            "attempt",
+                                            format_integer(self.locale(), u64::from(event.attempt)),
+                                        )
+                                        .with(
+                                            "elapsed",
+                                            format_duration_millis(
+                                                self.locale(),
+                                                event.elapsed_millis,
+                                            ),
                                         ),
-                                    )
-                                });
+                                ),
+                            )
+                        });
                         details
                             .child(
                                 div()
@@ -2900,6 +2960,22 @@ impl TeleArkApp {
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(self.tr("detail-trace-timeline")),
                                     )
+                                    .when(snapshot.event_history_omitted > 0, |timeline| {
+                                        timeline.child(
+                                            div().text_xs().text_color(theme::text_muted()).child(
+                                                self.tr_with(
+                                                    "transfer-lifecycle-history-omitted",
+                                                    MessageArgs::new().with(
+                                                        "count",
+                                                        format_integer(
+                                                            self.locale(),
+                                                            snapshot.event_history_omitted,
+                                                        ),
+                                                    ),
+                                                ),
+                                            ),
+                                        )
+                                    })
                                     .children(events),
                             )
                             .child(
@@ -2914,6 +2990,12 @@ impl TeleArkApp {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(self.tr("transfer-part-timeline")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::text_muted())
+                                            .child(part_retention),
                                     )
                                     .children(part_events),
                             )
@@ -3006,6 +3088,7 @@ fn execute_transfer_actions(
 // A collapsed batch selects its native child tasks. A set prevents double dispatch
 // when both the group and expanded children are selected. Hidden selections never
 // turn a visible-list action into an operation on another filter's tasks.
+#[cfg(test)]
 fn transfer_scope_ids(
     rows: &[TransferRow],
     selected: &std::collections::BTreeSet<u64>,
@@ -3190,6 +3273,7 @@ fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
         VaultUploadPhase::SendingMessage => "transfer-upload-confirming-message",
         VaultUploadPhase::Verifying => "transfer-upload-verifying-bytes",
         VaultUploadPhase::Publishing => "transfer-upload-publishing-manifest",
+        VaultUploadPhase::Persisting => "transfer-upload-saving-manifest",
     }
 }
 
@@ -3248,6 +3332,43 @@ fn current_unix_millis() -> Option<i64> {
     i64::try_from(millis).ok()
 }
 
+fn vault_transfer_error_message_id(
+    kind: teleark_core::ApplicationErrorKind,
+    phase: Option<VaultUploadPhase>,
+) -> &'static str {
+    use teleark_core::ApplicationErrorKind;
+    match kind {
+        ApplicationErrorKind::SourcePermissionDenied => "vault-transfer-error-source-permission",
+        ApplicationErrorKind::StorageAccessDenied => "storage-health-access",
+        ApplicationErrorKind::StorageConfigurationUnsafe => "storage-health-unsafe",
+        ApplicationErrorKind::StorageIdentityDamaged => "storage-health-repair",
+        ApplicationErrorKind::StorageIdentityUnsupported => "storage-health-unsupported",
+        ApplicationErrorKind::VaultKeyUnavailable => "vault-health-key-unavailable",
+        ApplicationErrorKind::PermissionDenied
+            if matches!(
+                phase,
+                Some(VaultUploadPhase::CheckingStorage | VaultUploadPhase::CheckingTarget)
+            ) =>
+        {
+            "vault-transfer-error-target-permission"
+        }
+        ApplicationErrorKind::PermissionDenied => "vault-transfer-error-permission",
+        ApplicationErrorKind::InvalidRequest => "vault-transfer-error-invalid-request",
+        ApplicationErrorKind::Conflict => "vault-transfer-error-conflict",
+        ApplicationErrorKind::SourceChanged => "vault-transfer-error-source-changed",
+        ApplicationErrorKind::NotFound | ApplicationErrorKind::SourceMissing => {
+            "vault-error-source-missing"
+        }
+        ApplicationErrorKind::Persistence => "vault-error-persistence",
+        ApplicationErrorKind::Capacity => "vault-error-capacity",
+        ApplicationErrorKind::Authorization => "error-transfer-authorization",
+        ApplicationErrorKind::Network => "error-transfer-network",
+        ApplicationErrorKind::Server => "telegram-error-server",
+        ApplicationErrorKind::Cancelled => "error-transfer-cancelled",
+        _ => "vault-error-persistence",
+    }
+}
+
 fn native_download_error_message_id(kind: teleark_core::ApplicationErrorKind) -> &'static str {
     use teleark_core::ApplicationErrorKind;
 
@@ -3281,6 +3402,7 @@ fn toggle_visible_selection(
     }
 }
 
+#[cfg(test)]
 fn visible_transfer_rows(
     rows: Vec<TransferRow>,
     selection: &str,
@@ -3386,12 +3508,41 @@ mod tests {
     use super::*;
 
     #[gpui_kit::test]
-    fn upload_phases_remain_visible_in_collapsed_batches_and_terminal_rows_are_final(
+    fn locked_vault_rows_hide_names_paths_and_search_matches_but_keep_progress(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
-        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
-        let mut completed = VaultTransferSnapshot {
+        app.update(cx, |app, _| {
+            let mut snapshot = vault_snapshot_fixture();
+            snapshot.destination = Some("/synthetic/private-output.bin".into());
+            snapshot.package_id = Some("private-package".into());
+            snapshot.transferred_bytes = 4096;
+            let item = TransferItem::Vault(std::sync::Arc::new(snapshot), false);
+            app.vault_locked = false;
+            let visible = item.row(app);
+            app.vault_locked = true;
+            let locked = item.row(app);
+            assert_ne!(locked.name, visible.name);
+            assert_ne!(locked.destination, visible.destination);
+            assert!(locked.caption.is_none());
+            assert_eq!(locked.progress, visible.progress);
+            assert_eq!(locked.activity, visible.activity);
+            assert_eq!(locked.state, visible.state);
+            let rows = projection::visible_items(
+                std::slice::from_ref(&item),
+                app,
+                "nav-transfers-all",
+                "fixture",
+                &Default::default(),
+            );
+            assert!(rows.is_empty());
+            app.vault_locked = false;
+            assert_eq!(item.row(app).name, visible.name);
+        });
+    }
+
+    fn vault_snapshot_fixture() -> VaultTransferSnapshot {
+        VaultTransferSnapshot {
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: 1,
             account_id: 7,
@@ -3433,7 +3584,220 @@ mod tests {
                 decisions: vec![],
             },
             state: VaultTransferState::Running,
+        }
+    }
+
+    fn native_snapshot_fixture(id: u64, account: i64) -> ChannelDownloadSnapshot {
+        let vault = vault_snapshot_fixture();
+        ChannelDownloadSnapshot {
+            account_id: Some(account),
+            id,
+            batch_id: None,
+            chat_id: 90,
+            message_id: id as i64,
+            message_sent_at_unix_ms: Some(1),
+            file_name: format!("京都 project file {id}.bin"),
+            caption: Some("Synthetic benchmark caption".into()),
+            mime_type: None,
+            size_bytes: 1_024,
+            transferred_bytes: 1_024,
+            destination: format!("/tmp/teleark-preview/output-{id}.bin").into(),
+            state: ChannelDownloadState::Completed,
+            verification: ChannelDownloadVerification::SizeChecked,
+            queued_at_unix_ms: 1,
+            started_at_unix_ms: Some(1),
+            finished_at_unix_ms: Some(2),
+            queue_wait_ms: Some(0),
+            duration_ms: Some(1),
+            current_bytes_per_second: None,
+            average_bytes_per_second: None,
+            eta_ms: None,
+            attempts: 1,
+            failure: None,
+            events: vec![],
+            event_history_omitted: 0,
+            part_events: Default::default(),
+            session_log_path: None,
+            telemetry: vault.telemetry,
+        }
+    }
+
+    fn populate_large_transfer_view(app: &mut TeleArkApp, count: u64) {
+        app.visual_preview = false;
+        let account = app.telegram_account.as_ref().expect("fixture account").id;
+        app.native_transfer_view = teleark_runtime::TransferSnapshotView {
+            omitted_items: 0,
+            revision: 1,
+            items: (0..count)
+                .map(|id| std::sync::Arc::new(native_snapshot_fixture(id + 1, account)))
+                .collect(),
         };
+    }
+
+    #[gpui_kit::test]
+    fn ten_thousand_transfers_format_only_the_visible_window(cx: &mut gpui_kit::TestAppContext) {
+        let (entity, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        entity.update(cx, |app, cx| {
+            populate_large_transfer_view(app, 10_000);
+            let first = app.transfer_items();
+            assert_eq!(first.len(), 10_000);
+            assert!(std::sync::Arc::ptr_eq(&first, &app.transfer_items()));
+            projection::reset_materialized_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let formatted = projection::materialized_rows();
+        assert!(
+            formatted > 0 && formatted < 200,
+            "formatted {formatted} rows for a compact viewport"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn lazy_transfer_filters_and_bulk_scope_match_displayed_rows(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (entity, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        entity.update(cx, |app, _| {
+            populate_large_transfer_view(app, 3);
+            let account = app.telegram_account.as_ref().expect("account").id;
+            let mut native = (1..=3)
+                .map(|id| native_snapshot_fixture(id, account))
+                .collect::<Vec<_>>();
+            native[0].batch_id = Some(9);
+            native[1].batch_id = Some(9);
+            native[1].state =
+                ChannelDownloadState::Failed(teleark_core::ApplicationErrorKind::Network);
+            app.native_transfer_view.items = native.into_iter().map(std::sync::Arc::new).collect();
+            let mut vault = vault_snapshot_fixture();
+            vault.account_id = account;
+            app.vault_transfer_view.items = vec![std::sync::Arc::new(vault)].into();
+            for locale in teleark_i18n::SupportedLocale::ALL {
+                app.localizer.set_locale(locale);
+                let items = app.transfer_items();
+                let rows = app.transfer_rows();
+                let source = app.tr("storage-channel-title").to_lowercase();
+                for selection in [
+                    "nav-transfers-all",
+                    "nav-waiting",
+                    "nav-completed",
+                    "nav-failed",
+                ] {
+                    for query in ["", "京都", "output-3", source.as_ref()] {
+                        for expanded in [
+                            std::collections::BTreeSet::new(),
+                            std::collections::BTreeSet::from([9, vault_batch_key(1)]),
+                        ] {
+                            let visible =
+                                projection::visible_items(&items, app, selection, query, &expanded);
+                            let legacy =
+                                visible_transfer_rows(rows.clone(), selection, query, &expanded);
+                            assert_eq!(
+                                visible
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, item)| item.key(i))
+                                    .collect::<Vec<_>>(),
+                                legacy
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, row)| transfer_selection_key(row, i))
+                                    .collect::<Vec<_>>()
+                            );
+                            let selected =
+                                std::collections::BTreeSet::from([0x4000_0000_0000_0009, 2, 99]);
+                            let tasks = [(1, Some(9)), (2, Some(9)), (3, None)];
+                            assert_eq!(
+                                projection::scope_ids(&visible, &selected, &tasks),
+                                transfer_scope_ids(&legacy, &selected, &tasks)
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    #[ignore = "manual before/after performance measurement"]
+    fn perf_transfer_virtualization(cx: &mut gpui_kit::TestAppContext) {
+        use std::{hint::black_box, time::Instant};
+        let (entity, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        entity.update(cx, |app, _| {
+            populate_large_transfer_view(app, 10_000);
+            let started = Instant::now();
+            for _ in 0..10 {
+                black_box(app.transfer_rows());
+            }
+            let before = started.elapsed();
+            let started = Instant::now();
+            for _ in 0..10 {
+                let items = app.transfer_items();
+                let visible = projection::visible_items(
+                    &items,
+                    app,
+                    "nav-transfers-all",
+                    "",
+                    &std::collections::BTreeSet::new(),
+                );
+                for item in visible.iter().take(20) {
+                    black_box(item.row(app));
+                }
+            }
+            println!(
+                "transfer_virtualization tasks=10000 frames=10 visible=20 old_us={} new_us={}",
+                before.as_micros(),
+                started.elapsed().as_micros()
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cached_transfer_projection_survives_unavailable_runtime_and_rejects_other_accounts(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (entity, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        entity.update(cx, |app, cx| {
+            app.visual_preview = false;
+            app.vault = None;
+            let mut row = vault_snapshot_fixture();
+            row.batch_id = None;
+            row.account_id = app.telegram_account.as_ref().expect("fixture account").id;
+            let mut other = row.clone();
+            other.id = 2;
+            other.account_id += 1;
+            app.vault_transfer_view = teleark_runtime::TransferSnapshotView {
+                omitted_items: 0,
+                revision: 1,
+                items: vec![std::sync::Arc::new(row.clone()), std::sync::Arc::new(other)].into(),
+            };
+            let rows = app.transfer_rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].name.as_ref(), row.file_name);
+            assert!(std::sync::Arc::ptr_eq(
+                &app.vault_transfer_snapshot(1).expect("cached snapshot"),
+                &app.vault_transfer_view.items[0]
+            ));
+            row.file_name = "Updated cached title".into();
+            app.vault_transfer_view = teleark_runtime::TransferSnapshotView {
+                omitted_items: 0,
+                revision: 2,
+                items: vec![std::sync::Arc::new(row)].into(),
+            };
+            assert_eq!(app.transfer_rows()[0].name.as_ref(), "Updated cached title");
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn upload_phases_remain_visible_in_collapsed_batches_and_terminal_rows_are_final(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        let mut completed = vault_snapshot_fixture();
         completed.state = VaultTransferState::Completed;
         completed.transferred_bytes = completed.size_bytes;
         let mut active = completed.clone();
@@ -3750,6 +4114,58 @@ mod tests {
         assert_eq!(selected, std::collections::BTreeSet::from([1, 2, 99]));
         toggle_visible_selection(&mut selected, &[1, 2], true);
         assert_eq!(selected, std::collections::BTreeSet::from([99]));
+    }
+
+    #[test]
+    fn vault_failures_do_not_claim_a_native_download_destination() {
+        use teleark_core::ApplicationErrorKind as Kind;
+        use teleark_i18n::{Localizer, MessageId, SupportedLocale};
+        for kind in [
+            Kind::InvalidRequest,
+            Kind::NotFound,
+            Kind::Conflict,
+            Kind::Persistence,
+            Kind::SourceMissing,
+            Kind::SourceChanged,
+            Kind::PermissionDenied,
+            Kind::Capacity,
+            Kind::Authorization,
+            Kind::Network,
+            Kind::Server,
+            Kind::Cancelled,
+        ] {
+            for phase in [
+                None,
+                Some(VaultUploadPhase::CheckingStorage),
+                Some(VaultUploadPhase::CheckingTarget),
+                Some(VaultUploadPhase::Preparing),
+                Some(VaultUploadPhase::Uploading),
+            ] {
+                let id = vault_transfer_error_message_id(kind, phase);
+                assert!(!id.starts_with("native-download-"));
+                for locale in SupportedLocale::ALL {
+                    assert!(
+                        Localizer::new(locale)
+                            .expect("localizer")
+                            .contains(locale, MessageId::new(id))
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            vault_transfer_error_message_id(
+                Kind::PermissionDenied,
+                Some(VaultUploadPhase::CheckingTarget)
+            ),
+            "vault-transfer-error-target-permission"
+        );
+        assert_eq!(
+            vault_transfer_error_message_id(
+                Kind::PermissionDenied,
+                Some(VaultUploadPhase::Uploading)
+            ),
+            "vault-transfer-error-permission"
+        );
     }
 
     #[test]

@@ -8,20 +8,17 @@ mod library_state;
 mod menus;
 mod mock;
 mod screens;
+mod startup;
 mod theme;
 
-use app::{AppStartup, LocaleStartup, Page, RuntimeStartup, TeleArkApp};
+use app::Page;
 use assets::Assets;
 use gpui_kit::component::Root;
 use gpui_kit::{
     App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
     WindowOptions, point, px, size,
 };
-use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_i18n::{Localizer, SupportedLocale};
-use teleark_runtime::{
-    DesktopLibrary, DesktopTelegram, DesktopTransfers, DesktopVault, initialize_diagnostics,
-};
 
 gpui_kit::actions!(
     teleark,
@@ -41,49 +38,19 @@ gpui_kit::actions!(
     ]
 );
 
+// All app networking belongs to Runtime/Telegram. Remote UI assets must use
+// that owner; framework HTTP is denied in both direct and proxy modes.
+fn application_http_client() -> std::sync::Arc<dyn gpui_kit::http_client::HttpClient> {
+    std::sync::Arc::new(gpui_kit::http_client::BlockedHttpClient::new())
+}
+
 fn main() {
     let system_locale = detect_system_locale();
     let visual_preview = std::env::args().any(|argument| argument == "--preview-ui");
-    let library = if visual_preview {
-        Err(ApplicationError::new(ApplicationErrorKind::NotFound))
-    } else {
-        DesktopLibrary::open_default()
-    };
-    let _diagnostics = library
-        .as_ref()
-        .map_err(|error| ApplicationError::new(error.kind()))
-        .and_then(|library| library.managed_directories())
-        .and_then(|directories| initialize_diagnostics(&directories.logs));
-    tracing::info!(
-        event = "application.starting",
-        version = env!("CARGO_PKG_VERSION"),
-        "TeleArk application starting"
-    );
-    let telegram = if visual_preview {
-        Err(ApplicationError::new(ApplicationErrorKind::NotFound))
-    } else {
-        DesktopTelegram::open_default()
-    };
-    let transfers = match (telegram.as_ref(), library.as_ref()) {
-        (Ok(telegram), Ok(library)) => DesktopTransfers::new(telegram.clone(), library.clone()),
-        (Err(error), _) | (_, Err(error)) => Err(ApplicationError::new(match error.kind() {
-            ApplicationErrorKind::Persistence => ApplicationErrorKind::Persistence,
-            _ => ApplicationErrorKind::Network,
-        })),
-    };
-    let vault = match (telegram.as_ref(), library.as_ref()) {
-        (Ok(telegram), Ok(library)) => DesktopVault::new(telegram.clone(), library.clone()),
-        (Err(error), _) | (_, Err(error)) => Err(ApplicationError::new(error.kind())),
-    };
-    let mut launch = LaunchOptions::from_env(system_locale);
-    let persisted_locale = library
-        .as_ref()
-        .ok()
-        .and_then(|library| library.locale_override().ok())
-        .flatten();
-    let follows_system_locale = apply_persisted_locale(&mut launch, persisted_locale.as_deref());
+    let launch = LaunchOptions::from_env(system_locale);
 
     gpui_kit::application()
+        .with_http_client(application_http_client())
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
@@ -131,25 +98,13 @@ fn main() {
                 .unwrap_or_else(|| Bounds::centered(None, requested_size, cx));
             let window = cx.open_window(main_window_options(bounds), move |window, cx| {
                 let view = cx.new(|cx| {
-                    TeleArkApp::new(
+                    startup::StartupView::new(
+                        localizer,
+                        launch,
+                        system_locale,
+                        visual_preview,
                         window,
                         cx,
-                        localizer,
-                        RuntimeStartup {
-                            library,
-                            telegram,
-                            transfers,
-                            vault,
-                        },
-                        AppStartup {
-                            page: launch.page,
-                            visual_preview,
-                            show_upload: launch.show_upload,
-                            locale: LocaleStartup {
-                                system_locale,
-                                follows_system_locale,
-                            },
-                        },
                     )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -500,3 +455,6 @@ mod tests {
         assert_eq!(system.locale, SupportedLocale::JaJp);
     }
 }
+
+#[cfg(test)]
+mod network_policy_tests;

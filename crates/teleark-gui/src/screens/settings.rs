@@ -29,6 +29,7 @@ use crate::{
     theme,
 };
 
+#[cfg(test)]
 const TELEGRAM_API_PANEL_URL: &str = "https://my.telegram.org/apps";
 
 impl TeleArkApp {
@@ -57,6 +58,11 @@ impl TeleArkApp {
             ));
 
         let main_sections = [
+            (
+                IconName::Globe,
+                "proxy-settings-title",
+                SettingsSection::Network,
+            ),
             (
                 IconName::Settings,
                 "settings-general",
@@ -344,14 +350,14 @@ impl TeleArkApp {
                                     div().mt_2().child(
                                         components::button(
                                             "settings-open-telegram-api-panel",
-                                            self.tr("settings-telegram-api-panel-action"),
+                                            self.tr(self.telegram_api_panel_action_id()),
                                             Some(IconName::ExternalLink),
                                             false,
                                         )
                                         .on_click(
-                                            |_, _, cx| {
-                                                cx.open_url(TELEGRAM_API_PANEL_URL);
-                                            },
+                                            cx.listener(|this, _, window, cx| {
+                                                this.open_telegram_api_panel(window, cx);
+                                            }),
                                         ),
                                     ),
                                 ),
@@ -362,6 +368,7 @@ impl TeleArkApp {
         let active_content = match self.settings_section {
             SettingsSection::About => self.render_about(cx),
             SettingsSection::General => language.into_any_element(),
+            SettingsSection::Network => self.render_proxy_settings(layout, cx),
             SettingsSection::Accounts => div()
                 .flex()
                 .flex_col()
@@ -526,6 +533,7 @@ impl TeleArkApp {
             .as_ref()
             .map(|status| status.dropped_event_count)
             .unwrap_or_default();
+        let omitted_records = teleark_runtime::session_log_dropped_record_count();
         let diagnostics_directory = diagnostics.map(|status| status.log_directory);
         let diagnostics_card = settings_card(
             self.tr("settings-diagnostics-title"),
@@ -548,6 +556,23 @@ impl TeleArkApp {
                         format_integer(self.locale(), dropped_events as u64),
                     ),
                 )),
+        )
+        .child(
+            div()
+                .mt_2()
+                .text_xs()
+                .text_color(if omitted_records == 0 {
+                    theme::green()
+                } else {
+                    theme::amber()
+                })
+                .child(
+                    self.tr_with(
+                        "transfer-session-log-omitted-count",
+                        teleark_i18n::MessageArgs::new()
+                            .with("count", format_integer(self.locale(), omitted_records)),
+                    ),
+                ),
         )
         .when_some(diagnostics_directory, |card, directory| {
             card.child(
@@ -908,13 +933,18 @@ impl TeleArkApp {
                                 None,
                                 true,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.vault_locked {
-                                    this.request_vault_unlock(crate::app::UnlockIntent::Browse, cx);
-                                } else {
-                                    this.lock_vault(cx);
-                                }
-                            })),
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    if this.vault_locked {
+                                        this.request_vault_unlock(
+                                            crate::app::UnlockIntent::Browse,
+                                            cx,
+                                        );
+                                    } else {
+                                        this.lock_vault(window, cx);
+                                    }
+                                },
+                            )),
                         ),
                 )
                 .child(
@@ -1055,7 +1085,7 @@ impl TeleArkApp {
             )
         })
         .when(
-            self.vault_status.configured && self.vault_status.locked,
+            self.vault_status.configured && self.vault_status.active_key_locked,
             |card| {
                 card.child(vault_input(
                     self.tr("vault-password-label"),
@@ -1094,7 +1124,7 @@ impl TeleArkApp {
             },
         )
         .when(
-            self.vault_status.configured && !self.vault_status.locked,
+            self.vault_status.configured && !self.vault_status.active_key_locked,
             |card| {
                 card.child(vault_input(
                     self.tr("vault-new-password-label"),
@@ -1144,11 +1174,53 @@ impl TeleArkApp {
                                 true,
                             )
                             .disabled(working)
-                            .on_click(cx.listener(|this, _, _, cx| this.lock_vault(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.lock_vault(window, cx)),
+                            ),
                         ),
                 )
             },
         )
+        .when(self.vault_status.configured, |card| {
+            card.child(
+                div()
+                    .mt_4()
+                    .text_sm()
+                    .child(self.tr("vault-epoch-preserved-description")),
+            )
+            .when(!self.vault_status.locked, |card| {
+                card.child(vault_input(
+                    self.tr("vault-epoch-historical-label"),
+                    &self.vault_recovery_key,
+                ))
+                .child(
+                    components::button(
+                        "unlock-historical-key",
+                        self.tr("vault-epoch-historical-action"),
+                        None,
+                        false,
+                    )
+                    .mt_3()
+                    .disabled(working)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.unlock_vault_with_recovery(window, cx)
+                    })),
+                )
+            })
+            .child(
+                components::button(
+                    "settings-lost-all-keys",
+                    self.tr("vault-epoch-lost-action"),
+                    None,
+                    false,
+                )
+                .mt_3()
+                .disabled(working)
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.request_new_key_epoch(window, cx)),
+                ),
+            )
+        })
         .when_some(
             self.vault_recovery_secret
                 .as_ref()
@@ -1249,19 +1321,12 @@ impl TeleArkApp {
                         .child(self.tr("vault-os-credential-development-note")),
                 ),
         )
-        .child(div().mt_4().child(preference_row(
-            "settings-lock-vault-when-hidden",
-            self.tr("settings-vault-lock-when-hidden"),
-            self.tr("settings-vault-lock-when-hidden-description"),
-            self.preferences.lock_vault_when_hidden,
-            cx.listener(|this, _, _, cx| {
-                if this.preference_persistence != PreferencePersistence::Saving {
-                    this.preferences.lock_vault_when_hidden =
-                        !this.preferences.lock_vault_when_hidden;
-                    this.persist_preferences(cx);
-                }
-            }),
-        )))
+        .child(
+            div()
+                .mt_4()
+                .text_sm()
+                .child(self.tr("vault-session-unlock-policy")),
+        )
         .child(
             div()
                 .mt_4()
@@ -1774,13 +1839,15 @@ pub fn render_telegram_api_id_prompt(app: &TeleArkApp, cx: &mut Context<TeleArkA
                             div().mt_2().child(
                                 components::button(
                                     "telegram-prompt-open-api-panel",
-                                    app.tr("settings-telegram-api-panel-action"),
+                                    app.tr(app.telegram_api_panel_action_id()),
                                     Some(IconName::ExternalLink),
                                     false,
                                 )
-                                .on_click(|_, _, cx| {
-                                    cx.open_url(TELEGRAM_API_PANEL_URL);
-                                }),
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.open_telegram_api_panel(window, cx);
+                                    },
+                                )),
                             ),
                         ),
                 ),
@@ -2129,6 +2196,22 @@ pub(crate) fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, 
         VaultActivity::Succeeded => Some((app.tr("vault-operation-succeeded"), Tone::Green)),
         VaultActivity::Failed(kind) => {
             let id = match kind {
+                teleark_core::ApplicationErrorKind::VaultKeyUnavailable => {
+                    "vault-health-key-unavailable"
+                }
+                teleark_core::ApplicationErrorKind::SourcePermissionDenied => {
+                    "vault-transfer-error-source-permission"
+                }
+                teleark_core::ApplicationErrorKind::StorageAccessDenied => "storage-health-access",
+                teleark_core::ApplicationErrorKind::StorageConfigurationUnsafe => {
+                    "storage-health-unsafe"
+                }
+                teleark_core::ApplicationErrorKind::StorageIdentityUnsupported => {
+                    "storage-health-unsupported"
+                }
+                teleark_core::ApplicationErrorKind::StorageIdentityDamaged => {
+                    "storage-health-repair"
+                }
                 teleark_core::ApplicationErrorKind::InvalidRequest => "vault-error-invalid-request",
                 teleark_core::ApplicationErrorKind::Authorization => "vault-error-authorization",
                 teleark_core::ApplicationErrorKind::SourceMissing => "vault-error-source-missing",

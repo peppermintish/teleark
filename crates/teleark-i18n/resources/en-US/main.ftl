@@ -10,6 +10,7 @@ common-save = Save
 common-pause = Pause
 common-resume = Resume
 common-retry = Retry
+channel-list-resize-hint = Drag the right divider to resize the channel list.
 common-delete = Delete
 common-open-file = Open File
 common-open-folder = Open Folder
@@ -949,6 +950,7 @@ transfer-reason-soft-limit = The measured probe conflicts with Telegram's conser
 transfer-reason-all-platform = Every eligible parameter is at its measured platform or configured bound.
 transfer-decision-throughput-value = {$elapsed} · {$before} → {$after} ({$change})
 transfer-part-timeline = Recent part timeline
+transfer-part-retention = Showing the latest { $shown } part events; { $omitted } older events omitted.
 transfer-part-inflight = Inflight
 transfer-part-completed = Completed
 transfer-part-retry = Retry
@@ -1009,7 +1011,7 @@ vault-unlock-action = Unlock Vault
 
 vault-lock-action = Lock Vault
 
-unlock-return-note = Unlock once to continue your action. Your keys stay in memory while TeleArk is active.
+unlock-return-note = Unlock for this session to browse files, review notices, and choose your next action.
 
 unlock-use-recovery = Use a recovery key
 
@@ -1143,6 +1145,17 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.4 · Session unlock and resilient background work
+
+    - Vault unlock lasts for the account session. Explicit lock hides decrypted names and paths while admitted transfers, queued batches and synchronization continue; new operations require unlock. Upload unlock returns to confirmation.
+
+    - TeleArk setup separates instructions, the current task and state changes into distinct cards. Phase badges, response panels and action bars make waiting, retries and completion easy to distinguish.
+    - Recent state changes are shown in timestamped rows, with an expandable bounded history. The independently scrolling inspector uses the same cards in English, Simplified Chinese and Japanese, in both themes.
+    - Channel browsing uses local projections and background synchronization. Large libraries and transfer histories use bounded updates, indexed reads and background filesystem work to keep the window responsive.
+    - Catalog server failures no longer overwrite the login state. Reads support cancellation and bounded retry, and incomplete discovery never authorizes private-channel creation. The observed Telegram catalog 500 error remains unresolved and also reproduces with the pre-performance code.
+    - Database schemas 0–14 upgrade automatically to read/write schema 15, including skipped releases. Existing encrypted files, recovery bundles, sessions and transfer checkpoint codecs retain their supported versions.
+    - Updated the application and macOS bundle to 0.4.4. Packaging remains unsigned; protected real-account and complete platform qualification remain outstanding.
+
     ## 0.4.3 · Upload activity at every step
 
     - Uploads now show storage checks, reading and encryption, waiting for Telegram, data transfer, remote confirmation, readback verification and manifest publication, with elapsed time and current object bytes.
@@ -1241,6 +1254,218 @@ transfer-upload-activity-elapsed = { $phase } · Elapsed { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · Elapsed { $elapsed }
 transfer-upload-waiting-telegram = Waiting for Telegram
 
+channel-sync-local-only = Local cache
+channel-sync-queued = Sync queued
+channel-sync-reading = Reading local cache
+channel-sync-receiving = Receiving channel changes
+channel-sync-persisting = Saving changes
+channel-sync-verifying = Checking cached messages after a sync gap
+channel-sync-waiting = Waiting to retry
+channel-sync-idle = Listening for updates
+channel-sync-failed = Sync needs attention
+channel-sync-cancelled = Sync paused
+channel-sync-status = { $phase } · { $queued } queued
+channel-sync-history = Earlier history
+channel-sync-timing = Phase: { $duration } · Last activity: { $activity } ago
+channel-sync-retry-after = Retry in { $duration }
+channel-sync-event = { $age } ago · { $phase }
+channel-sync-retention = Older timeline events omitted: { $dropped } · Overflow signals requiring reconciliation: { $overflow }
+channel-sync-empty = No files in the local cache yet. Background synchronization will update this view.
+channel-sync-seeding = Preparing the initial local cache
+channel-sync-history-loading = Receiving requested earlier history
+channel-sync-details-title = Channel synchronization
+channel-sync-rate-limited = Waiting for Telegram rate limit
+
+startup-title = Opening your local library
+startup-detecting = Checking the database version
+startup-preparing = Preparing transaction protection for database version { $version }
+startup-converting = Updating database structures to version { $version }
+startup-verifying = Verifying database version { $version } before committing
+startup-completed = Database ready · starting background services
+startup-failed = The library could not be opened. Your existing data is retained. Check available disk space and access, then retry; newer databases require a compatible app version.
+startup-truncated = Earlier startup events were removed from this bounded timeline.
+
+managed-watch-title = Private channel changes
+managed-watch-pending = Private channel changed · verifying
+managed-watch-changed = Private channel: { $count } changes to review
+managed-watch-acknowledge = Mark displayed changes as reviewed
+managed-watch-retention = Recent changes shown · { $omitted } older records omitted
+managed-watch-edited = Message edited
+managed-watch-deleted = Message deleted
+managed-watch-gap = Update gap · checking cached files
+managed-watch-event = { $time } · { $kind } · message { $message }
+managed-watch-gap-event = { $time } · { $kind }
+managed-catalog-syncing = Synchronizing the private channel catalog. Available files will appear as manifests are verified.
+managed-catalog-coverage = Initial sync covers up to 1,000 file manifests; new changes continue to sync.
+
+managed-scan-queued = Manifest verification queued
+managed-scan-reading = Reading file records
+managed-scan-receiving = Waiting for Telegram manifests
+managed-scan-verifying = Authenticating manifests
+managed-scan-completed = Manifest verification complete
+managed-scan-failed = Manifest verification failed
+managed-scan-cancelled = Manifest verification cancelled
+managed-scan-unknown = unknown
+managed-scan-progress = { $phase } · { $done } / { $total }
+managed-scan-detail = { $phase } · { $done } / { $total } records · { $cached } unchanged · { $rejected } rejected · phase { $duration } · last activity { $activity } ago
+
+transfer-session-log-omitted-label = Log gaps
+transfer-session-log-omitted-count = All transfers this run: { $count } log records omitted
+
+transfer-history-omitted = Earlier completed/cancelled records omitted from this list, across local accounts: { $count }
+transfer-controller-history-omitted = { $count } earlier controller records omitted.
+transfer-lifecycle-history-omitted = { $count } earlier state events omitted.
+transfer-footer-total-retained = Shown: { $count }
+
+telegram-error-server = Telegram's server could not process this request. Your login is still valid. Retry shortly.
+dialogs-reading = Loading channel list · waiting for Telegram
+dialogs-waiting = Channel list · retrying shortly (up to 3 attempts)
+dialogs-saving = Channel list · saving verified results
+dialogs-complete = Channel list updated
+dialogs-failed = Channel list unavailable · local data retained
+dialogs-cancelled = Channel list loading cancelled
+dialogs-timing = Current phase / last activity: { $elapsed }
+dialogs-details = Channel list activity
+dialogs-attempt = Attempt { $attempt } of 3
+
+activity-state-queued = Queued
+activity-state-running = In progress
+activity-state-waiting = Retry scheduled
+activity-state-saving = Saving
+activity-state-complete = Complete
+activity-state-failed = Needs attention
+activity-state-cancelled = Cancelled
+activity-last-response = Last response
+dialogs-task-title = Channel directory
+activity-history-title = State changes
+activity-history-time-origin = Time since this run started · newest first
+activity-history-show-all = Show all { $count } changes
+activity-history-show-less = Show recent changes
+storage-activity-title = Private storage
+storage-activity-retry-wait = Telegram could not complete the check. Another attempt is scheduled.
+activity-refresh = Refresh
+
 settings-telegram-custom-enable = Enable custom API credentials
 settings-telegram-custom-disable = Disable and use built-in credentials
 settings-telegram-custom-purpose = Use this option to connect through the Telegram application registered to your own API ID and API Hash. Enter both values and save to apply them. Disabling removes the saved pair and restores the credentials bundled with TeleArk.
+
+# Network proxy
+proxy-settings-title = Network proxy
+proxy-settings-description = Route all TeleArk network traffic through a SOCKS5 or HTTP CONNECT proxy. A proxy failure never enables direct access.
+proxy-enable = Use proxy
+proxy-disable = Disable proxy (direct access)
+proxy-apply-note = Apply to save these changes. Existing connections will close first; interrupted transfers remain recoverable. Direct access is allowed only after you explicitly disable the proxy and apply.
+proxy-protocol-socks5 = SOCKS5
+proxy-protocol-http = HTTP CONNECT
+proxy-host = Proxy IP address
+proxy-port = Port
+proxy-username = Username (optional)
+proxy-password = Password (optional)
+proxy-address-note = Use an IPv4 or IPv6 address, not a hostname, to avoid DNS outside the proxy. Credentials are stored locally.
+proxy-invalid = Check the IP address, port (1–65535), and credentials (at most 255 bytes each). A password requires a username; HTTP usernames cannot contain a colon. Changes were not applied.
+proxy-apply = Apply and test
+proxy-test = Test applied proxy again
+proxy-phase-direct = Proxy disabled · direct access explicitly allowed
+proxy-phase-ready = Proxy applied · no direct fallback
+proxy-phase-applying = Applying network policy · closing old connections and saving
+proxy-phase-connecting = Connecting through proxy · direct fallback blocked
+proxy-phase-connected = Proxy tunnel connected
+proxy-phase-testing = Testing applied proxy · establishing a Telegram TCP tunnel
+proxy-phase-tested = Proxy tunnel test passed
+proxy-phase-elapsed = Phase elapsed: { $elapsed }
+proxy-test-result = TCP tunnel established in { $elapsed }. This tests proxy reachability, not account authorization.
+proxy-error-unreachable = Cannot reach proxy. Direct access is blocked; check the proxy and retry.
+proxy-error-timeout = Proxy connection timed out. Direct access remains blocked.
+proxy-error-authentication = Proxy authentication failed. Check the username and password; direct access is blocked.
+proxy-error-rejected = Proxy refused the tunnel. Direct access remains blocked.
+proxy-error-protocol = Invalid proxy response. Direct access remains blocked.
+proxy-error-disconnected = Proxy connection closed. Retry through the proxy; direct access remains blocked.
+proxy-error-configuration = Proxy configuration is invalid. Networking is blocked.
+proxy-error-persistence = Could not apply the network policy. Networking remains blocked; check local storage and retry.
+proxy-error-capacity = Proxy connection limit reached. Direct access remains blocked.
+proxy-load-failed = Network policy could not be read. Networking is blocked; check storage access or use a version compatible with this data.
+proxy-timeline = Recent network events
+proxy-copy-api-link = Copy API panel link
+proxy-link-copied = Link copied. External browsers do not inherit TeleArk proxy settings.
+
+proxy-test-cancelled = Proxy test cancelled. The proxy policy remains applied; no direct fallback.
+proxy-cancel-test = Cancel test
+proxy-history-expand = Show retained events
+proxy-history-collapse = Show latest 8 events
+proxy-timeline-truncated = Earlier events omitted: { $count }
+
+proxy-timing = Phase: { $elapsed } · Last network event: { $activity } ago
+proxy-event-row = { $elapsed } ago · { $phase }
+
+proxy-phase-test-queued = Proxy test queued · waiting for its network slot
+
+# Encrypted transfer failures (distinct from native downloads).
+vault-transfer-error-target-permission = TeleArk could not verify permission to use the private storage channel. Check the active account and the channel’s ownership, privacy and identity record.
+vault-transfer-error-permission = Access required by this encrypted transfer was denied. Check source-file access, local storage permissions and the private Telegram storage channel.
+vault-transfer-error-invalid-request = The encrypted transfer request or package is invalid.
+vault-transfer-error-conflict = The encrypted transfer conflicts with the current account, storage channel or local state.
+vault-transfer-error-source-changed = The source or encrypted content changed, or failed integrity verification.
+detail-failure-last-phase = Last recorded phase
+
+# Bound channel resilience
+storage-health-repair = Channel management information needs repair. Existing file messages are preserved.
+storage-health-access = The bound channel is inaccessible or you no longer own it. Restore access and recheck.
+storage-health-unsafe = This channel must be private and have no other members. Correct its settings in Telegram, then recheck.
+storage-health-unsupported = This channel uses a newer identity format. Update TeleArk; its data has been preserved.
+storage-repair-action = Repair management information
+storage-archive-action = Mute and archive channel
+storage-repair-confirm = Repair the bound channel’s identity record, pin and description pointer. File messages, privacy and members will not be changed.
+storage-archive-confirm = Mute and archive this channel once. You can change this later in Telegram; TeleArk will respect your choice.
+storage-maintenance-confirm = Confirm
+storage-maintenance-time = Phase: { $seconds } s · Last activity: { $idle } s ago
+storage-maintenance-omitted = { $count } earlier timeline events omitted
+storage-maintenance-preview = Preview only — no Telegram changes made.
+storage-repair-completed = Management information repaired and verified. Retry the affected upload.
+storage-archive-completed = Channel muted and archived.
+storage-phase-checking = Checking account, binding and privacy
+storage-phase-finding = Finding existing identity record
+storage-phase-repairing = Restoring identity record
+storage-phase-pinning = Pinning identity record
+storage-phase-updating = Updating description pointer
+storage-phase-verifying = Verifying remote changes and saving
+storage-phase-muting = Muting channel
+storage-phase-archiving = Archiving channel
+storage-phase-completed = Completed and verified
+vault-transfer-error-source-permission = The local source file cannot be read. Grant access or choose the file again.
+vault-health-key-unavailable = The key for this file is unavailable. Unlock its key version with the original password or recovery material.
+
+# File health and key epochs
+vault-epoch-confirm-action = Create new key version
+vault-epoch-lost-action = I have lost all unlock material
+vault-epoch-confirm-description = Old files cannot be decrypted without their original unlock material. Create a new key for future uploads in the same channel? Old ciphertext and wrapped key records will be preserved. Save the new recovery bundle.
+vault-epoch-preserved-description = Old key versions remain available for recovery. Unlocking a historical key does not change the key used for new uploads.
+vault-epoch-historical-label = Original recovery bundle for an older key
+vault-epoch-historical-action = Unlock historical key
+vault-health-unchecked = Not checked
+vault-health-present = All parts indexed
+vault-health-missing-parts = Parts missing
+vault-health-missing-manifest = Remote manifest missing
+vault-health-key = Key unavailable
+vault-health-invalid = Manifest damaged or unsupported
+vault-health-detail = Health is based on synchronized message presence. File contents are authenticated during restoration. Missing parts affect only this file.
+vault-health-key-version = Key version
+vault-health-recheck = Recheck file health
+vault-health-reupload = Upload local copy again
+vault-health-unknown-size = Size unavailable until unlocked
+vault-health-scope-limited = The view is limited to 1,000 records or 16 MiB. A full health check continues through paginated history and retained manifests.
+
+vault-key-phase-queued = Waiting for key operation
+vault-key-phase-generating = Generating a new key version
+vault-key-phase-password = Deriving password protection
+vault-key-phase-recovery = Preparing recovery protection
+vault-key-phase-saving = Preserving old keys and saving atomically
+vault-key-phase-completed = New key version saved
+vault-key-phase-time = Phase: { $seconds } s · Last activity: { $idle } s ago
+vault-health-check-summary = Last history check: { $count } files checked. Files without an unlocked key remain unchecked.
+transfer-upload-saving-manifest = Saving the verified manifest locally
+
+vault-session-locked-background = Locked. Submitted transfers and synchronization continue in the background.
+vault-session-unlock-policy = Unlock once per account session. Switching pages or leaving the window does not lock the Vault. Lock manually when needed; submitted tasks keep running.
+vault-locked-file = Encrypted file — locked
+vault-locked-detail = Unlock to view
+upload-batch-still-running = The current batch is uploading. You can prepare the next batch and submit it when this one finishes.

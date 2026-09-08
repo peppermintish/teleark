@@ -1,6 +1,6 @@
-# Security and release review
+# Security and data integrity
 
-TeleArk is an early alpha with provisional crypto, manifest and recovery-bundle formats. Connected upload/discovery/recovery adapters and deterministic tests exist; independent security review, durable encrypted controls and credentialed crash/system evidence remain incomplete. Keep independent copies of important data and recovery material. [Status](IMPLEMENTATION_STATUS.md) is the current capability record.
+TeleArk's security contract covers confidentiality, account isolation, integrity and recoverable version upgrades. Crypto, manifest and recovery bundles use explicit versioned formats. [Status](IMPLEMENTATION_STATUS.md) records implemented behavior and concrete validation gaps.
 
 ## Threat model
 
@@ -34,7 +34,7 @@ Recovery rotation replaces the active local record, preventing ordinary unlock w
 - Each upload batch repeats complete remote storage discovery; each member refetches the target’s fully verified v2 identity before accessing plaintext or keys. Independent candidates are inspected with a fixed fan-out of four. Local bindings grant no permission. Conflicting, incomplete or damaged evidence fails closed. See the remote storage identity section and ADR 0015 for creation and provenance limits.
 - QR links are short-lived authorization secrets: memory-only, debug-redacted, refreshed on expiry/token updates and absent from databases, sessions, diagnostics and fixtures. Never capture real login/recovery secrets during UI review.
 
-Each immutable package writer owns an AEAD-usage registry and fresh File Key identities. Full restart-time hydration of previously used encryption identities remains a stabilization requirement.
+Each immutable package writer owns an AEAD-usage registry and fresh File Key identities. Encrypted restart support must hydrate previously used encryption identities before any reuse; this is unfinished implementation work.
 
 ## Untrusted bytes, paths and finalization
 
@@ -52,27 +52,13 @@ Personal API ID/Hash pairs are transactionally saved/removed in SQLite, validate
 
 Both process and per-transfer logs use an explicit allowlist: fixed operation/event names, structured classes and numeric IDs, offsets, sizes, timings, rates, attempts and queue/controller counters. Never record API Hashes, session data, QR tokens, phone numbers, codes/passwords/keys, filenames, captions, channel titles, paths, content/plaintext or unreviewed adapter error prose. New fields require review and deterministic coverage where practical. Third-party tracing targets are excluded. [Transfer and diagnostics](TRANSFER_ENGINE.md#progress-session-logs-and-diagnostics) owns bounds, retention and session schemas; full process queues drop events rather than block owners.
 
-## Dependencies and clean-room provenance
+## Validation and migration safety
 
-Review dependency necessity, direct/relevant transitive licenses, maintenance and advisories before adding/upgrading. `cargo deny check`, license notices and exact reviewed exceptions enforce the policy. Security-sensitive changes must rerun vectors, compatibility and tamper/recovery tests.
+For crypto behavior or format changes, validate affected key wrapping/KDF/nonce/AEAD identities, canonical codecs, parser allocation bounds, redaction and integrated upload/recovery. Retain versioned vectors, tamper/wrong-key tests, fresh-database recovery and crash/interruption regressions. Run affected crypto tests and parser fuzz targets (`cargo fuzz run part_decode`, `cargo fuzz run manifest_decode`); record the tested revision, scope and findings. Daily CI runs bounded ten-minute fuzz campaigns. Fuzz-only cargo-fuzz/libfuzzer-sys licenses were reviewed (MIT/Apache-2.0 and permissive NCSA); they do not enter release binaries.
 
-Never inspect, copy, adapt or derive implementation from GPL `tdl`, including agent summaries, schemas, tests, architecture, naming, control flow or RPC sequencing. Use official Telegram/MTProto specifications, public grammers APIs/docs, permissively licensed sources whose license was verified first and original TeleArk work. [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) records the permissive prefixed GPUI dependency graph and bans the incompatible unprefixed logging crates.
+[ADR 0017](adr/0017-versioned-automatic-migrations.md) defines automatic version upgrades. Crypto conversion authenticates old content before producing a new immutable generation with fresh encryption identities. Verify the replacement before switching authority, retaining a recoverable original throughout. Never overwrite encrypted bytes under the same key/nonce identity or discard a recovery bundle merely because a new writer is available. Local migration backups preserve the same access controls as the source; plaintext and keys never enter progress events or diagnostics.
 
-## Independent audit and format-stability gate
-
-No independent audit has been completed. The reviewer must be organizationally independent from implementation, disclose conflicts, identify the exact commit and sign a report separating findings, residual risks and exclusions. Retain its hash/reviewed commit. Findings include severity, affected bytes/API, exploitability, reproduction, remediation and retest evidence.
-
-Scope covers `crates/teleark-crypto`, its vectors under `tests/vectors`, both format documents, key wrapping/KDF/nonce/AEAD registries, parser allocation/canonical/version bounds, redaction and the integrated transfer/recovery lifecycle. Reproduce crypto tests and strict Clippy, plus `cargo fuzz run part_decode` and `cargo fuzz run manifest_decode`. Daily CI runs bounded ten-minute campaigns; release evidence must record materially longer campaigns, toolchain, corpus hash, executions, coverage, peak memory and minimized/replayed findings. Fuzz-only cargo-fuzz/libfuzzer-sys licenses were reviewed (MIT/Apache-2.0 and permissive NCSA); they do not enter release binaries.
-
-`FORMAT_MAJOR = 1` is a candidate identifier. Remove provisional markers only after all five gates:
-
-1. Signed independent review with critical/high findings resolved.
-2. Long-running fuzz evidence and retained regression corpora.
-3. Independently generated or cross-implementation vectors.
-4. Integrated upload, fresh-database discovery, authenticated download and byte-for-byte recovery, including tamper/wrong-key/frame-order/nonce/parser/partial/crash checks and protected real-system evidence.
-5. An adopted release ADR freezing canonical bytes and backward-read obligations.
-
-Internal tests, fake remotes and UI demonstrations do not substitute for independent review or real recovery evidence.
+Compatibility is demonstrated by supported-version fixtures and migration/recovery tests. External review may add evidence but is not a mandatory approval gate. Test results describe their actual coverage; simulated recovery does not establish behavior on a real Telegram account.
 
 ## Vulnerability reports
 
@@ -80,4 +66,16 @@ Until a private security contact exists, contact repository owners through an av
 
 ## Remote storage identity
 
-Storage identity is remote-authoritative: current creator/private metadata, single-member/admin checks, no bots/discussion/TTL, an exact versioned description pointer and a pinned non-forwarded account/channel-bound record are cross-checked before use. SQLite cannot authorize repair or writes. Conflicting candidates or damaged recognizable markers stop setup. Legacy marker/title upgrades are explicitly weaker compatibility evidence and must complete v2 verification before Vault writes. Public metadata can be forged by the account owner; this is not cryptographic app-origin authentication. Concurrent first creation lacks a Telegram atomic uniqueness primitive. [ADR 0015](adr/0015-remote-authoritative-storage-identity.md) records these limits; Vault manifest authentication remains independent.
+Storage uses a fixed account/channel binding validated against fresh remote account, ownership and private configuration. For an already bound safe peer, damaged/unpinned management metadata is repairable and does not authorize replacement-channel creation or disable independently authenticated files. New discovery still requires verified remote identity; titles never authorize adoption. Explicit repair changes only the identity record, pin and description pointer. Newer identity formats are preserved. [ADR 0025](adr/0025-fixed-channel-and-retained-key-epochs.md) supersedes the relevant identity policy in ADR 0015. Concurrent cross-device first creation still lacks a Telegram atomic uniqueness primitive.
+
+Schema 15 retains encrypted manifest envelopes and old wrapped-key epochs. It does not persist decrypted manifest metadata. Old ciphertext is not reinterpreted by a new password. At most the active and one historical master key are unlocked; independent health checks hold bounded Arc references, are cancelled on lock/new epoch, and release those references when the cancellable operation stops. Presence checks are not content-authentication claims. Remote data deleted before its manifest was retained cannot be recovered from this inventory.
+
+## Proxy egress policy
+
+An enabled proxy is mandatory for all TeleArk network sockets, including Telegram authentication, datacenter migration/reconnect, avatars and file transfers. Unreachable, rejected, timed-out or disconnected proxies produce persistent visible errors; direct access requires explicitly disabling the proxy and applying that change. Apply cancels/closes the old runtime before persisting and creating a new route. Missing/corrupt/future policy data blocks startup. Numeric proxy endpoints avoid DNS leakage; independent framework HTTP is blocked and external links are copied while restricted. See [ADR 0024](adr/0024-fail-closed-proxy-routing.md) for bounds, tests and application/OS scope.
+
+SOCKS5 password authentication and HTTP CONNECT Basic authentication do not encrypt the connection to the proxy. Telegram payload protection remains MTProto's responsibility. Proxy credentials are local protected SQLite settings, not OS-keychain storage, and must never enter logs or support bundles. Tests/previews use synthetic credentials and loopback peers only.
+
+### Session locking with active operations
+
+Explicit locking revokes new Vault key admission and clears visible secret inputs. Already admitted encrypted transfers and scans retain at most two operation-scoped key references until completion/cancellation, including their internal retries. Lock is therefore a presentation and new-access boundary, not immediate erasure of keys required by ongoing work. Locked transfer views hide decrypted names, paths and name-search matches while retaining progress and supported stop controls. Account exit and process exit are separate lifecycle operations. See [ADR 0026](adr/0026-session-unlock-and-task-key-leases.md).

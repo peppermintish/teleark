@@ -1929,4 +1929,21 @@ mod tests {
         }
         assert_eq!(controller.snapshot().decisions.len(), 3);
     }
+    #[test]
+    #[ignore = "manual bounded snapshot cost probe; no timing assertion"]
+    fn perf_bounded_controller_snapshot() {
+        let mut controller = controller(false);
+        for index in 0..4096 {
+            controller.observe(sample(index * 1_000, 10_000_000));
+        }
+        let count = controller.snapshot().decisions.len();
+        let started = std::time::Instant::now();
+        for _ in 0..10_000 {
+            std::hint::black_box(controller.snapshot());
+        }
+        eprintln!(
+            "controller snapshots=10000 decisions={count} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
 }

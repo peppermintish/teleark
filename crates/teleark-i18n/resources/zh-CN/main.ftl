@@ -10,6 +10,7 @@ common-save = 保存
 common-pause = 暂停
 common-resume = 继续
 common-retry = 重试
+channel-list-resize-hint = 拖动右侧分隔线，调整频道列表宽度。
 common-delete = 删除
 common-open-file = 打开文件
 common-open-folder = 打开文件夹
@@ -921,6 +922,7 @@ transfer-reason-soft-limit = 实测探测与 Telegram 的保守软限制冲突�
 transfer-reason-all-platform = 所有可用参数均已到达实测平台或配置上限。
 transfer-decision-throughput-value = {$elapsed} · {$before} → {$after}（{$change}）
 transfer-part-timeline = 最近分片时间线
+transfer-part-retention = 显示最近 { $shown } 条分片事件；已省略 { $omitted } 条较早事件。
 transfer-part-inflight = 传输中
 transfer-part-completed = 已完成
 transfer-part-retry = 重试
@@ -981,7 +983,7 @@ vault-unlock-action = 解锁密钥库
 
 vault-lock-action = 锁定密钥库
 
-unlock-return-note = 解锁后将继续刚才的操作。TeleArk 处于活动状态时，密钥会保留在内存中。
+unlock-return-note = 解锁本次会话后，可浏览文件、查看提示，再决定下一步操作。
 
 unlock-use-recovery = 使用恢复密钥
 
@@ -1115,6 +1117,17 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.4 · 会话解锁与可靠的后台任务
+
+    - 密钥库在本次账户会话中保持解锁。主动锁定会隐藏已解密的名称和路径，已提交的传输、排队批次及同步继续运行；新任务需要解锁。上传解锁后返回确认页面。
+
+    - TeleArk 准备页面将说明、当前任务和状态变化分成独立卡片。阶段标签、响应说明和操作区让等待、重试与完成一目了然。
+    - 最近状态逐条显示时间，完整的有界记录可展开查看。独立滚动的详情面板使用相同卡片，支持中英日三种语言与浅色、深色主题。
+    - 频道浏览使用本地投影和后台同步。大文件库与传输历史采用有界更新、索引查询和后台文件系统操作，保持窗口响应。
+    - 目录服务器错误不再覆盖登录状态。读取支持取消与有限重试，不完整发现不会授权创建私人频道。已观察到的 Telegram 目录 500 问题尚未解决，性能修复前的代码也能复现。
+    - 数据库 schema 0–14 自动升级至读写版本 15，支持跨版本升级。已有加密文件、恢复包、会话及传输检查点保持各自支持的格式版本。
+    - 应用与 macOS 运行包更新至 0.4.4。运行包尚未签名，受保护的真实账户及完整平台验证仍待完成。
+
     ## 0.4.3 · 上传的每一步都看得见
 
     - 上传现在会显示存储检查、读取与加密、等待 Telegram、数据传输、远程确认、回读校验和清单发布，并展示阶段耗时与当前对象的字节进度。
@@ -1213,6 +1226,218 @@ transfer-upload-activity-elapsed = { $phase } · 已耗时 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 已耗时 { $elapsed }
 transfer-upload-waiting-telegram = 正在等待 Telegram
 
+channel-sync-local-only = 本地缓存
+channel-sync-queued = 同步已排队
+channel-sync-reading = 正在读取本地缓存
+channel-sync-receiving = 正在接收频道增量更新
+channel-sync-persisting = 正在保存变更
+channel-sync-verifying = 正在校验同步缺口后的缓存消息
+channel-sync-waiting = 等待重试
+channel-sync-idle = 正在监听更新
+channel-sync-failed = 同步需要处理
+channel-sync-cancelled = 同步已暂停
+channel-sync-status = { $phase } · { $queued } 个排队中
+channel-sync-history = 更早历史
+channel-sync-timing = 当前阶段：{ $duration } · 最近活动：{ $activity }前
+channel-sync-retry-after = 将在 { $duration }后重试
+channel-sync-event = { $age }前 · { $phase }
+channel-sync-retention = 已省略的较早事件：{ $dropped } · 需要重新核对的溢出信号：{ $overflow }
+channel-sync-empty = 本地尚无文件缓存，后台同步会更新此列表。
+channel-sync-seeding = 正在准备首次本地缓存
+channel-sync-history-loading = 正在接收请求的更早历史
+channel-sync-details-title = 频道同步
+channel-sync-rate-limited = 等待 Telegram 限流结束
+
+startup-title = 正在打开本地文件库
+startup-detecting = 正在检查数据库版本
+startup-preparing = 正在为数据库版本 { $version } 准备事务保护
+startup-converting = 正在将数据库结构升级到版本 { $version }
+startup-verifying = 正在验证数据库版本 { $version }，完成后提交
+startup-completed = 数据库已就绪 · 正在启动后台服务
+startup-failed = 无法打开文件库，原有数据已保留。请检查磁盘空间和访问权限后重试；较新数据库需要兼容的应用版本。
+startup-truncated = 时间线容量有限，较早的启动事件已移除。
+
+managed-watch-title = 私有频道变更
+managed-watch-pending = 私有频道有变更 · 正在核验
+managed-watch-changed = 私有频道：{ $count } 项变更待确认
+managed-watch-acknowledge = 将已显示的变更标记为已阅
+managed-watch-retention = 显示近期变更 · 已省略 { $omitted } 条较早记录
+managed-watch-edited = 消息被编辑
+managed-watch-deleted = 消息被删除
+managed-watch-gap = 更新存在缺口 · 正在检查缓存文件
+managed-watch-event = { $time } · { $kind } · 消息 { $message }
+managed-watch-gap-event = { $time } · { $kind }
+managed-catalog-syncing = 正在同步私有频道目录。清单核验完成后会逐步显示可用文件。
+managed-catalog-coverage = 首次同步最多查找 1,000 份文件清单，并持续接收后续更新。
+
+managed-scan-queued = 清单核验已排队
+managed-scan-reading = 正在读取文件记录
+managed-scan-receiving = 等待 Telegram 返回清单
+managed-scan-verifying = 正在验证清单真实性
+managed-scan-completed = 清单核验完成
+managed-scan-failed = 清单核验失败
+managed-scan-cancelled = 清单核验已取消
+managed-scan-unknown = 未知
+managed-scan-progress = { $phase } · { $done } / { $total }
+managed-scan-detail = { $phase } · { $done } / { $total } 份清单 · { $cached } 份未变更 · { $rejected } 份被拒绝 · 本阶段 { $duration } · 上次活动于 { $activity } 前
+
+transfer-session-log-omitted-label = 日志缺口
+transfer-session-log-omitted-count = 本次运行的所有传输：已省略 { $count } 条日志记录
+
+transfer-history-omitted = 本机各账号有 { $count } 条较早的完成/取消记录未在此列表显示
+transfer-controller-history-omitted = 已省略 { $count } 条较早的控制器记录。
+transfer-lifecycle-history-omitted = 已省略 { $count } 条较早的状态事件。
+transfer-footer-total-retained = 当前显示 { $count }
+
+telegram-error-server = Telegram 服务器未能处理此请求。登录仍然有效，请稍后重试。
+dialogs-reading = 正在加载频道列表 · 等待 Telegram 响应
+dialogs-waiting = 频道列表 · 即将重试（最多尝试 3 次）
+dialogs-saving = 频道列表 · 正在保存已验证的结果
+dialogs-complete = 频道列表已更新
+dialogs-failed = 频道列表暂不可用 · 本地数据已保留
+dialogs-cancelled = 已取消频道列表加载
+dialogs-timing = 当前阶段 / 距上次活动：{ $elapsed }
+dialogs-details = 频道列表加载详情
+dialogs-attempt = 第 { $attempt } 次尝试，最多 3 次
+
+activity-state-queued = 排队中
+activity-state-running = 进行中
+activity-state-waiting = 等待重试
+activity-state-saving = 保存中
+activity-state-complete = 已完成
+activity-state-failed = 需要处理
+activity-state-cancelled = 已取消
+activity-last-response = 最近一次响应
+dialogs-task-title = 频道目录
+activity-history-title = 状态变化
+activity-history-time-origin = 自本次开始计时 · 最新在前
+activity-history-show-all = 查看全部 { $count } 条变化
+activity-history-show-less = 仅显示最近变化
+storage-activity-title = 私人存储
+storage-activity-retry-wait = Telegram 未能完成检查，已安排下一次尝试。
+activity-refresh = 刷新
+
 settings-telegram-custom-enable = 启用自定义 API 配置
 settings-telegram-custom-disable = 关闭并使用内置配置
 settings-telegram-custom-purpose = 此功能用于使用你自行注册的 Telegram 应用的 API ID 和 API Hash 连接 Telegram。填写两项并保存后生效。关闭会移除已保存的个人配置，恢复使用 TeleArk 打包的默认配置。
+
+# Network proxy
+proxy-settings-title = 网络代理
+proxy-settings-description = 通过 SOCKS5 或 HTTP CONNECT 代理传输 TeleArk 的全部网络流量。代理故障时绝不会自动直连。
+proxy-enable = 使用代理
+proxy-disable = 关闭代理（允许直连）
+proxy-apply-note = 点击应用后保存并生效。旧连接会先关闭，中断的传输可恢复。只有显式关闭代理并应用后才允许直连。
+proxy-protocol-socks5 = SOCKS5
+proxy-protocol-http = HTTP CONNECT
+proxy-host = 代理 IP 地址
+proxy-port = 端口
+proxy-username = 用户名（可选）
+proxy-password = 密码（可选）
+proxy-address-note = 请填写 IPv4 或 IPv6 地址，不接受域名，以避免 DNS 绕过代理。认证信息保存在本机。
+proxy-invalid = 请检查 IP、端口（1–65535）和认证信息（每项最多 255 字节）。填写密码时必须有用户名；HTTP 用户名不能含冒号。更改尚未应用。
+proxy-apply = 应用并测试
+proxy-test = 重新测试已应用代理
+proxy-phase-direct = 代理已关闭 · 允许直连
+proxy-phase-ready = 代理已应用 · 禁止直连回退
+proxy-phase-applying = 正在应用网络配置 · 关闭旧连接并保存
+proxy-phase-connecting = 正在通过代理连接 · 禁止直连回退
+proxy-phase-connected = 代理隧道已连接
+proxy-phase-testing = 正在测试已应用代理 · 建立 Telegram TCP 隧道
+proxy-phase-tested = 代理隧道测试通过
+proxy-phase-elapsed = 当前阶段耗时：{ $elapsed }
+proxy-test-result = TCP 隧道建立耗时 { $elapsed }。此测试验证代理连通性，不代表账户授权成功。
+proxy-error-unreachable = 无法连接代理。直连已阻止，请检查代理并重试。
+proxy-error-timeout = 代理连接超时，继续禁止直连。
+proxy-error-authentication = 代理认证失败，请检查用户名和密码；直连已阻止。
+proxy-error-rejected = 代理拒绝建立隧道，继续禁止直连。
+proxy-error-protocol = 代理响应无效，继续禁止直连。
+proxy-error-disconnected = 代理连接已断开，请通过代理重试；继续禁止直连。
+proxy-error-configuration = 代理配置无效，网络连接已阻止。
+proxy-error-persistence = 无法应用网络配置，网络连接保持阻止状态；请检查本地存储并重试。
+proxy-error-capacity = 代理连接数达到上限，继续禁止直连。
+proxy-load-failed = 无法读取网络配置，网络连接已阻止。请检查存储访问权限，或使用与此数据兼容的版本。
+proxy-timeline = 最近网络事件
+proxy-copy-api-link = 复制 API 开发面板链接
+proxy-link-copied = 链接已复制。外部浏览器不继承 TeleArk 的代理配置。
+
+proxy-test-cancelled = 代理测试已取消，代理配置保持启用，禁止直连回退。
+proxy-cancel-test = 取消测试
+proxy-history-expand = 展开保留的事件
+proxy-history-collapse = 仅显示最近 8 条
+proxy-timeline-truncated = 已省略更早的事件：{ $count } 条
+
+proxy-timing = 阶段耗时：{ $elapsed } · 最近网络事件：{ $activity } 前
+proxy-event-row = { $elapsed } 前 · { $phase }
+
+proxy-phase-test-queued = 代理测试已排队 · 等待网络执行名额
+
+# Encrypted transfer failures (distinct from native downloads).
+vault-transfer-error-target-permission = TeleArk 无法确认使用私有存储频道的权限。请检查当前账号以及频道的所有权、私密设置和身份记录。
+vault-transfer-error-permission = 此加密传输所需的访问被拒绝。请检查源文件访问权限、本地存储权限及 Telegram 私有存储频道。
+vault-transfer-error-invalid-request = 加密传输请求或文件包无效。
+vault-transfer-error-conflict = 加密传输与当前账号、存储频道或本地状态冲突。
+vault-transfer-error-source-changed = 源文件或加密内容发生变化，或未通过完整性校验。
+detail-failure-last-phase = 最后记录的阶段
+
+# Bound channel resilience
+storage-health-repair = 频道管理信息需要修复。现有文件消息将保留。
+storage-health-access = 无法访问已绑定频道，或你不再拥有该频道。请恢复权限后重新检查。
+storage-health-unsafe = 存储频道必须私有且没有其他成员。请在 Telegram 中调整配置后重新检查。
+storage-health-unsupported = 此频道使用较新的身份格式。请升级 TeleArk；数据已保留。
+storage-repair-action = 修复管理信息
+storage-archive-action = 静音并归档频道
+storage-repair-confirm = 修复已绑定频道的身份说明、置顶和简介指针。不会修改文件消息、隐私设置或成员。
+storage-archive-confirm = 仅对该频道执行一次静音和归档。之后可在 Telegram 中更改，TeleArk 不会反复强制恢复。
+storage-maintenance-confirm = 确认
+storage-maintenance-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
+storage-maintenance-omitted = 已省略 { $count } 条较早的时间线事件
+storage-maintenance-preview = 仅预览，未修改 Telegram。
+storage-repair-completed = 管理信息已修复并验证。可以重试受影响的上传。
+storage-archive-completed = 频道已静音并归档。
+storage-phase-checking = 正在检查账号、绑定和私密配置
+storage-phase-finding = 正在查找现有身份说明
+storage-phase-repairing = 正在恢复身份说明
+storage-phase-pinning = 正在置顶身份说明
+storage-phase-updating = 正在更新简介指针
+storage-phase-verifying = 正在验证远端修改并保存
+storage-phase-muting = 正在静音频道
+storage-phase-archiving = 正在归档频道
+storage-phase-completed = 已完成并验证
+vault-transfer-error-source-permission = 无法读取本地源文件。请授予访问权限或重新选择文件。
+vault-health-key-unavailable = 此文件的密钥不可用。请使用原密码或恢复材料解锁对应密钥版本。
+
+# File health and key epochs
+vault-epoch-confirm-action = 创建新密钥版本
+vault-epoch-lost-action = 所有解锁材料都已丢失
+vault-epoch-confirm-description = 没有原解锁材料就无法解密旧文件。是否在同一频道为后续上传创建新密钥？旧密文和加密密钥记录将保留。请保存新的恢复包。
+vault-epoch-preserved-description = 旧密钥版本保留用于恢复。解锁历史密钥不会改变新上传所用的密钥。
+vault-epoch-historical-label = 旧密钥的原恢复包
+vault-epoch-historical-action = 解锁历史密钥
+vault-health-unchecked = 未检查
+vault-health-present = 目录中分片齐全
+vault-health-missing-parts = 缺少分片
+vault-health-missing-manifest = 远端清单缺失
+vault-health-key = 缺少密钥
+vault-health-invalid = 清单损坏或格式不受支持
+vault-health-detail = 健康状态根据已同步的消息存在性判断；还原时会认证文件内容。缺失分片只影响此文件。
+vault-health-key-version = 密钥版本
+vault-health-recheck = 重新检查文件健康
+vault-health-reupload = 重新上传本地副本
+vault-health-unknown-size = 解锁前无法获取大小
+vault-health-scope-limited = 视图最多显示 1,000 条记录或 16 MiB 的目录。完整健康检查会继续分页检查历史及保留的清单。
+
+vault-key-phase-queued = 等待密钥操作
+vault-key-phase-generating = 正在生成新密钥版本
+vault-key-phase-password = 正在派生密码保护
+vault-key-phase-recovery = 正在准备恢复保护
+vault-key-phase-saving = 正在保留旧密钥并原子保存
+vault-key-phase-completed = 新密钥版本已保存
+vault-key-phase-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
+vault-health-check-summary = 最近一次历史检查：已检查 { $count } 个文件。未解锁密钥的文件仍未检查。
+transfer-upload-saving-manifest = 正在保存已验证清单到本地
+
+vault-session-locked-background = 已锁定。已提交的传输和同步任务继续在后台运行。
+vault-session-unlock-policy = 同一账户会话解锁一次。切换页面或离开窗口不会锁定密钥库；可随时手动锁定，已提交任务继续运行。
+vault-locked-file = 加密文件 · 已锁定
+vault-locked-detail = 解锁后查看
+upload-batch-still-running = 当前批次正在上传。可以先准备下一批，完成后再提交。

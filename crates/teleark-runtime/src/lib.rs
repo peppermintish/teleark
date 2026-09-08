@@ -3,18 +3,21 @@
 //! This crate owns adapter worker lifecycles so frontends never execute SQL or
 //! other blocking infrastructure work directly.
 
+pub use teleark_storage::VaultFileHealth;
 mod local_library;
+mod session_log_writer;
 pub use local_library::{
     LocalLibraryCancellation, LocalLibraryCursor, LocalLibraryFile, LocalLibraryKey,
     LocalLibraryPage,
 };
+pub use session_log_writer::session_log_dropped_record_count;
 
 mod local_files;
 pub use local_files::{
     LOCAL_FILE_PROBE_LIMIT, LocalFilePresence, VolumeSpace, local_file_presence, probe_local_files,
     volume_space,
 };
-pub use teleark_storage::{DownloadedFileRecord, DownloadedFilesCursor};
+pub use teleark_storage::{DownloadedFileRecord, DownloadedFilesCursor, MigrationProgress};
 
 use std::sync::mpsc::SyncSender;
 use std::{
@@ -25,9 +28,9 @@ use std::{
 };
 
 use teleark_core::{
-    ApplicationError, ApplicationErrorKind, FileKind, ImportLocalFile, LibraryItem, LibraryPage,
-    LibraryQuery, LibraryRepository, LibraryService, LibrarySort, LibraryStatistics, LogicalFile,
-    LogicalFileId,
+    AccountId, ApplicationError, ApplicationErrorKind, FileKind, ImportLocalFile, LibraryItem,
+    LibraryPage, LibraryQuery, LibraryRepository, LibraryService, LibrarySort, LibraryStatistics,
+    LogicalFile, LogicalFileId,
 };
 use teleark_storage::{
     AccountRecord, CachedTelegramFileRecord, ChatRecord, Database, FileSearchFacets,
@@ -37,8 +40,21 @@ use teleark_storage::{
 };
 pub use teleark_telegram::{TelegramAccount, TelegramChatKind};
 
+mod channel_sync;
+mod transfer_updates;
+pub use transfer_updates::{TransferSnapshotView, TransferSubscription};
 mod channel_transfer;
+pub use channel_sync::{
+    ChannelChanges, ChannelDelta, ChannelSync, ChannelSyncEvent, ChannelSyncPhase,
+    ChannelSyncSnapshot, ChannelSyncSubscription, ManagedScanObserver, ManagedScanStatus,
+};
+pub use teleark_storage::{ManagedChannelChange, ManagedChannelChangeKind, ManagedChannelWatch};
 mod credentials;
+mod proxy;
+pub use teleark_telegram::network::{
+    NetworkPhase, NetworkRoute, NetworkSnapshot, NetworkUpdates, ProxyConfig, ProxyFailure,
+    ProxyProtocol,
+};
 mod diagnostics;
 mod telegram;
 mod transfer;
@@ -50,12 +66,15 @@ pub use channel_transfer::{
     ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
     ChannelDownloadFailureStage, ChannelDownloadPartEvent, ChannelDownloadRequest,
     ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers,
-    TransferRates, available_download_destination,
+    PartEventHistory, TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
+mod storage_maintenance;
 pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
 pub use storage_channel::{ManagedStorageChannel, StorageChannelStatus};
+pub use storage_channel::{StorageChannelHealth, StorageMaintenancePhase};
+pub use storage_maintenance::{StorageMaintenance, StorageMaintenanceSnapshot};
 pub use teleark_telegram::DownloadPartState;
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
@@ -74,7 +93,8 @@ pub use transfer::{
     encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, MAX_VAULT_UPLOAD_BATCH, ManagedVaultFile, ManagedVaultScan, VaultStatus,
+    DesktopVault, MAX_VAULT_UPLOAD_BATCH, ManagedScanMode, ManagedVaultFile, ManagedVaultScan,
+    VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySnapshot, VaultStatus,
     VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadFailure,
     VaultUploadReport, VaultUploadSource, inspect_upload_sources,
 };
@@ -109,7 +129,13 @@ pub struct DesktopPreferences {
     pub notify_download_failed: bool,
     pub appearance: AppearancePreference,
     pub sidebar_collapsed: bool,
+    /// Preferred channel-list width in logical pixels; the GUI may clamp it to fit the window.
+    pub channel_sidebar_width: u16,
 }
+
+pub const CHANNEL_SIDEBAR_MIN_WIDTH: u16 = 180;
+pub const CHANNEL_SIDEBAR_MAX_WIDTH: u16 = 720;
+pub const CHANNEL_SIDEBAR_DEFAULT_WIDTH: u16 = 208;
 
 impl Default for DesktopPreferences {
     fn default() -> Self {
@@ -122,12 +148,13 @@ impl Default for DesktopPreferences {
             upload_encrypt_metadata: true,
             transfer_soft_limit_policy: SoftLimitPolicy::AdaptiveOverride,
             download_throughput_strategy: DownloadThroughputStrategy::Balanced,
-            lock_vault_when_hidden: true,
+            lock_vault_when_hidden: false,
             index_batch_size: 1_000,
             notify_download_completed: true,
             notify_download_failed: true,
             appearance: AppearancePreference::System,
             sidebar_collapsed: true,
+            channel_sidebar_width: CHANNEL_SIDEBAR_DEFAULT_WIDTH,
         }
     }
 }
@@ -351,6 +378,20 @@ impl DesktopLibrary {
         Self::open(path)
     }
 
+    pub fn open_default_with_progress(
+        progress: impl Fn(teleark_storage::MigrationProgress) + Send + 'static,
+    ) -> Result<Self, ApplicationError> {
+        let path = default_database_path()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        prepare_database_parent(&path)?;
+        let worker = StorageWorker::open_with_progress(path.clone(), progress)?;
+        Ok(Self {
+            service: Arc::new(LibraryService::new(worker.clone())),
+            worker,
+            database_path: Arc::new(path),
+        })
+    }
+
     pub fn search(&self, query: &LibraryQuery) -> Result<LibraryPage, ApplicationError> {
         self.service.search_files(query)
     }
@@ -393,6 +434,24 @@ impl DesktopLibrary {
 
     /// Reports whether a complete, validated Telegram API credential pair is
     /// stored without exposing the API Hash to the frontend.
+    pub fn proxy_configuration(&self) -> Result<NetworkRoute, ApplicationError> {
+        self.worker.request("proxy_configuration", |reply| {
+            StorageRequest::ProxyConfiguration { reply }
+        })
+    }
+
+    pub(crate) fn set_proxy_configuration(
+        &self,
+        route: &NetworkRoute,
+    ) -> Result<(), ApplicationError> {
+        self.worker.request("set_proxy_configuration", |reply| {
+            StorageRequest::SetProxyConfiguration {
+                route: route.clone(),
+                reply,
+            }
+        })
+    }
+
     pub fn telegram_credentials_status(
         &self,
     ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
@@ -427,13 +486,24 @@ impl DesktopLibrary {
         preferences: &DesktopPreferences,
     ) -> Result<(), ApplicationError> {
         validate_preferences(preferences)?;
+        // Filesystem preparation belongs to this background caller, not the
+        // shared SQL actor. Failed preparation leaves persisted settings intact.
+        prepare_managed_directories(&self.database_path, preferences)?;
         self.worker.set_preferences(preferences.clone())
     }
 
-    /// Returns the managed layout, creating its download and cache
-    /// directories when necessary.
+    /// Returns and prepares the managed layout. Call from a background owner;
+    /// filesystem waits do not occupy the shared SQL actor.
     pub fn managed_directories(&self) -> Result<ManagedDirectories, ApplicationError> {
-        self.worker.managed_directories()
+        self.managed_directories_with(prepare_managed_directories)
+    }
+
+    fn managed_directories_with(
+        &self,
+        prepare: impl FnOnce(&Path, &DesktopPreferences) -> Result<ManagedDirectories, ApplicationError>,
+    ) -> Result<ManagedDirectories, ApplicationError> {
+        let preferences = self.preferences()?;
+        prepare(&self.database_path, &preferences)
     }
 
     /// Cheap volume query for the configured download location, without a
@@ -456,8 +526,15 @@ impl DesktopLibrary {
         &self,
         suggested_file_name: &str,
     ) -> Result<PathBuf, ApplicationError> {
-        self.worker
-            .next_download_destination(suggested_file_name.to_owned())
+        let directories = self.managed_directories()?;
+        channel_transfer::available_download_destination_with_reservations(
+            &directories.downloads,
+            suggested_file_name,
+            |candidate| {
+                self.worker
+                    .native_download_destination_in_use(candidate.to_owned())
+            },
+        )
     }
 
     pub(crate) fn insert_native_download(
@@ -480,6 +557,15 @@ impl DesktopLibrary {
         task: NativeDownloadTaskRecord,
     ) -> Result<(), ApplicationError> {
         self.worker.save_native_download(task)
+    }
+
+    /// Best-effort progress sample. State transitions use acknowledged writes.
+    pub(crate) fn try_save_native_download_progress(&self, task: NativeDownloadTaskRecord) -> bool {
+        self.worker
+            .inner
+            .sender
+            .try_send(StorageRequest::SaveNativeDownloadProgress { task })
+            .is_ok()
     }
 
     pub(crate) fn resolve_legacy_native_download_accounts(
@@ -516,10 +602,27 @@ impl DesktopLibrary {
         })
     }
 
+    pub(crate) fn native_download(
+        &self,
+        task_id: u64,
+    ) -> Result<Option<NativeDownloadTaskRecord>, ApplicationError> {
+        self.worker
+            .request("native_download", |reply| StorageRequest::NativeDownload {
+                task_id,
+                reply,
+            })
+    }
+
     pub(crate) fn native_downloads(
         &self,
     ) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
         self.worker.native_downloads()
+    }
+
+    pub(crate) fn native_download_history(
+        &self,
+    ) -> Result<(Vec<NativeDownloadTaskRecord>, u64), ApplicationError> {
+        self.worker.native_download_history()
     }
 
     pub(crate) fn delete_native_download(&self, task_id: u64) -> Result<(), ApplicationError> {
@@ -556,6 +659,85 @@ impl DesktopLibrary {
                 limit,
             )
             .map(|files| files.into_iter().map(cached_file_summary).collect())
+    }
+
+    pub fn cached_channel_view(
+        &self,
+        account: i64,
+        chat: i64,
+        limit: usize,
+    ) -> Result<CachedChannelView, ApplicationError> {
+        self.worker.request("cached_channel_view", |reply| {
+            StorageRequest::CachedChannelView {
+                account: AccountId::new(account),
+                chat: teleark_core::ChatId::new(chat),
+                limit,
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn managed_channel_watch(
+        &self,
+        account: i64,
+        chat: i64,
+        register: bool,
+    ) -> Result<teleark_storage::ManagedChannelWatch, ApplicationError> {
+        self.worker.request("managed_channel_watch", |reply| {
+            StorageRequest::ManagedChannelWatch {
+                account: AccountId::new(account),
+                chat: teleark_core::ChatId::new(chat),
+                register,
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn acknowledge_managed_changes(
+        &self,
+        account: i64,
+        chat: i64,
+        through: u64,
+    ) -> Result<teleark_storage::ManagedChannelWatch, ApplicationError> {
+        self.worker.request("acknowledge_managed_changes", |reply| {
+            StorageRequest::AcknowledgeManagedChanges {
+                account: AccountId::new(account),
+                chat: teleark_core::ChatId::new(chat),
+                through,
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn cached_manifest_candidates(
+        &self,
+        account: i64,
+        chat: i64,
+    ) -> Result<Vec<teleark_storage::CachedManifestCandidate>, ApplicationError> {
+        self.worker.request("cached_manifest_candidates", |reply| {
+            StorageRequest::CachedManifestCandidates {
+                account: AccountId::new(account),
+                chat: teleark_core::ChatId::new(chat),
+                reply,
+            }
+        })
+    }
+
+    /// Local-only history availability; no transport work is initiated.
+    pub fn channel_history_exhausted(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+    ) -> Result<bool, ApplicationError> {
+        self.worker
+            .request("channel_sync_state", |reply| {
+                StorageRequest::ChannelSyncState {
+                    account: teleark_core::AccountId::new(account_id),
+                    chat: teleark_core::ChatId::new(chat_id),
+                    reply,
+                }
+            })
+            .map(|state| state.history_exhausted)
     }
 
     /// Projects files observed by interactive browsing into the local cache
@@ -647,7 +829,59 @@ struct WorkerInner {
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CachedChannelView {
+    pub files: Vec<TelegramFileSummary>,
+    pub revision: i64,
+    pub history_exhausted: bool,
+}
+
 enum StorageRequest {
+    ProxyConfiguration {
+        reply: SyncSender<Result<NetworkRoute, ApplicationError>>,
+    },
+    SetProxyConfiguration {
+        route: NetworkRoute,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    CachedChannelView {
+        account: AccountId,
+        chat: teleark_core::ChatId,
+        limit: usize,
+        reply: SyncSender<Result<CachedChannelView, ApplicationError>>,
+    },
+    ManagedChannelWatch {
+        account: AccountId,
+        chat: teleark_core::ChatId,
+        register: bool,
+        reply: SyncSender<Result<teleark_storage::ManagedChannelWatch, ApplicationError>>,
+    },
+    AcknowledgeManagedChanges {
+        account: AccountId,
+        chat: teleark_core::ChatId,
+        through: u64,
+        reply: SyncSender<Result<teleark_storage::ManagedChannelWatch, ApplicationError>>,
+    },
+    CachedManifestCandidates {
+        account: AccountId,
+        chat: teleark_core::ChatId,
+        reply: SyncSender<Result<Vec<teleark_storage::CachedManifestCandidate>, ApplicationError>>,
+    },
+    ChannelSyncState {
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        reply: SyncSender<Result<teleark_storage::ChannelSyncState, ApplicationError>>,
+    },
+    CommitChannelSync {
+        batch: teleark_storage::ChannelSyncCommit,
+        reply: SyncSender<Result<teleark_storage::ChannelSyncCommitOutcome, ApplicationError>>,
+    },
+    ChannelCachedIds {
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        before: Option<i64>,
+        reply: SyncSender<Result<Vec<i64>, ApplicationError>>,
+    },
     ResolveLegacyDownloadAccounts {
         account_id: Option<i64>,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
@@ -695,12 +929,9 @@ enum StorageRequest {
         preferences: DesktopPreferences,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
-    ManagedDirectories {
-        reply: SyncSender<Result<ManagedDirectories, ApplicationError>>,
-    },
-    NextDownloadDestination {
-        suggested_file_name: String,
-        reply: SyncSender<Result<PathBuf, ApplicationError>>,
+    NativeDownloadDestinationInUse {
+        candidate: PathBuf,
+        reply: SyncSender<Result<bool, ApplicationError>>,
     },
     TelegramCredentialsStatus {
         reply: SyncSender<Result<Option<TelegramCredentialsStatus>, ApplicationError>>,
@@ -716,10 +947,72 @@ enum StorageRequest {
     ClearTelegramCredentials {
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    StorageRepairToken {
+        account: i64,
+        chat: i64,
+        proposed: i64,
+        clear: bool,
+        reply: SyncSender<Result<i64, ApplicationError>>,
+    },
+    SaveVaultInventory {
+        record: teleark_storage::VaultInventoryRecord,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    VaultInventoryPage {
+        account: i64,
+        chat: i64,
+        before: i64,
+        reply: SyncSender<Result<Vec<teleark_storage::VaultInventoryRecord>, ApplicationError>>,
+    },
+    VaultManifestLocator {
+        account: i64,
+        chat: i64,
+        name: String,
+        reply: SyncSender<Result<Option<(i64, u64)>, ApplicationError>>,
+    },
+    SetVaultManifestInvalid {
+        account: i64,
+        chat: i64,
+        manifest: i64,
+        invalid: bool,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    MarkVaultHealthScan {
+        account: i64,
+        chat: i64,
+        manifest: i64,
+        run: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    UncheckedVaultInventory {
+        account: i64,
+        chat: i64,
+        before: i64,
+        run: i64,
+        reply: SyncSender<Result<Option<teleark_storage::VaultInventoryRecord>, ApplicationError>>,
+    },
+    SaveVaultMessageHealth {
+        account: i64,
+        chat: i64,
+        messages: Vec<(i64, bool)>,
+        observed_at: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    VaultMessageHealth {
+        account: i64,
+        chat: i64,
+        messages: Vec<i64>,
+        reply: SyncSender<Result<Vec<teleark_storage::VaultFileHealth>, ApplicationError>>,
+    },
+    VaultKeyEpoch {
+        vault_id: [u8; 16],
+        reply: SyncSender<Result<Option<VaultMetadataRecord>, ApplicationError>>,
+    },
     VaultMetadata {
         reply: SyncSender<Result<Option<VaultMetadataRecord>, ApplicationError>>,
     },
     SaveVaultMetadata {
+        expected: Option<([u8; 16], u32, u32)>,
         record: VaultMetadataRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
@@ -758,6 +1051,9 @@ enum StorageRequest {
             Result<(NativeDownloadBatchRecord, Vec<NativeDownloadTaskRecord>), ApplicationError>,
         >,
     },
+    SaveNativeDownloadProgress {
+        task: NativeDownloadTaskRecord,
+    },
     SaveNativeDownload {
         task: NativeDownloadTaskRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
@@ -771,8 +1067,12 @@ enum StorageRequest {
         after: Option<DownloadedFilesCursor>,
         reply: SyncSender<Result<Vec<DownloadedFileRecord>, ApplicationError>>,
     },
+    NativeDownload {
+        task_id: u64,
+        reply: SyncSender<Result<Option<NativeDownloadTaskRecord>, ApplicationError>>,
+    },
     NativeDownloads {
-        reply: SyncSender<Result<Vec<NativeDownloadTaskRecord>, ApplicationError>>,
+        reply: SyncSender<Result<(Vec<NativeDownloadTaskRecord>, u64), ApplicationError>>,
     },
     DeleteNativeDownload {
         task_id: u64,
@@ -783,19 +1083,28 @@ enum StorageRequest {
 
 impl StorageWorker {
     fn open(path: PathBuf) -> Result<Self, ApplicationError> {
+        Self::open_with_progress(path, |_| {})
+    }
+
+    fn open_with_progress(
+        path: PathBuf,
+        progress: impl Fn(teleark_storage::MigrationProgress) + Send + 'static,
+    ) -> Result<Self, ApplicationError> {
         let (sender, receiver) = mpsc::sync_channel(STORAGE_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("teleark-storage".to_owned())
-            .spawn(move || match Database::open(&path) {
-                Ok(database) => {
-                    let _ = ready_sender.send(Ok(()));
-                    storage_loop(database, path, receiver);
-                }
-                Err(error) => {
-                    let _ = ready_sender.send(Err(map_storage_error(error)));
-                }
-            })
+            .spawn(
+                move || match Database::open_with_progress(&path, progress) {
+                    Ok(database) => {
+                        let _ = ready_sender.send(Ok(()));
+                        storage_loop(database, receiver);
+                    }
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(map_storage_error(error)));
+                    }
+                },
+            )
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
 
         match ready_receiver.recv() {
@@ -909,6 +1218,12 @@ impl StorageWorker {
     }
 
     fn native_downloads(&self) -> Result<Vec<NativeDownloadTaskRecord>, ApplicationError> {
+        self.native_download_history().map(|(tasks, _)| tasks)
+    }
+
+    fn native_download_history(
+        &self,
+    ) -> Result<(Vec<NativeDownloadTaskRecord>, u64), ApplicationError> {
         self.request("native_downloads", |reply| {
             StorageRequest::NativeDownloads { reply }
         })
@@ -920,21 +1235,12 @@ impl StorageWorker {
         })
     }
 
-    fn managed_directories(&self) -> Result<ManagedDirectories, ApplicationError> {
-        self.request("managed_directories", |reply| {
-            StorageRequest::ManagedDirectories { reply }
-        })
-    }
-
-    fn next_download_destination(
+    fn native_download_destination_in_use(
         &self,
-        suggested_file_name: String,
-    ) -> Result<PathBuf, ApplicationError> {
-        self.request("next_download_destination", |reply| {
-            StorageRequest::NextDownloadDestination {
-                suggested_file_name,
-                reply,
-            }
+        candidate: PathBuf,
+    ) -> Result<bool, ApplicationError> {
+        self.request("native_download_destination_in_use", |reply| {
+            StorageRequest::NativeDownloadDestinationInUse { candidate, reply }
         })
     }
 
@@ -974,15 +1280,33 @@ impl StorageWorker {
         })
     }
 
+    fn vault_key_epoch(
+        &self,
+        vault_id: [u8; 16],
+    ) -> Result<Option<VaultMetadataRecord>, ApplicationError> {
+        self.request("vault_key_epoch", |reply| StorageRequest::VaultKeyEpoch {
+            vault_id,
+            reply,
+        })
+    }
+
     fn vault_metadata(&self) -> Result<Option<VaultMetadataRecord>, ApplicationError> {
         self.request("vault_metadata", |reply| StorageRequest::VaultMetadata {
             reply,
         })
     }
 
-    fn save_vault_metadata(&self, record: VaultMetadataRecord) -> Result<(), ApplicationError> {
+    fn save_vault_metadata(
+        &self,
+        record: VaultMetadataRecord,
+        expected: Option<([u8; 16], u32, u32)>,
+    ) -> Result<(), ApplicationError> {
         self.request("save_vault_metadata", |reply| {
-            StorageRequest::SaveVaultMetadata { record, reply }
+            StorageRequest::SaveVaultMetadata {
+                record,
+                expected,
+                reply,
+            }
         })
     }
 
@@ -1070,12 +1394,16 @@ impl StorageWorker {
 
 impl Drop for WorkerInner {
     fn drop(&mut self) {
-        let _ = self.sender.send(StorageRequest::Shutdown);
-        if let Ok(mut join) = self.join.lock()
+        // Drop can run on a frontend or reactor. Closing the last sender still
+        // drains accepted writes when this bounded queue is currently full.
+        let _ = self.sender.try_send(StorageRequest::Shutdown);
+        if let Ok(join) = self.join.get_mut()
             && let Some(join) = join.take()
+            && join.is_finished()
         {
             let _ = join.join();
         }
+        // A running worker owns its connection and pending requests until exit.
     }
 }
 
@@ -1110,13 +1438,99 @@ impl LibraryRepository for StorageWorker {
     }
 }
 
-fn storage_loop(
-    mut database: Database,
-    database_path: PathBuf,
-    receiver: mpsc::Receiver<StorageRequest>,
-) {
+fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>) {
     while let Ok(request) = receiver.recv() {
         match request {
+            StorageRequest::CachedChannelView {
+                account,
+                chat,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .cached_channel_view(account, chat, limit)
+                        .map(|(state, files)| CachedChannelView {
+                            files: files.into_iter().map(cached_file_summary).collect(),
+                            revision: state.revision,
+                            history_exhausted: state.history_exhausted,
+                        })
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::ManagedChannelWatch {
+                account,
+                chat,
+                register,
+                reply,
+            } => {
+                let _ = reply.send(
+                    if register {
+                        database.watch_managed_channel(account, chat)
+                    } else {
+                        database.managed_channel_watch(account, chat)
+                    }
+                    .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::AcknowledgeManagedChanges {
+                account,
+                chat,
+                through,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .acknowledge_managed_changes(account, chat, through)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CachedManifestCandidates {
+                account,
+                chat,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .cached_manifest_candidates(
+                            account,
+                            chat,
+                            transfer::MANIFEST_CAPTION,
+                            1_001,
+                        )
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::ChannelSyncState {
+                account,
+                chat,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .channel_sync_state(account, chat)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CommitChannelSync { batch, reply } => {
+                let _ = reply.send(
+                    database
+                        .commit_channel_sync(&batch)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::ChannelCachedIds {
+                account,
+                chat,
+                before,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .channel_cached_message_ids(account, chat, before)
+                        .map_err(map_storage_error),
+                );
+            }
             StorageRequest::StorageChannel { account_id, reply } => {
                 let _ = reply.send(storage_channel::load_binding(&database, account_id));
             }
@@ -1175,36 +1589,20 @@ fn storage_loop(
                 let _ = reply.send(load_preferences(&database));
             }
             StorageRequest::SetPreferences { preferences, reply } => {
-                let result = prepare_managed_directories(&database_path, &preferences)
-                    .and_then(|_| store_preferences(&mut database, &preferences));
-                let _ = reply.send(result);
+                let _ = reply.send(store_preferences(&mut database, &preferences));
             }
-            StorageRequest::ManagedDirectories { reply } => {
-                let result = load_preferences(&database).and_then(|preferences| {
-                    prepare_managed_directories(&database_path, &preferences)
-                });
-                let _ = reply.send(result);
+            StorageRequest::NativeDownloadDestinationInUse { candidate, reply } => {
+                let _ = reply.send(
+                    database
+                        .native_download_destination_in_use(&candidate)
+                        .map_err(map_storage_error),
+                );
             }
-            StorageRequest::NextDownloadDestination {
-                suggested_file_name,
-                reply,
-            } => {
-                let result = load_preferences(&database)
-                    .and_then(|preferences| {
-                        prepare_managed_directories(&database_path, &preferences)
-                    })
-                    .and_then(|directories| {
-                        channel_transfer::available_download_destination_with_reservations(
-                            &directories.downloads,
-                            &suggested_file_name,
-                            |candidate| {
-                                database
-                                    .native_download_destination_in_use(candidate)
-                                    .map_err(map_storage_error)
-                            },
-                        )
-                    });
-                let _ = reply.send(result);
+            StorageRequest::ProxyConfiguration { reply } => {
+                let _ = reply.send(proxy::load(&database));
+            }
+            StorageRequest::SetProxyConfiguration { route, reply } => {
+                let _ = reply.send(proxy::save(&mut database, &route));
             }
             StorageRequest::TelegramCredentialsStatus { reply } => {
                 let result = telegram_credentials_status(&database);
@@ -1226,14 +1624,142 @@ fn storage_loop(
                 let result = clear_telegram_credentials(&mut database);
                 let _ = reply.send(result);
             }
+            StorageRequest::StorageRepairToken {
+                account,
+                chat,
+                proposed,
+                clear,
+                reply,
+            } => {
+                let _ = reply.send(crate::storage_maintenance::repair_token(
+                    &mut database,
+                    account,
+                    chat,
+                    proposed,
+                    clear,
+                ));
+            }
+            StorageRequest::SaveVaultInventory { record, reply } => {
+                let _ = reply.send(
+                    database
+                        .save_vault_inventory(&record)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::VaultInventoryPage {
+                account,
+                chat,
+                before,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .vault_inventory_page(account, chat, before, 1)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::VaultManifestLocator {
+                account,
+                chat,
+                name,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .vault_manifest_locator(account, chat, &name)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::SetVaultManifestInvalid {
+                account,
+                chat,
+                manifest,
+                invalid,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .set_vault_manifest_invalid(account, chat, manifest, invalid)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::MarkVaultHealthScan {
+                account,
+                chat,
+                manifest,
+                run,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .mark_vault_health_scan(account, chat, manifest, run)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::UncheckedVaultInventory {
+                account,
+                chat,
+                before,
+                run,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .vault_inventory_unchecked_page(account, chat, before, run)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::SaveVaultMessageHealth {
+                account,
+                chat,
+                messages,
+                observed_at,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .save_vault_message_health(account, chat, &messages, observed_at)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::VaultMessageHealth {
+                account,
+                chat,
+                messages,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .vault_message_health(account, chat, &messages)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::VaultKeyEpoch { vault_id, reply } => {
+                let _ = reply.send(
+                    database
+                        .vault_key_epoch(vault_id)
+                        .map_err(map_storage_error),
+                );
+            }
             StorageRequest::VaultMetadata { reply } => {
                 let result = database.vault_metadata().map_err(map_storage_error);
                 let _ = reply.send(result);
             }
-            StorageRequest::SaveVaultMetadata { record, reply } => {
+            StorageRequest::SaveVaultMetadata {
+                record,
+                expected,
+                reply,
+            } => {
                 let result = database
-                    .save_vault_metadata(&record)
-                    .map_err(map_storage_error);
+                    .save_vault_metadata_checked(&record, expected)
+                    .map_err(map_storage_error)
+                    .and_then(|saved| {
+                        if saved {
+                            Ok(())
+                        } else {
+                            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                        }
+                    });
                 let _ = reply.send(result);
             }
             StorageRequest::SaveTelegramSources {
@@ -1291,6 +1817,12 @@ fn storage_loop(
                     .map_err(map_storage_error);
                 let _ = reply.send(result);
             }
+            StorageRequest::SaveNativeDownloadProgress { task } => {
+                if let Err(error) = database.save_native_download_progress(&task) {
+                    tracing::warn!(event = "transfer.download.checkpoint_failed", task_id = task.id,
+                        error_kind = ?map_storage_error(error).kind(), "sampled download checkpoint failed");
+                }
+            }
             StorageRequest::SaveNativeDownload { task, reply } => {
                 let result = database
                     .save_native_download(&task)
@@ -1322,8 +1854,13 @@ fn storage_loop(
                         .map_err(map_storage_error),
                 );
             }
+            StorageRequest::NativeDownload { task_id, reply } => {
+                let _ = reply.send(database.native_download(task_id).map_err(map_storage_error));
+            }
             StorageRequest::NativeDownloads { reply } => {
-                let result = database.native_downloads().map_err(map_storage_error);
+                let result = database
+                    .native_download_history()
+                    .map_err(map_storage_error);
                 let _ = reply.send(result);
             }
             StorageRequest::DeleteNativeDownload { task_id, reply } => {
@@ -1570,6 +2107,12 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
             "sidebar_collapsed" => {
                 preferences.sidebar_collapsed = parse_bool_setting(&setting.value)?;
             }
+            "channel_sidebar_width" => {
+                preferences.channel_sidebar_width = setting
+                    .value
+                    .parse()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
             "appearance" => {
                 preferences.appearance = match setting.value.as_str() {
                     "system" => AppearancePreference::System,
@@ -1633,6 +2176,10 @@ fn store_preferences(
     };
     let values = [
         (
+            "channel_sidebar_width",
+            preferences.channel_sidebar_width.to_string(),
+        ),
+        (
             "sidebar_collapsed",
             bool_setting(preferences.sidebar_collapsed),
         ),
@@ -1692,6 +2239,8 @@ fn store_preferences(
 fn validate_preferences(preferences: &DesktopPreferences) -> Result<(), ApplicationError> {
     if !matches!(preferences.upload_part_size_mib, 1_024 | 1_900)
         || !matches!(preferences.index_batch_size, 200 | 500 | 1_000)
+        || !(CHANNEL_SIDEBAR_MIN_WIDTH..=CHANNEL_SIDEBAR_MAX_WIDTH)
+            .contains(&preferences.channel_sidebar_width)
         || preferences.managed_files_root.as_ref().is_some_and(|path| {
             path.as_os_str().is_empty() || path.to_str().is_none() || !path.is_absolute()
         })
@@ -1898,6 +2447,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dropping_storage_owner_does_not_wait_for_a_full_queue_or_blocked_worker() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(StorageRequest::Shutdown).expect("fill queue");
+        let (release, blocked) = mpsc::sync_channel(1);
+        let (retired, retirement) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            blocked.recv().expect("release worker");
+            receiver
+                .recv()
+                .expect("accepted queue entry survives owner drop");
+            retired.send(()).expect("retirement receiver");
+        });
+        let inner = WorkerInner {
+            sender,
+            join: Mutex::new(Some(worker)),
+        };
+        let (finished, completion) = mpsc::sync_channel(1);
+        let dropper = thread::spawn(move || {
+            drop(inner);
+            finished.send(()).expect("completion receiver");
+        });
+        let result = completion.recv_timeout(std::time::Duration::from_secs(2));
+        release.send(()).expect("release worker");
+        dropper.join().expect("dropper");
+        retirement
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker retains ownership until exit");
+        result.expect("drop cannot await queue capacity or thread completion");
+    }
+
+    #[test]
+    fn sampled_checkpoints_do_not_wait_for_a_blocked_storage_receiver() {
+        let directory = tempfile::tempdir().expect("temporary data");
+        let mut library = DesktopLibrary::open(directory.path().join("db")).expect("library");
+        let task = library
+            .insert_native_download(NewNativeDownloadTaskRecord {
+                account_id: 1,
+                chat_id: 2,
+                message_id: 3,
+                message_sent_at_unix_ms: None,
+                file_name: "fixture".into(),
+                caption: None,
+                mime_type: None,
+                size_bytes: 100,
+                destination: directory.path().join("fixture"),
+                created_at_unix_ms: 1,
+            })
+            .expect("task");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        library.worker = StorageWorker {
+            inner: Arc::new(WorkerInner {
+                sender,
+                join: Mutex::new(None),
+            }),
+        };
+        let (finished, completion) = mpsc::sync_channel(1);
+        let owner = thread::spawn(move || {
+            let accepted = (0..1000)
+                .filter(|_| library.try_save_native_download_progress(task.clone()))
+                .count();
+            finished.send(accepted).expect("test receiver");
+            library
+        });
+        // A bounded deadline detects blocking; no wall-time performance threshold.
+        let result = completion.recv_timeout(std::time::Duration::from_secs(2));
+        drop(receiver); // Also release a regressed blocking sender before joining.
+        drop(owner.join().expect("test owner"));
+        assert_eq!(
+            result.expect("checkpoint submission must not wait for storage"),
+            1
+        );
+    }
+
+    #[test]
     fn classification_is_case_insensitive_and_preserves_unknowns() {
         assert_eq!(classify_file(Path::new("Movie.MKV")), FileKind::Video);
         assert_eq!(
@@ -2028,6 +2651,7 @@ mod tests {
             notify_download_failed: false,
             appearance: AppearancePreference::Dark,
             sidebar_collapsed: false,
+            channel_sidebar_width: 420,
         };
         library
             .set_preferences(&preferences)
@@ -2066,6 +2690,123 @@ mod tests {
                 .expect_err("relative managed root must fail")
                 .kind(),
             ApplicationErrorKind::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn channel_sidebar_preference_upgrades_legacy_rows_and_rejects_invalid_widths() {
+        let mut database = Database::open_in_memory().expect("database");
+        database
+            .set_setting(&SettingRecord {
+                key: format!("{PREFERENCE_PREFIX}sidebar_collapsed"),
+                value: "false".to_owned(),
+                updated_at_unix_ms: 0,
+            })
+            .expect("legacy setting");
+        let legacy = load_preferences(&database).expect("legacy settings");
+        assert!(!legacy.sidebar_collapsed);
+        assert_eq!(legacy.channel_sidebar_width, CHANNEL_SIDEBAR_DEFAULT_WIDTH);
+        store_preferences(&mut database, &legacy).expect("automatic additive upgrade");
+        for value in ["0", "179", "721", "65536", "-1", "NaN", "208.5"] {
+            database
+                .set_setting(&SettingRecord {
+                    key: format!("{PREFERENCE_PREFIX}channel_sidebar_width"),
+                    value: value.to_owned(),
+                    updated_at_unix_ms: 0,
+                })
+                .expect("invalid fixture");
+            assert_eq!(
+                load_preferences(&database)
+                    .expect_err("reject invalid width")
+                    .kind(),
+                ApplicationErrorKind::Persistence
+            );
+        }
+        store_preferences(&mut database, &legacy).expect("restore valid fixture");
+        for width in [0, 179, 721, u16::MAX] {
+            let invalid = DesktopPreferences {
+                channel_sidebar_width: width,
+                ..legacy.clone()
+            };
+            assert_eq!(
+                store_preferences(&mut database, &invalid)
+                    .expect_err("reject write")
+                    .kind(),
+                ApplicationErrorKind::InvalidRequest
+            );
+            assert_eq!(
+                load_preferences(&database).expect("preserved settings"),
+                legacy
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_directory_preparation_does_not_hold_the_sql_owner() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("library");
+        let source = directory.path().join("fixture.pdf");
+        std::fs::write(&source, b"fixture").expect("fixture");
+        assert!(library.import_paths([source])[0].is_ok());
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, blocked) = mpsc::sync_channel(1);
+        let preparing = library.clone();
+        let owner = thread::spawn(move || {
+            preparing.managed_directories_with(|path, preferences| {
+                entered.send(()).expect("started receiver");
+                blocked.recv().expect("release preparation");
+                prepare_managed_directories(path, preferences)
+            })
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("preparing filesystem");
+        let (finished, completion) = mpsc::sync_channel(1);
+        let probe = thread::spawn(move || {
+            library
+                .set_locale_override(Some("ja-JP"))
+                .expect("unrelated SQL write");
+            let page = library
+                .search(&LibraryQuery::default())
+                .expect("unrelated search");
+            finished
+                .send((
+                    page.total_matching,
+                    library.locale_override().expect("read setting"),
+                ))
+                .expect("probe receiver");
+        });
+        let result = completion.recv_timeout(std::time::Duration::from_secs(2));
+        release.send(()).expect("release preparation");
+        owner
+            .join()
+            .expect("preparation owner")
+            .expect("prepared layout");
+        probe.join().expect("SQL probe");
+        assert_eq!(
+            result.expect("SQL must remain available during filesystem wait"),
+            (1, Some("ja-JP".into()))
+        );
+    }
+
+    #[test]
+    fn failed_directory_preparation_preserves_persisted_preferences() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("library");
+        let before = library.preferences().expect("settings");
+        let blocked = directory.path().join("blocked");
+        std::fs::write(&blocked, b"preserve this file").expect("collision");
+        let preferences = DesktopPreferences {
+            managed_files_root: Some(blocked.clone()),
+            ..before.clone()
+        };
+        assert!(library.set_preferences(&preferences).is_err());
+        assert_eq!(library.preferences().expect("unchanged settings"), before);
+        assert_eq!(
+            std::fs::read(blocked).expect("original file"),
+            b"preserve this file"
         );
     }
 
@@ -2299,6 +3040,7 @@ mod tests {
             username: None,
         };
         let chat = TelegramChatSummary {
+            sync_pts: None,
             id: 22,
             name: "fixture chat".to_owned(),
             username: None,

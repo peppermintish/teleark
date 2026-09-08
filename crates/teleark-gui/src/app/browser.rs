@@ -7,10 +7,7 @@ impl TeleArkApp {
         if !self.telegram_file_auto_load
             || self.library.is_none()
             || self.telegram.is_none()
-            || !matches!(
-                self.page,
-                Page::Channel | Page::Storage | Page::LegacyRecovery
-            )
+            || self.page != Page::LegacyRecovery
             || self.storage_view != StorageView::RawFiles
         {
             return None;
@@ -23,11 +20,21 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_telegram_chat(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.remember_channel_view();
         self.cancel_telegram_file_load(cx);
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.selected_chat_id = Some(chat_id);
+        if self.page == Page::Channel
+            && let Some(sync) = &self.channel_sync
+            && let Err(error) = sync.observe(Some(chat_id))
+        {
+            self.telegram_activity = TelegramActivity::Failed(error.kind());
+        }
         self.telegram_index = None;
         self.telegram_files.clear();
+        if self.page == Page::Channel {
+            self.restore_channel_view(chat_id);
+        }
         self.telegram_files_next = None;
         self.telegram_files_exhausted = false;
         self.telegram_download = None;
@@ -43,6 +50,13 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_channel(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        if let Some(sync) = &self.channel_sync
+            && let Err(error) = sync
+                .prioritize(chat_id)
+                .and_then(|_| sync.observe(Some(chat_id)))
+        {
+            self.telegram_activity = TelegramActivity::Failed(error.kind());
+        }
         self.last_channel_id = Some(chat_id);
         self.nav_selection = "nav-channel";
         self.storage_view = StorageView::RawFiles;
@@ -81,7 +95,8 @@ impl TeleArkApp {
                 self.telegram_files_exhausted = false;
                 self.selected_telegram_message_id = None;
                 self.show_channel_detail = false;
-                self.managed_vault_files.clear();
+                self.managed_vault_files = Default::default();
+                self.managed_health_checked = None;
             }
             self.selected_chat_id = Some(chat_id);
             self.scan_managed_vault_files(cx);
@@ -94,10 +109,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn storage_channel_id(&self) -> Option<i64> {
-        match &self.storage_status {
-            teleark_runtime::StorageChannelStatus::Ready(channel) => Some(channel.id),
-            _ => None,
-        }
+        self.storage_status
+            .usable_channel()
+            .map(|channel| channel.id)
     }
 
     pub(crate) fn active_storage_chat_id(&self) -> Option<i64> {
@@ -113,12 +127,21 @@ impl TeleArkApp {
     }
 
     pub(crate) fn open_legacy_recovery(&mut self, cx: &mut Context<Self>) {
-        self.managed_vault_files.clear();
+        self.managed_vault_files = Default::default();
+        self.managed_health_checked = None;
         self.page = Page::LegacyRecovery;
         self.select_storage(StorageView::Files, cx);
     }
 
     pub(crate) fn load_selected_telegram_files(&mut self, append: bool, cx: &mut Context<Self>) {
+        if matches!(self.page, Page::Channel | Page::Storage) && !self.visual_preview {
+            if append {
+                self.request_channel_history(cx);
+            } else {
+                self.read_local_channel(cx);
+            }
+            return;
+        }
         if append && (self.telegram_files_loading || self.telegram_files_exhausted) {
             return;
         }
@@ -315,6 +338,11 @@ impl TeleArkApp {
     }
 
     pub(crate) fn retry_telegram_file_load(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.page, Page::Channel | Page::Storage) {
+            self.refresh_selected_channel(cx);
+            return;
+        }
+
         let append = self.telegram_files_retry_append && !self.telegram_files.is_empty();
         self.load_selected_telegram_files(append, cx);
     }
@@ -407,6 +435,10 @@ impl TeleArkApp {
     }
 
     pub(crate) fn index_selected_telegram_chat(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Channel {
+            self.request_channel_history(cx);
+            return;
+        }
         if self.telegram_activity == TelegramActivity::Working {
             return;
         }
@@ -535,6 +567,7 @@ mod tests {
                 cx,
                 Localizer::new(SupportedLocale::EnUs).expect("valid catalog"),
                 RuntimeStartup {
+                    configuration: None,
                     library: Err(unavailable()),
                     telegram: Err(unavailable()),
                     transfers: Err(unavailable()),
@@ -567,7 +600,7 @@ mod tests {
                     .expect("open isolated database"),
             );
             app.telegram = Some(
-                DesktopTelegram::open(directory.join("session"))
+                DesktopTelegram::open_direct(directory.join("session"))
                     .expect("open unconfigured adapter"),
             );
             app.telegram_account = Some(TelegramAccount {
@@ -575,7 +608,7 @@ mod tests {
                 display_name: "Pagination".into(),
                 username: None,
             });
-            app.page = Page::Channel;
+            app.page = Page::LegacyRecovery;
             app.storage_view = StorageView::RawFiles;
             app.selected_chat_id = Some(10);
             app.telegram_files_exhausted = false;
@@ -599,7 +632,7 @@ mod tests {
         // Reject requests queued before navigation, cancellation or source changes.
         for change in 0..4 {
             app.update(cx, |app, cx| {
-                app.page = Page::Channel;
+                app.page = Page::LegacyRecovery;
                 app.telegram_file_auto_load = true;
                 app.refresh_channel_file_table(cx);
             });

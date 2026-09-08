@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 · Session unlock and resilient background work
+
+- Vault unlock lasts for the account session. Explicit lock hides decrypted names and paths while admitted transfers, queued batches and synchronization continue; new operations require unlock. Upload unlock returns to confirmation.
+- Existing private-channel bindings remain fixed, with explicit management repair, file-local health and retained historical key versions. Proxy routing fails closed and applies across Telegram connections.
+- TeleArk setup separates instructions, the current task and state changes into distinct cards. Phase badges, response panels and action bars make waiting, retries and completion easy to distinguish.
+- Recent state changes are shown in timestamped rows, with an expandable bounded history. The independently scrolling inspector uses the same cards in English, Simplified Chinese and Japanese, in both themes.
+- Channel browsing uses local projections and background synchronization. Large libraries and transfer histories use bounded updates, indexed reads and background filesystem work to keep the window responsive.
+- Catalog server failures no longer overwrite the login state. Reads support cancellation and bounded retry, and incomplete discovery never authorizes private-channel creation. The observed Telegram catalog 500 error remains unresolved and also reproduces with the pre-performance code.
+- Database schemas 0–14 upgrade automatically to read/write schema 15, including skipped releases. Existing encrypted files, recovery bundles, sessions and transfer checkpoint codecs retain their supported versions.
+- Updated the application and macOS bundle to 0.4.4. Packaging remains unsigned; protected real-account and complete platform qualification remain outstanding.
+
 ## 0.4.3 · Upload activity at every step
 
 - Uploads now show storage checks, reading and encryption, waiting for Telegram, data transfer, remote confirmation, readback verification and manifest publication, with elapsed time and current object bytes.

@@ -129,6 +129,7 @@ pub struct TelegramObjectStore {
     account_id: i64,
     telegram: DesktopTelegram,
     chat_id: i64,
+    manifest_catalog: Option<Vec<RemoteByteObject>>,
 }
 
 impl TelegramObjectStore {
@@ -140,11 +141,17 @@ impl TelegramObjectStore {
             chat_id,
             cancellation: None,
             observer: None,
+            manifest_catalog: None,
         }
     }
 }
 
 impl TelegramObjectStore {
+    pub(crate) fn with_manifest_catalog(mut self, catalog: Vec<RemoteByteObject>) -> Self {
+        self.manifest_catalog = Some(catalog);
+        self
+    }
+
     pub(crate) fn with_observer(
         mut self,
         observer: Arc<dyn teleark_telegram::ByteTransferObserver>,
@@ -165,6 +172,11 @@ impl RemoteObjectStore for TelegramObjectStore {
         caption: &str,
         limit: usize,
     ) -> Result<Vec<RemoteByteObject>, TransferError> {
+        if caption == MANIFEST_CAPTION
+            && let Some(catalog) = &self.manifest_catalog
+        {
+            return Ok(catalog.iter().take(limit).cloned().collect());
+        }
         self.telegram
             .search_files_exact_caption(
                 self.account_id,
@@ -213,7 +225,12 @@ impl RemoteObjectStore for TelegramObjectStore {
                 name: name.to_owned(),
                 encoded_size,
             }),
-            Err(error) if error.kind() == ApplicationErrorKind::Network => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ApplicationErrorKind::Network | ApplicationErrorKind::Server
+                ) =>
+            {
                 Err(UploadError::AmbiguousSuccess)
             }
             Err(error) => Err(UploadError::Definite(map_application_error(error))),
@@ -257,6 +274,7 @@ pub struct EncryptedRemoteTransport<S> {
     recovered_public: Option<ManifestPublicHeader>,
     recovered_whole_digest: Option<[u8; 32]>,
     manifest_publication: Option<ManifestPublication>,
+    published_manifest_envelope: Option<Vec<u8>>,
 }
 
 struct ManifestPublication {
@@ -316,7 +334,14 @@ impl<S> EncryptedRemoteTransport<S> {
             recovered_public: None,
             recovered_whole_digest: None,
             manifest_publication: None,
+            published_manifest_envelope: None,
         })
+    }
+
+    /// The already re-read/authenticated envelope can be persisted locally
+    /// without another network request or retaining decrypted metadata.
+    pub(crate) fn take_published_manifest_envelope(&mut self) -> Option<Vec<u8>> {
+        self.published_manifest_envelope.take()
     }
 
     /// Require the engine's upload-finalization step to publish and verify a
@@ -754,6 +779,7 @@ impl<S> EncryptedRemoteTransport<S> {
                 && public.file_key_wrap.wrap_generation == request.wrap_generation
                 && opened.metadata == metadata
             {
+                self.published_manifest_envelope = Some(downloaded);
                 return Ok(object);
             }
             return Err(TransferError::ManifestCorrupted);
@@ -814,8 +840,41 @@ impl<S> EncryptedRemoteTransport<S> {
         if opened.public_header != public || opened.metadata != metadata {
             return Err(TransferError::HashMismatch);
         }
+        self.published_manifest_envelope = Some(downloaded);
         Ok(object)
     }
+}
+
+pub(crate) fn recover_manifest<S: RemoteObjectStore>(
+    store: &mut S,
+    master_key: &VaultMasterKey,
+    object: &RemoteByteObject,
+) -> Result<teleark_crypto::OpenedManifest, TransferError> {
+    recover_manifest_observed(store, master_key, object, None)
+}
+
+pub(crate) fn recover_manifest_observed<S: RemoteObjectStore>(
+    store: &mut S,
+    master_key: &VaultMasterKey,
+    object: &RemoteByteObject,
+    observer: Option<&crate::ManagedScanObserver>,
+) -> Result<teleark_crypto::OpenedManifest, TransferError> {
+    if let Some(observer) = observer {
+        observer.phase(crate::ChannelSyncPhase::ManifestReceiving);
+    }
+    let bytes = store.download(object.object_id)?;
+    if let Some(observer) = observer {
+        observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
+    }
+    if bytes.len() as u64 != object.encoded_size || bytes.len() > MAX_TRANSFER_OBJECT_BYTES {
+        return Err(TransferError::HashMismatch);
+    }
+    let manifest =
+        open_manifest(&bytes, master_key, ManifestLimits::default()).map_err(map_crypto_error)?;
+    if object.name != remote_manifest_name(&manifest.public_header.package_id) {
+        return Err(TransferError::ManifestCorrupted);
+    }
+    Ok(manifest)
 }
 
 /// Scan the common manifest caption and independently authenticate every
@@ -832,18 +891,7 @@ pub fn recover_remote_manifests<S: RemoteObjectStore>(
     let candidates = store.search_exact_caption(MANIFEST_CAPTION, bounded_limit)?;
     let mut report = ManifestRecoveryReport::default();
     for object in candidates {
-        let recovered = store.download(object.object_id).and_then(|bytes| {
-            if bytes.len() as u64 != object.encoded_size || bytes.len() > MAX_TRANSFER_OBJECT_BYTES
-            {
-                return Err(TransferError::HashMismatch);
-            }
-            let manifest = open_manifest(&bytes, master_key, ManifestLimits::default())
-                .map_err(map_crypto_error)?;
-            if object.name != remote_manifest_name(&manifest.public_header.package_id) {
-                return Err(TransferError::ManifestCorrupted);
-            }
-            Ok(manifest)
-        });
+        let recovered = recover_manifest(store, master_key, &object);
         match recovered {
             Ok(manifest) => report
                 .recovered
@@ -1571,7 +1619,7 @@ fn map_application_error(error: ApplicationError) -> TransferError {
         ApplicationErrorKind::PermissionDenied => TransferError::PermissionDenied,
         ApplicationErrorKind::Cancelled => TransferError::Cancelled,
         ApplicationErrorKind::Persistence => TransferError::Database,
-        ApplicationErrorKind::Network => TransferError::Network,
+        ApplicationErrorKind::Network | ApplicationErrorKind::Server => TransferError::Network,
         ApplicationErrorKind::InvalidRequest
         | ApplicationErrorKind::Conflict
         | ApplicationErrorKind::SourceChanged

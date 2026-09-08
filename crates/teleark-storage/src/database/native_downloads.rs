@@ -10,7 +10,7 @@ use crate::model::{
 };
 use crate::{StorageError, StorageResult};
 
-const MAX_NATIVE_DOWNLOAD_HISTORY: usize = 10_000;
+pub const NATIVE_DOWNLOAD_HISTORY_LIMIT: usize = 10_000;
 
 const COLUMNS: &str = r#"
     id, chat_id, message_id, file_name, size_bytes, destination_path,
@@ -82,7 +82,7 @@ impl Database {
         batch: &NewNativeDownloadBatchRecord,
         tasks: &[NewNativeDownloadTaskRecord],
     ) -> StorageResult<(NativeDownloadBatchRecord, Vec<NativeDownloadTaskRecord>)> {
-        if batch.chat_id <= 0 || tasks.is_empty() || tasks.len() > MAX_NATIVE_DOWNLOAD_HISTORY {
+        if batch.chat_id <= 0 || tasks.is_empty() || tasks.len() > NATIVE_DOWNLOAD_HISTORY_LIMIT {
             return Err(StorageError::InvalidInput {
                 field: "native_download_batch",
                 reason: InputReason::OutOfRange,
@@ -124,6 +124,29 @@ impl Database {
             },
             inserted,
         ))
+    }
+
+    /// Persists a sampled byte checkpoint without reviving a retired attempt.
+    /// Returns false when a state/account/attempt transition made the sample stale.
+    pub fn save_native_download_progress(
+        &mut self,
+        task: &NativeDownloadTaskRecord,
+    ) -> StorageResult<bool> {
+        validate_task(task)?;
+        let changed = self.connection.execute(
+            "UPDATE native_download_tasks SET transferred_bytes=?1, duration_ms=?2, updated_at_unix_ms=?3
+             WHERE id=?4 AND account_id IS ?5 AND state='running' AND attempts=?6
+             AND transferred_bytes<=?1 AND updated_at_unix_ms<=?3",
+            params![
+                unsigned_to_sql("native_download.transferred_bytes", task.transferred_bytes)?,
+                optional_u64("native_download.duration_ms", task.duration_ms)?,
+                task.updated_at_unix_ms,
+                unsigned_to_sql("native_download.id", task.id)?,
+                task.account_id,
+                i64::from(task.attempts),
+            ],
+        )?;
+        Ok(changed != 0)
     }
 
     pub fn save_native_download(&mut self, task: &NativeDownloadTaskRecord) -> StorageResult<()> {
@@ -174,19 +197,39 @@ WHERE id = ?1 AND (account_id IS NULL OR account_id = ?13)
         Ok(())
     }
 
+    pub fn native_download(&self, task_id: u64) -> StorageResult<Option<NativeDownloadTaskRecord>> {
+        self.native_download_by_sql_id(unsigned_to_sql("native_download.id", task_id)?)
+    }
+
     pub fn native_downloads(&self) -> StorageResult<Vec<NativeDownloadTaskRecord>> {
+        self.native_download_history().map(|(tasks, _)| tasks)
+    }
+
+    /// Keeps every recoverable task, even from an older database exceeding the
+    /// current admission limit, then fills remaining slots with recent history.
+    pub fn native_download_history(&self) -> StorageResult<(Vec<NativeDownloadTaskRecord>, u64)> {
         let sql = format!(
-            "SELECT {COLUMNS} FROM native_download_tasks \
-             ORDER BY created_at_unix_ms DESC, id DESC LIMIT ?1"
+            "WITH recoverable AS (
+                SELECT id FROM native_download_tasks WHERE state NOT IN ('completed', 'cancelled')
+                OR batch_id IN (SELECT batch_id FROM native_download_tasks WHERE state NOT IN ('completed', 'cancelled') AND batch_id IS NOT NULL)
+             ), recent AS (
+                SELECT id FROM native_download_tasks WHERE state IN ('completed', 'cancelled') AND id NOT IN (SELECT id FROM recoverable)
+                ORDER BY created_at_unix_ms DESC, id DESC
+                LIMIT MAX(0, ?1 - (SELECT COUNT(*) FROM recoverable))
+             ), visible AS (SELECT id FROM recoverable UNION ALL SELECT id FROM recent)
+             SELECT {COLUMNS}, (SELECT COUNT(*) FROM native_download_tasks) - (SELECT COUNT(*) FROM visible)
+             FROM native_download_tasks WHERE id IN (SELECT id FROM visible)
+             ORDER BY created_at_unix_ms, id"
         );
         let mut statement = self.connection.prepare(&sql)?;
-        let mut rows = statement.query([MAX_NATIVE_DOWNLOAD_HISTORY as i64])?;
+        let mut rows = statement.query([NATIVE_DOWNLOAD_HISTORY_LIMIT as i64])?;
         let mut tasks = Vec::new();
+        let mut omitted = 0;
         while let Some(row) = rows.next()? {
+            omitted = nonnegative_from_sql("native_download_history", "omitted", row.get(23)?)?;
             tasks.push(row_to_task(row)?);
         }
-        tasks.reverse();
-        Ok(tasks)
+        Ok((tasks, omitted))
     }
 
     pub fn delete_native_download(&mut self, task_id: u64) -> StorageResult<()> {

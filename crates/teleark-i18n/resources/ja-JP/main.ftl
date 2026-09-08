@@ -10,6 +10,7 @@ common-save = 保存
 common-pause = 一時停止
 common-resume = 再開
 common-retry = 再試行
+channel-list-resize-hint = 右の区切り線をドラッグして、チャンネル一覧の幅を調整できます。
 common-delete = 削除
 common-open-file = ファイルを開く
 common-open-folder = フォルダーを開く
@@ -921,6 +922,7 @@ transfer-reason-soft-limit = 実測プローブが Telegram の保守的なソ�
 transfer-reason-all-platform = 対象パラメーターはすべて実測プラットフォームまたは設定上限です。
 transfer-decision-throughput-value = {$elapsed} · {$before} → {$after}（{$change}）
 transfer-part-timeline = 最近のパートタイムライン
+transfer-part-retention = 最近のパートイベント { $shown } 件を表示。以前の { $omitted } 件は省略。
 transfer-part-inflight = 転送中
 transfer-part-completed = 完了
 transfer-part-retry = 再試行
@@ -981,7 +983,7 @@ vault-unlock-action = Vault のロックを解除
 
 vault-lock-action = Vault をロック
 
-unlock-return-note = ロック解除後、元の操作を続けます。TeleArk がアクティブな間、鍵はメモリに保持されます。
+unlock-return-note = このセッションを解除して、ファイルと通知を確認し、次の操作を選べます。
 
 unlock-use-recovery = 復旧キーを使用
 
@@ -1115,6 +1117,17 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.4.4 · セッションのロック解除と継続するバックグラウンド処理
+
+    - Vault はアカウントのセッション中、解除状態を維持します。明示的なロックで復号済みの名前とパスを隠しても、受付済みの転送・待機中のバッチ・同期は続行します。新しい操作には解除が必要で、アップロードは解除後に確認へ戻ります。
+
+    - TeleArk の準備画面を、説明・現在のタスク・状態の変化の独立したカードに整理しました。段階ラベル、応答の説明、操作欄で待機・再試行・完了を区別できます。
+    - 最近の変化を時刻付きの行で表示し、件数を制限した全履歴を展開できます。独立してスクロールする詳細にも同じカードを使い、英語・簡体字中国語・日本語と両テーマに対応します。
+    - チャンネル閲覧はローカルの表示データとバックグラウンド同期を使用します。大規模なライブラリや転送履歴には、上限付き更新・索引検索・バックグラウンドのファイル操作を使用します。
+    - 一覧取得時のサーバーエラーがログイン状態に影響しなくなりました。読み込みはキャンセルと回数制限付き再試行に対応し、不完全な検索結果からプライベートチャンネルを作成しません。確認された Telegram 一覧の 500 エラーは未解決で、性能修正前のコードでも再現します。
+    - データベースの schema 0–14 は、バージョンを飛ばした更新でも読み書きバージョン 15 に自動移行します。既存の暗号化ファイル・復旧バンドル・セッション・転送チェックポイントの対応形式は維持されます。
+    - アプリと macOS パッケージを 0.4.4 に更新しました。パッケージは未署名で、実アカウントと全プラットフォームの検証は引き続き必要です。
+
     ## 0.4.3 · アップロードの各段階を表示
 
     - 保存先の確認、読み込みと暗号化、Telegram の応答待ち、データ送信、リモート確認、再ダウンロードと検証、一覧情報の公開を表示し、経過時間と現在のオブジェクトのバイト進捗を確認できます。
@@ -1213,6 +1226,218 @@ transfer-upload-activity-elapsed = { $phase } · 経過 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
 transfer-upload-waiting-telegram = Telegram の応答待ち
 
+channel-sync-local-only = ローカルキャッシュ
+channel-sync-queued = 同期待ち
+channel-sync-reading = ローカルキャッシュを読み取り中
+channel-sync-receiving = チャンネルの差分を受信中
+channel-sync-persisting = 変更を保存中
+channel-sync-verifying = 同期の欠落後のキャッシュを確認中
+channel-sync-waiting = 再試行を待機中
+channel-sync-idle = 更新を待ち受け中
+channel-sync-failed = 同期への対応が必要です
+channel-sync-cancelled = 同期を一時停止しました
+channel-sync-status = { $phase } · 待機中 { $queued } 件
+channel-sync-history = 過去の履歴
+channel-sync-timing = 現在の段階：{ $duration } · 最後の動作：{ $activity }前
+channel-sync-retry-after = { $duration }後に再試行
+channel-sync-event = { $age }前 · { $phase }
+channel-sync-retention = 省略した古いイベント：{ $dropped } · 再確認が必要なオーバーフロー通知：{ $overflow }
+channel-sync-empty = ローカルにファイルのキャッシュがありません。バックグラウンド同期で一覧を更新します。
+channel-sync-seeding = 初回のローカルキャッシュを準備中
+channel-sync-history-loading = リクエストした過去の履歴を受信中
+channel-sync-details-title = チャンネルの同期
+channel-sync-rate-limited = Telegram のレート制限を待機中
+
+startup-title = ローカルライブラリを開いています
+startup-detecting = データベースのバージョンを確認中
+startup-preparing = データベースバージョン { $version } のトランザクション保護を準備中
+startup-converting = データベース構造をバージョン { $version } に更新中
+startup-verifying = データベースバージョン { $version } を確定前に検証中
+startup-completed = データベース準備完了 · バックグラウンドサービスを起動中
+startup-failed = ライブラリを開けませんでした。既存データは保持されています。空き容量とアクセス権を確認して再試行してください。新しいデータベースには対応するアプリが必要です。
+startup-truncated = 履歴の上限に達したため、古い起動イベントを削除しました。
+
+managed-watch-title = プライベートチャンネルの変更
+managed-watch-pending = プライベートチャンネルに変更 · 検証中
+managed-watch-changed = プライベートチャンネル：未確認の変更 { $count } 件
+managed-watch-acknowledge = 表示された変更を確認済みにする
+managed-watch-retention = 最近の変更を表示 · 古い記録 { $omitted } 件を省略
+managed-watch-edited = メッセージが編集されました
+managed-watch-deleted = メッセージが削除されました
+managed-watch-gap = 更新に欠落 · キャッシュを確認中
+managed-watch-event = { $time } · { $kind } · メッセージ { $message }
+managed-watch-gap-event = { $time } · { $kind }
+managed-catalog-syncing = プライベートチャンネルの一覧を同期しています。マニフェストの検証が完了するとファイルが表示されます。
+managed-catalog-coverage = 初回の同期では最大 1,000 件のファイルマニフェストを取得し、その後の変更を継続して同期します。
+
+managed-scan-queued = マニフェストの検証待ち
+managed-scan-reading = ファイル記録を読み込み中
+managed-scan-receiving = Telegram のマニフェストを待機中
+managed-scan-verifying = マニフェストを認証中
+managed-scan-completed = マニフェストの検証が完了しました
+managed-scan-failed = マニフェストの検証に失敗しました
+managed-scan-cancelled = マニフェストの検証をキャンセルしました
+managed-scan-unknown = 不明
+managed-scan-progress = { $phase } · { $done } / { $total }
+managed-scan-detail = { $phase } · { $done } / { $total } 件 · 変更なし { $cached } 件 · 拒否 { $rejected } 件 · 現在の段階 { $duration } · 最終動作 { $activity } 前
+
+transfer-session-log-omitted-label = ログの欠落
+transfer-session-log-omitted-count = 今回起動中の全転送：ログ記録 { $count } 件を省略
+
+transfer-history-omitted = この一覧で省略された過去の完了・キャンセル記録（ローカルの全アカウント）：{ $count } 件
+transfer-controller-history-omitted = 過去の制御記録 { $count } 件を省略しました。
+transfer-lifecycle-history-omitted = 過去の状態イベント { $count } 件を省略しました。
+transfer-footer-total-retained = 表示中：{ $count }
+
+telegram-error-server = Telegram サーバーがこのリクエストを処理できませんでした。ログインは有効です。しばらくしてから再試行してください。
+dialogs-reading = チャンネル一覧を読み込み中 · Telegram の応答待ち
+dialogs-waiting = チャンネル一覧 · まもなく再試行（最大 3 回）
+dialogs-saving = チャンネル一覧 · 確認済みの結果を保存中
+dialogs-complete = チャンネル一覧を更新しました
+dialogs-failed = チャンネル一覧を取得できません · ローカルデータは保持されています
+dialogs-cancelled = チャンネル一覧の読み込みをキャンセルしました
+dialogs-timing = 現在の段階 / 最後の動作から：{ $elapsed }
+dialogs-details = チャンネル一覧の処理状況
+dialogs-attempt = { $attempt } 回目（最大 3 回）
+
+activity-state-queued = 待機中
+activity-state-running = 実行中
+activity-state-waiting = 再試行待ち
+activity-state-saving = 保存中
+activity-state-complete = 完了
+activity-state-failed = 要確認
+activity-state-cancelled = キャンセル済み
+activity-last-response = 直近の応答
+dialogs-task-title = チャンネル一覧
+activity-history-title = 状態の変化
+activity-history-time-origin = 今回の開始からの経過時間 · 新しい順
+activity-history-show-all = 全 { $count } 件を表示
+activity-history-show-less = 最近の変化のみ表示
+storage-activity-title = プライベートストレージ
+storage-activity-retry-wait = Telegram で確認を完了できませんでした。次の試行を予定しています。
+activity-refresh = 更新
+
 settings-telegram-custom-enable = カスタム API 設定を有効にする
 settings-telegram-custom-disable = 無効にして内蔵設定を使う
 settings-telegram-custom-purpose = 自分で登録した Telegram アプリの API ID と API Hash で接続するための機能です。両方を入力して保存すると適用されます。無効にすると保存済みの設定を削除し、TeleArk に内蔵された設定に戻ります。
+
+# Network proxy
+proxy-settings-title = ネットワークプロキシ
+proxy-settings-description = TeleArk のすべての通信を SOCKS5 または HTTP CONNECT プロキシ経由にします。障害時も直接接続には切り替わりません。
+proxy-enable = プロキシを使用
+proxy-disable = 無効にする（直接接続を許可）
+proxy-apply-note = 適用すると保存され、先に既存の接続を閉じます。中断した転送は復旧できます。直接接続は、明示的に無効にして適用した場合のみ許可します。
+proxy-protocol-socks5 = SOCKS5
+proxy-protocol-http = HTTP CONNECT
+proxy-host = プロキシの IP アドレス
+proxy-port = ポート
+proxy-username = ユーザー名（任意）
+proxy-password = パスワード（任意）
+proxy-address-note = プロキシ外での DNS 通信を防ぐため、ホスト名ではなく IPv4 または IPv6 アドレスを入力してください。認証情報はローカルに保存します。
+proxy-invalid = IP、ポート（1～65535）、認証情報（各255バイト以内）を確認してください。パスワードにはユーザー名が必要で、HTTP のユーザー名にはコロンを使えません。変更は未適用です。
+proxy-apply = 適用してテスト
+proxy-test = 適用済みプロキシを再テスト
+proxy-phase-direct = プロキシ無効 · 直接接続を許可
+proxy-phase-ready = プロキシ適用済み · 直接接続への切替なし
+proxy-phase-applying = ネットワーク設定を適用中 · 既存の接続を閉じて保存
+proxy-phase-connecting = プロキシ経由で接続中 · 直接接続への切替を禁止
+proxy-phase-connected = プロキシトンネル接続済み
+proxy-phase-testing = 適用済みプロキシをテスト中 · Telegram への TCP トンネルを確立
+proxy-phase-tested = プロキシトンネルのテスト成功
+proxy-phase-elapsed = この段階の経過時間：{ $elapsed }
+proxy-test-result = TCP トンネルを { $elapsed } で確立しました。プロキシの接続確認であり、アカウントの認証確認ではありません。
+proxy-error-unreachable = プロキシに接続できません。直接接続は禁止されています。設定を確認し、再試行してください。
+proxy-error-timeout = プロキシ接続がタイムアウトしました。直接接続は引き続き禁止されています。
+proxy-error-authentication = プロキシ認証に失敗しました。ユーザー名とパスワードを確認してください。直接接続は禁止されています。
+proxy-error-rejected = プロキシがトンネルを拒否しました。直接接続は引き続き禁止されています。
+proxy-error-protocol = プロキシ応答が無効です。直接接続は引き続き禁止されています。
+proxy-error-disconnected = プロキシ接続が切断されました。プロキシ経由で再試行してください。直接接続は引き続き禁止されています。
+proxy-error-configuration = プロキシ設定が無効です。通信を停止しています。
+proxy-error-persistence = ネットワーク設定を適用できませんでした。通信は停止したままです。ローカルストレージを確認し、再試行してください。
+proxy-error-capacity = プロキシ接続数の上限に達しました。直接接続は引き続き禁止されています。
+proxy-load-failed = ネットワーク設定を読み取れないため通信を停止しています。ストレージのアクセス権を確認するか、このデータに対応するバージョンを使用してください。
+proxy-timeline = 最近のネットワークイベント
+proxy-copy-api-link = API 開発パネルのリンクをコピー
+proxy-link-copied = リンクをコピーしました。外部ブラウザーには TeleArk のプロキシ設定は適用されません。
+
+proxy-test-cancelled = テストをキャンセルしました。プロキシ設定は適用したままで、直接接続には切り替えません。
+proxy-cancel-test = テストをキャンセル
+proxy-history-expand = 保持しているイベントを表示
+proxy-history-collapse = 最新8件のみ表示
+proxy-timeline-truncated = 省略した過去のイベント：{ $count } 件
+
+proxy-timing = 段階の経過：{ $elapsed } · 最後の通信イベント：{ $activity } 前
+proxy-event-row = { $elapsed } 前 · { $phase }
+
+proxy-phase-test-queued = プロキシテスト待機中 · 通信枠の空きを待っています
+
+# Encrypted transfer failures (distinct from native downloads).
+vault-transfer-error-target-permission = TeleArk は非公開ストレージチャンネルの利用権限を確認できませんでした。現在のアカウント、チャンネルの所有者、公開範囲、識別レコードを確認してください。
+vault-transfer-error-permission = 暗号化転送に必要なアクセスが拒否されました。元ファイルへのアクセス、ローカルストレージの権限、Telegram の非公開ストレージチャンネルを確認してください。
+vault-transfer-error-invalid-request = 暗号化転送リクエストまたはパッケージが無効です。
+vault-transfer-error-conflict = 暗号化転送が現在のアカウント、ストレージチャンネル、またはローカル状態と競合しています。
+vault-transfer-error-source-changed = 元ファイルまたは暗号化された内容が変更されたか、整合性検証に失敗しました。
+detail-failure-last-phase = 最後に記録された段階
+
+# Bound channel resilience
+storage-health-repair = チャンネル管理情報の修復が必要です。既存のファイルメッセージは保持されます。
+storage-health-access = 連携済みチャンネルにアクセスできないか、所有権がありません。権限を復元して再確認してください。
+storage-health-unsafe = 保存チャンネルは非公開で、他のメンバーがいない必要があります。Telegram で設定を修正して再確認してください。
+storage-health-unsupported = このチャンネルは新しい識別形式を使用しています。TeleArk を更新してください。データは保持されています。
+storage-repair-action = 管理情報を修復
+storage-archive-action = チャンネルをミュートしてアーカイブ
+storage-repair-confirm = 連携済みチャンネルの識別記録、固定表示、説明内の参照を修復します。ファイルメッセージ、公開設定、メンバーは変更されません。
+storage-archive-confirm = このチャンネルを一度だけミュートしてアーカイブします。後で Telegram で変更した設定は維持されます。
+storage-maintenance-confirm = 確認
+storage-maintenance-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
+storage-maintenance-omitted = 以前のイベント { $count } 件を省略
+storage-maintenance-preview = プレビューのみ。Telegram は変更されていません。
+storage-repair-completed = 管理情報を修復して検証しました。影響を受けたアップロードを再試行できます。
+storage-archive-completed = チャンネルをミュートしてアーカイブしました。
+storage-phase-checking = アカウント・連携・公開設定を確認中
+storage-phase-finding = 既存の識別記録を検索中
+storage-phase-repairing = 識別記録を復元中
+storage-phase-pinning = 識別記録を固定中
+storage-phase-updating = 説明内の参照を更新中
+storage-phase-verifying = リモートの変更を検証して保存中
+storage-phase-muting = チャンネルをミュート中
+storage-phase-archiving = チャンネルをアーカイブ中
+storage-phase-completed = 完了・検証済み
+vault-transfer-error-source-permission = ローカルの元ファイルを読み取れません。アクセスを許可するか、ファイルを再選択してください。
+vault-health-key-unavailable = このファイルの鍵を利用できません。元のパスワードまたは復元情報で対応する鍵を解除してください。
+
+# File health and key epochs
+vault-epoch-confirm-action = 新しい鍵を作成
+vault-epoch-lost-action = 解除情報をすべて紛失した
+vault-epoch-confirm-description = 元の解除情報がなければ古いファイルは復号できません。同じチャンネルへの今後のアップロード用に新しい鍵を作成しますか？古い暗号文と暗号化された鍵の記録は保持されます。新しい復元情報を保存してください。
+vault-epoch-preserved-description = 古い鍵は復元用に保持されます。過去の鍵を解除しても、新規アップロードの鍵は変わりません。
+vault-epoch-historical-label = 過去の鍵の元の復元情報
+vault-epoch-historical-action = 過去の鍵を解除
+vault-health-unchecked = 未確認
+vault-health-present = 索引内のパーツはすべて存在
+vault-health-missing-parts = パーツが不足
+vault-health-missing-manifest = リモートのマニフェストが不在
+vault-health-key = 鍵を利用できません
+vault-health-invalid = マニフェストが破損または未対応
+vault-health-detail = 状態は同期済みメッセージの存在に基づきます。内容は復元時に認証されます。パーツの不足はこのファイルにのみ影響します。
+vault-health-key-version = 鍵のバージョン
+vault-health-recheck = ファイルの状態を再確認
+vault-health-reupload = ローカルのコピーを再アップロード
+vault-health-unknown-size = 解除するまでサイズは不明
+vault-health-scope-limited = 表示は 1,000 件または 16 MiB までです。完全な状態確認では、ページごとの履歴と保持済みマニフェストを引き続き確認します。
+
+vault-key-phase-queued = 鍵の処理を待機中
+vault-key-phase-generating = 新しい鍵を生成中
+vault-key-phase-password = パスワード保護を導出中
+vault-key-phase-recovery = 復元用の保護を準備中
+vault-key-phase-saving = 古い鍵を保持して一括保存中
+vault-key-phase-completed = 新しい鍵を保存しました
+vault-key-phase-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
+vault-health-check-summary = 前回の履歴確認：{ $count } 件を確認しました。鍵を解除していないファイルは未確認です。
+transfer-upload-saving-manifest = 検証済みマニフェストをローカルに保存中
+
+vault-session-locked-background = ロック中です。送信済みの転送と同期はバックグラウンドで続行します。
+vault-session-unlock-policy = アカウントのセッションごとに一度解除します。画面切り替えやウインドウから離れてもロックしません。手動でロックしても送信済みの処理は続行します。
+vault-locked-file = 暗号化ファイル · ロック中
+vault-locked-detail = 解除して表示
+upload-batch-still-running = 現在のバッチをアップロード中です。次のバッチを準備して、完了後に送信できます。

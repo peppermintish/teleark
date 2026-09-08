@@ -1,7 +1,17 @@
+mod vault_inventory;
+pub use vault_inventory::{VaultFileHealth, VaultInventoryRecord};
+mod channel_sync;
+pub use channel_sync::{ChannelSyncCommit, ChannelSyncCommitOutcome, ChannelSyncState};
+mod managed_watch;
+pub use managed_watch::{
+    CachedManifestCandidate, MANAGED_CHANGE_HISTORY_LIMIT, ManagedChannelChange,
+    ManagedChannelChangeKind, ManagedChannelWatch,
+};
 mod collections;
 mod downloaded_files;
 mod index;
 mod native_downloads;
+pub use native_downloads::NATIVE_DOWNLOAD_HISTORY_LIMIT;
 mod remote;
 mod search;
 mod telegram_index;
@@ -49,26 +59,37 @@ impl Database {
     /// Opens or creates a database, applies ordered migrations, and enables
     /// foreign keys, WAL, NORMAL synchronous durability, and a five-second busy timeout.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+        Self::open_with_progress(path, |_| {})
+    }
+
+    pub fn open_with_progress(
+        path: impl AsRef<Path>,
+        progress: impl Fn(migration::MigrationProgress),
+    ) -> StorageResult<Self> {
+        progress(migration::MigrationProgress::Detecting);
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = Connection::open_with_flags(path, flags)?;
-        Self::initialize(connection)
+        Self::initialize(connection, progress)
     }
 
     /// Opens a fully migrated isolated database for deterministic tests or ephemeral use.
     pub fn open_in_memory() -> StorageResult<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        Self::initialize(Connection::open_in_memory()?, |_| {})
     }
 
-    fn initialize(mut connection: Connection) -> StorageResult<Self> {
+    fn initialize(
+        mut connection: Connection,
+        progress: impl Fn(migration::MigrationProgress),
+    ) -> StorageResult<Self> {
         connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "wal_autocheckpoint", 1_000_i64)?;
         connection.pragma_update(None, "trusted_schema", false)?;
-        migration::migrate(&mut connection)?;
+        migration::migrate(&mut connection, &progress)?;
 
         let foreign_keys: i64 =
             connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
@@ -168,6 +189,22 @@ FROM vault_metadata WHERE singleton_id = 1
 
     /// Atomically creates or replaces the single Vault metadata record.
     pub fn save_vault_metadata(&mut self, record: &VaultMetadataRecord) -> StorageResult<()> {
+        self.save_vault_metadata_inner(record, None).map(|_| ())
+    }
+
+    pub fn save_vault_metadata_checked(
+        &mut self,
+        record: &VaultMetadataRecord,
+        expected: Option<([u8; 16], u32, u32)>,
+    ) -> StorageResult<bool> {
+        self.save_vault_metadata_inner(record, Some(expected))
+    }
+
+    fn save_vault_metadata_inner(
+        &mut self,
+        record: &VaultMetadataRecord,
+        expected: Option<Option<([u8; 16], u32, u32)>>,
+    ) -> StorageResult<bool> {
         if record.password_wrap.len() < 124
             || record.password_wrap.len() > 172
             || record.recovery_wrap.len() != 88
@@ -183,6 +220,21 @@ FROM vault_metadata WHERE singleton_id = 1
         let password_generation = i64::from(record.password_generation);
         let recovery_generation = i64::from(record.recovery_generation);
         let transaction = self.connection.transaction()?;
+        if let Some(expected) = expected {
+            use rusqlite::OptionalExtension as _;
+            let actual=transaction.query_row("SELECT vault_id,password_generation,recovery_generation FROM vault_metadata WHERE singleton_id=1",[],|row| {
+                let bytes:Vec<u8>=row.get(0)?;
+                let id:[u8;16]=bytes.try_into().map_err(|_|rusqlite::Error::InvalidQuery)?;
+                Ok((id,row.get::<_,u32>(1)?,row.get::<_,u32>(2)?))
+            }).optional()?;
+            if actual != expected {
+                return Ok(false);
+            }
+        }
+        // Preserve the previous epoch before atomically changing the active one.
+        // Same-epoch password/recovery rotations update its wrappers explicitly.
+        transaction.execute("INSERT OR IGNORE INTO vault_key_epochs SELECT vault_id,password_wrap,recovery_wrap,password_generation,recovery_generation,created_at_unix_ms,updated_at_unix_ms FROM vault_metadata", [])?;
+        transaction.execute("INSERT INTO vault_key_epochs VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(vault_id) DO UPDATE SET password_wrap=excluded.password_wrap,recovery_wrap=excluded.recovery_wrap,password_generation=excluded.password_generation,recovery_generation=excluded.recovery_generation,updated_at_unix_ms=excluded.updated_at_unix_ms", params![record.vault_id.as_slice(),record.password_wrap,record.recovery_wrap,password_generation,recovery_generation,record.created_at_unix_ms,record.updated_at_unix_ms])?;
         transaction.execute(
             r#"
 INSERT INTO vault_metadata (
@@ -209,7 +261,20 @@ ON CONFLICT(singleton_id) DO UPDATE SET
             ],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(true)
+    }
+
+    /// Read one epoch by opaque identity without materializing all historical keys.
+    pub fn vault_key_epoch(
+        &self,
+        vault_id: [u8; 16],
+    ) -> StorageResult<Option<VaultMetadataRecord>> {
+        use rusqlite::OptionalExtension as _;
+        Ok(self.connection.query_row("SELECT password_wrap,recovery_wrap,password_generation,recovery_generation,created_at_unix_ms,updated_at_unix_ms FROM vault_key_epochs WHERE vault_id=?1", [vault_id.as_slice()], |row| Ok(VaultMetadataRecord {
+            vault_id, password_wrap: row.get(0)?, recovery_wrap: row.get(1)?,
+            password_generation: row.get(2)?, recovery_generation: row.get(3)?,
+            created_at_unix_ms: row.get(4)?, updated_at_unix_ms: row.get(5)?,
+        })).optional()?)
     }
 
     pub fn upsert_account(&mut self, account: &AccountRecord) -> StorageResult<()> {

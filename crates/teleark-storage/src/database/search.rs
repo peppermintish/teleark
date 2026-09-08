@@ -76,6 +76,12 @@ impl Database {
         }
         add_facets(&mut sql, &mut values, &query.facets)?;
         add_facets(&mut count_sql, &mut count_values, &query.facets)?;
+        // A constant WHERE disables SQLite's dedicated Count opcode. Keep the
+        // unfiltered shape bare so counting uses B-tree page metadata, while
+        // filtered/FTS searches still evaluate their exact predicate.
+        if count_sql.ends_with(" WHERE 1 = 1") {
+            count_sql.truncate(count_sql.len() - " WHERE 1 = 1".len());
+        }
         let total_matching_sql: i64 = self.connection.query_row(
             &count_sql,
             params_from_iter(count_values.iter()),
@@ -88,8 +94,10 @@ impl Database {
                 value: total_matching_sql.to_string(),
             })?;
         if let Some(cursor) = cursor {
+            // The scalar upper bound makes SQLite seek the expression index;
+            // the tuple alone can still scan every preceding key on deep pages.
             sql.push_str(&format!(
-                " AND (COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}) < ? OR (COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}) = ? AND f.id < ?))"
+                " AND COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}) <= ? AND (COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, {SORT_NULL_SENTINEL}), f.id) < (?, ?)"
             ));
             values.push(Value::Integer(cursor.sort_value));
             values.push(Value::Integer(cursor.sort_value));

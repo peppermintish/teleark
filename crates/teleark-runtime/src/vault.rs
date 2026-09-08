@@ -1,3 +1,6 @@
+use crate::transfer_updates::{
+    TransferRecord, TransferSnapshotView, TransferSnapshots, TransferSubscription,
+};
 use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -37,6 +40,13 @@ use crate::{
     TelegramObjectStore, encrypted_part_sizes, recover_remote_manifests,
 };
 
+mod catalog;
+mod health;
+mod key_progress;
+mod session;
+pub use key_progress::{VaultKeyPhase, VaultKeyProgress, VaultKeySnapshot};
+use session::{VaultEnvelope, VaultSession};
+
 const VAULT_QUEUE_CAPACITY: usize = 16;
 pub const MAX_VAULT_UPLOAD_BATCH: usize = 128;
 const MAX_MANIFEST_SCAN: usize = 1_000;
@@ -48,6 +58,9 @@ const MAX_ENCRYPTION_WORKERS: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultStatus {
+    pub active_key_locked: bool,
+    pub historical_key_unlocked: bool,
+    pub active_vault_id: Option<[u8; 16]>,
     pub configured: bool,
     pub locked: bool,
     pub created_at_unix_ms: Option<i64>,
@@ -58,6 +71,9 @@ pub struct VaultStatus {
 impl VaultStatus {
     const fn unconfigured() -> Self {
         Self {
+            active_key_locked: true,
+            historical_key_unlocked: false,
+            active_vault_id: None,
             configured: false,
             locked: true,
             created_at_unix_ms: None,
@@ -106,8 +122,24 @@ pub struct VaultTransferSnapshot {
     pub state: VaultTransferState,
 }
 
+impl TransferRecord for VaultTransferSnapshot {
+    type Phase = (VaultTransferState, Option<VaultUploadPhase>);
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn phase(&self) -> Self::Phase {
+        (
+            self.state,
+            self.upload_activity.as_ref().map(|activity| activity.phase),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedVaultFile {
+    pub vault_id: Option<[u8; 16]>,
+    pub health: crate::VaultFileHealth,
+    pub part_message_ids: Vec<i64>,
     pub package_numeric_id: u64,
     pub package_id: String,
     pub logical_name: String,
@@ -122,10 +154,28 @@ pub struct ManagedVaultFile {
     pub related_remote_names: Vec<String>,
 }
 
+impl ManagedVaultFile {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        256 + self.package_id.len()
+            + self.logical_name.len()
+            + self.relative_path.as_ref().map_or(0, String::len)
+            + self.mime_type.as_ref().map_or(0, String::len)
+            + self.part_message_ids.len() * std::mem::size_of::<i64>()
+            + self
+                .related_remote_names
+                .iter()
+                .map(|name| 24 + name.len())
+                .sum::<usize>()
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ManagedVaultScan {
+    pub health_checked_files: Option<usize>,
     pub files: Vec<ManagedVaultFile>,
     pub rejected_manifests: usize,
+    pub catalog_pending: bool,
+    pub catalog_limited: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +261,7 @@ impl UploadBatchPolicy {
                 ApplicationErrorKind::Authorization
                     | ApplicationErrorKind::PermissionDenied
                     | ApplicationErrorKind::Network
+                    | ApplicationErrorKind::Server
             )
         {
             self.blocked = Some(error.kind());
@@ -233,15 +284,57 @@ pub struct DesktopVault {
     inner: Arc<VaultInner>,
 }
 
+/// An already admitted operation. Wait only on a background executor.
+/// Admission retains only this operation's key lease; locking does not revoke it.
+#[must_use]
+pub struct VaultJob<T> {
+    response: mpsc::Receiver<Result<T, ApplicationError>>,
+    _owner: Arc<VaultInner>,
+}
+impl<T> VaultJob<T> {
+    pub fn wait(self) -> Result<T, ApplicationError> {
+        self.response
+            .recv()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ManagedScanMode {
+    Remote,
+    Cached,
+    CheckHealth,
+}
+
 struct VaultInner {
-    sender: Mutex<Option<mpsc::SyncSender<VaultCommand>>>,
-    status: Arc<Mutex<VaultStatus>>,
-    transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>,
+    sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
+    transfer_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
+    scan_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
+    session: Arc<Mutex<VaultSession>>,
+    transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
-    join: Mutex<Option<JoinHandle<()>>>,
+    joins: Mutex<Vec<JoinHandle<()>>>,
 }
 
 enum VaultCommand {
+    #[cfg(test)]
+    TestScan {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        cancellation: crate::TelegramScanCancellation,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+    #[cfg(test)]
+    TestTransfer {
+        entered: mpsc::SyncSender<std::sync::Weak<VaultMasterKey>>,
+        release: mpsc::Receiver<()>,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+    StartNewEpoch {
+        progress: VaultKeyProgress,
+        password: Zeroizing<String>,
+        reply: mpsc::SyncSender<Result<String, ApplicationError>>,
+    },
     Initialize {
         password: Zeroizing<String>,
         reply: mpsc::SyncSender<Result<String, ApplicationError>>,
@@ -259,9 +352,7 @@ enum VaultCommand {
         new_password: Zeroizing<String>,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
-    Lock {
-        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
-    },
+    Invalidate,
     ChangePassword {
         password: Zeroizing<String>,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
@@ -270,6 +361,9 @@ enum VaultCommand {
         reply: mpsc::SyncSender<Result<String, ApplicationError>>,
     },
     Scan {
+        verify_health: bool,
+        observer: Option<crate::ManagedScanObserver>,
+        cached: bool,
         account_id: i64,
         chat_id: i64,
         cancellation: crate::TelegramScanCancellation,
@@ -297,12 +391,17 @@ enum VaultCommand {
 }
 
 struct VaultOwner {
+    catalog: catalog::ManifestCache,
+    catalog_key_revision: u64,
     library: DesktopLibrary,
     telegram: DesktopTelegram,
     record: Option<VaultMetadataRecord>,
-    master_key: Option<VaultMasterKey>,
-    status: Arc<Mutex<VaultStatus>>,
-    transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>,
+    master_key: Option<Arc<VaultMasterKey>>,
+    historical_key: Option<([u8; 16], Arc<VaultMasterKey>)>,
+    health_worker: Option<health::HealthWorker>,
+    session: Arc<Mutex<VaultSession>>,
+    session_generation: u64,
+    transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
 }
 
@@ -315,35 +414,49 @@ impl DesktopVault {
         if let Some(record) = record.as_ref() {
             validate_record(record)?;
         }
-        let status = Arc::new(Mutex::new(status_for(record.as_ref(), true)));
-        let transfers = Arc::new(Mutex::new(Vec::new()));
-        let owner_status = Arc::clone(&status);
-        let owner_transfers = Arc::clone(&transfers);
+        let session = Arc::new(Mutex::new(VaultSession::new(record.clone())));
+        let transfers = Arc::new(TransferSnapshots::new(Vec::new())?);
         let active_upload_batch: ActiveUploadBatch = Arc::new(Mutex::new(None));
-        let owner_upload_batch = active_upload_batch.clone();
-        let (sender, receiver) = mpsc::sync_channel(VAULT_QUEUE_CAPACITY);
-        let join = thread::Builder::new()
-            .name("teleark-vault".to_owned())
-            .spawn(move || {
-                VaultOwner {
-                    library,
-                    telegram,
-                    record,
-                    master_key: None,
-                    status: owner_status,
-                    transfers: owner_transfers,
-                    active_upload_batch: owner_upload_batch,
-                }
-                .run(receiver);
-            })
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let mut senders = Vec::new();
+        let mut joins = Vec::new();
+        for name in [
+            "teleark-vault-keys",
+            "teleark-vault-transfers",
+            "teleark-vault-scan",
+        ] {
+            let (sender, receiver) = mpsc::sync_channel(VAULT_QUEUE_CAPACITY);
+            let owner = VaultOwner {
+                catalog: catalog::ManifestCache::default(),
+                catalog_key_revision: 0,
+                library: library.clone(),
+                telegram: telegram.clone(),
+                record: record.clone(),
+                master_key: None,
+                historical_key: None,
+                health_worker: None,
+                session: session.clone(),
+                session_generation: 0,
+                transfers: transfers.clone(),
+                active_upload_batch: active_upload_batch.clone(),
+            };
+            joins.push(
+                thread::Builder::new()
+                    .name(name.into())
+                    .spawn(move || owner.run(receiver))
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+            );
+            senders.push(sender);
+        }
+        let mut senders = senders.into_iter();
         Ok(Self {
             inner: Arc::new(VaultInner {
-                sender: Mutex::new(Some(sender)),
-                status,
+                sender: Mutex::new(senders.next()),
+                transfer_sender: Mutex::new(senders.next()),
+                scan_sender: Mutex::new(senders.next()),
+                session,
                 transfers,
                 active_upload_batch,
-                join: Mutex::new(Some(join)),
+                joins: Mutex::new(joins),
             }),
         })
     }
@@ -351,19 +464,87 @@ impl DesktopVault {
     #[must_use]
     pub fn status(&self) -> VaultStatus {
         self.inner
-            .status
+            .session
             .lock()
-            .map(|status| *status)
-            .unwrap_or_else(|_| VaultStatus::unconfigured())
+            .unwrap_or_else(|error| error.into_inner())
+            .status
     }
 
     #[must_use]
     pub fn transfers(&self) -> Vec<VaultTransferSnapshot> {
+        self.inner.transfers.all().unwrap_or_default()
+    }
+
+    pub fn has_active_transfers(&self) -> bool {
+        if self
+            .inner
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending_transfers
+            .load(Ordering::Acquire)
+            != 0
+        {
+            return true;
+        }
         self.inner
             .transfers
-            .lock()
-            .map(|items| items.clone())
+            .fold(false, |active, row| {
+                active
+                    || matches!(
+                        row.state,
+                        VaultTransferState::Queued | VaultTransferState::Running
+                    )
+            })
+            .unwrap_or(true)
+    }
+
+    pub fn active_upload_batches(&self) -> Vec<(i64, u64)> {
+        self.inner
+            .transfers
+            .fold(std::collections::BTreeSet::new(), |mut batches, row| {
+                if matches!(
+                    row.state,
+                    VaultTransferState::Queued | VaultTransferState::Running
+                ) && let Some(batch) = row.batch_id
+                {
+                    batches.insert((row.account_id, batch));
+                }
+                batches
+            })
             .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn subscribe(&self) -> TransferSubscription {
+        self.inner.transfers.subscribe()
+    }
+
+    pub fn snapshot_view(&self) -> Option<TransferSnapshotView<VaultTransferSnapshot>> {
+        self.inner.transfers.view()
+    }
+
+    /// Call only after an explicit loss-of-keys confirmation. Existing wrapped
+    /// keys and remote ciphertext are retained; no replacement channel is created.
+    pub fn start_new_key_epoch(&self, password: String) -> Result<String, ApplicationError> {
+        self.start_new_key_epoch_observed(password, VaultKeyProgress::new())
+    }
+    pub fn start_new_key_epoch_observed(
+        &self,
+        password: String,
+        progress: VaultKeyProgress,
+    ) -> Result<String, ApplicationError> {
+        let observer = progress.clone();
+        let result = self.request(|reply| VaultCommand::StartNewEpoch {
+            progress,
+            password: Zeroizing::new(password),
+            reply,
+        });
+        if let Err(error) = &result {
+            observer.finish(Some(error.kind()));
+        }
+        result
     }
 
     pub fn initialize(&self, password: String) -> Result<String, ApplicationError> {
@@ -400,7 +581,26 @@ impl DesktopVault {
     }
 
     pub fn lock(&self) -> Result<(), ApplicationError> {
-        self.request(|reply| VaultCommand::Lock { reply })
+        let generation = self
+            .inner
+            .session
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .lock();
+        // Wake idle owners only. A full queue already guarantees cleanup at the
+        // end of the running operation; never wait behind I/O to lock admission.
+        for queue in [
+            &self.inner.sender,
+            &self.inner.transfer_sender,
+            &self.inner.scan_sender,
+        ] {
+            if let Ok(sender) = queue.lock()
+                && let Some(sender) = sender.as_ref()
+            {
+                let _ = sender.try_send(VaultEnvelope::invalidate(generation));
+            }
+        }
+        Ok(())
     }
 
     pub fn change_password(&self, password: String) -> Result<(), ApplicationError> {
@@ -421,6 +621,69 @@ impl DesktopVault {
         cancellation: crate::TelegramScanCancellation,
     ) -> Result<ManagedVaultScan, ApplicationError> {
         self.request(|reply| VaultCommand::Scan {
+            verify_health: false,
+            observer: None,
+            cached: false,
+            account_id,
+            chat_id,
+            cancellation,
+            reply,
+        })
+    }
+
+    /// Uses the unified local message catalog; authenticates only changed manifests.
+    pub fn scan_cached_managed_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
+        self.request(|reply| VaultCommand::Scan {
+            verify_health: false,
+            observer: None,
+            cached: true,
+            account_id,
+            chat_id,
+            cancellation,
+            reply,
+        })
+    }
+
+    pub fn scan_cached_managed_files_observed(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
+        observer: crate::ManagedScanObserver,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
+        let failure_observer = observer.clone();
+        let result = self.request(|reply| VaultCommand::Scan {
+            verify_health: false,
+            observer: Some(observer),
+            cached: true,
+            account_id,
+            chat_id,
+            cancellation,
+            reply,
+        });
+        // Also covers queue rejection before the retained owner receives work.
+        if let Err(error) = &result {
+            failure_observer.finish(Some(error.kind()));
+        }
+        result
+    }
+
+    pub fn check_managed_file_health(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        cancellation: crate::TelegramScanCancellation,
+        observer: Option<crate::ManagedScanObserver>,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
+        self.request(|reply| VaultCommand::Scan {
+            verify_health: true,
+            observer,
+            cached: true,
             account_id,
             chat_id,
             cancellation,
@@ -448,10 +711,21 @@ impl DesktopVault {
         chat_id: i64,
         sources: Vec<PathBuf>,
     ) -> Result<VaultUploadReport, ApplicationError> {
+        self.submit_upload_files(account_id, chat_id, sources)?
+            .wait()
+    }
+
+    /// Admission is bounded and does no filesystem, crypto or network work.
+    pub fn submit_upload_files(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        sources: Vec<PathBuf>,
+    ) -> Result<VaultJob<VaultUploadReport>, ApplicationError> {
         if sources.is_empty() || sources.len() > MAX_VAULT_UPLOAD_BATCH {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
-        self.request(|reply| VaultCommand::UploadBatch {
+        self.submit(|reply| VaultCommand::UploadBatch {
             account_id,
             chat_id,
             sources,
@@ -487,7 +761,17 @@ impl DesktopVault {
         chat_id: i64,
         package_id: u64,
     ) -> Result<PathBuf, ApplicationError> {
-        self.request(|reply| VaultCommand::Download {
+        self.submit_download_file(account_id, chat_id, package_id)?
+            .wait()
+    }
+
+    pub fn submit_download_file(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        package_id: u64,
+    ) -> Result<VaultJob<PathBuf>, ApplicationError> {
+        self.submit(|reply| VaultCommand::Download {
             account_id,
             chat_id,
             package_id,
@@ -495,133 +779,348 @@ impl DesktopVault {
         })
     }
 
+    pub fn submit_managed_scan(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        mode: ManagedScanMode,
+        cancellation: crate::TelegramScanCancellation,
+        observer: Option<crate::ManagedScanObserver>,
+    ) -> Result<VaultJob<ManagedVaultScan>, ApplicationError> {
+        let failure_observer = observer.clone();
+        let result = self.submit(|reply| VaultCommand::Scan {
+            account_id,
+            chat_id,
+            cached: !matches!(mode, ManagedScanMode::Remote),
+            verify_health: matches!(mode, ManagedScanMode::CheckHealth),
+            cancellation,
+            observer,
+            reply,
+        });
+        if let Err(error) = &result
+            && let Some(observer) = failure_observer
+        {
+            observer.finish(Some(error.kind()));
+        }
+        result
+    }
+
     fn request<T>(
         &self,
         build: impl FnOnce(mpsc::SyncSender<Result<T, ApplicationError>>) -> VaultCommand,
     ) -> Result<T, ApplicationError> {
+        self.submit(build)?.wait()
+    }
+
+    fn submit<T>(
+        &self,
+        build: impl FnOnce(mpsc::SyncSender<Result<T, ApplicationError>>) -> VaultCommand,
+    ) -> Result<VaultJob<T>, ApplicationError> {
         let (reply, response) = mpsc::sync_channel(1);
-        let sender = self
+        let command = build(reply);
+        let envelope = self
             .inner
-            .sender
+            .session
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .admit(command)?;
+        let queue = if envelope.command.is_transfer() {
+            &self.inner.transfer_sender
+        } else if envelope.command.is_scan() {
+            &self.inner.scan_sender
+        } else {
+            &self.inner.sender
+        };
+        let sender = queue
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
             .clone()
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
-        sender
-            .send(build(reply))
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
-        response
-            .recv()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+        sender.try_send(envelope).map_err(|error| {
+            ApplicationError::new(match error {
+                mpsc::TrySendError::Full(_) => ApplicationErrorKind::Conflict,
+                mpsc::TrySendError::Disconnected(_) => ApplicationErrorKind::Persistence,
+            })
+        })?;
+        Ok(VaultJob {
+            response,
+            _owner: self.inner.clone(),
+        })
     }
 }
 
 impl Drop for VaultInner {
     fn drop(&mut self) {
+        if let Ok(mut session) = self.session.lock() {
+            session.lock();
+        }
         if let Ok(active) = self.active_upload_batch.lock()
             && let Some((_, _, cancel)) = active.as_ref()
         {
             cancel.store(true, Ordering::Release);
         }
-        if let Ok(sender) = self.sender.get_mut()
-            && let Some(sender) = sender.take()
-        {
-            let _ = sender.try_send(VaultCommand::Shutdown);
+        for queue in [
+            &mut self.sender,
+            &mut self.transfer_sender,
+            &mut self.scan_sender,
+        ] {
+            if let Ok(sender) = queue.get_mut()
+                && let Some(sender) = sender.take()
+            {
+                let _ = sender.try_send(VaultEnvelope::shutdown());
+            }
         }
-        if let Ok(join) = self.join.get_mut()
-            && let Some(join) = join.take()
-            && join.is_finished()
-        {
-            let _ = join.join();
+        if let Ok(joins) = self.joins.get_mut() {
+            for join in joins.drain(..) {
+                if join.is_finished() {
+                    let _ = join.join();
+                }
+            }
         }
     }
 }
 
 impl VaultOwner {
-    fn run(mut self, receiver: mpsc::Receiver<VaultCommand>) {
-        while let Ok(command) = receiver.recv() {
-            match command {
-                VaultCommand::Initialize { password, reply } => {
-                    let _ = reply.send(self.initialize(&password));
-                }
-                VaultCommand::UnlockPassword { password, reply } => {
-                    let _ = reply.send(self.unlock_password(&password));
-                }
-                VaultCommand::UnlockRecovery {
-                    recovery_key,
-                    reply,
-                } => {
-                    let _ = reply.send(self.unlock_recovery(&recovery_key));
-                }
-                VaultCommand::RestoreRecovery {
-                    recovery_bundle,
-                    new_password,
-                    reply,
-                } => {
-                    let _ = reply.send(self.restore_recovery(&recovery_bundle, &new_password));
-                }
-                VaultCommand::Lock { reply } => {
-                    self.master_key = None;
-                    self.refresh_status();
-                    let _ = reply.send(Ok(()));
-                }
-                VaultCommand::ChangePassword { password, reply } => {
-                    let _ = reply.send(self.change_password(&password));
-                }
-                VaultCommand::RotateRecovery { reply } => {
-                    let _ = reply.send(self.rotate_recovery());
-                }
-                VaultCommand::Scan {
-                    account_id,
-                    chat_id,
-                    cancellation,
-                    reply,
-                } => {
-                    let _ = reply.send(self.scan(account_id, chat_id, cancellation));
-                }
-                VaultCommand::Upload {
-                    account_id,
-                    chat_id,
-                    source,
-                    reply,
-                } => {
-                    let _ = reply.send(self.upload(account_id, chat_id, &source, None));
-                }
-                VaultCommand::UploadBatch {
-                    account_id,
-                    chat_id,
-                    sources,
-                    reply,
-                } => {
-                    let _ = reply.send(self.upload_batch(account_id, chat_id, sources));
-                }
-                VaultCommand::Download {
-                    account_id,
-                    chat_id,
-                    package_id,
-                    reply,
-                } => {
-                    let _ =
-                        reply.send(self.download(account_id, chat_id, PackageId::new(package_id)));
-                }
-                VaultCommand::Shutdown => break,
+    fn run(mut self, receiver: mpsc::Receiver<VaultEnvelope>) {
+        while let Ok(envelope) = receiver.recv() {
+            if matches!(envelope.command, VaultCommand::Shutdown) {
+                break;
+            }
+            if self.catalog_key_revision != envelope.keys.revision {
+                self.catalog.clear();
+                self.catalog_key_revision = envelope.keys.revision;
+            }
+            self.session_generation = envelope.generation;
+            if !envelope.command.is_key_operation() {
+                self.record = envelope.keys.record.clone();
+            }
+            self.master_key = envelope.keys.active;
+            self.historical_key = envelope.keys.historical;
+            self.execute(envelope.command);
+            // The operation owns these references only for its lifetime. A
+            // locked session cannot borrow them to admit another operation.
+            self.master_key = None;
+            self.historical_key = None;
+            if self
+                .session
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .status
+                .locked
+            {
+                self.catalog.clear();
             }
         }
-        self.master_key = None;
-        self.refresh_status();
+    }
+
+    fn execute(&mut self, command: VaultCommand) {
+        match command {
+            #[cfg(test)]
+            VaultCommand::TestScan {
+                entered,
+                release,
+                cancellation,
+                reply,
+            } => {
+                let key = self.master_key.clone().expect("admitted scan key");
+                let check_cancel = cancellation.clone();
+                self.health_worker = Some(
+                    health::HealthWorker::spawn(cancellation, move || {
+                        let _ = entered.send(());
+                        let _ = release.recv();
+                        let result = if check_cancel.is_cancelled() {
+                            Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+                        } else {
+                            Ok(())
+                        };
+                        drop(key);
+                        let _ = reply.send(result);
+                    })
+                    .expect("health worker"),
+                );
+            }
+            #[cfg(test)]
+            VaultCommand::TestTransfer {
+                entered,
+                release,
+                reply,
+            } => {
+                let key = self.master_key.as_ref().expect("admitted key");
+                let _ = entered.send(Arc::downgrade(key));
+                let _ = release.recv();
+                let _ = reply.send(Ok(()));
+            }
+            VaultCommand::StartNewEpoch {
+                password,
+                progress,
+                reply,
+            } => {
+                let result = self.create_key_epoch_observed(&password, &progress);
+                progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                let _ = reply.send(result);
+            }
+            VaultCommand::Initialize { password, reply } => {
+                let _ = reply.send(self.initialize(&password));
+            }
+            VaultCommand::UnlockPassword { password, reply } => {
+                let _ = reply.send(self.unlock_password(&password));
+            }
+            VaultCommand::UnlockRecovery {
+                recovery_key,
+                reply,
+            } => {
+                let _ = reply.send(self.unlock_recovery(&recovery_key));
+            }
+            VaultCommand::RestoreRecovery {
+                recovery_bundle,
+                new_password,
+                reply,
+            } => {
+                let _ = reply.send(self.restore_recovery(&recovery_bundle, &new_password));
+            }
+            VaultCommand::Invalidate => {
+                self.catalog.clear();
+            }
+            VaultCommand::ChangePassword { password, reply } => {
+                let _ = reply.send(self.change_password(&password));
+            }
+            VaultCommand::RotateRecovery { reply } => {
+                let _ = reply.send(self.rotate_recovery());
+            }
+            VaultCommand::Scan {
+                verify_health,
+                observer,
+                cached,
+                account_id,
+                chat_id,
+                cancellation,
+                reply,
+            } => {
+                let observer =
+                    observer.unwrap_or_else(|| crate::ManagedScanObserver::silent(chat_id));
+                if verify_health && cached {
+                    if self
+                        .health_worker
+                        .as_ref()
+                        .is_some_and(|worker| !worker.is_finished())
+                    {
+                        observer.finish(Some(ApplicationErrorKind::Conflict));
+                        let _ =
+                            reply.send(Err(ApplicationError::new(ApplicationErrorKind::Conflict)));
+                        return;
+                    }
+                    let active = self
+                        .record
+                        .as_ref()
+                        .zip(self.master_key.as_ref())
+                        .map(|(record, key)| (record.vault_id, Arc::clone(key)));
+                    let historical = self
+                        .historical_key
+                        .as_ref()
+                        .map(|(id, key)| (*id, Arc::clone(key)));
+                    let telegram = self.telegram.clone();
+                    let library = self.library.clone();
+                    let failure_observer = observer.clone();
+                    let worker_cancel = cancellation.clone();
+                    let spawned = health::HealthWorker::spawn(cancellation, move || {
+                        let result = (|| {
+                            if active.is_none() && historical.is_none() {
+                                return Err(ApplicationError::new(
+                                    ApplicationErrorKind::Authorization,
+                                ));
+                            }
+                            if worker_cancel.is_cancelled() {
+                                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                            }
+                            telegram.validate_storage_channel(account_id, chat_id)?;
+                            health::full_check(
+                                &telegram,
+                                &library,
+                                (account_id, chat_id),
+                                active.as_ref().map(|(id, key)| (*id, key.as_ref())),
+                                historical.as_ref(),
+                                &worker_cancel,
+                                &observer,
+                            )
+                        })();
+                        observer.finish(result.as_ref().err().map(ApplicationError::kind));
+                        let _ = reply.send(result);
+                    });
+                    match spawned {
+                        Ok(worker) => self.health_worker = Some(worker),
+                        Err(error) => failure_observer.finish(Some(error.kind())),
+                    }
+                    return;
+                }
+                let result = if cancellation.is_cancelled() {
+                    Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+                } else if cached {
+                    self.scan_cached(account_id, chat_id, cancellation, &observer)
+                } else {
+                    self.scan(account_id, chat_id, cancellation)
+                };
+                observer.finish(result.as_ref().err().map(ApplicationError::kind));
+                let _ = reply.send(result);
+            }
+            VaultCommand::Upload {
+                account_id,
+                chat_id,
+                source,
+                reply,
+            } => {
+                let _ = reply.send(self.upload(account_id, chat_id, &source, None));
+            }
+            VaultCommand::UploadBatch {
+                account_id,
+                chat_id,
+                sources,
+                reply,
+            } => {
+                let _ = reply.send(self.upload_batch(account_id, chat_id, sources));
+            }
+            VaultCommand::Download {
+                account_id,
+                chat_id,
+                package_id,
+                reply,
+            } => {
+                let _ = reply.send(self.download(account_id, chat_id, PackageId::new(package_id)));
+            }
+            VaultCommand::Shutdown => {}
+        }
     }
 
     fn initialize(&mut self, password: &str) -> Result<String, ApplicationError> {
         if self.record.is_some() {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
+        self.create_key_epoch(password)
+    }
+
+    fn create_key_epoch(&mut self, password: &str) -> Result<String, ApplicationError> {
+        self.create_key_epoch_observed(password, &VaultKeyProgress::new())
+    }
+
+    fn create_key_epoch_observed(
+        &mut self,
+        password: &str,
+        progress: &VaultKeyProgress,
+    ) -> Result<String, ApplicationError> {
+        progress.phase(VaultKeyPhase::Generating)?;
+        if let Some(worker) = &self.health_worker {
+            worker.cancel();
+        }
         let password = Password::new(password.as_bytes().to_vec()).map_err(map_crypto_error)?;
         let mut random = OsRandom;
         let mut vault_id = [0_u8; 16];
         random.fill_bytes(&mut vault_id).map_err(map_crypto_error)?;
+        if self.library.worker.vault_key_epoch(vault_id)?.is_some() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
         let master_key = generate_vault_master_key(&mut random).map_err(map_crypto_error)?;
         let recovery_key = generate_recovery_key(&mut random).map_err(map_crypto_error)?;
         let mut usage = AeadUsageRegistry::new();
+        progress.phase(VaultKeyPhase::WrappingPassword)?;
         let password_wrap = wrap_master_key_with_password(
             &master_key,
             &password,
@@ -631,6 +1130,7 @@ impl VaultOwner {
             &mut usage,
         )
         .map_err(map_crypto_error)?;
+        progress.phase(VaultKeyPhase::WrappingRecovery)?;
         let recovery_wrap =
             wrap_master_key_with_recovery(&master_key, &recovery_key, vault_id, 1, &mut usage)
                 .map_err(map_crypto_error)?;
@@ -644,10 +1144,22 @@ impl VaultOwner {
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
-        self.library.worker.save_vault_metadata(record.clone())?;
+        progress.phase(VaultKeyPhase::Saving)?;
+        self.library.worker.save_vault_metadata(
+            record.clone(),
+            self.record.as_ref().map(|old| {
+                (
+                    old.vault_id,
+                    old.password_generation,
+                    old.recovery_generation,
+                )
+            }),
+        )?;
         let recovery_text = encode_recovery_bundle(&recovery_key, &recovery_wrap);
         self.record = Some(record);
-        self.master_key = Some(master_key);
+        self.master_key = Some(Arc::new(master_key));
+        self.historical_key = None;
+        self.catalog.clear();
         self.refresh_status();
         Ok(recovery_text)
     }
@@ -662,12 +1174,39 @@ impl VaultOwner {
         let password = Password::new(password.as_bytes().to_vec()).map_err(map_crypto_error)?;
         let master = unwrap_master_key_with_password(&password_wrap, &password)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-        self.master_key = Some(master);
+        self.master_key = Some(Arc::new(master));
         self.refresh_status();
         Ok(())
     }
 
     fn unlock_recovery(&mut self, recovery_text: &str) -> Result<(), ApplicationError> {
+        if recovery_text.starts_with(RECOVERY_BUNDLE_PREFIX) {
+            let (key, wrap) = decode_recovery_bundle(recovery_text)?;
+            if self
+                .record
+                .as_ref()
+                .is_some_and(|record| record.vault_id != wrap.vault_id)
+            {
+                let old = self
+                    .library
+                    .worker
+                    .vault_key_epoch(wrap.vault_id)?
+                    .ok_or_else(|| {
+                        ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable)
+                    })?;
+                validate_record(&old)?;
+                if old.recovery_wrap != wrap.encode() {
+                    return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+                }
+                let master = unwrap_master_key_with_recovery(&wrap, &key)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+                // At most one historical key is unlocked. Uploads keep the active epoch.
+                self.historical_key = Some((wrap.vault_id, Arc::new(master)));
+                self.catalog.clear();
+                self.refresh_status();
+                return Ok(());
+            }
+        }
         let record = self
             .record
             .as_ref()
@@ -686,7 +1225,7 @@ impl VaultOwner {
         };
         let master = unwrap_master_key_with_recovery(&recovery_wrap, &recovery_key)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-        self.master_key = Some(master);
+        self.master_key = Some(Arc::new(master));
         self.refresh_status();
         Ok(())
     }
@@ -724,9 +1263,18 @@ impl VaultOwner {
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
-        self.library.worker.save_vault_metadata(record.clone())?;
+        self.library.worker.save_vault_metadata(
+            record.clone(),
+            self.record.as_ref().map(|old| {
+                (
+                    old.vault_id,
+                    old.password_generation,
+                    old.recovery_generation,
+                )
+            }),
+        )?;
         self.record = Some(record);
-        self.master_key = Some(master);
+        self.master_key = Some(Arc::new(master));
         self.refresh_status();
         Ok(())
     }
@@ -759,7 +1307,16 @@ impl VaultOwner {
         record.password_wrap = wrapped.encode().map_err(map_crypto_error)?;
         record.password_generation = generation;
         record.updated_at_unix_ms = now_unix_ms()?;
-        self.library.worker.save_vault_metadata(record.clone())?;
+        self.library.worker.save_vault_metadata(
+            record.clone(),
+            self.record.as_ref().map(|old| {
+                (
+                    old.vault_id,
+                    old.password_generation,
+                    old.recovery_generation,
+                )
+            }),
+        )?;
         self.record = Some(record);
         self.refresh_status();
         Ok(())
@@ -792,7 +1349,16 @@ impl VaultOwner {
         record.recovery_wrap = wrapped.encode();
         record.recovery_generation = generation;
         record.updated_at_unix_ms = now_unix_ms()?;
-        self.library.worker.save_vault_metadata(record.clone())?;
+        self.library.worker.save_vault_metadata(
+            record.clone(),
+            self.record.as_ref().map(|old| {
+                (
+                    old.vault_id,
+                    old.password_generation,
+                    old.recovery_generation,
+                )
+            }),
+        )?;
         self.record = Some(record);
         self.refresh_status();
         Ok(encode_recovery_bundle(&recovery_key, &wrapped))
@@ -824,9 +1390,73 @@ impl VaultOwner {
                 .then_with(|| left.logical_name.cmp(&right.logical_name))
         });
         Ok(ManagedVaultScan {
+            health_checked_files: None,
             files,
             rejected_manifests: report.rejected.len(),
+            catalog_pending: false,
+            catalog_limited: false,
         })
+    }
+
+    fn scan_cached(
+        &mut self,
+        account: i64,
+        chat: i64,
+        cancellation: crate::TelegramScanCancellation,
+        observer: &crate::ManagedScanObserver,
+    ) -> Result<ManagedVaultScan, ApplicationError> {
+        let active = self
+            .record
+            .as_ref()
+            .zip(self.master_key.as_deref())
+            .map(|(record, key)| (record.vault_id, key));
+        if active.is_none() && self.historical_key.is_none() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        observer.phase(crate::ChannelSyncPhase::ManifestReading);
+        let watch = self.library.managed_channel_watch(account, chat, false)?;
+        let candidates = self.library.cached_manifest_candidates(account, chat)?;
+        let mut store = TelegramObjectStore::new(self.telegram.clone(), account, chat)
+            .with_cancellation(cancellation.clone());
+        let library = &self.library;
+        let historical = self.historical_key.as_ref();
+        let mut report = self.catalog.project_observed(
+            (account, chat),
+            candidates,
+            &cancellation,
+            |candidate| {
+                health::load(
+                    &mut store,
+                    library,
+                    (account, chat),
+                    catalog::byte_object(candidate)?,
+                    active,
+                    historical,
+                    observer,
+                )
+            },
+            Some(observer),
+        )?;
+        for file in &mut report.files {
+            if file.health != crate::VaultFileHealth::KeyUnavailable {
+                file.health = health::check(
+                    library,
+                    (account, chat),
+                    file.manifest_message_id,
+                    &file.part_message_ids,
+                )?;
+            }
+        }
+        health::retain_missing(
+            &mut report,
+            library,
+            (account, chat),
+            active,
+            historical,
+            &cancellation,
+        )?;
+        report.catalog_pending = !watch.catalog_ready;
+        Ok(report)
     }
 
     fn upload_batch(
@@ -910,12 +1540,15 @@ impl VaultOwner {
         } else {
             validate(self)
         };
+        let validation_succeeded = validation.is_ok();
         let mut report = VaultUploadReport::default();
         let mut policy = UploadBatchPolicy {
             blocked: validation.err().map(|error| error.kind()),
         };
-        for plan in &plans {
-            self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
+        if validation_succeeded {
+            for plan in &plans {
+                self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
+            }
         }
         for plan in &plans {
             let result = policy.execute(&cancel, || {
@@ -969,6 +1602,10 @@ impl VaultOwner {
         } else {
             self.telegram
                 .validate_storage_channel(account_id, chat_id)?;
+        }
+        if let Some(plan) = queued {
+            VaultUploadObserver::new(self.transfers.clone(), plan.id)
+                .phase(VaultUploadPhase::Preparing);
         }
         let metadata = std::fs::metadata(source).map_err(map_source_io)?;
         if !metadata.is_file() || metadata.len() == 0 {
@@ -1269,26 +1906,56 @@ impl VaultOwner {
                     },
                 )
                 .map_err(map_transfer_error)?;
-            let package_bytes = package_bytes(package_id);
-            let related_remote_names = (0..part_count)
-                .map(|index| teleark_crypto::remote_part_name(&package_bytes, index))
-                .chain(std::iter::once(manifest_object.name.clone()))
-                .collect();
-            Ok(ManagedVaultFile {
-                package_numeric_id: package_id,
-                package_id: hex_id(&package_bytes),
-                logical_name: logical_name.clone(),
-                relative_path: None,
-                mime_type: None,
-                media_kind: crate::classify_file(source),
-                size_bytes: metadata.len(),
-                encoded_size_bytes: encoded_size.saturating_add(manifest_object.encoded_size),
-                part_count,
-                created_at_unix_ms: started_at,
-                manifest_message_id: i64::try_from(manifest_object.object_id)
-                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?,
-                related_remote_names,
-            })
+            self.catalog.remember_receipt(
+                (account_id, chat_id),
+                package_id,
+                manifest_object.clone(),
+            );
+            observer.phase(VaultUploadPhase::Persisting);
+            let sealed_manifest = remote
+                .take_published_manifest_envelope()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let active = self
+                .record
+                .as_ref()
+                .zip(self.master_key.as_deref())
+                .map(|(record, key)| (record.vault_id, key));
+            let manifest = health::open_with_keys(&sealed_manifest, active, None)?;
+            let record = teleark_storage::VaultInventoryRecord {
+                account_id,
+                chat_id,
+                manifest_message_id: manifest_object.object_id as i64,
+                remote_name: manifest_object.name.clone(),
+                vault_id: manifest.public_header.vault_id,
+                sealed_manifest,
+                observed_at_unix_ms: now_unix_ms()?,
+                manifest_invalid: false,
+            };
+            self.library
+                .worker
+                .request("save_upload_manifest", |reply| {
+                    crate::StorageRequest::SaveVaultInventory { record, reply }
+                })?;
+            let mut file = managed_file_from_recovered(&crate::RecoveredManifest {
+                object: manifest_object,
+                manifest,
+            })?;
+            file.health = crate::VaultFileHealth::Present;
+            let ids = std::iter::once(file.manifest_message_id)
+                .chain(file.part_message_ids.iter().copied())
+                .collect::<Vec<_>>();
+            for chunk in ids.chunks(100) {
+                self.library.worker.request("save_upload_health", |reply| {
+                    crate::StorageRequest::SaveVaultMessageHealth {
+                        account: account_id,
+                        chat: chat_id,
+                        messages: chunk.iter().map(|id| (*id, true)).collect(),
+                        observed_at: now_unix_ms().unwrap_or(0),
+                        reply,
+                    }
+                })?;
+            }
+            Ok(file)
         })();
         if let Err(error) = &result {
             self.update_transfer(transfer_id, |snapshot| {
@@ -1314,23 +1981,58 @@ impl VaultOwner {
         chat_id: i64,
         package_id: PackageId,
     ) -> Result<PathBuf, ApplicationError> {
-        let master = self
-            .master_key
+        let active = self
+            .record
             .as_ref()
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+            .zip(self.master_key.as_deref())
+            .map(|(record, key)| (record.vault_id, key));
+        if active.is_none() && self.historical_key.is_none() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
         let mut store =
             TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id);
-        let mut report = recover_remote_manifests(&mut store, master, MAX_MANIFEST_SCAN)
-            .map_err(map_transfer_error)?;
-        let position = report
-            .recovered
-            .iter()
-            .position(|candidate| {
-                package_id_from_bytes(candidate.manifest.public_header.package_id)
-                    .is_ok_and(|candidate_id| candidate_id == package_id)
-            })
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-        let recovered = report.recovered.swap_remove(position);
+        if expected_account_id != chat_id {
+            let catalog = if let Some(object) = self
+                .catalog
+                .locator_for((expected_account_id, chat_id), package_id)
+            {
+                vec![object]
+            } else if let Some((id, encoded_size)) =
+                self.library
+                    .worker
+                    .request("vault_manifest_locator", |reply| {
+                        crate::StorageRequest::VaultManifestLocator {
+                            account: expected_account_id,
+                            chat: chat_id,
+                            name: teleark_crypto::remote_manifest_name(&package_bytes(
+                                package_id.get(),
+                            )),
+                            reply,
+                        }
+                    })?
+            {
+                vec![crate::RemoteByteObject {
+                    object_id: id as u64,
+                    name: teleark_crypto::remote_manifest_name(&package_bytes(package_id.get())),
+                    encoded_size,
+                }]
+            } else {
+                self.library
+                    .cached_manifest_candidates(expected_account_id, chat_id)?
+                    .iter()
+                    .take(MAX_MANIFEST_SCAN)
+                    .map(catalog::byte_object)
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            store = store.with_manifest_catalog(catalog);
+        }
+        let recovered = health::recover_target(
+            &mut store,
+            (expected_account_id, chat_id),
+            package_id,
+            active,
+            self.historical_key.as_ref(),
+        )?;
         let logical_name = recovered.manifest.metadata.logical_name.clone();
         let size_bytes = recovered.manifest.public_header.logical_file_size;
         let part_count = recovered.manifest.public_header.part_count;
@@ -1512,17 +2214,12 @@ impl VaultOwner {
     }
 
     fn push_transfer(&self, snapshot: VaultTransferSnapshot) {
-        if let Ok(mut transfers) = self.transfers.lock() {
-            retain_transfer_snapshot(&mut transfers, snapshot);
-        }
+        self.transfers
+            .insert_pruning(snapshot, vault_transfer_evictions);
     }
 
     fn update_transfer(&self, id: u64, update: impl FnOnce(&mut VaultTransferSnapshot)) {
-        if let Ok(mut transfers) = self.transfers.lock()
-            && let Some(snapshot) = transfers.iter_mut().find(|item| item.id == id)
-        {
-            update(snapshot);
-        }
+        self.transfers.update(id, update);
     }
 
     fn finish_transfer(&self, id: u64, started: Instant, package_id: Option<String>) {
@@ -1543,15 +2240,20 @@ impl VaultOwner {
     }
 
     fn refresh_status(&self) {
-        if let Ok(mut status) = self.status.lock() {
-            *status = status_for(self.record.as_ref(), self.master_key.is_none());
+        if let Ok(mut session) = self.session.lock() {
+            session.publish(
+                self.session_generation,
+                self.record.clone(),
+                self.master_key.clone(),
+                self.historical_key.clone(),
+            );
         }
     }
 }
 
 pub(crate) struct TransferSessionLog {
     pub(crate) path: PathBuf,
-    writer: std::io::BufWriter<std::fs::File>,
+    writer: crate::session_log_writer::SessionLogWriter,
 }
 
 #[derive(Clone, Copy)]
@@ -1576,25 +2278,40 @@ impl TransferSessionLog {
         transfer_id: u64,
     ) -> Result<Self, ApplicationError> {
         let directory = library.managed_directories()?.logs.join("Transfers");
-        std::fs::create_dir_all(&directory).map_err(map_log_io)?;
         let path = directory.join(format!(
             "{}-{transfer_id}.jsonl",
             session_kind.file_prefix()
         ));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(map_log_io)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(map_log_io)?;
-        }
+        // This constructor runs on the transfer owner, before network work.
+        // Once opened, callbacks only stage bounded records for the log actor.
+        let file = (|| -> std::io::Result<std::fs::File> {
+            std::fs::create_dir_all(&directory)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let file = options.open(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(file)
+        })();
+        let file = match file {
+            Ok(file) => Some(file),
+            Err(error) => {
+                tracing::warn!(event = "transfer.logs.open_failed", error_kind = ?error.kind(),
+                    "diagnostic log unavailable; transfer remains enabled");
+                None
+            }
+        };
         Ok(Self {
             path,
-            writer: std::io::BufWriter::new(file),
+            writer: crate::session_log_writer::SessionLogWriter::new(file),
         })
     }
 
@@ -1782,6 +2499,36 @@ fn recommended_encryption_worker_count() -> u16 {
         .clamp(1, MAX_ENCRYPTION_WORKERS)
 }
 
+fn vault_transfer_evictions(transfers: &[&VaultTransferSnapshot]) -> Option<Vec<u64>> {
+    if transfers.len() < 256 {
+        return Some(Vec::new());
+    }
+    let item = transfers.iter().find(|item| {
+        !matches!(
+            item.state,
+            VaultTransferState::Queued | VaultTransferState::Running
+        ) && item.batch_id.is_none_or(|batch| {
+            transfers.iter().all(|member| {
+                member.batch_id != Some(batch)
+                    || member.account_id != item.account_id
+                    || !matches!(
+                        member.state,
+                        VaultTransferState::Queued | VaultTransferState::Running
+                    )
+            })
+        })
+    })?;
+    Some(match item.batch_id {
+        Some(batch) => transfers
+            .iter()
+            .filter(|member| member.batch_id == Some(batch) && member.account_id == item.account_id)
+            .map(|member| member.id)
+            .collect(),
+        None => vec![item.id],
+    })
+}
+
+#[cfg(test)]
 fn retain_transfer_snapshot(
     transfers: &mut Vec<VaultTransferSnapshot>,
     snapshot: VaultTransferSnapshot,
@@ -1790,34 +2537,10 @@ fn retain_transfer_snapshot(
         *existing = snapshot;
         return;
     }
-    if transfers.len() >= 256 {
-        // The serialized owner can have at most one 128-file active batch.
-        // Evict a complete historical group, never truncate its member count.
-        let Some(index) = transfers.iter().position(|item| {
-            !matches!(
-                item.state,
-                VaultTransferState::Queued | VaultTransferState::Running
-            ) && item.batch_id.is_none_or(|batch| {
-                transfers.iter().all(|member| {
-                    member.batch_id != Some(batch)
-                        || member.account_id != item.account_id
-                        || !matches!(
-                            member.state,
-                            VaultTransferState::Queued | VaultTransferState::Running
-                        )
-                })
-            })
-        }) else {
-            return;
-        };
-        if let Some(batch_id) = transfers[index].batch_id {
-            let account_id = transfers[index].account_id;
-            transfers
-                .retain(|item| item.batch_id != Some(batch_id) || item.account_id != account_id);
-        } else {
-            transfers.remove(index);
-        }
-    }
+    let Some(removed) = vault_transfer_evictions(&transfers.iter().collect::<Vec<_>>()) else {
+        return;
+    };
+    transfers.retain(|item| !removed.contains(&item.id));
     transfers.push(snapshot);
 }
 
@@ -1890,6 +2613,10 @@ fn read_source_part(source: &Path, descriptor: PipelinePart) -> Result<Vec<u8>, 
 
 fn map_pipeline_error(error: EncryptionPipelineError<TransferError>) -> ApplicationError {
     match error {
+        EncryptionPipelineError::Read {
+            source: TransferError::PermissionDenied,
+            ..
+        } => ApplicationError::new(ApplicationErrorKind::SourcePermissionDenied),
         EncryptionPipelineError::Read { source, .. }
         | EncryptionPipelineError::Encrypt { source, .. }
         | EncryptionPipelineError::Upload { source, .. } => map_transfer_error(source),
@@ -1987,6 +2714,9 @@ fn upper_hex_nibble(value: u8) -> Result<u8, ApplicationError> {
 
 fn status_for(record: Option<&VaultMetadataRecord>, locked: bool) -> VaultStatus {
     record.map_or_else(VaultStatus::unconfigured, |record| VaultStatus {
+        active_key_locked: locked,
+        historical_key_unlocked: false,
+        active_vault_id: Some(record.vault_id),
         configured: true,
         locked,
         created_at_unix_ms: Some(record.created_at_unix_ms),
@@ -2014,6 +2744,14 @@ fn managed_file_from_recovered(
         .collect::<Vec<_>>();
     related_remote_names.push(recovered.object.name.clone());
     Ok(ManagedVaultFile {
+        vault_id: Some(manifest.public_header.vault_id),
+        health: crate::VaultFileHealth::Unchecked,
+        part_message_ids: manifest
+            .metadata
+            .parts
+            .iter()
+            .map(|part| part.remote_locator.message_id)
+            .collect(),
         package_numeric_id: package_id_from_bytes(manifest.public_header.package_id)
             .map_err(map_transfer_error)?
             .get(),
@@ -2096,7 +2834,7 @@ fn discard_partial(destination: &Path) {
 fn map_source_io(error: std::io::Error) -> ApplicationError {
     ApplicationError::new(match error.kind() {
         std::io::ErrorKind::NotFound => ApplicationErrorKind::SourceMissing,
-        std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+        std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::SourcePermissionDenied,
         _ => ApplicationErrorKind::SourceChanged,
     })
 }
@@ -2169,6 +2907,7 @@ mod tests {
         log.append_part_confirmed(0, 25, 2_048, &decision, &telemetry)?;
         log.append_finished(30, None, &telemetry)?;
         let path = log.path.clone();
+        log.writer.wait_until_idle();
         drop(log);
 
         let contents = std::fs::read_to_string(&path)?;
@@ -2212,9 +2951,9 @@ mod tests {
                 .snapshot(),
             state: VaultTransferState::Running,
         };
-        let transfers = Arc::new(Mutex::new(vec![fixture]));
+        let transfers = Arc::new(TransferSnapshots::new(vec![fixture]).expect("snapshot store"));
         let observer = VaultUploadObserver::new(transfers.clone(), 1);
-        let snapshot = || transfers.lock().expect("test snapshot lock")[0].clone();
+        let snapshot = || transfers.get(1).expect("test snapshot");
         observer.begin_part(60 * 1024 * 1024);
         observer.observe(ByteTransferEvent::Uploading {
             bytes: 512 * 1024,
@@ -2256,8 +2995,9 @@ mod tests {
             snapshot().upload_activity.expect("upload activity").phase,
             VaultUploadPhase::Publishing
         );
-        transfers.lock().expect("test snapshot lock")[0].state =
-            VaultTransferState::Failed(ApplicationErrorKind::Network);
+        transfers.update(1, |row| {
+            row.state = VaultTransferState::Failed(ApplicationErrorKind::Network)
+        });
         let before = snapshot();
         observer.phase(VaultUploadPhase::Preparing);
         observer.observe(ByteTransferEvent::Uploading {
@@ -2279,18 +3019,23 @@ mod tests {
             let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3"))?;
             assert_eq!(library.storage_channel_id(100)?, None);
             let mut owner = VaultOwner {
-                telegram: DesktopTelegram::open(temp.path().join("test.session"))?,
+                catalog: catalog::ManifestCache::default(),
+                catalog_key_revision: 0,
+                telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
                 library,
                 record: None,
-                master_key: Some(VaultMasterKey::from_bytes([7; 32])),
-                status: Arc::new(Mutex::new(VaultStatus::unconfigured())),
-                transfers: Arc::new(Mutex::new(Vec::new())),
+                master_key: Some(Arc::new(VaultMasterKey::from_bytes([7; 32]))),
+                historical_key: None,
+                health_worker: None,
+                session: Arc::new(Mutex::new(VaultSession::new(None))),
+                session_generation: 0,
+                transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshot store")),
                 active_upload_batch: Arc::new(Mutex::new(None)),
             };
             let mut calls = 0;
             let report = owner.upload_batch_with_validation(100, 700, paths.clone(), |owner| {
                 calls += 1;
-                let rows = owner.transfers.lock().expect("snapshots");
+                let rows = owner.transfers.all().expect("snapshots");
                 assert_eq!(rows.len(), 2);
                 assert!(
                     rows.iter()
@@ -2320,6 +3065,11 @@ mod tests {
                 assert_eq!(report.cancelled.len(), 2);
             } else {
                 assert_eq!(report.failed.len(), 2);
+                assert!(owner.transfers.all().expect("snapshots").iter().all(|row| {
+                    row.upload_activity
+                        .as_ref()
+                        .is_some_and(|activity| activity.phase == VaultUploadPhase::CheckingStorage)
+                }));
             }
             assert!(
                 owner
@@ -2331,7 +3081,7 @@ mod tests {
             assert!(
                 owner
                     .transfers
-                    .lock()
+                    .all()
                     .expect("snapshots")
                     .iter()
                     .all(|row| row.state
@@ -2375,7 +3125,7 @@ mod tests {
         let database_path = directory.path().join("library.sqlite3");
         let session_path = directory.path().join("telegram.session");
         let library = DesktopLibrary::open(&database_path)?;
-        let telegram = DesktopTelegram::open(&session_path)?;
+        let telegram = DesktopTelegram::open_direct(&session_path)?;
         let vault = DesktopVault::new(telegram.clone(), library.clone())?;
 
         assert_eq!(vault.status(), VaultStatus::unconfigured());
@@ -2422,13 +3172,119 @@ mod tests {
         let recovery_database = directory.path().join("recovered.sqlite3");
         let recovery_session = directory.path().join("recovered.session");
         let recovered_library = DesktopLibrary::open(recovery_database)?;
-        let recovered_telegram = DesktopTelegram::open(recovery_session)?;
+        let recovered_telegram = DesktopTelegram::open_direct(recovery_session)?;
         let recovered = DesktopVault::new(recovered_telegram, recovered_library)?;
         recovered.restore_with_recovery(second_recovery, "post-disaster password".to_owned())?;
         assert!(recovered.status().configured);
         assert!(!recovered.status().locked);
         Ok(())
     }
+    #[test]
+    fn key_epochs_preserve_old_recovery_and_cancel_before_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("epochs.db"))?;
+        let telegram = DesktopTelegram::open_direct(temp.path().join("test.session"))?;
+        let vault = DesktopVault::new(telegram.clone(), library.clone())?;
+        let old_recovery = vault.initialize("old synthetic password".into())?;
+        let old = library.worker.vault_metadata()?.expect("old");
+        let cancelled = VaultKeyProgress::new();
+        cancelled.cancel();
+        assert_eq!(
+            vault
+                .start_new_key_epoch_observed(
+                    "cancelled synthetic password".into(),
+                    cancelled.clone()
+                )
+                .expect_err("cancelled")
+                .kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        assert_eq!(library.worker.vault_metadata()?, Some(old.clone()));
+        assert!(cancelled.snapshot().finished);
+        let progress = VaultKeyProgress::new();
+        let new_recovery = vault
+            .start_new_key_epoch_observed("new synthetic password".into(), progress.clone())?;
+        let new = library.worker.vault_metadata()?.expect("new");
+        assert_ne!(new.vault_id, old.vault_id);
+        assert_ne!(new_recovery, old_recovery);
+        assert_eq!(
+            library.worker.vault_key_epoch(old.vault_id)?,
+            Some(old.clone())
+        );
+        assert!(progress.snapshot().finished);
+        assert_eq!(progress.snapshot().phase, VaultKeyPhase::Completed);
+        assert_eq!(
+            progress
+                .snapshot()
+                .timeline
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>(),
+            vec![
+                VaultKeyPhase::Queued,
+                VaultKeyPhase::Generating,
+                VaultKeyPhase::WrappingPassword,
+                VaultKeyPhase::WrappingRecovery,
+                VaultKeyPhase::Saving,
+                VaultKeyPhase::Completed
+            ]
+        );
+        vault.lock()?;
+        vault.unlock_with_recovery(old_recovery.clone())?;
+        assert!(!vault.status().locked);
+        assert!(vault.status().active_key_locked);
+        assert!(vault.status().historical_key_unlocked);
+        assert_eq!(library.worker.vault_metadata()?, Some(new.clone()));
+        vault.unlock_with_password("new synthetic password".into())?;
+        assert!(!vault.status().active_key_locked);
+        let reopened = DesktopVault::new(telegram, library.clone())?;
+        reopened.unlock_with_recovery(old_recovery)?;
+        assert!(reopened.status().historical_key_unlocked);
+        assert_eq!(library.worker.vault_key_epoch(old.vault_id)?, Some(old));
+        assert_eq!(library.worker.vault_metadata()?, Some(new));
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_health_owner_does_not_block_vault_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (release, wait) = mpsc::channel();
+        let (started, ready) = mpsc::channel();
+        let worker =
+            health::HealthWorker::spawn(crate::TelegramScanCancellation::new(), move || {
+                started.send(()).expect("started");
+                let _ = wait.recv();
+            })?;
+        ready.recv()?;
+        let mut owner = VaultOwner {
+            catalog: catalog::ManifestCache::default(),
+            catalog_key_revision: 0,
+            library: DesktopLibrary::open(temp.path().join("health.db"))?,
+            telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
+            record: None,
+            master_key: None,
+            historical_key: None,
+            health_worker: Some(worker),
+            session: Arc::new(Mutex::new(VaultSession::new(None))),
+            session_generation: 0,
+            transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
+            active_upload_batch: Arc::new(Mutex::new(None)),
+        };
+        owner.initialize("synthetic independent password")?;
+        assert!(
+            !owner
+                .health_worker
+                .as_ref()
+                .expect("retained worker")
+                .is_finished()
+        );
+        assert!(owner.master_key.is_some());
+        release.send(())?;
+        Ok(())
+    }
+
     #[test]
     fn bounded_history_evicts_whole_completed_batches_and_keeps_active_members() {
         let fixture = VaultTransferSnapshot {

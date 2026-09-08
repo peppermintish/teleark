@@ -15,16 +15,77 @@ use gpui_kit::{
 };
 
 impl TeleArkApp {
+    pub(crate) fn render_vault_key_progress(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(progress) = &self.vault_key_progress else {
+            return div().into_any_element();
+        };
+        let state = progress.snapshot();
+        let elapsed = if state.finished {
+            state.last_activity.duration_since(state.phase_since)
+        } else {
+            state.phase_since.elapsed()
+        };
+        div()
+            .p_3()
+            .max_h(px(140.0))
+            .id("vault-key-progress")
+            .overflow_y_scroll()
+            .text_sm()
+            .child(self.tr(key_phase_id(state.phase)))
+            .child(
+                div().mt_1().text_xs().child(
+                    self.tr_with(
+                        "vault-key-phase-time",
+                        teleark_i18n::MessageArgs::new()
+                            .with("seconds", elapsed.as_secs().to_string())
+                            .with("idle", state.last_activity.elapsed().as_secs().to_string()),
+                    ),
+                ),
+            )
+            .child(
+                div().mt_1().text_xs().child(
+                    state
+                        .timeline
+                        .iter()
+                        .map(|(phase, millis)| {
+                            format!("{} · {}s", self.tr(key_phase_id(*phase)), millis / 1000)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" → "),
+                ),
+            )
+            .when(!state.finished, |body| {
+                body.child(
+                    components::button(
+                        "cancel-key-creation",
+                        self.tr("common-cancel"),
+                        None,
+                        false,
+                    )
+                    .mt_2()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(progress) = &this.vault_key_progress {
+                            progress.cancel();
+                        }
+                        cx.notify();
+                    })),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(crate) fn render_unlock_dialog(
         &self,
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let working = self.vault_activity == VaultActivity::Working;
-        let setup = !self.vault_status.configured;
+        let setup = !self.vault_status.configured || self.vault_new_epoch_confirmation;
         let recovery = self.vault_recovery_secret.is_some();
         let title = self.tr(if recovery {
             "vault-recovery-save-now-title"
+        } else if self.vault_new_epoch_confirmation {
+            "vault-epoch-confirm-action"
         } else if setup {
             "vault-create-action"
         } else {
@@ -79,6 +140,16 @@ impl TeleArkApp {
                             ),
                     ),
             )
+            .when(self.vault_new_epoch_confirmation, |popup| {
+                popup.child(
+                    div()
+                        .mt_4()
+                        .p_3()
+                        .bg(theme::amber_soft())
+                        .text_sm()
+                        .child(self.tr("vault-epoch-confirm-description")),
+                )
+            })
             .when(!recovery, |popup| {
                 popup
                     .child(
@@ -117,7 +188,9 @@ impl TeleArkApp {
                     .child(
                         components::button(
                             "unlock-submit",
-                            self.tr(if setup {
+                            self.tr(if self.vault_new_epoch_confirmation {
+                                "vault-epoch-confirm-action"
+                            } else if setup {
                                 "vault-create-action"
                             } else {
                                 "vault-unlock-password-action"
@@ -129,7 +202,7 @@ impl TeleArkApp {
                         .w_full()
                         .disabled(working)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            if this.vault_status.configured {
+                            if this.vault_status.configured && !this.vault_new_epoch_confirmation {
                                 this.unlock_vault_with_password(window, cx);
                             } else {
                                 this.initialize_vault(window, cx);
@@ -150,6 +223,21 @@ impl TeleArkApp {
                             cx.notify();
                         })),
                     )
+                    .when(!setup, |popup| {
+                        popup.child(
+                            components::button(
+                                "unlock-lost-all-keys",
+                                self.tr("vault-epoch-lost-action"),
+                                None,
+                                false,
+                            )
+                            .mt_2()
+                            .disabled(working)
+                            .on_click(cx.listener(
+                                |this, _, window, cx| this.request_new_key_epoch(window, cx),
+                            )),
+                        )
+                    })
                     .when(self.vault_advanced_expanded, |popup| {
                         popup
                             .child(
@@ -174,7 +262,9 @@ impl TeleArkApp {
                                 .disabled(working)
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
-                                        if this.vault_status.configured {
+                                        if this.vault_status.configured
+                                            && !this.vault_new_epoch_confirmation
+                                        {
                                             this.unlock_vault_with_recovery(window, cx);
                                         } else {
                                             this.restore_vault_with_recovery(window, cx);
@@ -228,6 +318,9 @@ impl TeleArkApp {
                         })),
                     )
             })
+            .when(self.vault_key_progress.is_some(), |popup| {
+                popup.child(self.render_vault_key_progress(cx))
+            })
             .when_some(
                 super::settings::vault_activity_message(self),
                 |popup, (message, tone)| {
@@ -258,7 +351,7 @@ impl TeleArkApp {
         let submit = cx.listener(|this, _, window, cx| {
             if this.vault_activity != VaultActivity::Working && this.vault_recovery_secret.is_none()
             {
-                if this.vault_status.configured {
+                if this.vault_status.configured && !this.vault_new_epoch_confirmation {
                     this.unlock_vault_with_password(window, cx);
                 } else {
                     this.initialize_vault(window, cx);
@@ -282,5 +375,17 @@ impl TeleArkApp {
                 false
             })
             .into_any_element()
+    }
+}
+
+fn key_phase_id(phase: teleark_runtime::VaultKeyPhase) -> &'static str {
+    use teleark_runtime::VaultKeyPhase;
+    match phase {
+        VaultKeyPhase::Queued => "vault-key-phase-queued",
+        VaultKeyPhase::Generating => "vault-key-phase-generating",
+        VaultKeyPhase::WrappingPassword => "vault-key-phase-password",
+        VaultKeyPhase::WrappingRecovery => "vault-key-phase-recovery",
+        VaultKeyPhase::Saving => "vault-key-phase-saving",
+        VaultKeyPhase::Completed => "vault-key-phase-completed",
     }
 }

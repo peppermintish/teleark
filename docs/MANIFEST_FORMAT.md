@@ -1,12 +1,11 @@
 # TeleArk Manifest Format
 
-Status: **provisional, integrated v1 codec candidate**. `teleark-crypto` can
-deterministically seal/open and strictly validate the candidate manifest, and
-`teleark-runtime` now publishes it after verified parts, discovers it by a
-common remote caption, recovers the File Key/layout/locators, and completes an
-exact download with a fresh SQLite database in deterministic integration tests.
-Exact bytes may change before v1 stabilization; after release, incompatible
-changes require a new major version and old fixtures remain readable.
+Format: **implemented version 1**. `teleark-crypto` seals/opens and strictly
+validates the manifest. Runtime publishes it after verified parts, discovers it
+by a common remote caption and recovers the File Key/layout/locators. Deterministic
+integration tests restore exact contents with a fresh SQLite database.
+Incompatible changes require a new major version and automatic migration for
+supported upgrades; old fixtures remain readable. See [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
 ## Role
 
@@ -19,9 +18,8 @@ File Key resolution, validates bounded canonical metadata and exact
 part/container bindings, derives opaque remote names, and redacts sensitive
 fields from `Debug`. The retained desktop Vault owner now uses those mechanics
 for private-channel upload, authenticated managed-file discovery, and verified
-restore. This remains an alpha workflow rather than a release recovery
-guarantee because the format is provisional and credentialed crash/system and
-independent security tests remain.
+restore. Credentialed crash/system recovery coverage is tracked as concrete
+validation work in [status](IMPLEMENTATION_STATUS.md).
 
 ## Design properties
 
@@ -36,7 +34,7 @@ independent security tests remain.
 
 ## Remote names
 
-When hidden filenames are enabled, upload opaque ASCII names derived only from package identity, kind, version, and index. The provisional shape is:
+When hidden filenames are enabled, upload opaque ASCII names derived only from package identity, kind, version, and index. The version-1 shape is:
 
 ```text
 <lowercase-hex-package-id>.v1.manifest.tam
@@ -44,7 +42,7 @@ When hidden filenames are enabled, upload opaque ASCII names derived only from p
 <lowercase-hex-package-id>.v1.000001.part.tav
 ```
 
-The provisional discovery captions paired with those names are:
+The version-1 discovery captions paired with those names are:
 
 ```text
 teleark-manifest-v1
@@ -56,11 +54,11 @@ an object is a candidate manifest or part. This is classification only: it must
 not expose encrypted metadata as trusted or claim a package is recoverable
 until the bounded codec authenticates the manifest and validates its locators.
 
-No original filename/path appears in the Telegram remote name or caption. Remote naming intentionally leaks package linkage, kind, format generation, and part ordering; it does not promise traffic-analysis resistance. A final naming alphabet/length and Telegram behavior must be verified before v1 fixtures are frozen.
+No original filename/path appears in the Telegram remote name or caption. Remote naming intentionally leaks package linkage, kind, format generation, and part ordering; it does not promise traffic-analysis resistance. Names and captions are part of versioned discovery; incompatible changes need matching readers and migration coverage.
 
 ## Envelope
 
-The candidate envelope is:
+The version-1 envelope is:
 
 ```text
 magic                       8 bytes   ASCII "TARKMAN\0"
@@ -73,7 +71,7 @@ encrypted_metadata          encrypted_metadata_length bytes
 authentication_tag          16 bytes
 ```
 
-CBOR follows the required RFC 8949 deterministic subset: definite lengths, shortest integer forms, canonical numeric map-key order, no duplicate keys, and no unsupported tags/floats. The candidate uses a small explicit bounded encoder/decoder rather than binding persistence to Serde or an in-memory Rust layout. Tests reject non-shortest integers, indefinite values, reordered/duplicate keys, unsupported types, trailing bytes, and excessive claims.
+CBOR follows the required RFC 8949 deterministic subset: definite lengths, shortest integer forms, canonical numeric map-key order, no duplicate keys, and no unsupported tags/floats. The codec uses a small explicit bounded encoder/decoder rather than binding persistence to Serde or an in-memory Rust layout. Tests reject non-shortest integers, indefinite values, reordered/duplicate keys, unsupported types, trailing bytes, and excessive claims.
 
 The exact envelope prefix plus exact canonical `public_header` bytes are AAD for metadata encryption. Authentication therefore covers magic/version/lengths and every public field.
 
@@ -91,13 +89,13 @@ The deterministic CBOR public header uses unsigned integer keys; symbolic names 
 | 6 | `part_count` | unsigned 32-bit, bounded and consistent with metadata |
 | 7 | `application_part_target` | unsigned 64-bit bytes; descriptive, not assumed for final part |
 | 8 | `frame_plaintext_max` | unsigned 32-bit bytes |
-| 9 | `nonce_strategy_id` | unsigned 16-bit; candidate strategy `1` |
-| 10 | `crypto_suite_id` | unsigned 16-bit; candidate suite `1` |
+| 9 | `nonce_strategy_id` | unsigned 16-bit; strategy `1` |
+| 10 | `crypto_suite_id` | unsigned 16-bit; suite `1` |
 | 11 | `file_key_wrap` | nested required map described below |
 | 12 | `master_key_generation` | unsigned 32-bit |
 | 13 | `flags` | unsigned 32-bit; all v1 bits currently zero/required understood |
 
-`file_key_wrap` contains wrap algorithm ID, wrapped File Key ciphertext (32 bytes for suite 1), GCM tag (16 bytes), and any explicitly required generation/derivation metadata. The candidate derivation and zero nonce are defined in `CRYPTO_FORMAT.md`; nonce/key rules are not inferred from field absence.
+`file_key_wrap` contains wrap algorithm ID, wrapped File Key ciphertext (32 bytes for suite 1), GCM tag (16 bytes), and any explicitly required generation/derivation metadata. The version-1 derivation and zero nonce are defined in `CRYPTO_FORMAT.md`; nonce/key rules are not inferred from field absence.
 
 The public header intentionally exposes approximate logical size, part/frame counts/parameters, package/vault linkage, and creation time. Original name/path, hashes, media metadata, and locators remain encrypted.
 
@@ -160,8 +158,9 @@ Public-header tampering changes AAD or key derivation and fails authentication. 
 - Unknown noncritical metadata fields may be ignored after successful authentication; rewrite tools should preserve them when the codec policy requires roundtripping.
 - Writers emit one canonical representation for a version.
 - Released readers retain fixtures for all supported versions; internal struct changes cannot alter encoded output accidentally.
+- Upgrades recognize older supported manifests automatically. Retain the old reader or convert to a new authenticated generation with fresh encryption identities. Verify the replacement before switching authority; keep the original recovery path intact through interruption. Migration progress reaches the UI before scanning/conversion begins.
 
-Provisional parser limits for v1 are: public header at most 64 KiB, encrypted metadata at most 64 MiB, part count at most 1,000,000, bounded strings/arrays/nesting, and checked total sizes. Final values require recovery-scale tests and may become stricter. Limits are applied before allocation and must not conflict with valid stated maximum file/part geometry.
+Parser limits for v1 are: public header at most 64 KiB, encrypted metadata at most 64 MiB, part count at most 1,000,000, bounded strings/arrays/nesting, and checked total sizes. Changes to these limits require recovery-scale tests and a read/conversion path for previously valid supported data. Limits are applied before allocation and must not conflict with valid stated maximum file/part geometry.
 
 ## Upload publication and authority
 
@@ -197,13 +196,12 @@ package IDs/generations, conflicting manifests, missing parts, cross-account
 locators, and unexpected objects require deterministic conflict handling and
 user-visible structured status. Recovery never deletes remote objects automatically.
 
-## Candidate fixtures and remaining recovery tests
+## Versioned fixtures and recovery tests
 
 A fixed Unicode multipart fixture now lives under `crates/teleark-crypto/tests/vectors/manifest_v1/`; deterministic tests also cover empty manifests. The suite covers encode/decode, wrong keys, envelope/header/metadata tamper, duplicate/noncanonical keys, unknown versions/suites/flags, length/offset overflow, excessive allocation claims, invalid UTF-8, unsafe relative paths, duplicate/reordered/missing/overlapping parts, locator/name mismatch, part-container binding, duplicate manifest-generation identity, and hostile mutation/truncation corpora.
 
-Before stabilization, add released-version compatibility fixtures, longer
-recorded fuzz campaigns, conflict/generation recovery policy tests, credentialed
-Telegram system recovery, and independent security review. The deterministic
+Extend supported-version migration fixtures, recorded fuzz campaigns,
+conflict/generation recovery policy tests and credentialed Telegram system recovery. The deterministic
 acceptance test now creates a fresh SQLite database, recovers through the
 authenticated remote Manifest without a caller-supplied File Key/layout,
 downloads/decrypts, and proves the recovered BLAKE3/plaintext exactly matches

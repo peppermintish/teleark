@@ -27,8 +27,16 @@ use teleark_transfer::{
 
 use crate::{
     DesktopLibrary, DesktopTelegram, DownloadThroughputStrategy,
+    transfer_updates::{
+        TransferRecord, TransferSnapshotView, TransferSnapshots, TransferSubscription,
+    },
     vault::{TransferSessionKind, TransferSessionLog},
 };
+
+mod history_retention;
+use history_retention::{HistoryRetention, bound_lifecycle, compact_idle_replays};
+mod part_history;
+pub use part_history::PartEventHistory;
 
 const CHANNEL_DOWNLOAD_QUEUE_CAPACITY: usize = 32;
 const CHANNEL_DOWNLOAD_BATCH_CAPACITY: usize = 5_000;
@@ -186,9 +194,24 @@ pub struct ChannelDownloadSnapshot {
     pub attempts: u32,
     pub failure: Option<ChannelDownloadFailure>,
     pub events: Vec<ChannelDownloadEvent>,
-    pub part_events: Vec<ChannelDownloadPartEvent>,
+    pub event_history_omitted: u64,
+    pub part_events: PartEventHistory,
     pub session_log_path: Option<PathBuf>,
     pub telemetry: TransferTelemetrySnapshot,
+}
+
+impl TransferRecord for ChannelDownloadSnapshot {
+    type Phase = (
+        ChannelDownloadState,
+        ChannelDownloadVerification,
+        Option<i64>,
+    );
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn phase(&self) -> Self::Phase {
+        (self.state, self.verification, self.account_id)
+    }
 }
 
 #[derive(Clone)]
@@ -203,15 +226,17 @@ pub struct TransferRates {
 }
 
 struct TransferWorkerInner {
-    active_account: std::sync::atomic::AtomicI64,
-    sender: Mutex<Option<mpsc::SyncSender<TransferCommand>>>,
-    snapshots: Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    active_account: Arc<std::sync::atomic::AtomicI64>,
+    sender: Arc<Mutex<Option<mpsc::SyncSender<TransferCommand>>>>,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
     controls: Arc<Mutex<BTreeMap<u64, Arc<AtomicU8>>>>,
     scheduled: Arc<Mutex<BTreeSet<u64>>>,
     shutdown: Arc<AtomicBool>,
     library: DesktopLibrary,
     backend: Arc<dyn ChannelDownloadBackend>,
     join: Mutex<Option<JoinHandle<()>>>,
+    pump: Arc<QueuePump>,
+    retention: HistoryRetention,
 }
 
 enum TransferCommand {
@@ -283,7 +308,7 @@ struct RuntimeDownloadObserver {
     size_bytes: u64,
     control: Arc<AtomicU8>,
     shutdown: Arc<AtomicBool>,
-    snapshots: Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
     library: DesktopLibrary,
     started: Instant,
     previous_duration_ms: u64,
@@ -344,15 +369,6 @@ impl DownloadObserver for RuntimeDownloadObserver {
                 .checked_mul(1_000)
                 .map(|remaining| remaining / speed.max(1))
         });
-        let snapshot = update_snapshot(&self.snapshots, self.id, |snapshot| {
-            snapshot.transferred_bytes = transferred_bytes.min(snapshot.size_bytes);
-            snapshot.current_bytes_per_second = current_speed;
-            snapshot.eta_ms = eta_ms;
-            snapshot.duration_ms = Some(
-                self.previous_duration_ms
-                    .saturating_add(elapsed_millis(self.started.elapsed())),
-            );
-        });
         let should_persist = self.last_persisted.lock().is_ok_and(|mut persisted| {
             if now.duration_since(*persisted) >= PROGRESS_PERSIST_INTERVAL
                 || transferred_bytes >= self.size_bytes
@@ -363,16 +379,27 @@ impl DownloadObserver for RuntimeDownloadObserver {
                 false
             }
         });
-        if should_persist
-            && let Some(snapshot) = snapshot
-            && let Err(error) = persist_snapshot(&self.library, &snapshot)
-        {
-            tracing::warn!(
-                event = "transfer.download.checkpoint_failed",
-                task_id = self.id,
-                error_kind = ?error.kind(),
-                "native Telegram download checkpoint could not be persisted"
+        let snapshot = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
+            snapshot.transferred_bytes = transferred_bytes.min(snapshot.size_bytes);
+            snapshot.current_bytes_per_second = current_speed;
+            snapshot.eta_ms = eta_ms;
+            snapshot.duration_ms = Some(
+                self.previous_duration_ms
+                    .saturating_add(elapsed_millis(self.started.elapsed())),
             );
+            should_persist.then(|| snapshot.clone())
+        })
+        .flatten();
+        if let Some(snapshot) = snapshot {
+            let queued = snapshot_record(&snapshot)
+                .is_ok_and(|record| self.library.try_save_native_download_progress(record));
+            if !queued {
+                tracing::warn!(
+                    event = "transfer.download.checkpoint_deferred",
+                    task_id = self.id,
+                    "storage queue unavailable; live progress retained and final state uses acknowledged persistence"
+                );
+            }
         }
     }
 
@@ -410,16 +437,16 @@ impl RuntimeDownloadObserver {
             attempt: event.attempt,
             elapsed_millis: event.elapsed_millis,
         };
-        let snapshot = update_snapshot(&self.snapshots, self.id, |snapshot| {
-            if snapshot.part_events.len() >= 8_192 {
-                snapshot.part_events.remove(0);
-            }
+        let snapshot = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
             snapshot.part_events.push(part_event);
-            snapshot.telemetry.parts = current_part_counters(
-                &snapshot.part_events,
+            snapshot.telemetry.parts = snapshot.part_events.counters(
                 snapshot.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES),
+                snapshot
+                    .transferred_bytes
+                    .div_ceil(DOWNLOAD_PART_SIZE_BYTES),
                 0,
             );
+            (snapshot.current_bytes_per_second, snapshot.telemetry.parts)
         });
         if event.state != DownloadPartState::Completed
             && let Ok(mut log) = self.session_log.lock()
@@ -432,11 +459,11 @@ impl RuntimeDownloadObserver {
             let elapsed_ms = elapsed_millis(self.started.elapsed()).max(1);
             let current_speed = snapshot
                 .as_ref()
-                .and_then(|snapshot| snapshot.current_bytes_per_second)
+                .and_then(|(speed, _)| *speed)
                 .unwrap_or_default();
             let part_counters = snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.telemetry.parts)
+                .map(|(_, parts)| *parts)
                 .unwrap_or_default();
             if let Ok(mut controller) = self.controller.lock() {
                 let inflight_parts_per_file = controller.parameters().inflight_parts_per_file;
@@ -475,7 +502,7 @@ impl RuntimeDownloadObserver {
                         &telemetry,
                     );
                 }
-                let _ = update_snapshot(&self.snapshots, self.id, |snapshot| {
+                let _ = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
                     snapshot.telemetry = telemetry;
                 });
             }
@@ -486,11 +513,11 @@ impl RuntimeDownloadObserver {
         let elapsed_ms = elapsed_millis(self.started.elapsed()).max(1);
         let current_speed = snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.current_bytes_per_second)
+            .and_then(|(speed, _)| *speed)
             .unwrap_or_default();
         let completed_parts = snapshot
             .as_ref()
-            .map_or(0, |snapshot| snapshot.telemetry.parts.completed_parts);
+            .map_or(0, |(_, parts)| parts.completed_parts);
         let total_parts = self.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES);
         let completed_parts_per_second_milli = completed_parts
             .saturating_mul(1_000_000)
@@ -504,12 +531,9 @@ impl RuntimeDownloadObserver {
                 completed_parts_per_second_milli,
                 ..PartCounters::default()
             },
-            |snapshot| {
-                current_part_counters(
-                    &snapshot.part_events,
-                    total_parts,
-                    completed_parts_per_second_milli,
-                )
+            |(_, parts)| PartCounters {
+                completed_parts_per_second_milli,
+                ..*parts
             },
         );
         let mut controller = match self.controller.lock() {
@@ -552,36 +576,9 @@ impl RuntimeDownloadObserver {
                 &telemetry,
             );
         }
-        let _ = update_snapshot(&self.snapshots, self.id, |snapshot| {
+        let _ = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
             snapshot.telemetry = telemetry;
         });
-    }
-}
-
-fn current_part_counters(
-    events: &[ChannelDownloadPartEvent],
-    total_parts: u64,
-    completed_parts_per_second_milli: u64,
-) -> PartCounters {
-    let mut current_states = BTreeMap::new();
-    for event in events {
-        current_states.insert(event.part_index, event.state);
-    }
-    let count = |state| {
-        current_states
-            .values()
-            .filter(|current| **current == state)
-            .count() as u64
-    };
-    let completed_parts = count(DownloadPartState::Completed);
-    PartCounters {
-        total_parts,
-        completed_parts,
-        inflight_parts: count(DownloadPartState::Inflight),
-        retry_parts: count(DownloadPartState::Retry),
-        failed_parts: count(DownloadPartState::Failed),
-        missing_parts: total_parts.saturating_sub(completed_parts),
-        completed_parts_per_second_milli,
     }
 }
 
@@ -598,7 +595,12 @@ impl DesktopTransfers {
         library: DesktopLibrary,
     ) -> Result<Self, ApplicationError> {
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_DOWNLOAD_QUEUE_CAPACITY);
-        let restored = library.native_downloads()?;
+        let (restored, omitted) = library.native_download_history()?;
+        let retention = HistoryRetention::new(
+            restored.len(),
+            omitted,
+            teleark_storage::NATIVE_DOWNLOAD_HISTORY_LIMIT,
+        );
         let transfer_log_directory = library.managed_directories()?.logs.join("Transfers");
         let mut snapshots = Vec::with_capacity(restored.len());
         let mut controls = BTreeMap::new();
@@ -634,10 +636,21 @@ impl DesktopTransfers {
             }
             snapshots.push(snapshot);
         }
-        let snapshots = Arc::new(Mutex::new(snapshots));
+        let snapshots = Arc::new(TransferSnapshots::new(snapshots)?);
         let controls = Arc::new(Mutex::new(controls));
         let scheduled = Arc::new(Mutex::new(BTreeSet::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let active_account = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let pump = Arc::new(QueuePump {
+            active_account: active_account.clone(),
+            sender: sender.clone(),
+            snapshots: snapshots.clone(),
+            controls: controls.clone(),
+            scheduled: scheduled.clone(),
+            shutdown: shutdown.clone(),
+        });
+        let worker_pump = pump.clone();
         let worker_snapshots = Arc::clone(&snapshots);
         let worker_scheduled = Arc::clone(&scheduled);
         let worker_shutdown = Arc::clone(&shutdown);
@@ -653,13 +666,14 @@ impl DesktopTransfers {
                     worker_scheduled,
                     worker_shutdown,
                     worker_library,
+                    worker_pump,
                 );
             })
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
         Ok(Self {
             inner: Arc::new(TransferWorkerInner {
-                active_account: std::sync::atomic::AtomicI64::new(0),
-                sender: Mutex::new(Some(sender)),
+                active_account,
+                sender,
                 snapshots,
                 controls,
                 scheduled,
@@ -667,6 +681,8 @@ impl DesktopTransfers {
                 library,
                 backend,
                 join: Mutex::new(Some(join)),
+                pump,
+                retention,
             }),
         })
     }
@@ -677,17 +693,29 @@ impl DesktopTransfers {
     ) -> Result<u64, ApplicationError> {
         validate_request(&request)?;
         self.require_active_account(Some(request.account_id))?;
-        if self.snapshots()?.iter().any(|snapshot| {
-            snapshot.destination == request.destination
-                && matches!(
-                    snapshot.state,
-                    ChannelDownloadState::Queued
-                        | ChannelDownloadState::Running
-                        | ChannelDownloadState::Paused
-                )
-        }) {
+        let conflict = self
+            .inner
+            .snapshots
+            .fold(false, |found, snapshot| {
+                found
+                    || (snapshot.destination == request.destination
+                        && matches!(
+                            snapshot.state,
+                            ChannelDownloadState::Queued
+                                | ChannelDownloadState::Running
+                                | ChannelDownloadState::Paused
+                        ))
+            })
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        if conflict {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
+        let reservation = self.inner.retention.reserve(
+            1,
+            &self.inner.snapshots,
+            &self.inner.controls,
+            &self.inner.scheduled,
+        )?;
         let queued_at_unix_ms = unix_time_millis()?;
         let stored = self
             .inner
@@ -704,14 +732,13 @@ impl DesktopTransfers {
                 destination: request.destination,
                 created_at_unix_ms: queued_at_unix_ms,
             })?;
+        reservation.commit();
         let snapshot = snapshot_from_record(stored);
         let id = snapshot.id;
         let control = Arc::new(AtomicU8::new(CONTROL_RUNNING));
-        self.inner
-            .snapshots
-            .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-            .push(snapshot.clone());
+        if !self.inner.snapshots.insert(snapshot.clone()) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Persistence));
+        }
         self.inner
             .controls
             .lock()
@@ -732,11 +759,15 @@ impl DesktopTransfers {
     /// Creates a new attempt from historical source metadata, allocating a new
     /// destination. The completed record and any existing file remain intact.
     pub fn redownload_completed(&self, task_id: u64) -> Result<u64, ApplicationError> {
-        let snapshot = self
-            .snapshots()?
-            .into_iter()
-            .find(|item| item.id == task_id)
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        let snapshot = match self.inner.snapshots.get(task_id) {
+            Some(snapshot) => snapshot,
+            None => self
+                .inner
+                .library
+                .native_download(task_id)?
+                .map(snapshot_from_record)
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?,
+        };
         self.require_active_account(snapshot.account_id)?;
         if snapshot.state != ChannelDownloadState::Completed {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
@@ -774,23 +805,35 @@ impl DesktopTransfers {
         if requests.iter().any(|request| request.chat_id != chat_id) {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
-        let existing = self.snapshots()?;
+        let existing = self
+            .inner
+            .snapshots
+            .fold(BTreeSet::new(), |mut paths, snapshot| {
+                if matches!(
+                    snapshot.state,
+                    ChannelDownloadState::Queued
+                        | ChannelDownloadState::Running
+                        | ChannelDownloadState::Paused
+                ) {
+                    paths.insert(snapshot.destination.clone());
+                }
+                paths
+            })
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         let mut destinations = BTreeSet::new();
         for request in &requests {
             if !destinations.insert(request.destination.clone())
-                || existing.iter().any(|snapshot| {
-                    snapshot.destination == request.destination
-                        && matches!(
-                            snapshot.state,
-                            ChannelDownloadState::Queued
-                                | ChannelDownloadState::Running
-                                | ChannelDownloadState::Paused
-                        )
-                })
+                || existing.contains(&request.destination)
             {
                 return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
             }
         }
+        let reservation = self.inner.retention.reserve(
+            requests.len(),
+            &self.inner.snapshots,
+            &self.inner.controls,
+            &self.inner.scheduled,
+        )?;
         let created_at_unix_ms = unix_time_millis()?;
         let tasks = requests
             .into_iter()
@@ -814,14 +857,13 @@ impl DesktopTransfers {
             },
             tasks,
         )?;
+        reservation.commit();
         for record in records {
             let snapshot = snapshot_from_record(record);
             let control = Arc::new(AtomicU8::new(CONTROL_RUNNING));
-            self.inner
-                .snapshots
-                .lock()
-                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-                .push(snapshot.clone());
+            if !self.inner.snapshots.insert(snapshot.clone()) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Persistence));
+            }
             self.inner
                 .controls
                 .lock()
@@ -839,21 +881,7 @@ impl DesktopTransfers {
     }
 
     pub fn activate_pending_downloads(&self) -> Result<(), ApplicationError> {
-        for snapshot in self.snapshots()?.into_iter().filter(|snapshot| {
-            snapshot.state == ChannelDownloadState::Queued
-                && self.require_active_account(snapshot.account_id).is_ok()
-        }) {
-            let control = self
-                .inner
-                .controls
-                .lock()
-                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-                .entry(snapshot.id)
-                .or_insert_with(|| Arc::new(AtomicU8::new(CONTROL_RUNNING)))
-                .clone();
-            self.try_schedule(snapshot, control)?;
-        }
-        Ok(())
+        self.inner.pump.refill()
     }
 
     pub fn pause(&self, id: u64) -> Result<(), ApplicationError> {
@@ -948,7 +976,7 @@ impl DesktopTransfers {
         self.require_task_account(id)?;
         // Serialize with worker retirement so a retry cannot revive an attempt
         // that still owns the cancelled partial and outstanding requests.
-        let scheduled = self
+        let mut scheduled = self
             .inner
             .scheduled
             .lock()
@@ -980,7 +1008,6 @@ impl DesktopTransfers {
             });
         })
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-        persist_snapshot(&self.inner.library, &snapshot)?;
         let control = {
             let mut controls = self
                 .inner
@@ -994,10 +1021,22 @@ impl DesktopTransfers {
         };
         if scheduled.contains(&id) {
             control.store(CONTROL_RETRY_PENDING, Ordering::Release);
+            // The retained worker persists the replacement after its old write
+            // and partial cleanup finish. Never race those writes from this caller.
             return Ok(());
         }
         control.store(CONTROL_RUNNING, Ordering::Release);
+        // Reserve this identity while persisting, so a concurrent refill cannot
+        // start the new attempt before its queued checkpoint is acknowledged.
+        scheduled.insert(id);
         drop(scheduled);
+        let persisted = persist_snapshot(&self.inner.library, &snapshot);
+        self.inner
+            .scheduled
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .remove(&id);
+        persisted?;
         self.try_schedule(snapshot, control)
     }
 
@@ -1005,9 +1044,9 @@ impl DesktopTransfers {
     /// A successfully downloaded destination is user data and is never removed.
     pub fn delete(&self, id: u64) -> Result<(), ApplicationError> {
         let snapshot = self
-            .snapshots()?
-            .into_iter()
-            .find(|snapshot| snapshot.id == id)
+            .inner
+            .snapshots
+            .get(id)
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
         if !is_terminal(snapshot.state)
             || self
@@ -1021,11 +1060,9 @@ impl DesktopTransfers {
         }
 
         self.inner.library.delete_native_download(id)?;
-        self.inner
-            .snapshots
-            .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-            .retain(|snapshot| snapshot.id != id);
+        if self.inner.snapshots.remove(id) {
+            self.inner.retention.removed();
+        }
         self.inner
             .controls
             .lock()
@@ -1061,23 +1098,45 @@ impl DesktopTransfers {
     pub fn snapshots(&self) -> Result<Vec<ChannelDownloadSnapshot>, ApplicationError> {
         self.inner
             .snapshots
-            .lock()
-            .map(|snapshots| snapshots.clone())
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))
+            .all()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))
+    }
+
+    pub fn subscribe(&self) -> TransferSubscription {
+        self.inner.snapshots.subscribe()
+    }
+
+    /// Immutable presentation view; unchanged records and idle views share their allocations.
+    pub fn snapshot_view(
+        &self,
+    ) -> Result<TransferSnapshotView<ChannelDownloadSnapshot>, ApplicationError> {
+        let mut view = self
+            .inner
+            .snapshots
+            .view()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        view.omitted_items = self.inner.retention.omitted();
+        Ok(view)
+    }
+
+    pub fn snapshot(&self, id: u64) -> Option<ChannelDownloadSnapshot> {
+        self.inner.snapshots.get(id)
     }
 
     pub fn current_rates(&self) -> Result<TransferRates, ApplicationError> {
         let download_bytes_per_second = self
-            .snapshots()?
-            .into_iter()
-            .filter(|snapshot| snapshot.state == ChannelDownloadState::Running)
+            .inner
+            .snapshots
             .fold(0_u64, |total, snapshot| {
-                total.saturating_add(snapshot.current_bytes_per_second.unwrap_or(0))
-            });
+                if snapshot.state == ChannelDownloadState::Running {
+                    total.saturating_add(snapshot.current_bytes_per_second.unwrap_or(0))
+                } else {
+                    total
+                }
+            })
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         Ok(TransferRates {
             download_bytes_per_second,
-            // The encrypted upload engine is not yet retained by the desktop
-            // owner. Zero is the truthful live rate, not a preview estimate.
             upload_bytes_per_second: 0,
         })
     }
@@ -1111,19 +1170,27 @@ impl DesktopTransfers {
         self.inner
             .active_account
             .store(account_id, Ordering::Release);
-        Ok(())
+        self.inner.pump.refill()
     }
 
     /// Pause active work and wait for its retained workers to close partial files before logout.
     pub fn suspend_account(&self) -> Result<(), ApplicationError> {
         self.inner.active_account.store(0, Ordering::Release);
-        for snapshot in self.snapshots()? {
-            if matches!(
-                snapshot.state,
-                ChannelDownloadState::Queued | ChannelDownloadState::Running
-            ) {
-                self.pause(snapshot.id)?;
-            }
+        let active = self
+            .inner
+            .snapshots
+            .fold(Vec::new(), |mut ids, snapshot| {
+                if matches!(
+                    snapshot.state,
+                    ChannelDownloadState::Queued | ChannelDownloadState::Running
+                ) {
+                    ids.push(snapshot.id);
+                }
+                ids
+            })
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        for id in active {
+            self.pause(id)?;
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -1153,12 +1220,12 @@ impl DesktopTransfers {
     }
 
     fn require_task_account(&self, id: u64) -> Result<(), ApplicationError> {
-        let snapshot = self
-            .snapshots()?
-            .into_iter()
-            .find(|snapshot| snapshot.id == id)
+        let account = self
+            .inner
+            .snapshots
+            .read(id, |snapshot| snapshot.account_id)
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-        self.require_active_account(snapshot.account_id)
+        self.require_active_account(account)
     }
 
     fn control(&self, id: u64) -> Result<Arc<AtomicU8>, ApplicationError> {
@@ -1174,11 +1241,7 @@ impl DesktopTransfers {
     fn snapshot_state(&self, id: u64) -> Result<ChannelDownloadState, ApplicationError> {
         self.inner
             .snapshots
-            .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-            .iter()
-            .find(|snapshot| snapshot.id == id)
-            .map(|snapshot| snapshot.state)
+            .read(id, |snapshot| snapshot.state)
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))
     }
 
@@ -1220,8 +1283,67 @@ impl DesktopTransfers {
         snapshot: ChannelDownloadSnapshot,
         control: Arc<AtomicU8>,
     ) -> Result<(), ApplicationError> {
+        self.inner.pump.schedule(snapshot, control)
+    }
+}
+
+struct QueuePump {
+    active_account: Arc<std::sync::atomic::AtomicI64>,
+    sender: Arc<Mutex<Option<mpsc::SyncSender<TransferCommand>>>>,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
+    controls: Arc<Mutex<BTreeMap<u64, Arc<AtomicU8>>>>,
+    scheduled: Arc<Mutex<BTreeSet<u64>>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl QueuePump {
+    fn refill(&self) -> Result<(), ApplicationError> {
+        let account = self.active_account.load(Ordering::Acquire);
+        if account <= 0 || self.shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let scheduled = self
+            .scheduled
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .clone();
+        let slots = CHANNEL_DOWNLOAD_QUEUE_CAPACITY.saturating_sub(scheduled.len());
+        if slots == 0 {
+            return Ok(());
+        }
+        let pending = self
+            .snapshots
+            .select(
+                |snapshot| {
+                    snapshot.state == ChannelDownloadState::Queued
+                        && snapshot.account_id == Some(account)
+                        && !scheduled.contains(&snapshot.id)
+                },
+                slots,
+            )
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        for snapshot in pending {
+            if self.active_account.load(Ordering::Acquire) != account {
+                break;
+            }
+            let control = self
+                .controls
+                .lock()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .entry(snapshot.id)
+                .or_insert_with(|| Arc::new(AtomicU8::new(CONTROL_RUNNING)))
+                .clone();
+            self.schedule(snapshot, control)?;
+        }
+        Ok(())
+    }
+
+    fn schedule(
+        &self,
+        snapshot: ChannelDownloadSnapshot,
+        control: Arc<AtomicU8>,
+    ) -> Result<(), ApplicationError> {
         let mut scheduled = self
-            .inner
             .scheduled
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
@@ -1229,7 +1351,6 @@ impl DesktopTransfers {
             return Ok(());
         }
         let send_result = self
-            .inner
             .sender
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
@@ -1263,30 +1384,35 @@ impl DesktopTransfers {
 impl Drop for TransferWorkerInner {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        // Do not make application shutdown depend on Telegram delivering one
-        // more network chunk. Persist the latest in-memory byte checkpoint
-        // synchronously, then detach the worker if its backend is still
-        // blocked. The worker owns all Arcs it needs to finish safely later.
-        let active_checkpoint = self.snapshots.lock().ok().and_then(|mut snapshots| {
-            snapshots
-                .iter_mut()
-                .find(|snapshot| snapshot.state == ChannelDownloadState::Running)
-                .map(|snapshot| {
-                    snapshot.state = ChannelDownloadState::Queued;
-                    snapshot.current_bytes_per_second = None;
-                    snapshot.eta_ms = None;
-                    snapshot.clone()
+        // Do not wait for Telegram or SQLite from a frontend destructor. Submit
+        // the latest sample without copying replay histories; a saturated queue
+        // retains the previous checkpoint and the independently saved part map.
+        // The worker owns its state and performs acknowledged retirement later.
+        let active_id = self
+            .snapshots
+            .fold(None, |found, snapshot| {
+                found.or_else(|| {
+                    (snapshot.state == ChannelDownloadState::Running).then_some(snapshot.id)
                 })
+            })
+            .flatten();
+        let active_checkpoint = active_id.and_then(|id| {
+            self.snapshots.update(id, |snapshot| {
+                snapshot.state = ChannelDownloadState::Queued;
+                snapshot.current_bytes_per_second = None;
+                snapshot.eta_ms = None;
+                snapshot_record(snapshot)
+            })
         });
-        if let Some(checkpoint) = active_checkpoint
-            && let Err(error) = persist_snapshot(&self.library, &checkpoint)
-        {
-            tracing::warn!(
-                event = "transfer.download.shutdown_checkpoint_failed",
-                task_id = checkpoint.id,
-                error_kind = ?error.kind(),
-                "latest download checkpoint could not be persisted during shutdown"
-            );
+        if let Some(checkpoint) = active_checkpoint {
+            let queued = checkpoint
+                .is_ok_and(|record| self.library.try_save_native_download_progress(record));
+            if !queued {
+                tracing::warn!(
+                    event = "transfer.download.shutdown_checkpoint_deferred",
+                    "storage queue unavailable; previous checkpoint and part map retained for recovery"
+                );
+            }
         }
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
@@ -1387,10 +1513,11 @@ fn validate_batch_size(size: usize) -> Result<(), ApplicationError> {
 fn transfer_loop(
     receiver: mpsc::Receiver<TransferCommand>,
     backend: Arc<dyn ChannelDownloadBackend>,
-    snapshots: Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
     scheduled: Arc<Mutex<BTreeSet<u64>>>,
     shutdown: Arc<AtomicBool>,
     library: DesktopLibrary,
+    pump: Arc<QueuePump>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
@@ -1429,8 +1556,9 @@ fn transfer_loop(
                             current.finished_at_unix_ms = None;
                             current.failure = None;
                         }) {
-                            let _ = persist_snapshot(&library, &retry);
                             control.store(CONTROL_RUNNING, Ordering::Release);
+                            drop(scheduled);
+                            let _ = persist_snapshot(&library, &retry);
                             snapshot = retry;
                             queued_at = Instant::now();
                             continue;
@@ -1441,12 +1569,34 @@ fn transfer_loop(
                 }
             }
         }
+        compact_idle_replays(&snapshots, &scheduled);
+        if let Err(error) = pump.refill() {
+            tracing::warn!(event = "transfer.download.refill_failed", error_kind = ?error.kind(), "download queue refill failed");
+        }
     }
 }
 
+#[derive(Clone, Copy)]
 struct DownloadWorkerState<'a> {
-    snapshots: &'a Arc<Mutex<Vec<ChannelDownloadSnapshot>>>,
+    snapshots: &'a Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
     scheduled: &'a Mutex<BTreeSet<u64>>,
+}
+
+impl DownloadWorkerState<'_> {
+    // Only publication is serialized with retry. Storage and backend cleanup run
+    // after this guard is dropped, while `scheduled` still retains task ownership.
+    fn retire(
+        self,
+        control: &AtomicU8,
+        id: u64,
+        mutate: impl FnOnce(&mut ChannelDownloadSnapshot),
+    ) -> Option<ChannelDownloadSnapshot> {
+        let _guard = self.scheduled.lock().ok()?;
+        if control.load(Ordering::Acquire) == CONTROL_RETRY_PENDING {
+            return None;
+        }
+        update_snapshot(self.snapshots, id, mutate)
+    }
 }
 
 fn run_download(
@@ -1511,9 +1661,10 @@ fn run_download(
         Ok(controller) => controller,
         Err(error) => {
             fail_download(
-                FailedDownloadOwner {
+                DownloadRetirementOwner {
                     backend,
-                    snapshots,
+                    state,
+                    control: &control,
                     library,
                     snapshot: &snapshot,
                 },
@@ -1531,9 +1682,10 @@ fn run_download(
             Ok(log) => log,
             Err(error) => {
                 fail_download(
-                    FailedDownloadOwner {
+                    DownloadRetirementOwner {
                         backend,
-                        snapshots,
+                        state,
+                        control: &control,
                         library,
                         snapshot: &snapshot,
                     },
@@ -1553,9 +1705,10 @@ fn run_download(
         &controller.snapshot(),
     ) {
         fail_download(
-            FailedDownloadOwner {
+            DownloadRetirementOwner {
                 backend,
-                snapshots,
+                state,
+                control: &control,
                 library,
                 snapshot: &snapshot,
             },
@@ -1603,17 +1756,12 @@ fn run_download(
         duration_ms,
         result.as_ref().err().map(ApplicationError::kind),
     );
-    // Serialize terminal publication with retry: an old cancellation must not
-    // overwrite the queued replacement after the retry command has returned.
-    let Ok(_retirement) = state.scheduled.lock() else {
-        return;
-    };
     match result {
         _ if control.load(Ordering::Acquire) == CONTROL_RETRY_PENDING => {
             // transfer_loop starts the replacement only after this owner exits.
         }
         Ok(()) if control.load(Ordering::Acquire) == CONTROL_CANCELLED => {
-            let cancelled = update_snapshot(snapshots, snapshot.id, |current| {
+            let cancelled = state.retire(&control, snapshot.id, |current| {
                 current.state = ChannelDownloadState::Cancelled;
                 current.verification = ChannelDownloadVerification::NotReached;
                 current.finished_at_unix_ms = finished_at_unix_ms;
@@ -1627,15 +1775,19 @@ fn run_download(
             }
         }
         Ok(()) => complete_download(
-            snapshots,
-            library,
-            &snapshot,
+            DownloadRetirementOwner {
+                backend,
+                state,
+                control: &control,
+                library,
+                snapshot: &snapshot,
+            },
             queue_wait_ms,
             duration_ms,
             finished_at_unix_ms,
         ),
         Err(error) if shutdown.load(Ordering::Acquire) => {
-            let interrupted = update_snapshot(snapshots, snapshot.id, |current| {
+            let interrupted = state.retire(&control, snapshot.id, |current| {
                 if current.state != ChannelDownloadState::Paused {
                     current.state = ChannelDownloadState::Queued;
                 }
@@ -1654,7 +1806,7 @@ fn run_download(
             );
         }
         Err(_error) if control.load(Ordering::Acquire) == CONTROL_PAUSED => {
-            let paused = update_snapshot(snapshots, snapshot.id, |current| {
+            let paused = state.retire(&control, snapshot.id, |current| {
                 current.state = ChannelDownloadState::Paused;
                 current.current_bytes_per_second = None;
                 current.eta_ms = None;
@@ -1666,7 +1818,7 @@ fn run_download(
         }
         Err(_error) if control.load(Ordering::Acquire) == CONTROL_RESUME_PENDING => {
             control.store(CONTROL_RUNNING, Ordering::Release);
-            let resumed = update_snapshot(snapshots, snapshot.id, |current| {
+            let resumed = state.retire(&control, snapshot.id, |current| {
                 current.state = ChannelDownloadState::Queued;
                 current.current_bytes_per_second = None;
                 current.eta_ms = None;
@@ -1677,7 +1829,7 @@ fn run_download(
             }
         }
         Err(_error) if control.load(Ordering::Acquire) == CONTROL_CANCELLED => {
-            let cancelled = update_snapshot(snapshots, snapshot.id, |current| {
+            let cancelled = state.retire(&control, snapshot.id, |current| {
                 current.state = ChannelDownloadState::Cancelled;
                 current.verification = ChannelDownloadVerification::NotReached;
                 current.finished_at_unix_ms = finished_at_unix_ms;
@@ -1691,9 +1843,10 @@ fn run_download(
             }
         }
         Err(error) => fail_download(
-            FailedDownloadOwner {
+            DownloadRetirementOwner {
                 backend,
-                snapshots,
+                state,
+                control: &control,
                 library,
                 snapshot: &snapshot,
             },
@@ -1706,15 +1859,20 @@ fn run_download(
 }
 
 fn complete_download(
-    snapshots: &Mutex<Vec<ChannelDownloadSnapshot>>,
-    library: &DesktopLibrary,
-    snapshot: &ChannelDownloadSnapshot,
+    owner: DownloadRetirementOwner<'_>,
     queue_wait_ms: u64,
     duration_ms: u64,
     finished_at_unix_ms: Option<i64>,
 ) {
+    let DownloadRetirementOwner {
+        state,
+        control,
+        library,
+        snapshot,
+        ..
+    } = owner;
     let average_bytes_per_second = average_rate(snapshot.size_bytes, duration_ms);
-    let completed = update_snapshot(snapshots, snapshot.id, |current| {
+    let completed = state.retire(control, snapshot.id, |current| {
         current.state = ChannelDownloadState::Completed;
         current.verification = ChannelDownloadVerification::SizeChecked;
         current.transferred_bytes = current.size_bytes;
@@ -1755,28 +1913,30 @@ fn complete_download(
     );
 }
 
-struct FailedDownloadOwner<'a> {
+struct DownloadRetirementOwner<'a> {
     backend: &'a dyn ChannelDownloadBackend,
-    snapshots: &'a Mutex<Vec<ChannelDownloadSnapshot>>,
+    state: DownloadWorkerState<'a>,
+    control: &'a AtomicU8,
     library: &'a DesktopLibrary,
     snapshot: &'a ChannelDownloadSnapshot,
 }
 
 fn fail_download(
-    owner: FailedDownloadOwner<'_>,
+    owner: DownloadRetirementOwner<'_>,
     error: ApplicationError,
     queue_wait_ms: u64,
     duration_ms: u64,
     finished_at_unix_ms: Option<i64>,
 ) {
-    let FailedDownloadOwner {
+    let DownloadRetirementOwner {
         backend,
-        snapshots,
+        state,
+        control,
         library,
         snapshot,
     } = owner;
     let failure = failure_diagnostic(error.kind());
-    let failed = update_snapshot(snapshots, snapshot.id, |current| {
+    let failed = state.retire(control, snapshot.id, |current| {
         current.state = ChannelDownloadState::Failed(error.kind());
         current.verification = ChannelDownloadVerification::NotReached;
         current.finished_at_unix_ms = finished_at_unix_ms;
@@ -1823,15 +1983,24 @@ fn fail_download(
     );
 }
 
+fn mutate_snapshot<T>(
+    snapshots: &TransferSnapshots<ChannelDownloadSnapshot>,
+    id: u64,
+    update: impl FnOnce(&mut ChannelDownloadSnapshot) -> T,
+) -> Option<T> {
+    snapshots.update(id, update)
+}
+
 fn update_snapshot(
-    snapshots: &Mutex<Vec<ChannelDownloadSnapshot>>,
+    snapshots: &TransferSnapshots<ChannelDownloadSnapshot>,
     id: u64,
     update: impl FnOnce(&mut ChannelDownloadSnapshot),
 ) -> Option<ChannelDownloadSnapshot> {
-    let mut snapshots = snapshots.lock().ok()?;
-    let snapshot = snapshots.iter_mut().find(|snapshot| snapshot.id == id)?;
-    update(snapshot);
-    Some(snapshot.clone())
+    mutate_snapshot(snapshots, id, |snapshot| {
+        update(snapshot);
+        bound_lifecycle(snapshot);
+        snapshot.clone()
+    })
 }
 
 fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnapshot {
@@ -1916,7 +2085,8 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
         attempts: record.attempts,
         failure,
         events,
-        part_events: Vec::new(),
+        event_history_omitted: 0,
+        part_events: PartEventHistory::default(),
         session_log_path: None,
         telemetry: empty_download_telemetry(),
     }
@@ -1926,6 +2096,12 @@ fn persist_snapshot(
     library: &DesktopLibrary,
     snapshot: &ChannelDownloadSnapshot,
 ) -> Result<(), ApplicationError> {
+    library.save_native_download(snapshot_record(snapshot)?)
+}
+
+fn snapshot_record(
+    snapshot: &ChannelDownloadSnapshot,
+) -> Result<NativeDownloadTaskRecord, ApplicationError> {
     let state = match snapshot.state {
         ChannelDownloadState::Queued => StoredNativeDownloadState::Queued,
         ChannelDownloadState::Running => StoredNativeDownloadState::Running,
@@ -1939,7 +2115,7 @@ fn persist_snapshot(
         ChannelDownloadVerification::SizeChecked => StoredNativeDownloadVerification::SizeChecked,
         ChannelDownloadVerification::NotReached => StoredNativeDownloadVerification::NotReached,
     };
-    library.save_native_download(NativeDownloadTaskRecord {
+    Ok(NativeDownloadTaskRecord {
         id: snapshot.id,
         account_id: snapshot.account_id,
         batch_id: snapshot.batch_id,
@@ -2016,6 +2192,7 @@ fn is_terminal(state: ChannelDownloadState) -> bool {
 fn failure_diagnostic(kind: ApplicationErrorKind) -> ChannelDownloadFailure {
     let (retryable, requires_user_action) = match kind {
         ApplicationErrorKind::Network
+        | ApplicationErrorKind::Server
         | ApplicationErrorKind::Persistence
         | ApplicationErrorKind::Capacity => (true, false),
         ApplicationErrorKind::InvalidRequest
@@ -2047,7 +2224,8 @@ fn error_code(kind: ApplicationErrorKind) -> &'static str {
         ApplicationErrorKind::PermissionDenied => "permission_denied",
         ApplicationErrorKind::Capacity => "capacity",
         ApplicationErrorKind::Authorization => "authorization",
-        ApplicationErrorKind::Network => "network",
+        // Preserve the existing durable codec: server failures historically used network.
+        ApplicationErrorKind::Network | ApplicationErrorKind::Server => "network",
         ApplicationErrorKind::Cancelled => "cancelled",
         _ => "persistence",
     }
@@ -2194,7 +2372,11 @@ mod tests {
             },
         ];
 
-        let counters = current_part_counters(&events, 3, 1_500);
+        let mut history = PartEventHistory::default();
+        for event in events {
+            history.push(event);
+        }
+        let counters = history.counters(3, 1, 1_500);
 
         assert_eq!(counters.completed_parts, 1);
         assert_eq!(counters.inflight_parts, 0);
@@ -2272,7 +2454,17 @@ mod tests {
                 .into_iter()
                 .find(|snapshot| snapshot.id == id)
                 .expect("queued snapshot");
-            if is_terminal(snapshot.state) {
+            // A terminal UI state precedes the final durable write/cleanup. Fixtures
+            // that reopen or replace stored records must wait for worker ownership
+            // to be released, otherwise the old writer can overwrite the fixture.
+            if is_terminal(snapshot.state)
+                && !transfers
+                    .inner
+                    .scheduled
+                    .lock()
+                    .expect("scheduled tasks")
+                    .contains(&id)
+            {
                 return snapshot;
             }
             assert!(Instant::now() < deadline, "download worker timed out");
@@ -2317,6 +2509,136 @@ mod tests {
         assert_eq!(restored[0].id, id);
         assert_eq!(restored[0].state, ChannelDownloadState::Completed);
         assert_eq!(restored[0].transferred_bytes, 14);
+    }
+
+    #[test]
+    fn durable_queue_refills_without_a_frontend_poll_or_subscriber() {
+        struct GatedBackend {
+            first: AtomicBool,
+            entered: mpsc::SyncSender<()>,
+            release: StdMutex<mpsc::Receiver<()>>,
+        }
+        impl ChannelDownloadBackend for GatedBackend {
+            fn download(
+                &self,
+                _: Option<i64>,
+                _: i64,
+                _: i64,
+                destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                if !self.first.swap(true, Ordering::AcqRel) {
+                    self.entered.send(()).expect("entered");
+                    self.release
+                        .lock()
+                        .expect("gate")
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("released");
+                }
+                fs::write(destination, b"telegram bytes").expect("fixture output");
+                observer.progressed(14);
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().expect("fixture");
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let backend = Arc::new(GatedBackend {
+            first: AtomicBool::new(false),
+            entered,
+            release: StdMutex::new(gate),
+        });
+        let transfers = test_transfers(backend, library(&root)).expect("worker");
+        let total = CHANNEL_DOWNLOAD_QUEUE_CAPACITY * 2 + 3;
+        let requests = (0..total)
+            .map(|index| request(root.path().join(format!("{index}.bin"))))
+            .collect();
+        transfers
+            .enqueue_channel_download_batch(requests)
+            .expect("batch");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("backend entered");
+        assert_eq!(transfers.snapshots().expect("queued").len(), total);
+        assert!(transfers.inner.scheduled.lock().expect("scheduled").len() < total);
+        release.send(()).expect("release backend");
+        let last = transfers
+            .snapshots()
+            .expect("tasks")
+            .last()
+            .expect("last")
+            .id;
+        assert_eq!(
+            wait_for_terminal(&transfers, last).state,
+            ChannelDownloadState::Completed
+        );
+        assert!(
+            transfers
+                .snapshots()
+                .expect("finished")
+                .iter()
+                .all(|row| row.state == ChannelDownloadState::Completed)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual before/after performance measurement"]
+    fn perf_transfer_snapshot_views() {
+        use std::hint::black_box;
+        let root = tempfile::tempdir().expect("fixture");
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend, library(&root)).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(root.path().join("fixture.bin")))
+            .expect("enqueue");
+        let mut template = wait_for_terminal(&transfers, id);
+        for part_index in 0..512 {
+            template.part_events.push(ChannelDownloadPartEvent {
+                part_index,
+                offset_bytes: part_index * DOWNLOAD_PART_SIZE_BYTES,
+                length_bytes: DOWNLOAD_PART_SIZE_BYTES,
+                state: DownloadPartState::Completed,
+                attempt: 1,
+                elapsed_millis: 1,
+            });
+        }
+        let store = TransferSnapshots::new(
+            (0..128)
+                .map(|id| {
+                    let mut row = template.clone();
+                    row.id = id;
+                    row
+                })
+                .collect(),
+        )
+        .expect("store");
+        let view = store.view().expect("initial view");
+        let started = Instant::now();
+        for _ in 0..100 {
+            black_box(store.all().expect("legacy full clone"));
+        }
+        let before = started.elapsed();
+        let started = Instant::now();
+        for _ in 0..100 {
+            black_box(store.view().expect("reusable view"));
+        }
+        let idle = started.elapsed();
+        let started = Instant::now();
+        for _ in 0..100 {
+            store.update(64, |row| row.transferred_bytes += 1);
+            let changed = store.view().expect("changed view");
+            assert!(Arc::ptr_eq(&view.items[0], &changed.items[0]));
+            black_box(changed);
+        }
+        println!(
+            "transfer_snapshot_views tasks=128 events_per_task=512 reads=100 old_us={} idle_us={} one_changed_us={}",
+            before.as_micros(),
+            idle.as_micros(),
+            started.elapsed().as_micros()
+        );
     }
 
     #[test]
@@ -2405,6 +2727,134 @@ mod tests {
     }
 
     #[test]
+    fn resident_history_eviction_preserves_database_records_and_completed_files() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let mut transfers = test_transfers(backend, library.clone()).expect("worker");
+        let requests = (0..4)
+            .map(|index| request(directory.path().join(format!("old-{index}.bin"))))
+            .collect();
+        transfers
+            .enqueue_channel_download_batch(requests)
+            .expect("original batch");
+        let ids: Vec<_> = transfers
+            .snapshots()
+            .expect("records")
+            .iter()
+            .map(|snapshot| snapshot.id)
+            .collect();
+        for id in &ids {
+            wait_for_terminal(&transfers, *id);
+        }
+        Arc::get_mut(&mut transfers.inner)
+            .expect("unique frontend")
+            .retention = HistoryRetention::new(4, 0, 4);
+        let fresh = transfers
+            .enqueue_channel_download(request(directory.path().join("new.bin")))
+            .expect("new task");
+        wait_for_terminal(&transfers, fresh);
+        let view = transfers.snapshot_view().expect("retained view");
+        assert_eq!(view.items.len(), 1); // Old completed batch was evicted as a whole.
+        assert_eq!(view.omitted_items, 4);
+        assert_eq!(
+            library.native_downloads().expect("durable history").len(),
+            5
+        );
+        for index in 0..4 {
+            assert_eq!(
+                fs::read(directory.path().join(format!("old-{index}.bin")))
+                    .expect("completed file"),
+                b"telegram bytes"
+            );
+        }
+        // A failed insert must release its admission, allowing the remaining slots.
+        assert!(
+            transfers
+                .enqueue_channel_download(request(directory.path().join("old-0.bin")))
+                .is_err()
+        );
+        let requests = (0..3)
+            .map(|index| request(directory.path().join(format!("more-{index}.bin"))))
+            .collect();
+        transfers
+            .enqueue_channel_download_batch(requests)
+            .expect("failed insert released capacity");
+        assert_eq!(transfers.snapshots().expect("bounded view").len(), 4);
+        for snapshot in transfers.snapshots().expect("remaining tasks") {
+            wait_for_terminal(&transfers, snapshot.id);
+        }
+        let redownload = transfers
+            .redownload_completed(ids[0])
+            .expect("cold historical redownload");
+        let finished = wait_for_terminal(&transfers, redownload);
+        assert_eq!(finished.state, ChannelDownloadState::Completed);
+        assert_ne!(redownload, ids[0]);
+        assert_eq!(
+            fs::read(&finished.destination).expect("new output"),
+            b"telegram bytes"
+        );
+        assert!(
+            library
+                .native_download(ids[0])
+                .expect("old history")
+                .is_some()
+        );
+        // Account isolation is still checked after loading cold source metadata.
+        let mut foreign = library
+            .insert_native_download(NewNativeDownloadTaskRecord {
+                account_id: 99,
+                chat_id: 100,
+                message_id: 200,
+                message_sent_at_unix_ms: None,
+                file_name: "foreign.bin".into(),
+                caption: None,
+                mime_type: None,
+                size_bytes: 14,
+                destination: directory.path().join("foreign.bin"),
+                created_at_unix_ms: 1,
+            })
+            .expect("foreign historical fixture");
+        foreign.state = StoredNativeDownloadState::Completed;
+        library
+            .save_native_download(foreign.clone())
+            .expect("foreign fixture state");
+        assert!(transfers.snapshot(foreign.id).is_none());
+        assert_eq!(
+            transfers
+                .redownload_completed(foreign.id)
+                .expect_err("foreign history must not authorize a transfer")
+                .kind(),
+            ApplicationErrorKind::Authorization
+        );
+    }
+
+    #[test]
+    fn unavailable_diagnostic_log_does_not_fail_a_download() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let logs = library.managed_directories().expect("directories").logs;
+        fs::write(logs.join("Transfers"), b"path collision").expect("blocked log directory");
+        let destination = directory.path().join("output.zip");
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend, library).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("enqueue");
+        assert_eq!(
+            wait_for_terminal(&transfers, id).state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(fs::read(destination).expect("output"), b"telegram bytes");
+    }
+
+    #[test]
     fn deleting_a_terminal_task_removes_history_and_log_but_preserves_output() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let destination = directory.path().join("archive.zip");
@@ -2482,6 +2932,7 @@ mod tests {
 
         for (failure_kind, expected_retention) in [
             (ApplicationErrorKind::Network, true),
+            (ApplicationErrorKind::Server, true),
             (ApplicationErrorKind::PermissionDenied, false),
         ] {
             let directory = tempfile::tempdir().expect("temporary directory");
@@ -2665,6 +3116,173 @@ mod tests {
     }
 
     #[test]
+    fn terminal_checkpoint_wait_does_not_hold_schedule_lock() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let backend = Arc::new(FakeBackend {
+            outcome: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        });
+        let transfers = test_transfers(backend.clone(), library(&directory)).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("done.zip")))
+            .expect("enqueue");
+        let snapshot = wait_for_terminal(&transfers, id);
+        let mut blocked_library = library(&directory);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        blocked_library.worker = crate::StorageWorker {
+            inner: Arc::new(crate::WorkerInner {
+                sender,
+                join: Mutex::new(None),
+            }),
+        };
+        let snapshots =
+            Arc::new(TransferSnapshots::new(vec![snapshot.clone()]).expect("snapshots"));
+        let scheduled = Arc::new(Mutex::new(BTreeSet::from([id])));
+        let worker_scheduled = scheduled.clone();
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            complete_download(
+                DownloadRetirementOwner {
+                    backend: &*backend,
+                    state: DownloadWorkerState {
+                        snapshots: &snapshots,
+                        scheduled: &worker_scheduled,
+                    },
+                    control: &AtomicU8::new(CONTROL_RUNNING),
+                    library: &blocked_library,
+                    snapshot: &snapshot,
+                },
+                0,
+                1,
+                Some(1),
+            );
+            finished_tx.send(()).expect("finished");
+        });
+        let request = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("checkpoint awaiting acknowledgement");
+        assert!(finished_rx.try_recv().is_err());
+        assert!(
+            scheduled.try_lock().is_ok(),
+            "SQLite acknowledgement cannot hold scheduling lock"
+        );
+        drop(request);
+        finished_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("checkpoint released");
+        worker.join().expect("owner joined");
+    }
+
+    #[test]
+    fn blocked_cleanup_does_not_hold_schedule_lock_or_start_retry_early() {
+        struct CleanupBackend {
+            attempts: AtomicUsize,
+            entered: mpsc::SyncSender<()>,
+            release: StdMutex<mpsc::Receiver<()>>,
+        }
+        impl ChannelDownloadBackend for CleanupBackend {
+            fn download(
+                &self,
+                _account: Option<i64>,
+                _chat: i64,
+                _message: i64,
+                _destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                if self.attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    return Err(ApplicationError::new(ApplicationErrorKind::Network));
+                }
+                observer.progressed(14);
+                Ok(())
+            }
+            fn cleanup_failed_partial(
+                &self,
+                _destination: &Path,
+                _size: u64,
+                _retain: bool,
+            ) -> Result<(), ApplicationError> {
+                self.entered.send(()).expect("cleanup entered");
+                self.release
+                    .lock()
+                    .expect("release lock")
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("cleanup release");
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let backend = Arc::new(CleanupBackend {
+            attempts: AtomicUsize::new(0),
+            entered: entered_tx,
+            release: StdMutex::new(release_rx),
+        });
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("first.zip")))
+            .expect("enqueue");
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("cleanup blocked");
+        assert!(
+            transfers.inner.scheduled.try_lock().is_ok(),
+            "cleanup must release global scheduling lock"
+        );
+        transfers.retry(id).expect("request retry during cleanup");
+        assert_eq!(
+            transfers.snapshot_state(id).expect("state"),
+            ChannelDownloadState::Queued
+        );
+        let next = transfers
+            .enqueue_channel_download(request(directory.path().join("next.zip")))
+            .expect("unrelated admission remains available");
+        assert!(
+            transfers
+                .inner
+                .scheduled
+                .lock()
+                .expect("scheduled")
+                .contains(&next)
+        );
+        assert_eq!(
+            backend.attempts.load(AtomicOrdering::SeqCst),
+            1,
+            "retry cannot share old partial owner"
+        );
+        release_tx.send(()).expect("release cleanup");
+        assert_eq!(
+            wait_for_terminal(&transfers, id).state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(
+            wait_for_terminal(&transfers, next).state,
+            ChannelDownloadState::Completed
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !transfers
+            .inner
+            .scheduled
+            .lock()
+            .expect("scheduled")
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert_eq!(
+            library
+                .native_download(id)
+                .expect("stored")
+                .expect("record")
+                .state,
+            StoredNativeDownloadState::Completed
+        );
+        assert_eq!(backend.attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[test]
     fn immediate_cancel_retry_waits_for_old_attempt_to_release_ownership() {
         struct RetryBackend {
             attempts: AtomicUsize,
@@ -2835,7 +3453,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_does_not_wait_for_a_stalled_telegram_read() {
+    fn shutdown_does_not_wait_for_stalled_telegram_or_storage() {
         struct StalledBackend {
             gate: Arc<(StdMutex<(bool, bool)>, Condvar)>,
         }
@@ -2861,7 +3479,7 @@ mod tests {
 
         let gate = Arc::new((StdMutex::new((false, false)), Condvar::new()));
         let directory = tempfile::tempdir().expect("temporary directory");
-        let transfers = test_transfers(
+        let mut transfers = test_transfers(
             Arc::new(StalledBackend {
                 gate: Arc::clone(&gate),
             }),
@@ -2878,16 +3496,34 @@ mod tests {
         }
         drop(state);
 
-        let started = Instant::now();
-        drop(transfers);
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "shutdown waited for a stalled backend"
-        );
-
+        // Keep the Drop path's storage queue full while the real transfer owner
+        // remains blocked in its fake network read.
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(crate::StorageRequest::Shutdown)
+            .expect("full storage queue");
+        Arc::get_mut(&mut transfers.inner)
+            .expect("unique frontend owner")
+            .library
+            .worker = crate::StorageWorker {
+            inner: Arc::new(crate::WorkerInner {
+                sender,
+                join: Mutex::new(None),
+            }),
+        };
+        let (finished, completion) = mpsc::sync_channel(1);
+        let dropper = thread::spawn(move || {
+            drop(transfers);
+            finished.send(()).expect("completion receiver");
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        drop(receiver); // Release a regressed blocking sender before joining.
         let mut state = lock.lock().expect("gate lock");
         state.1 = true;
         condition.notify_all();
+        drop(state);
+        dropper.join().expect("dropper");
+        result.expect("shutdown cannot wait for network or storage");
     }
 
     #[test]

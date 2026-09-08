@@ -35,10 +35,10 @@ pub fn render_upload_overlay(
                 ),
             ),
     );
-    let channel_name = match &app.storage_status {
-        teleark_runtime::StorageChannelStatus::Ready(channel) => channel.name.clone(),
-        _ => app.tr("storage-nav-title").to_string(),
-    };
+    let channel_name = app.storage_status.usable_channel().map_or_else(
+        || app.tr("storage-nav-title").to_string(),
+        |channel| channel.name.clone(),
+    );
     let popup = components::card()
         .relative()
         .w(px(520.0))
@@ -305,6 +305,15 @@ pub fn render_upload_overlay(
                     },
                 ),
         ))
+        .when(app.upload_in_flight, |popup| {
+            popup.child(
+                div()
+                    .px_6()
+                    .py_2()
+                    .text_xs()
+                    .child(app.tr("upload-batch-still-running")),
+            )
+        })
         .child(
             div()
                 .flex_none()
@@ -326,7 +335,7 @@ pub fn render_upload_overlay(
                 .child(
                     components::button(
                         "upload-add-queue",
-                        app.tr(if app.vault_locked {
+                        app.tr(if app.vault_locked || app.vault_status.active_key_locked {
                             "vault-unlock-action"
                         } else {
                             "upload-add-to-queue"
@@ -336,13 +345,14 @@ pub fn render_upload_overlay(
                     )
                     .disabled(
                         app.visual_preview
+                            || app.upload_in_flight
                             || app.upload_sources.is_empty()
                             || app.upload_preparing
                             || app.vault_activity == VaultActivity::Working
                             || app.storage_channel_id().is_none(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if this.vault_locked {
+                        if this.vault_locked || this.vault_status.active_key_locked {
                             this.show_upload = false;
                             this.request_vault_unlock(UnlockIntent::Upload, cx);
                         } else {

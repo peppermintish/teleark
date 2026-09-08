@@ -54,6 +54,48 @@ pub fn card() -> Div {
         .bg(theme::surface())
 }
 
+/// Shared visual boundary for background work, with a named task and a semantic state.
+/// Callers append the explanation and actions below this header.
+pub fn activity_card(
+    title: impl Into<SharedString>,
+    state: impl Into<SharedString>,
+    tone: Tone,
+    icon: IconName,
+) -> Div {
+    card().rounded(theme::RADIUS_LARGE).overflow_hidden().child(
+        div()
+            .p_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(36.0))
+                    .flex_none()
+                    .rounded(theme::RADIUS_MEDIUM)
+                    .bg(tone.background())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_kit::component::Icon::new(icon)
+                            .size(px(18.0))
+                            .text_color(tone.foreground()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child(title.into()),
+            )
+            .child(badge(state, tone)),
+    )
+}
+
 /// A bounded inspector surface isolates both scrolling and pointer hit testing
 /// from the file list below it, including at the ends of its scroll range.
 pub fn inspector_panel(id: &'static str, width: f32) -> Stateful<Div> {

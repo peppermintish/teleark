@@ -1,3 +1,4 @@
+# Proxy-feature dependencies retain the existing permissive license policy; no new exception.
 [graph]
 targets = [
     "aarch64-apple-darwin",

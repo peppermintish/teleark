@@ -1,6 +1,6 @@
 # ADR 0009: Version Native Part Maps and Transfer Session Logs
 
-- Status: Accepted for the v0.3 alpha
+- Status: Partially superseded by [ADR 0022](0022-bounded-background-session-logs.md) for session-log I/O and failure behavior; native part-map decisions remain accepted
 - Date: 2026-09-05
 
 ## Context

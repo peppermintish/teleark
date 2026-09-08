@@ -1,4 +1,5 @@
 //! A distinct home for authenticated TeleArk files and their underlying source.
+use crate::app::storage::StorageAction;
 use crate::assets::Symbol;
 use crate::{
     app::{Page, StorageView, TeleArkApp, UnlockIntent},
@@ -13,10 +14,10 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
-    AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
-use teleark_runtime::StorageChannelStatus;
+use teleark_runtime::StorageMaintenancePhase;
 
 impl TeleArkApp {
     pub(crate) fn render_storage_workspace(
@@ -26,7 +27,7 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let legacy = self.page == Page::LegacyRecovery;
-        let ready = legacy || matches!(self.storage_status, StorageChannelStatus::Ready(_));
+        let ready = legacy || self.storage_status.usable_channel().is_some();
         let header = div()
             .h(px(76.0))
             .flex_none()
@@ -117,16 +118,14 @@ impl TeleArkApp {
                 .when(self.show_storage_guide, |body| {
                     body.child(self.storage_guide(true, cx))
                 })
-                .when(!legacy, |body| {
-                    body.when_some(self.storage_notice, |body, message| {
-                        body.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::text_secondary())
-                                .child(self.tr(message)),
-                        )
-                    })
-                })
+                .when(
+                    !legacy
+                        && (self.storage_notice.is_some()
+                            || self.storage_loading
+                            || self.storage_error.is_some()),
+                    |body| body.child(self.render_storage_activity(cx)),
+                )
+                .when(!legacy, |body| body.child(self.render_storage_controls(cx)))
                 .child(div().flex_1().min_h_0().child(content))
                 .into_any_element()
         } else {
@@ -138,61 +137,46 @@ impl TeleArkApp {
                     div()
                         .max_w(px(720.0))
                         .mx_auto()
-                        .py_6()
+                        .py_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
                         .child(
-                            components::card()
-                                .p_6()
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(components::app_mark(38.0))
                                 .child(
                                     div()
+                                        .flex_1()
+                                        .min_w_0()
                                         .flex()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(components::app_mark(52.0))
+                                        .flex_col()
+                                        .gap_2()
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .text_size(px(23.0))
+                                                .text_size(px(18.0))
                                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .text_color(theme::text_primary())
                                                 .child(self.tr("storage-setup-title")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme::text_secondary())
+                                                .child(self.tr("storage-setup-description")),
                                         ),
-                                )
-                                .child(
-                                    div()
-                                        .mt_4()
-                                        .text_sm()
-                                        .text_color(theme::text_secondary())
-                                        .child(self.tr("storage-setup-description")),
-                                )
-                                .when(self.storage_loading, |card| {
-                                    card.child(
-                                        div()
-                                            .mt_3()
-                                            .text_sm()
-                                            .text_color(theme::blue())
-                                            .child(self.tr("storage-loading")),
-                                    )
-                                })
-                                .when_some(self.storage_error, |card, kind| {
-                                    card.child(
-                                        div()
-                                            .mt_3()
-                                            .text_sm()
-                                            .text_color(theme::red())
-                                            .child(self.tr(match kind {
-                                            teleark_core::ApplicationErrorKind::Network => {
-                                                "telegram-error-network"
-                                            }
-                                            teleark_core::ApplicationErrorKind::Authorization => {
-                                                "telegram-error-authorization"
-                                            }
-                                            teleark_core::ApplicationErrorKind::Conflict => "storage-identity-conflict",
-                                            teleark_core::ApplicationErrorKind::PermissionDenied => "storage-identity-invalid",
-                                            _ => "storage-setup-error",
-                                        })),
-                                    )
-                                }),
+                                ),
                         )
-                        .child(div().mt_4().child(self.storage_guide(false, cx))),
+                        .when(!self.dialogs.ready && self.dialogs.has_activity(), |body| {
+                            body.child(self.render_dialog_activity(cx))
+                        })
+                        .when(
+                            self.storage_loading || self.storage_error.is_some(),
+                            |body| body.child(self.render_storage_activity(cx)),
+                        )
+                        .child(self.storage_guide(false, cx)),
                 )
                 .into_any_element()
         };
@@ -206,6 +190,330 @@ impl TeleArkApp {
             .pb(px(layout.content_padding()))
             .child(header)
             .child(body)
+            .into_any_element()
+    }
+
+    fn render_storage_activity(&self, cx: &mut Context<Self>) -> AnyElement {
+        let waiting = self.storage_waiting_for_retry();
+        let (state, tone, icon) = if self.storage_loading {
+            ("activity-state-running", Tone::Blue, IconName::LoaderCircle)
+        } else if waiting {
+            ("activity-state-waiting", Tone::Amber, IconName::Redo2)
+        } else if self.storage_error.is_some() {
+            (
+                "activity-state-failed",
+                Tone::Amber,
+                IconName::TriangleAlert,
+            )
+        } else {
+            (
+                "activity-state-complete",
+                Tone::Green,
+                IconName::CircleCheck,
+            )
+        };
+        components::activity_card(
+            self.tr("storage-activity-title"),
+            self.tr(state),
+            tone,
+            icon,
+        )
+        .debug_selector(|| "storage-activity-card".into())
+        .child(
+            div()
+                .px_4()
+                .pb_4()
+                .text_sm()
+                .text_color(theme::text_secondary())
+                .child(self.tr(if self.storage_loading {
+                    "storage-loading"
+                } else if waiting {
+                    "storage-activity-retry-wait"
+                } else if self.storage_error.is_some() {
+                    "storage-setup-error"
+                } else {
+                    self.storage_notice.unwrap_or("storage-auto-found")
+                }))
+                .when_some(self.storage_error, |body, kind| {
+                    body.child(
+                        div()
+                            .mt_3()
+                            .p_3()
+                            .rounded(theme::RADIUS_MEDIUM)
+                            .bg(theme::canvas())
+                            .border_1()
+                            .border_color(theme::border_subtle())
+                            .child(
+                                div()
+                                    .mb_1()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(self.tr("activity-last-response")),
+                            )
+                            .child(self.tr(match kind {
+                                teleark_core::ApplicationErrorKind::Server => {
+                                    "telegram-error-server"
+                                }
+                                teleark_core::ApplicationErrorKind::Network => {
+                                    "telegram-error-network"
+                                }
+                                teleark_core::ApplicationErrorKind::Authorization => {
+                                    "telegram-error-authorization"
+                                }
+                                teleark_core::ApplicationErrorKind::Conflict => {
+                                    "storage-identity-conflict"
+                                }
+                                teleark_core::ApplicationErrorKind::StorageConfigurationUnsafe => {
+                                    "storage-health-unsafe"
+                                }
+                                teleark_core::ApplicationErrorKind::StorageAccessDenied => {
+                                    "storage-health-access"
+                                }
+                                teleark_core::ApplicationErrorKind::StorageIdentityUnsupported => {
+                                    "storage-health-unsupported"
+                                }
+                                teleark_core::ApplicationErrorKind::StorageIdentityDamaged => {
+                                    "storage-health-repair"
+                                }
+                                teleark_core::ApplicationErrorKind::PermissionDenied => {
+                                    "storage-identity-invalid"
+                                }
+                                _ => "storage-setup-error",
+                            })),
+                    )
+                }),
+        )
+        .when(
+            !self.storage_loading && !waiting && self.storage_error.is_some(),
+            |card| {
+                card.child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(theme::border_subtle())
+                        .bg(theme::canvas())
+                        .flex()
+                        .justify_end()
+                        .child(
+                            components::button(
+                                "storage-activity-retry",
+                                self.tr("common-retry"),
+                                Some(IconName::Redo2),
+                                true,
+                            )
+                            .debug_selector(|| "storage-activity-retry".into())
+                            .on_click(cx.listener(|app, _, _, cx| app.refresh_storage_channel(cx))),
+                        ),
+                )
+            },
+        )
+        .into_any_element()
+    }
+
+    fn render_storage_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let repair = self
+            .storage_status
+            .health()
+            .is_some_and(|health| health.needs_repair());
+        div()
+            .flex_none()
+            .max_h(px(180.0))
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .when(repair, |body| {
+                        body.child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text_primary())
+                                .child(self.tr("storage-health-repair")),
+                        )
+                    })
+                    .when(!self.storage_loading, |body| {
+                        body.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .when(repair, |row| {
+                                    row.child(
+                                        components::button(
+                                            "repair-storage",
+                                            self.tr("storage-repair-action"),
+                                            None,
+                                            true,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.storage_confirmation =
+                                                    Some(StorageAction::Repair);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .child(
+                                    components::button(
+                                        "archive-storage",
+                                        self.tr("storage-archive-action"),
+                                        None,
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.storage_confirmation =
+                                                Some(StorageAction::Archive);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        "recheck-storage",
+                                        self.tr("common-retry"),
+                                        None,
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| this.refresh_storage_channel(cx),
+                                    )),
+                                ),
+                        )
+                    })
+                    .when_some(self.storage_confirmation, |body, action| {
+                        body.child(
+                            div()
+                                .p_3()
+                                .bg(theme::canvas())
+                                .rounded(theme::RADIUS_MEDIUM)
+                                .child(div().text_sm().child(self.tr(
+                                    if action == StorageAction::Repair {
+                                        "storage-repair-confirm"
+                                    } else {
+                                        "storage-archive-confirm"
+                                    },
+                                )))
+                                .child(
+                                    div()
+                                        .mt_2()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            components::button(
+                                                "confirm-storage-maintenance",
+                                                self.tr("storage-maintenance-confirm"),
+                                                None,
+                                                true,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.confirm_storage_maintenance(cx)
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            components::button(
+                                                "dismiss-storage-maintenance",
+                                                self.tr("common-cancel"),
+                                                None,
+                                                false,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.storage_confirmation = None;
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(self.storage_maintenance.is_some(), |body| {
+                        body.child(self.render_storage_maintenance(cx))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn render_storage_maintenance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(progress) = &self.storage_maintenance else {
+            return div().into_any_element();
+        };
+        let state = progress.snapshot();
+        let phase = storage_phase_id(state.phase);
+        let duration = if state.finished {
+            state.last_activity.duration_since(state.phase_since)
+        } else {
+            state.phase_since.elapsed()
+        };
+        div()
+            .max_h(px(120.0))
+            .overflow_y_scrollbar()
+            .px_3()
+            .py_2()
+            .bg(theme::canvas())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .child(self.tr(phase))
+                    .child(
+                        div().text_xs().text_color(theme::text_secondary()).child(
+                            self.tr_with(
+                                "storage-maintenance-time",
+                                teleark_i18n::MessageArgs::new()
+                                    .with("seconds", duration.as_secs().to_string())
+                                    .with(
+                                        "idle",
+                                        state.last_activity.elapsed().as_secs().to_string(),
+                                    ),
+                            ),
+                        ),
+                    ),
+            )
+            .when(!state.finished && self.storage_loading, |row| {
+                row.child(
+                    components::button(
+                        "cancel-storage-maintenance",
+                        self.tr("common-cancel"),
+                        None,
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(progress) = &this.storage_maintenance {
+                            progress.cancel();
+                        }
+                        cx.notify();
+                    })),
+                )
+            })
+            .child(
+                div().w_full().text_xs().child(
+                    state
+                        .timeline
+                        .iter()
+                        .map(|(phase, millis)| {
+                            format!("{} · {}s", self.tr(storage_phase_id(*phase)), millis / 1000)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" → "),
+                ),
+            )
+            .when(state.omitted > 0, |row| {
+                row.child(div().text_xs().child(self.tr_with(
+                    "storage-maintenance-omitted",
+                    teleark_i18n::MessageArgs::new().with("count", state.omitted.to_string()),
+                )))
+            })
             .into_any_element()
     }
 
@@ -354,24 +662,23 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let query = self.search_input.read(cx).value().to_lowercase();
-        let files: Vec<_> = self
-            .managed_vault_files
-            .iter()
-            .filter(|file| query.is_empty() || file.logical_name.to_lowercase().contains(&query))
-            .cloned()
-            .collect();
-        let selected = files
-            .iter()
-            .find(|file| Some(file.manifest_message_id) == self.selected_telegram_message_id)
+        let rows = self
+            .managed_projection
+            .borrow_mut()
+            .rows(&self.managed_vault_files, &query);
+        let source = self.managed_vault_files.clone();
+        let selected = self
+            .managed_projection
+            .borrow()
+            .selected(self.selected_telegram_message_id)
             .cloned();
-        let count = files.len();
-        let rows = std::sync::Arc::new(files);
+        let count = rows.len();
         let list = gpui_kit::uniform_list(
             "managed-files",
             count,
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
-                    .filter_map(|index| rows.get(index))
+                    .filter_map(|index| rows.get(index).and_then(|index| source.get(*index)))
                     .map(|file| {
                         let message_id = file.manifest_message_id;
                         let package_id = file.package_numeric_id;
@@ -421,17 +728,21 @@ impl TeleArkApp {
                                             .mt_1()
                                             .text_xs()
                                             .text_color(theme::text_muted())
-                                            .child(teleark_i18n::format::format_bytes(
-                                                this.locale(),
-                                                file.size_bytes,
-                                            )),
+                                            .child(format!(
+                                            "{} · {}",
+                                            if file.health
+                                                == teleark_runtime::VaultFileHealth::KeyUnavailable
+                                            {
+                                                this.tr("vault-health-unknown-size").to_string()
+                                            } else {
+                                                teleark_i18n::format::format_bytes(
+                                                    this.locale(),
+                                                    file.size_bytes,
+                                                )
+                                            },
+                                            this.tr(vault_health_id(file.health)),
+                                        )),
                                     ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::green())
-                                    .child(this.tr("storage-channel-manifest-authenticated")),
                             )
                             .when_some(local.as_ref(), |row, observation| {
                                 row.child(components::badge(
@@ -452,6 +763,13 @@ impl TeleArkApp {
                                     this.tr("storage-channel-download-restored-action"),
                                 )
                                 .ghost()
+                                .disabled(matches!(
+                                    file.health,
+                                    teleark_runtime::VaultFileHealth::KeyUnavailable
+                                        | teleark_runtime::VaultFileHealth::MissingParts
+                                        | teleark_runtime::VaultFileHealth::MissingManifest
+                                        | teleark_runtime::VaultFileHealth::InvalidManifest
+                                ))
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         cx.stop_propagation();
@@ -508,9 +826,26 @@ impl TeleArkApp {
                         )
                         .ghost()
                         .disabled(self.managed_scan_loading)
-                        .on_click(cx.listener(|this, _, _, cx| this.scan_managed_vault_files(cx))),
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.refresh_managed_vault_files(cx)),
+                        ),
                     ),
             )
+            .when_some(self.managed_health_checked, |body, count| {
+                body.child(div().p_3().text_xs().child(self.tr_with(
+                    "vault-health-check-summary",
+                    teleark_i18n::MessageArgs::new().with("count", count.to_string()),
+                )))
+            })
+            .when(self.managed_catalog_limited, |body| {
+                body.child(
+                    div()
+                        .p_3()
+                        .text_xs()
+                        .bg(theme::amber_soft())
+                        .child(self.tr("vault-health-scope-limited")),
+                )
+            })
             .when(count > 0, |body| body.child(list))
             .when(count == 0, |body| {
                 body.child(
@@ -534,7 +869,9 @@ impl TeleArkApp {
                                 .text_center()
                                 .text_sm()
                                 .text_color(theme::text_secondary())
-                                .child(self.tr(if self.managed_scan_loading {
+                                .child(self.tr(if self.managed_catalog_pending {
+                                    "managed-catalog-syncing"
+                                } else if self.managed_scan_loading {
                                     "storage-loading"
                                 } else {
                                     "storage-channel-managed-empty"
@@ -563,6 +900,9 @@ impl TeleArkApp {
                     .border_color(theme::border())
                     .text_xs()
                     .text_color(theme::text_muted())
+                    .when(self.page == Page::Storage, |footer| {
+                        footer.child(self.tr("managed-catalog-coverage"))
+                    })
                     .child(
                         self.tr_with(
                             "storage-scan-summary",
@@ -615,5 +955,31 @@ impl TeleArkApp {
                 },
             )
             .into_any_element()
+    }
+}
+
+fn storage_phase_id(phase: StorageMaintenancePhase) -> &'static str {
+    match phase {
+        StorageMaintenancePhase::Checking => "storage-phase-checking",
+        StorageMaintenancePhase::FindingRecord => "storage-phase-finding",
+        StorageMaintenancePhase::Repairing => "storage-phase-repairing",
+        StorageMaintenancePhase::Pinning => "storage-phase-pinning",
+        StorageMaintenancePhase::Updating => "storage-phase-updating",
+        StorageMaintenancePhase::Verifying => "storage-phase-verifying",
+        StorageMaintenancePhase::Muting => "storage-phase-muting",
+        StorageMaintenancePhase::Archiving => "storage-phase-archiving",
+        StorageMaintenancePhase::Completed => "storage-phase-completed",
+    }
+}
+
+pub(crate) fn vault_health_id(health: teleark_runtime::VaultFileHealth) -> &'static str {
+    use teleark_runtime::VaultFileHealth;
+    match health {
+        VaultFileHealth::Unchecked => "vault-health-unchecked",
+        VaultFileHealth::Present => "vault-health-present",
+        VaultFileHealth::MissingParts => "vault-health-missing-parts",
+        VaultFileHealth::MissingManifest => "vault-health-missing-manifest",
+        VaultFileHealth::KeyUnavailable => "vault-health-key",
+        VaultFileHealth::InvalidManifest => "vault-health-invalid",
     }
 }

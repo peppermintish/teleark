@@ -1,3 +1,4 @@
+use crate::app::Page;
 use std::{collections::HashSet, path::Path};
 
 use gpui_kit::component::{
@@ -10,7 +11,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -41,6 +42,7 @@ pub(crate) const CHANNEL_FILE_SCAN_CHUNK: usize = 200;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChannelFileTableRow {
+    source: (SharedString, i64, u64),
     message_id: i64,
     name: SharedString,
     sent_at: SharedString,
@@ -49,6 +51,7 @@ struct ChannelFileTableRow {
 }
 
 pub(crate) struct ChannelFileTableDelegate {
+    locale: Option<teleark_i18n::SupportedLocale>,
     columns: Vec<Column>,
     rows: Vec<ChannelFileTableRow>,
     owner: Option<WeakEntity<TeleArkApp>>,
@@ -70,6 +73,7 @@ pub(crate) struct ChannelFileTableDelegate {
 impl ChannelFileTableDelegate {
     pub(crate) fn new() -> Self {
         Self {
+            locale: None,
             columns: channel_table_columns(["", "", "", "", "", ""].map(Into::into)),
             rows: Vec::new(),
             owner: None,
@@ -372,10 +376,25 @@ impl TableDelegate for ChannelFileTableDelegate {
 
 impl TeleArkApp {
     pub(crate) fn refresh_channel_file_table(&mut self, cx: &mut Context<Self>) {
+        let previous = self.channel_file_table.read(cx).delegate();
+        let reuse = previous.locale == Some(self.locale());
+        let previous: std::collections::BTreeMap<_, _> = previous
+            .rows
+            .iter()
+            .map(|row| (row.message_id, row))
+            .collect();
         let rows = self
             .channel_filtered_files()
             .into_iter()
             .map(|file| {
+                if reuse
+                    && let Some(row) = previous.get(&file.message_id)
+                    && row.source.0.as_ref() == file.file_name
+                    && row.source.1 == file.sent_at_unix_ms
+                    && row.source.2 == file.size_bytes
+                {
+                    return (*row).clone();
+                }
                 let name = if file.file_name.trim().is_empty() {
                     self.tr_with(
                         "telegram-file-unnamed",
@@ -386,6 +405,11 @@ impl TeleArkApp {
                 };
                 let kind = teleark_runtime::classify_file(Path::new(&file.file_name));
                 ChannelFileTableRow {
+                    source: (
+                        file.file_name.clone().into(),
+                        file.sent_at_unix_ms,
+                        file.size_bytes,
+                    ),
                     message_id: file.message_id,
                     name,
                     sent_at: format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
@@ -413,28 +437,36 @@ impl TeleArkApp {
             "telegram-files-loading"
         } else if matches!(self.telegram_activity, TelegramActivity::Failed(_)) {
             "telegram-files-load-failed"
+        } else if matches!(self.page, Page::Channel | Page::Storage) {
+            "channel-sync-empty"
         } else {
             "telegram-files-empty"
         });
-        let loading_label = self.tr_with(
-            "telegram-files-fetching-progress",
-            MessageArgs::new()
-                .with(
-                    "scanned",
-                    format_integer(self.locale(), self.telegram_files_scanned),
-                )
-                .with(
-                    "target",
-                    format_integer(self.locale(), self.telegram_files_scan_target),
-                ),
-        );
+        let loading_label = if matches!(self.page, Page::Channel | Page::Storage) {
+            self.tr("channel-sync-reading")
+        } else {
+            self.tr_with(
+                "telegram-files-fetching-progress",
+                MessageArgs::new()
+                    .with(
+                        "scanned",
+                        format_integer(self.locale(), self.telegram_files_scanned),
+                    )
+                    .with(
+                        "target",
+                        format_integer(self.locale(), self.telegram_files_scan_target),
+                    ),
+            )
+        };
         let slow_label = self.tr("telegram-files-fetching-slow");
         let cancel_label = self.tr("telegram-files-cancel-action");
         let retry_label = self.tr("telegram-files-retry-action");
         let slow = self.telegram_files_slow;
         let failed = matches!(self.telegram_activity, TelegramActivity::Failed(_));
+        let locale = self.locale();
         self.channel_file_table.update(cx, |table, table_cx| {
             let delegate = table.delegate_mut();
+            delegate.locale = Some(locale);
             delegate.rows = rows;
             delegate.columns = columns;
             delegate.owner = Some(owner);
@@ -482,9 +514,12 @@ impl TeleArkApp {
     ) {
         if selected {
             let ids = self
-                .channel_filtered_files()
-                .into_iter()
-                .map(|file| file.message_id)
+                .channel_file_table
+                .read(cx)
+                .delegate()
+                .rows
+                .iter()
+                .map(|row| row.message_id)
                 .collect::<Vec<_>>();
             self.selected_channel_message_ids.extend(ids);
         } else {
@@ -863,8 +898,9 @@ impl TeleArkApp {
                             IconName::Redo2,
                             self.tr("telegram-files-refresh-action"),
                         )
+                        .debug_selector(|| "channel-files-refresh".into())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.load_selected_telegram_files(false, cx);
+                            this.refresh_selected_channel(cx);
                         })),
                     )
                     .when(self.channel_batch_expanded, |header| {
@@ -943,6 +979,13 @@ impl TeleArkApp {
             "managed-detail-body",
             &self.raw_detail_scroll,
             detail
+                .child(
+                    div()
+                        .mt_3()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.tr(crate::screens::storage::vault_health_id(package.health))),
+                )
                 .when_some(
                     self.selected_chat_id.and_then(|chat_id| {
                         self.local_download_for_source(chat_id, None, Some(&package.package_id))
@@ -966,8 +1009,69 @@ impl TeleArkApp {
                 ))
                 .child(message_detail_row(
                     self.tr("storage-channel-manifest-state"),
-                    self.tr("storage-channel-manifest-authenticated"),
+                    self.tr(crate::screens::storage::vault_health_id(package.health)),
                 ))
+                .when_some(package.vault_id, |detail, id| {
+                    detail.child(message_detail_row(
+                        self.tr("vault-health-key-version"),
+                        id.iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                            .into(),
+                    ))
+                })
+                .child(div().mt_3().text_xs().child(self.tr(
+                    if package.health == teleark_runtime::VaultFileHealth::KeyUnavailable {
+                        "vault-health-key-unavailable"
+                    } else {
+                        "vault-health-detail"
+                    },
+                )))
+                .when(
+                    package.health == teleark_runtime::VaultFileHealth::KeyUnavailable,
+                    |detail| {
+                        detail.child(
+                            components::button(
+                                "unlock-file-key",
+                                self.tr("vault-unlock-action"),
+                                None,
+                                true,
+                            )
+                            .mt_3()
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.clear_vault_inputs(window, cx);
+                                    this.unlock_intent = Some(crate::app::UnlockIntent::Browse);
+                                    this.vault_advanced_expanded = true;
+                                    this.vault_new_epoch_confirmation = false;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    },
+                )
+                .child(
+                    components::button(
+                        "recheck-file-health",
+                        self.tr("vault-health-recheck"),
+                        None,
+                        false,
+                    )
+                    .mt_3()
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_managed_vault_files(cx))),
+                )
+                .child(
+                    components::button(
+                        "reupload-file-copy",
+                        self.tr("vault-health-reupload"),
+                        None,
+                        false,
+                    )
+                    .mt_2()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.request_vault_unlock(crate::app::UnlockIntent::Upload, cx)
+                    })),
+                )
                 .child(message_detail_row(
                     self.tr("table-parts"),
                     format_integer(self.locale(), package.part_count as u64).into(),
@@ -978,7 +1082,7 @@ impl TeleArkApp {
                 ))
                 .child(message_detail_row(
                     self.tr("storage-channel-restore-state"),
-                    self.tr("storage-channel-restore-ready"),
+                    self.tr(crate::screens::storage::vault_health_id(package.health)),
                 ))
                 .child(
                     div()
@@ -1004,7 +1108,16 @@ impl TeleArkApp {
                         true,
                     )
                     .mt_4()
-                    .disabled(self.vault_activity == crate::app::VaultActivity::Working)
+                    .disabled(
+                        self.vault_activity == crate::app::VaultActivity::Working
+                            || matches!(
+                                package.health,
+                                teleark_runtime::VaultFileHealth::MissingParts
+                                    | teleark_runtime::VaultFileHealth::MissingManifest
+                                    | teleark_runtime::VaultFileHealth::KeyUnavailable
+                                    | teleark_runtime::VaultFileHealth::InvalidManifest
+                            ),
+                    )
                     .on_click({
                         let package_id = package.package_numeric_id;
                         cx.listener(move |this, _, _, cx| {
@@ -1017,6 +1130,9 @@ impl TeleArkApp {
 
     fn render_channel_batch_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let preparing = self.channel_batch_activity == ChannelBatchActivity::Preparing;
+        // Use the same projection as the table. Re-filtering on every render
+        // repeats file classification and can drift across a time boundary.
+        let result_count = self.channel_file_table.read(cx).delegate().rows.len();
         let periods = [
             (ChannelBatchPeriod::AnyTime, "telegram-batch-period-any"),
             (ChannelBatchPeriod::Past24Hours, "telegram-batch-period-24h"),
@@ -1048,6 +1164,7 @@ impl TeleArkApp {
                             Some(IconName::Settings2),
                             self.channel_batch_expanded,
                         )
+                        .debug_selector(|| "channel-filter-toggle".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.channel_batch_expanded = !this.channel_batch_expanded;
                             cx.notify();
@@ -1062,10 +1179,7 @@ impl TeleArkApp {
                                 "telegram-files-title",
                                 MessageArgs::new().with(
                                     "count",
-                                    format_integer(
-                                        self.locale(),
-                                        self.channel_filtered_files().len() as u64,
-                                    ),
+                                    format_integer(self.locale(), result_count as u64),
                                 ),
                             )),
                     ),
@@ -1158,16 +1272,15 @@ impl TeleArkApp {
                         .mt_3()
                         .text_xs()
                         .text_color(theme::text_secondary())
-                        .child(self.tr_with(
-                            "telegram-files-title",
-                            MessageArgs::new().with(
-                                "count",
-                                format_integer(
-                                    self.locale(),
-                                    self.channel_filtered_files().len() as u64,
+                        .child(
+                            self.tr_with(
+                                "telegram-files-title",
+                                MessageArgs::new().with(
+                                    "count",
+                                    format_integer(self.locale(), result_count as u64),
                                 ),
                             ),
-                        )),
+                        ),
                 )
             })
             .child(
@@ -1198,7 +1311,7 @@ impl TeleArkApp {
                             None,
                             false,
                         )
-                        .disabled(self.channel_filtered_files().is_empty())
+                        .disabled(result_count == 0)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_all_channel_files_selected(true, cx);
                         })),
@@ -1226,6 +1339,7 @@ impl TeleArkApp {
                             Some(IconName::ArrowDown),
                             true,
                         )
+                        .debug_selector(|| "channel-files-download".into())
                         .disabled(preparing || self.selected_channel_message_ids.is_empty())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.download_filtered_telegram_files(cx);
@@ -1273,8 +1387,14 @@ impl TeleArkApp {
                 ),
             )
             .when(
-                self.telegram_files_loading && !self.telegram_files.is_empty(),
+                self.page == Page::LegacyRecovery
+                    && self.telegram_files_loading
+                    && !self.telegram_files.is_empty(),
                 |table| table.child(self.render_telegram_fetch_footer(cx)),
+            )
+            .when(
+                matches!(self.page, Page::Channel | Page::Storage),
+                |table| table.child(self.render_channel_sync(cx)),
             )
             .when(
                 !self.telegram_files_loading
@@ -1566,13 +1686,21 @@ impl TeleArkApp {
         let TelegramActivity::Failed(kind) = self.telegram_activity else {
             return None;
         };
-        Some(self.tr(match kind {
+        Some(self.application_error_message(kind))
+    }
+
+    pub(crate) fn application_error_message(
+        &self,
+        kind: teleark_core::ApplicationErrorKind,
+    ) -> gpui_kit::SharedString {
+        self.tr(match kind {
             teleark_core::ApplicationErrorKind::InvalidRequest => "telegram-error-invalid-request",
             teleark_core::ApplicationErrorKind::Authorization => "telegram-error-authorization",
             teleark_core::ApplicationErrorKind::Network => "telegram-error-network",
+            teleark_core::ApplicationErrorKind::Server => "telegram-error-server",
             teleark_core::ApplicationErrorKind::Persistence => "telegram-error-persistence",
             _ => "telegram-error-generic",
-        }))
+        })
     }
 }
 
@@ -1707,6 +1835,8 @@ fn channel_file_matches_filters(
     kinds: &HashSet<FileKind>,
     now_unix_ms: i64,
 ) -> bool {
+    #[cfg(test)]
+    FILTER_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let maximum_age_ms = match period {
         ChannelBatchPeriod::AnyTime => None,
         ChannelBatchPeriod::Past24Hours => Some(24 * 60 * 60 * 1_000),
@@ -1892,8 +2022,67 @@ fn error_banner(message: gpui_kit::SharedString) -> AnyElement {
 }
 
 #[cfg(test)]
+thread_local! { static FILTER_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn batch_controls_and_select_all_reuse_the_displayed_projection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        app.update(cx, |app, cx| {
+            app.telegram_files = (0..5_000)
+                .map(|id| TelegramFileSummary {
+                    message_id: id,
+                    file_name: if id % 2 == 0 { "file.zip" } else { "file.png" }.into(),
+                    modified_at_unix_ms: 1,
+                    sent_at_unix_ms: 1,
+                    size_bytes: 1,
+                    caption: String::new(),
+                    mime_type: None,
+                })
+                .collect();
+            for kinds in [
+                HashSet::new(),
+                HashSet::from([FileKind::Archive]),
+                HashSet::from([FileKind::Audio]),
+            ] {
+                app.channel_batch_kinds = kinds;
+                app.refresh_channel_file_table(cx);
+                let displayed: std::collections::BTreeSet<_> = app
+                    .channel_file_table
+                    .read(cx)
+                    .delegate()
+                    .rows
+                    .iter()
+                    .map(|row| row.message_id)
+                    .collect();
+                FILTER_EVALUATIONS.with(|count| count.set(0));
+                for expanded in [false, true] {
+                    app.channel_batch_expanded = expanded;
+                    let _ = app.render_channel_batch_controls(cx);
+                }
+                app.set_all_channel_files_selected(false, cx);
+                app.set_all_channel_files_selected(true, cx);
+                assert_eq!(app.selected_channel_message_ids, displayed);
+                assert_eq!(FILTER_EVALUATIONS.with(|count| count.get()), 0);
+            }
+            // Selection follows what the user sees even if the time-sensitive
+            // filter has moved since the last explicit projection refresh.
+            app.channel_batch_kinds.clear();
+            app.refresh_channel_file_table(cx);
+            app.channel_batch_period = ChannelBatchPeriod::Past24Hours;
+            app.set_all_channel_files_selected(true, cx);
+            assert_eq!(app.selected_channel_message_ids.len(), 5_000);
+            app.refresh_channel_file_table(cx);
+            app.set_all_channel_files_selected(false, cx);
+            app.set_all_channel_files_selected(true, cx);
+            assert!(app.selected_channel_message_ids.is_empty());
+        });
+    }
     #[test]
     fn one_channel_page_supports_five_thousand_filtered_rows() {
         let now = 2_000_000_000_000;

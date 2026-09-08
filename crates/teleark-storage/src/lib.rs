@@ -8,9 +8,14 @@
 mod database;
 mod error;
 mod migration;
+pub use migration::MigrationProgress;
 mod model;
 
-pub use database::{Database, LATEST_SCHEMA_VERSION};
+pub use database::{
+    CachedManifestCandidate, ChannelSyncCommit, ChannelSyncCommitOutcome, ChannelSyncState,
+    Database, LATEST_SCHEMA_VERSION, MANAGED_CHANGE_HISTORY_LIMIT, ManagedChannelChange,
+    ManagedChannelChangeKind, ManagedChannelWatch, NATIVE_DOWNLOAD_HISTORY_LIMIT,
+};
 pub use error::{
     CursorError, EntityKind, InputReason, InvariantViolation, StorageError, StorageResult,
 };
@@ -25,3 +30,5 @@ pub use model::{
     StoredPartState, StoredTransferDirection, StoredTransferState, TelegramIndexStateRecord,
     TransferPartCheckpoint, TransferTaskRecord, VaultDownloadRecord, VaultMetadataRecord,
 };
+
+pub use database::{VaultFileHealth, VaultInventoryRecord};

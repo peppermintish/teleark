@@ -8,3 +8,5 @@ pub mod upload;
 pub mod account;
 pub mod storage;
 pub mod unlock;
+
+pub(crate) mod proxy;

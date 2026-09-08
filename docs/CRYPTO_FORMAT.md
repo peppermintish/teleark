@@ -1,6 +1,6 @@
 # TeleArk Crypto Format
 
-Status: **provisional, implemented v1 candidate**. `teleark-crypto` now contains explicit candidate writers/readers and fixed fixtures, but no writer may claim stable or production-ready `v1` output until independent cryptographic review, continuous fuzzing, cross-implementation vectors, and end-to-end recovery testing are complete. Changes are currently allowed but must update this document and ADR 0004; after release, incompatible changes require a new format version.
+Format: **implemented version 1**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
 ## Goals and boundaries
 
@@ -10,11 +10,11 @@ It does not hide ciphertext size, part count, upload timing, account/channel rel
 
 Application parts (target default 1900 MiB plaintext) are distinct from crypto frames (proposed default 8 MiB plaintext) and MTProto upload parts. Implementations stream frames; they must not allocate an application part or create giant plaintext/ciphertext temporary part files.
 
-The current candidate implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected private-channel upload/recovery path. Each fresh package writer tracks its AEAD identities; full restart-time hydration from every existing wrap/manifest/part identity remains a stabilization requirement before production output may be claimed.
+The implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected private-channel upload/recovery path. Each fresh package writer tracks its AEAD identities; encrypted restart support still needs hydration from every existing wrap/manifest/part identity before any identity can be reused.
 
 ## Primitive suite
 
-Provisional suite ID `1` consists of:
+Suite ID `1` consists of:
 
 | Purpose | Primitive |
 | --- | --- |
@@ -57,12 +57,12 @@ Password, recovery, and file-key wrap records use AES-256-GCM. Their derivations
 - Record Argon2 algorithm version, memory cost, iterations, and parallelism in bounded public metadata.
 - Benchmark safe interactive parameters on supported hardware; do not silently reduce production strength for tests. Tests inject explicit cheap parameters.
 - Derive exactly 32 bytes. Do not reuse the derived KEK for any other purpose.
-- The provisional wrap nonce is twelve zero bytes because the fresh salt defines a fresh derived KEK for each immutable wrap record. Reusing a salt/password pair for another encryption is forbidden.
+- The version-1 wrap nonce is twelve zero bytes because the fresh salt defines a fresh derived KEK for each immutable wrap record. Reusing a salt/password pair for another encryption is forbidden.
 - AAD binds `teleark/vault-master/password-wrap/v1`, `vault_id`, and wrap generation.
 
 ### Recovery wrapping
 
-Recovery Key material is 32 random bytes. Its exact provisional canonical text is:
+Recovery Key material is 32 random bytes. Its canonical version-1 text is:
 
 ```text
 "TARK-RK1-" || UPPER_HEX(key[32]) || "-" || UPPER_HEX(checksum[4])
@@ -70,7 +70,7 @@ Recovery Key material is 32 random bytes. Its exact provisional canonical text i
 
 `checksum` is the first four bytes of BLAKE3 over the literal domain `teleark/recovery-key/text/v1` followed by the 32 raw key bytes. The encoded length is exactly 82 ASCII bytes. Parsers accept only this uppercase canonical form; they do not trim whitespace, fold case, or normalize punctuation.
 
-The provisional Recovery KEK is HKDF-SHA-256 with `salt = vault_id` and `info = "teleark/vault-master/recovery-wrap/v1"`. The immutable recovery record uses a zero nonce and AAD binding vault ID and recovery generation. Rotating recovery creates new random key material/generation.
+The version-1 Recovery KEK is HKDF-SHA-256 with `salt = vault_id` and `info = "teleark/vault-master/recovery-wrap/v1"`. The immutable recovery record uses a zero nonce and AAD binding vault ID and recovery generation. Rotating recovery creates new random key material/generation.
 
 For database-loss recovery, the desktop exports an exact self-contained bundle:
 
@@ -228,10 +228,14 @@ Do not perform a separate full read merely to calculate these hashes. Update the
 - Keep the destination `.partial`; remove/quarantine it according to explicit recoverability policy and never rename on failure.
 - Redact secrets from logs/errors/`Debug` and zeroize sensitive buffers where practical.
 
-## Candidate vectors and remaining stabilization tests
+## Versioned fixtures and validation
 
-Fixed deterministic fixtures now live under `crates/teleark-crypto/tests/vectors/crypto_v1/` and `manifest_v1/` for key wraps, a multi-frame part, and a Unicode multipart manifest. Tests use injected deterministic randomness with the production algorithms and assert the exact candidate bytes. The format is still pre-release, so these fixtures prevent accidental drift during this phase but are not yet a public compatibility promise.
+Fixed deterministic fixtures now live under `crates/teleark-crypto/tests/vectors/crypto_v1/` and `manifest_v1/` for key wraps, a multi-frame part, and a Unicode multipart manifest. Tests use injected deterministic randomness with the production algorithms and assert exact version-1 bytes. These fixtures define the existing compatibility baseline; retain them when adding new versions and conversion tests.
 
-The current deterministic suite covers roundtrip, ciphertext/tag/header/AAD tamper, wrong keys/password/recovery key, reorder, duplication, omission, truncation, invalid final-frame/layout claims, overflow/oversized lengths, unsupported versions/suites, nonce uniqueness over broad index ranges, duplicate encryption identities, canonical codec rejection, and hostile mutation/truncation corpora without panics. Before stabilization, add continuous coverage-guided fuzz targets, cross-implementation/cross-platform validation, larger streaming/recovery fixtures, and independent review.
+The current deterministic suite covers roundtrip, ciphertext/tag/header/AAD tamper, wrong keys/password/recovery key, reorder, duplication, omission, truncation, invalid final-frame/layout claims, overflow/oversized lengths, unsupported versions/suites, nonce uniqueness over broad index ranges, duplicate encryption identities, canonical codec rejection, and hostile mutation/truncation corpora without panics. Extend evidence with recorded fuzz campaigns, cross-platform validation, larger streaming/recovery fixtures and version-conversion tests.
 
-Only after the remaining tests, integration work, and independent review pass may this document lose its provisional status.
+A format upgrade must authenticate source data, use fresh encryption identities for converted output, verify recovery equality and preserve recoverable originals until commit. Runtime owns conversion and reports each phase to the UI; missing keys or unsupported versions leave source data intact.
+
+## Retained key epochs
+
+Schema 15 changes local key-record retention, not the cryptographic formats. Existing manifest v1 `vault_id` identifies the key epoch; password/recovery wrap generations remain independent counters inside that epoch. An unauthenticated, bounded header hint is used only for key selection, followed by normal complete manifest authentication. New upload epochs preserve old wrapped records and ciphertext. See [ADR 0025](adr/0025-fixed-channel-and-retained-key-epochs.md).

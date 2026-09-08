@@ -131,9 +131,23 @@ pub enum ApplicationErrorKind {
     SourceMissing,
     SourceChanged,
     PermissionDenied,
+    /// A local plaintext upload source cannot be read.
+    SourcePermissionDenied,
+    /// The fixed storage channel cannot be reached by this account.
+    StorageAccessDenied,
+    /// The fixed channel no longer satisfies private owner-only storage policy.
+    StorageConfigurationUnsafe,
+    /// Management records need repair; file data may still be usable.
+    StorageIdentityDamaged,
+    /// A newer channel identity must not be overwritten by an older app.
+    StorageIdentityUnsupported,
+    /// The package belongs to a key epoch that is currently locked/unavailable.
+    VaultKeyUnavailable,
     Capacity,
     Authorization,
     Network,
+    /// Telegram accepted the request but its server failed to process it.
+    Server,
     Cancelled,
 }
 

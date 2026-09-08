@@ -36,6 +36,7 @@ impl TeleArkApp {
     pub(crate) fn reset_telegram_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
         self.qr_poll_task = None;
+        self.reset_dialog_load(cx);
         self.telegram_auth = TelegramAuthState::Unauthorized;
         self.telegram_activity = TelegramActivity::Idle;
         for input in [&self.telegram_code, &self.telegram_password] {
@@ -50,15 +51,11 @@ impl TeleArkApp {
             return;
         }
         if self.upload_in_flight
-            || self.vault.as_ref().is_some_and(|vault| {
-                vault.transfers().iter().any(|transfer| {
-                    matches!(
-                        transfer.state,
-                        teleark_runtime::VaultTransferState::Queued
-                            | teleark_runtime::VaultTransferState::Running
-                    )
-                })
-            })
+            || self.vault_download_in_flight
+            || self
+                .vault
+                .as_ref()
+                .is_some_and(DesktopVault::has_active_transfers)
         {
             self.show_account_switch = true;
             cx.notify();
@@ -68,6 +65,7 @@ impl TeleArkApp {
         self.show_account_switch = false;
         self.phone_login = false;
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
+        self.reset_dialog_load(cx);
         self.transfers_account_ready = false;
         self.storage_retry_task = None;
         self.storage_loading = false;
@@ -76,7 +74,13 @@ impl TeleArkApp {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.cancel_managed_scan();
         self.cancel_telegram_file_load(cx);
-        self.clear_vault_inputs(window, cx);
+        if let Some(sync) = self.channel_sync.take() {
+            sync.stop();
+        }
+        self.channel_sync_task = None;
+        self.channel_sync_snapshot = None;
+        self.channel_view_cache.clear();
+        self.lock_vault(window, cx);
         self.qr_poll_task = None;
         let Some(telegram) = self.telegram.clone() else {
             if self.visual_preview {
@@ -114,9 +118,16 @@ impl TeleArkApp {
                             this.telegram_index = None;
                             this.selected_chat_id = None;
                             this.storage_status = teleark_runtime::StorageChannelStatus::Missing;
+                            if let Some(progress) = this.storage_maintenance.take() {
+                                progress.cancel();
+                            }
+                            this.storage_confirmation = None;
+                            this.storage_maintenance_presentation = None;
                             this.storage_loading = false;
                             this.storage_error = None;
-                            this.managed_vault_files.clear();
+                            this.managed_vault_files = Default::default();
+                            this.managed_health_checked = None;
+                            this.managed_upload_receipts.clear();
                             this.managed_vault_rejected = 0;
                             this.vault_recovery_secret = None;
                             this.vault_locked = true;
@@ -319,63 +330,6 @@ impl TeleArkApp {
                 {
                     this.apply_telegram_auth_result(result, cx);
                 }
-            });
-        }));
-    }
-
-    pub(crate) fn load_telegram_dialogs(&mut self, cx: &mut Context<Self>) {
-        if self.telegram_activity == TelegramActivity::Working {
-            return;
-        }
-        let (Some(telegram), Some(library), Some(account)) = (
-            self.telegram.clone(),
-            self.library.clone(),
-            self.telegram_account.clone(),
-        ) else {
-            return;
-        };
-        let account_id = account.id;
-        let generation = self.telegram_login_generation;
-        let transfers = self.transfers.clone();
-        self.telegram_activity = TelegramActivity::Working;
-        let work = cx.background_spawn(async move {
-            let chats = telegram.list_dialogs(account_id)?;
-            library.save_telegram_sources(&account, &chats)?;
-            if let Some(transfers) = transfers {
-                transfers.activate_account(account_id)?;
-            }
-            Ok::<_, ApplicationError>(chats)
-        });
-        self.telegram_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if this.telegram_login_generation != generation
-                    || this.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
-                {
-                    return;
-                }
-                match result {
-                    Ok(chats) => {
-                        // Refresh data without resetting the route, selection,
-                        // scroll owner, filters, or a populated file table.
-                        this.telegram_chats = chats;
-                        this.transfers_account_ready = true;
-                        this.telegram_activity = TelegramActivity::Idle;
-                        if this.page == Page::Channel
-                            && this.selected_chat_id.is_none()
-                            && let Some(chat) = this
-                                .telegram_chats
-                                .iter()
-                                .find(|chat| chat.kind == TelegramChatKind::Channel)
-                        {
-                            this.select_telegram_chat(chat.id, cx);
-                        }
-                        this.refresh_storage_channel(cx);
-                    }
-                    Err(error) => this.telegram_activity = TelegramActivity::Failed(error.kind()),
-                }
-                cx.notify();
             });
         }));
     }

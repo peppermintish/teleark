@@ -1,7 +1,11 @@
 # ADR 0008: Export a Self-Contained Vault Recovery Bundle
 
+> Extended by [ADR 0025](0025-fixed-channel-and-retained-key-epochs.md): schema 15 retains historical wrapped-key epochs, while existing recovery-bundle bytes and exact-wrapper checks remain unchanged.
+
 - Status: Accepted for the provisional v1 candidate
 - Date: 2026-09-04
+
+The historical provisional-format policy below is superseded by [ADR 0017](0017-versioned-automatic-migrations.md). The recovery-bundle design remains in effect.
 
 ## Context
 

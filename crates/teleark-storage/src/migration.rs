@@ -3,7 +3,16 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 10;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 15;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationProgress {
+    Detecting,
+    Preparing { from: u32, to: u32 },
+    Converting { version: u32 },
+    Verifying { version: u32 },
+    Completed,
+}
 
 pub(crate) struct Migration {
     pub version: u32,
@@ -428,9 +437,141 @@ CREATE INDEX native_download_completed_outputs ON native_download_tasks (account
     WHERE state = 'completed';
 "#,
     },
+    Migration {
+        version: 11,
+        sql: r#"
+CREATE TABLE channel_sync_state (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    pts INTEGER NOT NULL CHECK (pts >= 0),
+    history_before INTEGER,
+    history_exhausted INTEGER NOT NULL CHECK (history_exhausted IN (0, 1)),
+    repair_pending INTEGER NOT NULL CHECK (repair_pending IN (0, 1)),
+    repair_before INTEGER,
+    gap_pending INTEGER NOT NULL CHECK (gap_pending IN (0, 1)),
+    gap_before INTEGER,
+    gap_until INTEGER,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    PRIMARY KEY (account_id, chat_id),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE channel_sync_tombstones (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (account_id, chat_id, message_id),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id)
+) STRICT, WITHOUT ROWID;
+"#,
+    },
+    Migration {
+        version: 12,
+        sql: r#"
+CREATE TABLE channel_file_versions (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL CHECK (message_id > 0),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    PRIMARY KEY (account_id, chat_id, message_id),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id)
+) STRICT, WITHOUT ROWID;
+-- This is an observation scope, never proof of remote identity or write authority.
+CREATE TABLE managed_channel_watches (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    catalog_ready INTEGER NOT NULL DEFAULT 0 CHECK (catalog_ready IN (0, 1)),
+    change_count INTEGER NOT NULL DEFAULT 0 CHECK (change_count >= 0),
+    acknowledged_count INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_count >= 0 AND acknowledged_count <= change_count),
+    last_changed_at INTEGER,
+    PRIMARY KEY (account_id, chat_id),
+    FOREIGN KEY (account_id, chat_id) REFERENCES chats(account_id, id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE managed_channel_changes (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    message_id INTEGER NOT NULL CHECK (message_id >= 0),
+    kind TEXT NOT NULL CHECK (kind IN ('edited', 'deleted', 'gap')),
+    pts INTEGER NOT NULL CHECK (pts >= 0),
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, chat_id, sequence),
+    UNIQUE (account_id, chat_id, message_id, kind, pts),
+    FOREIGN KEY (account_id, chat_id) REFERENCES managed_channel_watches(account_id, chat_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX channel_manifest_candidates ON logical_files (source_account_id, source_chat_id, caption, created_at_unix_ms DESC);
+"#,
+    },
+    Migration {
+        version: 13,
+        sql: r#"
+-- Search orders by the effective timestamp, including created-at/null fallback.
+-- Keep the earlier raw modified-at indexes for explicit timestamp-range facets.
+CREATE INDEX logical_files_effective_keyset ON logical_files
+    (COALESCE(modified_at_unix_ms, created_at_unix_ms, -9223372036854775808) DESC, id DESC);
+CREATE INDEX logical_files_account_effective_keyset ON logical_files
+    (source_account_id, COALESCE(modified_at_unix_ms, created_at_unix_ms, -9223372036854775808) DESC, id DESC);
+CREATE INDEX logical_files_source_effective_keyset ON logical_files
+    (source_account_id, source_chat_id, COALESCE(modified_at_unix_ms, created_at_unix_ms, -9223372036854775808) DESC, id DESC);
+CREATE INDEX logical_files_kind_effective_keyset ON logical_files
+    (kind, COALESCE(modified_at_unix_ms, created_at_unix_ms, -9223372036854775808) DESC, id DESC);
+"#,
+    },
+    Migration {
+        version: 14,
+        sql: r#"
+-- Fence readers that predate mandatory proxy routing. A missing policy after
+-- this migration is corruption, not permission to create direct connections.
+INSERT INTO settings (key, value, updated_at_unix_ms)
+VALUES ('network.proxy', '{"version":1,"mode":"direct"}', 0);
+"#,
+    },
+    Migration {
+        version: 15,
+        sql: r#"
+-- Key epochs are independent of password/recovery wrap generations. The
+-- singleton remains the active upload epoch; old wrapped keys remain readable.
+CREATE TABLE vault_key_epochs (
+    vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 16),
+    password_wrap BLOB NOT NULL CHECK (length(password_wrap) BETWEEN 124 AND 172),
+    recovery_wrap BLOB NOT NULL CHECK (length(recovery_wrap) = 88),
+    password_generation INTEGER NOT NULL CHECK (password_generation > 0),
+    recovery_generation INTEGER NOT NULL CHECK (recovery_generation > 0),
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)
+) STRICT, WITHOUT ROWID;
+INSERT INTO vault_key_epochs SELECT vault_id,password_wrap,recovery_wrap,
+    password_generation,recovery_generation,created_at_unix_ms,updated_at_unix_ms
+    FROM vault_metadata;
+CREATE TABLE vault_inventory (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    manifest_message_id INTEGER NOT NULL CHECK (manifest_message_id > 0),
+    remote_name TEXT NOT NULL CHECK (length(remote_name) <= 128),
+    vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
+    sealed_manifest BLOB NOT NULL CHECK (length(sealed_manifest) BETWEEN 1 AND 16777216),
+    observed_at INTEGER NOT NULL,
+    health_scan_run INTEGER NOT NULL DEFAULT 0,
+    manifest_invalid INTEGER NOT NULL DEFAULT 0 CHECK (manifest_invalid IN (0,1)),
+    PRIMARY KEY(account_id,chat_id,manifest_message_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX vault_inventory_name ON vault_inventory(account_id,chat_id,remote_name,manifest_message_id DESC);
+CREATE TABLE vault_message_health (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL CHECK (message_id > 0),
+    present INTEGER NOT NULL CHECK (present IN (0,1)),
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY(account_id,chat_id,message_id)
+) STRICT, WITHOUT ROWID;
+"#,
+    },
 ];
 
-pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<()> {
+pub(crate) fn migrate(
+    connection: &mut Connection,
+    progress: &impl Fn(MigrationProgress),
+) -> StorageResult<()> {
+    progress(MigrationProgress::Detecting);
     let application_id = read_pragma_u32(connection, "application_id")?;
     let current_version = read_pragma_u32(connection, "user_version")?;
 
@@ -453,14 +594,41 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<()> {
         .iter()
         .filter(|migration| migration.version > current_version)
     {
+        progress(MigrationProgress::Preparing {
+            from: migration.version - 1,
+            to: migration.version,
+        });
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if migration.version == 1 {
             transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
         }
+        progress(MigrationProgress::Converting {
+            version: migration.version,
+        });
         transaction.execute_batch(migration.sql)?;
+        progress(MigrationProgress::Verifying {
+            version: migration.version,
+        });
+        if migration.version == LATEST_SCHEMA_VERSION {
+            let check: String =
+                transaction.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if check != "ok" || violations != 0 {
+                return Err(StorageError::CorruptData {
+                    entity: "migration",
+                    field: "integrity",
+                    value: "verification_failed".into(),
+                });
+            }
+        }
         transaction.pragma_update(None, "user_version", migration.version)?;
         transaction.commit()?;
     }
+    progress(MigrationProgress::Completed);
     Ok(())
 }
 

@@ -1,5 +1,7 @@
 # ADR 0015: Remote-authoritative storage identity
 
+> Superseded in part by [ADR 0025](0025-fixed-channel-and-retained-key-epochs.md): an existing fixed binding plus fresh remote owner/privacy checks permits file operations when only management metadata is damaged. New discovery still requires verified remote identity.
+
 - Status: Accepted
 - Date: 2026-09-07
 - Supersedes: ADR 0014's saved-binding preference, lowest-ID selection and marker-only identity policy. Automatic setup and bounded work remain.

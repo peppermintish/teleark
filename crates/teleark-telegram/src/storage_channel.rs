@@ -14,6 +14,45 @@ const STORAGE_MARKER_V2: &str = "teleark:storage:v2";
 const STORAGE_TITLE: &str = "🔒 TeleArk · Managed Storage";
 const IDENTITY_MAGIC: &str = "teleark:channel-identity:v1";
 
+/// Management records are repairable; access and privacy failures block writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageChannelHealth {
+    Healthy,
+    IdentityMissing,
+    IdentityUnpinned,
+    IdentityInvalid,
+    UnsafeConfiguration,
+    AccessDenied,
+    UnsupportedIdentity,
+}
+impl StorageChannelHealth {
+    pub const fn permits_files(self) -> bool {
+        matches!(
+            self,
+            Self::Healthy | Self::IdentityMissing | Self::IdentityUnpinned | Self::IdentityInvalid
+        )
+    }
+    pub const fn needs_repair(self) -> bool {
+        matches!(
+            self,
+            Self::IdentityMissing | Self::IdentityUnpinned | Self::IdentityInvalid
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageMaintenancePhase {
+    Checking,
+    FindingRecord,
+    Repairing,
+    Pinning,
+    Updating,
+    Verifying,
+    Muting,
+    Archiving,
+    Completed,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteIdentity {
     Unrelated,
@@ -363,6 +402,7 @@ impl TelegramConnection {
         }
         let peer_ref = PeerRef::from(&channel);
         Ok(TelegramChat {
+            sync_pts: None,
             id: channel.id,
             name: channel.title,
             username: None,
@@ -593,3 +633,5 @@ mod tests {
         }
     }
 }
+
+mod resilience;

@@ -3,6 +3,8 @@
 - Status: Accepted architecture; exact v1 encoding remains provisional
 - Date: 2026-08-24
 
+The historical provisional-format policy below is superseded by [ADR 0017](0017-versioned-automatic-migrations.md). The manifest/recovery design remains in effect.
+
 ## Context
 
 SQLite can be lost, corrupted, or unavailable. If it were the only map from logical files to encrypted remote parts and keys, Telegram-hosted data would become unintelligible after local-device loss. Rust in-memory/Serde layouts are not durable compatibility contracts, and remote upload plus local database persistence cannot be atomic.

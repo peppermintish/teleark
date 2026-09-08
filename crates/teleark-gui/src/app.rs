@@ -1,12 +1,17 @@
 mod auth;
 mod background;
 mod browser;
+mod channel_layout;
+mod channel_sync;
+mod dialogs;
 mod library;
 mod local_files;
+mod managed_projection;
 mod navigation;
 mod preferences;
 mod preview;
-mod storage;
+pub(crate) mod proxy;
+pub(crate) mod storage;
 mod vault;
 
 use std::{collections::BTreeSet, time::Duration};
@@ -15,6 +20,7 @@ use gpui_kit::component::{
     Icon, IconName, WindowExt as _,
     input::{InputEvent, InputState},
     notification::Notification,
+    resizable::ResizableState,
     table::{TableEvent, TableState},
 };
 use gpui_kit::{
@@ -31,10 +37,9 @@ use teleark_i18n::{
 };
 use teleark_runtime::{
     AppearancePreference, ChannelDownloadRequest, ChannelDownloadState, DesktopLibrary,
-    DesktopPreferences, DesktopTelegram, DesktopTransfers, DesktopVault, ManagedStorageMetrics,
-    ManagedVaultFile, TelegramAuthState, TelegramChatSummary, TelegramCredentialSource,
-    TelegramFilePage, TelegramFileSummary, TelegramIndexPage, TelegramScanCancellation,
-    VaultStatus,
+    DesktopPreferences, DesktopTelegram, DesktopTransfers, DesktopVault, ManagedVaultFile,
+    TelegramAuthState, TelegramChatSummary, TelegramCredentialSource, TelegramFilePage,
+    TelegramFileSummary, TelegramIndexPage, TelegramScanCancellation, VaultStatus,
 };
 use teleark_runtime::{TelegramAccount, TelegramChatKind};
 
@@ -138,6 +143,7 @@ pub(crate) enum SettingsSection {
     #[default]
     General,
     Accounts,
+    Network,
     Storage,
     Downloads,
     Uploads,
@@ -215,7 +221,45 @@ pub struct AppStartup {
     pub locale: LocaleStartup,
 }
 
+pub struct RuntimeConfiguration {
+    network_route: Result<teleark_runtime::NetworkRoute, teleark_core::ApplicationErrorKind>,
+    credential_status: Result<
+        Option<teleark_runtime::TelegramCredentialsStatus>,
+        teleark_core::ApplicationErrorKind,
+    >,
+    preferences: Result<DesktopPreferences, teleark_core::ApplicationErrorKind>,
+}
+
+impl RuntimeConfiguration {
+    pub(crate) fn read(
+        library: &Result<DesktopLibrary, ApplicationError>,
+        telegram: &Result<DesktopTelegram, ApplicationError>,
+    ) -> Self {
+        Self {
+            network_route: library
+                .as_ref()
+                .map_err(|e| e.kind())
+                .and_then(|library| library.proxy_configuration().map_err(|e| e.kind())),
+            credential_status: library
+                .as_ref()
+                .map_err(|error| error.kind())
+                .and_then(|library| {
+                    telegram
+                        .as_ref()
+                        .map_err(|error| error.kind())?
+                        .effective_credentials_status(library)
+                        .map_err(|error| error.kind())
+                }),
+            preferences: library
+                .as_ref()
+                .map_err(|error| error.kind())
+                .and_then(|library| library.preferences().map_err(|error| error.kind())),
+        }
+    }
+}
+
 pub struct RuntimeStartup {
+    pub configuration: Option<RuntimeConfiguration>,
     pub library: Result<DesktopLibrary, ApplicationError>,
     pub telegram: Result<DesktopTelegram, ApplicationError>,
     pub transfers: Result<DesktopTransfers, ApplicationError>,
@@ -232,9 +276,13 @@ pub(crate) enum VaultActivity {
 }
 
 pub struct TeleArkApp {
+    pub(crate) proxy: proxy::ProxyUi,
     pub(crate) page: Page,
     pub(crate) storage_status: teleark_runtime::StorageChannelStatus,
     pub(crate) storage_loading: bool,
+    pub(crate) storage_confirmation: Option<storage::StorageAction>,
+    pub(crate) storage_maintenance: Option<teleark_runtime::StorageMaintenance>,
+    storage_maintenance_presentation: Option<Task<()>>,
     pub(crate) storage_notice: Option<&'static str>,
     storage_retry_task: Option<Task<()>>,
     pub(crate) storage_error: Option<teleark_core::ApplicationErrorKind>,
@@ -243,6 +291,9 @@ pub struct TeleArkApp {
     pub(crate) about_show_licenses: bool,
     pub(crate) upload_advanced_expanded: bool,
     pub(crate) vault_advanced_expanded: bool,
+    pub(crate) vault_new_epoch_confirmation: bool,
+    pub(crate) vault_key_progress: Option<teleark_runtime::VaultKeyProgress>,
+    vault_key_presentation: Option<Task<()>>,
     pub(crate) account_restoring: bool,
     pub(crate) transfers_account_ready: bool,
     pub(crate) account_avatar: Option<std::sync::Arc<gpui_kit::Image>>,
@@ -261,11 +312,14 @@ pub struct TeleArkApp {
     pub(crate) show_upload: bool,
     pub(crate) upload_queued: bool,
     pub(crate) upload_in_flight: bool,
+    upload_draft_generation: u64,
     pub(crate) selected_file: usize,
     pub(crate) selected_transfer_keys: BTreeSet<u64>,
     pub(crate) pending_transfer_delete: Option<u64>,
     pub(crate) pending_transfer_bulk_delete: Vec<u64>,
     pub(crate) transfer_action_error: Option<teleark_core::ApplicationErrorKind>,
+    pub(crate) transfer_projection_cache:
+        std::cell::RefCell<screens::transfers::TransferProjectionCache>,
     pub(crate) transfer_action_job: Option<screens::transfers::TransferActionJob>,
     pub(crate) show_transfer_detail: bool,
     pub(crate) transfer_controls_expanded: bool,
@@ -287,7 +341,8 @@ pub struct TeleArkApp {
     pub(crate) vault_password: Entity<InputState>,
     pub(crate) vault_new_password: Entity<InputState>,
     pub(crate) vault_recovery_key: Entity<InputState>,
-    pub(crate) managed_vault_files: Vec<ManagedVaultFile>,
+    pub(crate) managed_vault_files: std::sync::Arc<Vec<ManagedVaultFile>>,
+    pub(crate) managed_projection: std::cell::RefCell<managed_projection::ManagedProjection>,
     pub(crate) managed_vault_rejected: usize,
     pub(crate) upload_sources: Vec<teleark_runtime::VaultUploadSource>,
     pub(crate) upload_preparing: bool,
@@ -308,6 +363,9 @@ pub struct TeleArkApp {
     pub(crate) locale_persistence: LocalePersistence,
     pub(crate) telegram_auth: TelegramAuthState,
     pub(crate) telegram_activity: TelegramActivity,
+    pub(crate) dialogs: dialogs::DialogLoad,
+    dialogs_task: Option<Task<()>>,
+    dialogs_clock_task: Option<Task<()>>,
     pub(crate) telegram_account: Option<TelegramAccount>,
     pub(crate) telegram_chats: Vec<TelegramChatSummary>,
     pub(crate) selected_chat_id: Option<i64>,
@@ -315,6 +373,21 @@ pub struct TeleArkApp {
     pub(crate) preview_transfer_rows: Vec<crate::mock::TransferRow>,
     pub(crate) telegram_index: Option<TelegramIndexPage>,
     pub(crate) telegram_files: Vec<TelegramFileSummary>,
+    channel_sync: Option<teleark_runtime::ChannelSync>,
+    pub(crate) channel_sync_snapshot: Option<teleark_runtime::ChannelSyncSnapshot>,
+    channel_sync_task: Option<Task<()>>,
+    channel_display_revision: i64,
+    channel_sync_clock_task: Option<Task<()>>,
+    managed_display_revision: i64,
+    managed_upload_receipts:
+        std::collections::VecDeque<(i64, i64, teleark_runtime::ManagedVaultFile)>,
+    pub(crate) managed_catalog_pending: bool,
+    pub(crate) managed_catalog_limited: bool,
+    pub(crate) managed_health_checked: Option<usize>,
+    channel_local_read_failed: bool,
+    channel_view_cache: std::collections::VecDeque<(i64, i64, Vec<TelegramFileSummary>)>,
+    pub(crate) channel_sync_details: bool,
+    pub(crate) channel_sync_scroll: gpui_kit::ScrollHandle,
     pub(crate) telegram_files_next: Option<i64>,
     pub(crate) telegram_files_exhausted: bool,
     pub(crate) telegram_files_loading: bool,
@@ -343,9 +416,10 @@ pub struct TeleArkApp {
     pub(crate) custom_telegram_credentials_enabled: bool,
     pub(crate) settings_section: SettingsSection,
     pub(crate) preferences: DesktopPreferences,
+    channel_layout: Entity<ResizableState>,
+    channel_layout_geometry: Option<(gpui_kit::Pixels, bool)>,
     pub(crate) preference_persistence: PreferencePersistence,
     pub(crate) volume_space: Option<teleark_runtime::VolumeSpace>,
-    pub(crate) overall_storage_metrics: Option<ManagedStorageMetrics>,
     library: Option<DesktopLibrary>,
     telegram: Option<DesktopTelegram>,
     pub(crate) transfers: Option<DesktopTransfers>,
@@ -368,14 +442,21 @@ pub struct TeleArkApp {
     telegram_batch_task: Option<Task<()>>,
     preference_task: Option<Task<()>>,
     preference_picker_task: Option<Task<()>>,
-    storage_metrics_task: Option<Task<()>>,
     volume_space_task: Option<Task<()>>,
     local_files_task: Option<Task<()>>,
-    pub(crate) local_downloads:
-        std::collections::BTreeMap<std::path::PathBuf, local_files::LocalDownloadObservation>,
+    pub(crate) local_downloads: local_files::LocalDownloadCache,
     transfer_monitor_task: Option<Task<()>>,
     transfer_refresh_task: Option<Task<()>>,
+    vault_refresh_task: Option<Task<()>>,
+    transfer_clock_task: Option<Task<()>>,
+    pub(crate) native_transfer_view:
+        teleark_runtime::TransferSnapshotView<teleark_runtime::ChannelDownloadSnapshot>,
+    pub(crate) vault_transfer_view:
+        teleark_runtime::TransferSnapshotView<teleark_runtime::VaultTransferSnapshot>,
     vault_task: Option<Task<()>>,
+    vault_upload_task: Option<Task<()>>,
+    vault_session_generation: u64,
+    vault_download_in_flight: bool,
     pub(crate) managed_scan_loading: bool,
     managed_scan_generation: u64,
     managed_scan_cancellation: Option<TelegramScanCancellation>,
@@ -404,22 +485,16 @@ impl TeleArkApp {
             locale: locale_startup,
         } = startup;
         let RuntimeStartup {
+            configuration,
             library,
             telegram,
             transfers,
             vault,
         } = runtime;
-        let credential_status =
-            library
-                .as_ref()
-                .map_err(|error| error.kind())
-                .and_then(|library| {
-                    telegram
-                        .as_ref()
-                        .map_err(|error| error.kind())?
-                        .effective_credentials_status(library)
-                        .map_err(|error| error.kind())
-                });
+        let configuration =
+            configuration.unwrap_or_else(|| RuntimeConfiguration::read(&library, &telegram));
+        let proxy = proxy::ProxyUi::new(configuration.network_route, visual_preview, window, cx);
+        let credential_status = configuration.credential_status;
         let (configured_telegram_api_id, telegram_credential_source, telegram_api_id_persistence) =
             match credential_status {
                 Ok(status) => (
@@ -429,11 +504,8 @@ impl TeleArkApp {
                 ),
                 Err(kind) => (None, None, TelegramApiIdPersistence::Failed(kind)),
             };
-        let (preferences, preference_persistence) = match library.as_ref() {
-            Ok(library) => match library.preferences() {
-                Ok(preferences) => (preferences, PreferencePersistence::Idle),
-                Err(_) => (DesktopPreferences::default(), PreferencePersistence::Failed),
-            },
+        let (preferences, preference_persistence) = match configuration.preferences {
+            Ok(preferences) => (preferences, PreferencePersistence::Idle),
             Err(_) => (DesktopPreferences::default(), PreferencePersistence::Failed),
         };
         theme::apply_appearance(preferences.appearance, window, cx);
@@ -444,12 +516,8 @@ impl TeleArkApp {
             }
         });
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active()
-                && !window.has_active_prompt()
-                && this.preferences.lock_vault_when_hidden
-            {
-                this.clear_vault_inputs(window, cx);
-                this.lock_vault(cx);
+            if !window.is_window_active() {
+                this.reset_channel_layout(cx);
             }
         });
         let placeholder = localizer.translate_or_id(MessageId::new("search-placeholder"));
@@ -567,6 +635,7 @@ impl TeleArkApp {
                     }
                     this.selected_telegram_message_id = selected;
                     this.show_channel_detail = true;
+                    this.channel_sync_details = false;
                     cx.notify();
                 }
             },
@@ -596,6 +665,9 @@ impl TeleArkApp {
             .as_ref()
             .map(DesktopVault::status)
             .unwrap_or(VaultStatus {
+                active_key_locked: true,
+                historical_key_unlocked: false,
+                active_vault_id: None,
                 configured: false,
                 locked: true,
                 created_at_unix_ms: None,
@@ -603,9 +675,13 @@ impl TeleArkApp {
                 recovery_generation: None,
             });
         let mut app = Self {
+            proxy,
             page,
             storage_status: teleark_runtime::StorageChannelStatus::Missing,
             storage_loading: false,
+            storage_confirmation: None,
+            storage_maintenance: None,
+            storage_maintenance_presentation: None,
             storage_notice: None,
             storage_retry_task: None,
             storage_error: None,
@@ -614,6 +690,9 @@ impl TeleArkApp {
             about_show_licenses: false,
             upload_advanced_expanded: false,
             vault_advanced_expanded: false,
+            vault_new_epoch_confirmation: false,
+            vault_key_progress: None,
+            vault_key_presentation: None,
             account_restoring: false,
             transfers_account_ready: false,
             account_avatar: None,
@@ -632,11 +711,13 @@ impl TeleArkApp {
             show_upload,
             upload_queued: false,
             upload_in_flight: false,
+            upload_draft_generation: 0,
             selected_file: 0,
             selected_transfer_keys: BTreeSet::new(),
             pending_transfer_delete: None,
             pending_transfer_bulk_delete: Vec::new(),
             transfer_action_error: None,
+            transfer_projection_cache: Default::default(),
             transfer_action_job: None,
             show_transfer_detail: false,
             transfer_controls_expanded: false,
@@ -662,7 +743,8 @@ impl TeleArkApp {
             vault_password,
             vault_new_password,
             vault_recovery_key,
-            managed_vault_files: Vec::new(),
+            managed_vault_files: Default::default(),
+            managed_projection: Default::default(),
             managed_vault_rejected: 0,
             upload_sources: Vec::new(),
             upload_preparing: false,
@@ -687,6 +769,9 @@ impl TeleArkApp {
             } else {
                 TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
             },
+            dialogs: dialogs::DialogLoad::default(),
+            dialogs_task: None,
+            dialogs_clock_task: None,
             telegram_account: None,
             telegram_chats: Vec::new(),
             selected_chat_id: None,
@@ -694,6 +779,20 @@ impl TeleArkApp {
             preview_transfer_rows: Vec::new(),
             telegram_index: None,
             telegram_files: Vec::new(),
+            channel_sync: None,
+            channel_sync_snapshot: None,
+            channel_sync_task: None,
+            channel_display_revision: 0,
+            channel_sync_clock_task: None,
+            managed_display_revision: 0,
+            managed_upload_receipts: std::collections::VecDeque::new(),
+            managed_catalog_pending: false,
+            managed_catalog_limited: false,
+            managed_health_checked: None,
+            channel_local_read_failed: false,
+            channel_view_cache: Default::default(),
+            channel_sync_details: false,
+            channel_sync_scroll: gpui_kit::ScrollHandle::new(),
             telegram_files_next: None,
             telegram_files_exhausted: false,
             telegram_files_loading: false,
@@ -723,9 +822,10 @@ impl TeleArkApp {
                 == Some(TelegramCredentialSource::User),
             settings_section: SettingsSection::General,
             preferences,
+            channel_layout: cx.new(|_| ResizableState::default()),
+            channel_layout_geometry: None,
             preference_persistence,
             volume_space: None,
-            overall_storage_metrics: None,
             library,
             telegram: telegram.ok(),
             transfers: transfers.ok(),
@@ -748,13 +848,19 @@ impl TeleArkApp {
             telegram_batch_task: None,
             preference_task: None,
             preference_picker_task: None,
-            storage_metrics_task: None,
             volume_space_task: None,
             local_files_task: None,
             local_downloads: Default::default(),
             transfer_monitor_task: None,
             transfer_refresh_task: None,
+            vault_refresh_task: None,
+            transfer_clock_task: None,
+            native_transfer_view: Default::default(),
+            vault_transfer_view: Default::default(),
             vault_task: None,
+            vault_upload_task: None,
+            vault_session_generation: 0,
+            vault_download_in_flight: false,
             managed_scan_loading: false,
             managed_scan_generation: 0,
             managed_scan_cancellation: None,
@@ -780,8 +886,9 @@ impl TeleArkApp {
             app.initialize_preview(window, cx);
         }
         app.start_transfer_refresh(cx);
-        app.start_storage_metrics_refresh(cx);
+        app.start_volume_space_refresh(cx);
         app.start_local_file_refresh(cx);
+        app.start_network_observer(cx);
         app.restore_telegram_session(cx);
         app
     }
@@ -821,6 +928,14 @@ impl TeleArkApp {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
         }
         self.page = page;
+        if let Some(sync) = &self.channel_sync {
+            let observed = (page == Page::Channel)
+                .then_some(self.selected_chat_id)
+                .flatten();
+            if let Err(error) = sync.observe(observed) {
+                self.telegram_activity = TelegramActivity::Failed(error.kind());
+            }
+        }
         self.show_upload = false;
         if page == Page::Account {
             self.ensure_telegram_qr_login(cx);
@@ -938,11 +1053,7 @@ impl Drop for TeleArkApp {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.library_scan_cancellation.cancel();
         if let Some(vault) = self.vault.as_ref() {
-            let batches = vault
-                .transfers()
-                .into_iter()
-                .filter_map(|item| item.batch_id.map(|batch| (item.account_id, batch)))
-                .collect::<std::collections::BTreeSet<_>>();
+            let batches = vault.active_upload_batches();
             for (account, batch) in batches {
                 let _ = vault.stop_upload_batch(account, batch);
             }
@@ -956,8 +1067,30 @@ impl Drop for TeleArkApp {
 
 impl Render for TeleArkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let channel_geometry = (
+            window.viewport_size().width,
+            self.preferences.sidebar_collapsed,
+        );
+        if self.page == Page::Channel && self.channel_layout_geometry != Some(channel_geometry) {
+            // Reapply the saved width against the new available space. Kit's
+            // proportional resizing would otherwise shrink the preferred list.
+            self.reset_channel_layout(cx);
+            self.channel_layout_geometry = Some(channel_geometry);
+        }
+        if self.page != Page::Channel && !self.channel_layout.read(cx).sizes().is_empty() {
+            self.reset_channel_layout(cx);
+        }
         let layout = LayoutPolicy::from_window(window)
-            .with_sidebar_collapsed(self.preferences.sidebar_collapsed);
+            .with_sidebar_collapsed(self.preferences.sidebar_collapsed)
+            .with_channel_sidebar_width(
+                self.channel_layout
+                    .read(cx)
+                    .sizes()
+                    .first()
+                    .map_or(f32::from(self.preferences.channel_sidebar_width), |width| {
+                        f32::from(*width)
+                    }),
+            );
         let modal_open = self.show_upload
             || self.show_telegram_api_id_prompt
             || self.unlock_intent.is_some()
@@ -1009,6 +1142,8 @@ impl Render for TeleArkApp {
                         this.skip_telegram_api_id_prompt(cx);
                     }
                     EscapeBehavior::Ignore => {
+                        this.dialogs.details = false;
+                        this.channel_sync_details = false;
                         this.show_transfer_detail = false;
                         this.pending_transfer_delete = None;
                         this.pending_transfer_bulk_delete.clear();
@@ -1044,12 +1179,11 @@ impl Render for TeleArkApp {
                     .update(cx, |input, cx| input.focus(window, cx))
             }))
             .on_action(cx.listener(|this, _: &RefreshPage, _, cx| match this.page {
+                Page::Channel => this.refresh_selected_channel(cx),
                 Page::Storage | Page::LegacyRecovery if this.storage_view == StorageView::Files => {
-                    this.scan_managed_vault_files(cx)
+                    this.refresh_managed_vault_files(cx)
                 }
-                Page::Storage | Page::LegacyRecovery | Page::Channel => {
-                    this.load_selected_telegram_files(false, cx)
-                }
+                Page::Storage | Page::LegacyRecovery => this.refresh_selected_channel(cx),
                 Page::Library => this.refresh_library(cx),
                 _ => this.load_telegram_dialogs(cx),
             }))
@@ -1070,32 +1204,42 @@ impl Render for TeleArkApp {
                     .when(self.page != Page::Account, |body| {
                         body.child(self.render_sidebar(layout, cx))
                     })
-                    .when(self.page == Page::Channel, |body| {
-                        body.child(self.render_channels_sidebar(cx))
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .when(self.page != Page::Account, |body| {
-                                body.child(self.render_header(window, layout, cx))
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .child(self.render_page(window, layout, cx)),
-                            )
-                            .when(self.page != Page::Account, |body| {
-                                body.child(self.render_status_bar(cx))
-                            }),
-                    ),
+                    .child(self.render_workspace(window, layout, cx)),
             )
+            .when(self.proxy.show_banner(), |root| {
+                root.child(self.render_network_banner(cx))
+            })
+            .when(
+                self.storage_loading
+                    && self.storage_maintenance.is_some()
+                    && self.page != Page::Storage,
+                |root| root.child(self.render_storage_maintenance(cx)),
+            )
+            .when(
+                self.vault_activity == VaultActivity::Working
+                    && self.vault_key_progress.is_some()
+                    && self.unlock_intent.is_none(),
+                |root| root.child(self.render_vault_key_progress(cx)),
+            )
+            .when(self.vault_locked && self.vault_status.configured, |root| {
+                root.child(
+                    div()
+                        .id("vault-session-locked-notice")
+                        .debug_selector(|| "vault-session-locked-notice".into())
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .bg(theme::blue_pale())
+                        .child(self.tr("vault-session-locked-background")),
+                )
+            })
+            .child(self.render_status_bar(cx))
+            .when(self.channel_sync_details, |root| {
+                root.child(self.render_channel_sync_details(cx))
+            })
+            .when(self.dialogs.details, |root| {
+                root.child(self.render_dialog_details(cx))
+            })
             .when(self.confirm_account_switch, |root| {
                 root.child(self.render_account_switch_dialog(cx))
             })
@@ -1300,6 +1444,7 @@ pub(crate) mod test_support {
                 cx,
                 Localizer::new(SupportedLocale::EnUs).expect("catalog"),
                 RuntimeStartup {
+                    configuration: None,
                     library: Err(unavailable()),
                     telegram: Err(unavailable()),
                     transfers: Err(unavailable()),

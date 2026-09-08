@@ -36,8 +36,15 @@ mod connection;
 use byte_progress::UploadReader;
 pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
 
+mod channel_sync;
+pub mod network;
 mod session;
 mod storage_channel;
+pub use channel_sync::{
+    ChannelDifferencePage, ChannelFileUpdate, ChannelPush, ChannelUpdateHints,
+    ChannelUpdateSignals, ChannelWake,
+};
+pub use storage_channel::{StorageChannelHealth, StorageMaintenancePhase};
 
 use session::FileSession;
 
@@ -147,10 +154,13 @@ impl ScanCancellation {
 ///
 /// The Telegram API hash is intentionally not stored here. The application
 /// must obtain and protect that value separately before requesting login.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct TelegramConfig {
     pub api_id: i32,
     pub session_path: PathBuf,
+    pub network_route: network::NetworkRoute,
+    pub network_monitor: network::NetworkMonitor,
+    pub network_generation: u64,
 }
 
 /// Stable error categories used by Core and frontends.
@@ -160,6 +170,7 @@ pub enum TelegramErrorKind {
     InvalidConfiguration,
     Session,
     Network,
+    Server,
     FloodWait,
     Authorization,
     SignUpRequired,
@@ -167,6 +178,10 @@ pub enum TelegramErrorKind {
     InvalidPassword,
     SourceMissing,
     PermissionDenied,
+    StorageAccessDenied,
+    StorageConfigurationUnsafe,
+    StorageIdentityDamaged,
+    StorageIdentityUnsupported,
     LimitExceeded,
     Cancelled,
     Interrupted,
@@ -306,9 +321,13 @@ pub struct TelegramChat {
     kind: TelegramChatKind,
     peer_ref: PeerRef,
     owned_channel: bool,
+    sync_pts: Option<i32>,
 }
 
 impl TelegramChat {
+    pub const fn sync_pts(&self) -> Option<i32> {
+        self.sync_pts
+    }
     pub const fn id(&self) -> i64 {
         self.id
     }
@@ -396,12 +415,15 @@ pub struct SentDocument {
 /// Connected Telegram adapter with explicit ownership of all background work.
 pub struct TelegramConnection {
     client: Client,
+    sync_client: Client,
     session: Arc<FileSession>,
     api_id: i32,
     qr_login_update: Arc<AtomicBool>,
     download_flood_gate: Arc<DownloadFloodGate>,
     runner: Option<JoinHandle<()>>,
+    gateway: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
+    channel_updates: ChannelUpdateSignals,
 }
 
 impl TelegramConnection {
@@ -410,29 +432,50 @@ impl TelegramConnection {
         validate_config(&config)?;
         prepare_session_parent(&config.session_path).await?;
 
-        let session = Arc::new(
-            FileSession::open(&config.session_path)
-                .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?,
-        );
+        let path = config.session_path.clone();
+        let session = tokio::task::spawn_blocking(move || FileSession::open(&path))
+            .await
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?
+            .map(Arc::new)
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?;
         restrict_session_permissions(&config.session_path).await?;
 
+        let gateway = network::Gateway::start(
+            config.network_route,
+            config.network_monitor.clone(),
+            config.network_generation,
+        )
+        .await
+        .map_err(|_| TelegramError::new(TelegramErrorKind::Network))?;
         let SenderPool {
             runner,
             handle,
             mut updates,
-        } = SenderPool::with_configuration(
-            Arc::clone(&session),
-            config.api_id,
-            connection::params(),
+        } = sender_pool(Arc::clone(&session), config.api_id, gateway.proxy_url);
+
+        let sync_client = Client::with_configuration(
+            handle.clone(),
+            grammers_client::client::ClientConfiguration {
+                retry_policy: Box::new(grammers_client::client::NoRetries),
+                ..Default::default()
+            },
         );
         let client = Client::new(handle);
         let runner = tokio::spawn(runner.run());
-        // Grammers receives updates through an unbounded transport channel. Drain
-        // it continuously until a bounded Core update stream is connected.
+        // Drain the transport continuously into bounded/coalesced channel PTS
+        // hints. Durable differences, not these hints, advance the catalog.
+        let channel_updates = ChannelUpdateSignals::default();
+        let channel_signal = channel_updates.clone();
         let qr_login_update = Arc::new(AtomicBool::new(false));
         let drain_signal = Arc::clone(&qr_login_update);
         let update_drain = tokio::spawn(async move {
             while let Some(update) = updates.recv().await {
+                if matches!(&update, UpdatesLike::ConnectionClosed) {
+                    config
+                        .network_monitor
+                        .transport_closed(config.network_generation);
+                }
+                channel_signal.observe(&update);
                 if contains_qr_login_update(&update) {
                     drain_signal.store(true, Ordering::Release);
                 }
@@ -441,12 +484,15 @@ impl TelegramConnection {
 
         Ok(Self {
             client,
+            sync_client,
             session,
             api_id: config.api_id,
             qr_login_update,
             download_flood_gate: Arc::new(DownloadFloodGate::default()),
             runner: Some(runner),
+            gateway: Some(gateway.task),
             update_drain: Some(update_drain),
+            channel_updates,
         })
     }
 
@@ -609,36 +655,17 @@ impl TelegramConnection {
     }
 
     pub async fn list_dialogs(&self, limit: usize) -> Result<Vec<TelegramChat>, TelegramError> {
-        validate_limit(limit, MAX_DIALOGS_PER_REQUEST)?;
-        require_authorized(&self.client).await?;
+        list_dialogs_with_client(&self.client, limit).await
+    }
 
-        let mut dialogs = self.client.iter_dialogs();
-        let mut chats = Vec::with_capacity(limit.min(128));
-        while chats.len() < limit {
-            let Some(dialog) = dialogs.next().await.map_err(map_invocation)? else {
-                break;
-            };
-            let peer = dialog.peer();
-            let peer_id = peer.id();
-            let Some(id) = peer_id.bare_id() else {
-                continue;
-            };
-            let kind = match peer_id.kind() {
-                PeerKind::User => TelegramChatKind::User,
-                PeerKind::Chat => TelegramChatKind::Group,
-                PeerKind::Channel => TelegramChatKind::Channel,
-            };
-            chats.push(TelegramChat {
-                id,
-                name: peer.name().unwrap_or_default().to_owned(),
-                username: peer.username().map(ToOwned::to_owned),
-                kind,
-                peer_ref: dialog.peer_ref(),
-                owned_channel: matches!(peer, grammers_client::peer::Peer::Channel(channel)
-                    if channel.raw.creator),
-            });
+    pub async fn list_sync_dialogs(
+        &self,
+        cancellation: &ScanCancellation,
+    ) -> Result<Vec<TelegramChat>, TelegramError> {
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(TelegramError::new(TelegramErrorKind::Cancelled)),
+            result = list_dialogs_with_client(&self.sync_client, MAX_DIALOGS_PER_REQUEST) => result,
         }
-        Ok(chats)
     }
 
     /// Scans a bounded page of document messages, newest first.
@@ -676,47 +703,21 @@ impl TelegramConnection {
         limit: usize,
         cancellation: &ScanCancellation,
     ) -> Result<TelegramFilePage, TelegramError> {
-        validate_limit(limit, MAX_MESSAGES_PER_SCAN)?;
-        if cancellation.is_cancelled() {
-            return Err(TelegramError::new(TelegramErrorKind::Cancelled));
-        }
-        let offset = before_message_id
-            .map(i32::try_from)
-            .transpose()
-            .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?
-            .unwrap_or_default();
+        scan_page_with_client(&self.client, chat, before_message_id, limit, cancellation).await
+    }
 
-        let mut messages = self
-            .client
-            .iter_messages(chat.peer_ref)
-            .offset_id(offset)
-            .limit(limit);
-        let mut files = Vec::new();
-        let mut examined = 0_usize;
-        let mut last_message_id = None;
-        loop {
-            let next = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    return Err(TelegramError::new(TelegramErrorKind::Cancelled));
-                }
-                next = messages.next() => next.map_err(map_invocation)?,
-            };
-            let Some(message) = next else {
-                break;
-            };
-            examined = examined.saturating_add(1);
-            last_message_id = Some(i64::from(message.id()));
-            if let Some(file) = file_from_message(message)? {
-                files.push(file);
-            }
+    /// Bounded history requested by the sync owner; rate limits are surfaced
+    /// immediately so the account scheduler can publish and honor the deadline.
+    pub async fn scan_sync_history(
+        &self,
+        chat: &TelegramChat,
+        before: Option<i64>,
+        cancellation: &ScanCancellation,
+    ) -> Result<TelegramFilePage, TelegramError> {
+        if chat.kind != TelegramChatKind::Channel {
+            return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
         }
-        let exhausted = examined < limit;
-        Ok(TelegramFilePage {
-            files,
-            next_before_message_id: (!exhausted).then_some(last_message_id).flatten(),
-            exhausted,
-            examined_messages: examined,
-        })
+        scan_page_with_client(&self.sync_client, chat, before, 200, cancellation).await
     }
 
     /// Refetches one indexed document by its source message identity.
@@ -816,7 +817,7 @@ impl TelegramConnection {
         observer: &dyn DownloadObserver,
     ) -> Result<(), TelegramError> {
         let destination = destination.as_ref();
-        validate_download_destination(destination)?;
+        validate_download_destination(destination).await?;
         let partial = partial_download_path(destination)?;
         let part_map_path = partial_download_map_path(destination)?;
         let mut part_map =
@@ -1124,6 +1125,10 @@ impl TelegramConnection {
     /// Gracefully stops both retained background tasks.
     pub async fn shutdown(mut self) {
         self.client.disconnect();
+        if let Some(task) = self.gateway.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.runner.take() {
             let _ = task.await;
         }
@@ -1163,7 +1168,7 @@ fn download_part_retry_delay(
     }
     match error.kind() {
         TelegramErrorKind::FloodWait => error.retry_after(),
-        TelegramErrorKind::Network => Some(
+        TelegramErrorKind::Network | TelegramErrorKind::Server => Some(
             DOWNLOAD_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.saturating_sub(1).min(5)),
         ),
         _ => None,
@@ -1277,7 +1282,10 @@ const DOWNLOAD_PART_MAP_HEADER_BYTES: usize = 40;
 
 struct DownloadPartMap {
     total_bytes: u64,
-    completed: Vec<bool>,
+    part_count: usize,
+    completed: Vec<u8>,
+    completed_part_count: usize,
+    completed_byte_count: u64,
 }
 
 impl DownloadPartMap {
@@ -1287,14 +1295,17 @@ impl DownloadPartMap {
             .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
         Ok(Self {
             total_bytes,
-            completed: vec![false; part_count],
+            part_count,
+            completed: vec![0; part_count.div_ceil(8)],
+            completed_part_count: 0,
+            completed_byte_count: 0,
         })
     }
 
     fn part_range(&self, part_index: u64) -> Result<(u64, u64), TelegramError> {
         let position = usize::try_from(part_index)
             .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-        if position >= self.completed.len() {
+        if position >= self.part_count {
             return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
         }
         let offset = part_index
@@ -1309,52 +1320,41 @@ impl DownloadPartMap {
     }
 
     fn mark_completed(&mut self, part_index: u64) -> Result<(), TelegramError> {
-        let position = usize::try_from(part_index)
-            .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-        let completed = self
-            .completed
-            .get_mut(position)
-            .ok_or_else(|| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-        *completed = true;
+        let (_, length) = self.part_range(part_index)?;
+        let position = part_index as usize; // checked by part_range
+        let byte = &mut self.completed[position / 8];
+        let bit = 1 << (position % 8);
+        if *byte & bit == 0 {
+            *byte |= bit;
+            self.completed_part_count += 1;
+            self.completed_byte_count += length;
+        }
         Ok(())
     }
 
     fn is_complete(&self) -> bool {
-        self.completed.iter().all(|completed| *completed)
+        self.completed_part_count == self.part_count
     }
 
     fn completed_bytes(&self) -> u64 {
-        self.completed
-            .iter()
-            .enumerate()
-            .filter(|(_, completed)| **completed)
-            .filter_map(|(position, _)| self.part_range(position as u64).ok())
-            .fold(0_u64, |total, (_, length)| total.saturating_add(length))
+        self.completed_byte_count
     }
 
     fn missing_parts(&self) -> VecDeque<u64> {
-        self.completed
-            .iter()
-            .enumerate()
-            .filter(|(_, completed)| !**completed)
-            .filter_map(|(position, _)| u64::try_from(position).ok())
+        (0..self.part_count)
+            .filter(|position| self.completed[position / 8] & (1 << (position % 8)) == 0)
+            .map(|position| position as u64)
             .collect()
     }
 
     fn encode(&self) -> Result<Vec<u8>, TelegramError> {
-        let bit_bytes = self.completed.len().div_ceil(8);
-        let mut output = Vec::with_capacity(DOWNLOAD_PART_MAP_HEADER_BYTES + bit_bytes);
+        let mut output = Vec::with_capacity(DOWNLOAD_PART_MAP_HEADER_BYTES + self.completed.len());
         output.extend_from_slice(DOWNLOAD_PART_MAP_MAGIC);
         output.extend_from_slice(&DOWNLOAD_PART_SIZE_BYTES.to_be_bytes());
         output.extend_from_slice(&self.total_bytes.to_be_bytes());
+        output.extend_from_slice(&(self.part_count as u64).to_be_bytes());
         output.extend_from_slice(&(self.completed.len() as u64).to_be_bytes());
-        output.extend_from_slice(&(bit_bytes as u64).to_be_bytes());
-        output.resize(DOWNLOAD_PART_MAP_HEADER_BYTES + bit_bytes, 0);
-        for (position, completed) in self.completed.iter().copied().enumerate() {
-            if completed {
-                output[DOWNLOAD_PART_MAP_HEADER_BYTES + position / 8] |= 1 << (position % 8);
-            }
-        }
+        output.extend_from_slice(&self.completed);
         Ok(output)
     }
 
@@ -1387,14 +1387,32 @@ impl DownloadPartMap {
         }
         let part_count = usize::try_from(part_count)
             .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-        let completed = (0..part_count)
-            .map(|position| {
-                bytes[DOWNLOAD_PART_MAP_HEADER_BYTES + position / 8] & (1 << (position % 8)) != 0
-            })
-            .collect();
+        let mut completed = bytes[DOWNLOAD_PART_MAP_HEADER_BYTES..].to_vec();
+        // Version 1 ignores unused high bits; preserve its reader behavior and
+        // canonical writer bytes instead of assigning new meaning to those bits.
+        if !part_count.is_multiple_of(8)
+            && let Some(last) = completed.last_mut()
+        {
+            *last &= (1 << (part_count % 8)) - 1;
+        }
+        let completed_part_count = completed
+            .iter()
+            .map(|byte| byte.count_ones() as usize)
+            .sum::<usize>();
+        let tail_length = total_bytes % DOWNLOAD_PART_SIZE_BYTES;
+        let tail_completed = tail_length != 0
+            && completed
+                .last()
+                .is_some_and(|last| last & (1 << ((part_count - 1) % 8)) != 0);
+        let completed_byte_count = ((completed_part_count - usize::from(tail_completed)) as u64)
+            * DOWNLOAD_PART_SIZE_BYTES
+            + if tail_completed { tail_length } else { 0 };
         Ok(Self {
             total_bytes,
+            part_count,
             completed,
+            completed_part_count,
+            completed_byte_count,
         })
     }
 }
@@ -1431,7 +1449,7 @@ async fn prepare_download_part_map(
         .await
         .map_err(map_io)?;
     output.set_len(expected_bytes).await.map_err(map_io)?;
-    if part_map.completed.len() != expected_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES) as usize {
+    if part_map.part_count != expected_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES) as usize {
         return Err(TelegramError::new(TelegramErrorKind::Network));
     }
     persist_download_part_map(map_path, &part_map).await?;
@@ -1497,6 +1515,9 @@ async fn prepare_partial_download(
 impl Drop for TelegramConnection {
     fn drop(&mut self) {
         self.client.disconnect();
+        if let Some(task) = self.gateway.take() {
+            task.abort();
+        }
         if let Some(task) = self.runner.take() {
             task.abort();
         }
@@ -1504,6 +1525,23 @@ impl Drop for TelegramConnection {
             task.abort();
         }
     }
+}
+
+// One factory for every API, sync, avatar and transfer client. The gateway URL
+// is mandatory, including in direct mode; no caller can omit proxy routing.
+fn sender_pool<S>(session: Arc<S>, api_id: i32, gateway_url: String) -> SenderPool
+where
+    S: grammers_session::Session + Sized,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    SenderPool::with_configuration(
+        session,
+        api_id,
+        grammers_mtsender::ConnectionParams {
+            proxy_url: Some(gateway_url),
+            ..connection::params()
+        },
+    )
 }
 
 fn validate_config(config: &TelegramConfig) -> Result<(), TelegramError> {
@@ -1547,11 +1585,11 @@ fn validate_qr_migration(dc_id: i32, token: &[u8]) -> Result<(), TelegramError> 
     }
 }
 
-fn validate_download_destination(destination: &Path) -> Result<(), TelegramError> {
+async fn validate_download_destination(destination: &Path) -> Result<(), TelegramError> {
     if destination.as_os_str().is_empty() || destination.file_name().is_none() {
         return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
     }
-    match std::fs::symlink_metadata(destination) {
+    match tokio::fs::symlink_metadata(destination).await {
         Ok(_) => Err(TelegramError::new(TelegramErrorKind::PermissionDenied)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(map_io(error)),
@@ -1724,6 +1762,9 @@ fn map_invocation(error: InvocationError) -> TelegramError {
         InvocationError::Rpc(rpc) if rpc.code == 420 => TelegramError::flood_wait(
             Duration::from_secs(u64::from(rpc.value.unwrap_or_default())),
         ),
+        InvocationError::Rpc(rpc) if rpc.code >= 500 => {
+            TelegramError::new(TelegramErrorKind::Server)
+        }
         InvocationError::Session(_) => TelegramError::new(TelegramErrorKind::Session),
         InvocationError::Dropped => TelegramError::new(TelegramErrorKind::Cancelled),
         InvocationError::Io(_)
@@ -1768,6 +1809,95 @@ fn merge_search_candidates<T>(
         .collect()
 }
 
+async fn scan_page_with_client(
+    client: &Client,
+    chat: &TelegramChat,
+    before_message_id: Option<i64>,
+    limit: usize,
+    cancellation: &ScanCancellation,
+) -> Result<TelegramFilePage, TelegramError> {
+    validate_limit(limit, MAX_MESSAGES_PER_SCAN)?;
+    if cancellation.is_cancelled() {
+        return Err(TelegramError::new(TelegramErrorKind::Cancelled));
+    }
+    let offset = before_message_id
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?
+        .unwrap_or_default();
+
+    let mut messages = client
+        .iter_messages(chat.peer_ref)
+        .offset_id(offset)
+        .limit(limit);
+    let mut files = Vec::new();
+    let mut examined = 0_usize;
+    let mut last_message_id = None;
+    loop {
+        let next = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(TelegramError::new(TelegramErrorKind::Cancelled));
+            }
+            next = messages.next() => next.map_err(map_invocation)?,
+        };
+        let Some(message) = next else {
+            break;
+        };
+        examined = examined.saturating_add(1);
+        last_message_id = Some(i64::from(message.id()));
+        if let Some(file) = file_from_message(message)? {
+            files.push(file);
+        }
+    }
+    let exhausted = examined < limit;
+    Ok(TelegramFilePage {
+        files,
+        next_before_message_id: (!exhausted).then_some(last_message_id).flatten(),
+        exhausted,
+        examined_messages: examined,
+    })
+}
+
+async fn list_dialogs_with_client(
+    client: &Client,
+    limit: usize,
+) -> Result<Vec<TelegramChat>, TelegramError> {
+    validate_limit(limit, MAX_DIALOGS_PER_REQUEST)?;
+    require_authorized(client).await?;
+
+    let mut dialogs = client.iter_dialogs();
+    let mut chats = Vec::with_capacity(limit.min(128));
+    while chats.len() < limit {
+        let Some(dialog) = dialogs.next().await.map_err(map_invocation)? else {
+            break;
+        };
+        let peer = dialog.peer();
+        let peer_id = peer.id();
+        let Some(id) = peer_id.bare_id() else {
+            continue;
+        };
+        let kind = match peer_id.kind() {
+            PeerKind::User => TelegramChatKind::User,
+            PeerKind::Chat => TelegramChatKind::Group,
+            PeerKind::Channel => TelegramChatKind::Channel,
+        };
+        chats.push(TelegramChat {
+            sync_pts: match &dialog.raw {
+                tl::enums::Dialog::Dialog(dialog) => dialog.pts,
+                _ => None,
+            },
+            id,
+            name: peer.name().unwrap_or_default().to_owned(),
+            username: peer.username().map(ToOwned::to_owned),
+            kind,
+            peer_ref: dialog.peer_ref(),
+            owned_channel: matches!(peer, grammers_client::peer::Peer::Channel(channel)
+                    if channel.raw.creator),
+        });
+    }
+    Ok(chats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1800,6 +1930,9 @@ mod tests {
         let error = validate_config(&TelegramConfig {
             api_id: 0,
             session_path: PathBuf::from("account.session"),
+            network_route: network::NetworkRoute::Direct,
+            network_monitor: network::NetworkMonitor::new(&network::NetworkRoute::Direct),
+            network_generation: 0,
         })
         .expect_err("zero API ID must fail validation");
         assert_eq!(error.kind(), TelegramErrorKind::InvalidConfiguration);
@@ -1827,6 +1960,30 @@ mod tests {
         waiter.await.expect("cancellation waiter");
         assert!(cancellation.is_cancelled());
         cancellation.cancelled().await;
+    }
+
+    #[test]
+    fn server_rpc_failure_is_not_a_transport_or_authentication_failure() {
+        for (code, expected) in [
+            (500, TelegramErrorKind::Server),
+            (503, TelegramErrorKind::Server),
+            (401, TelegramErrorKind::Authorization),
+        ] {
+            let error = map_invocation(InvocationError::Rpc(grammers_mtsender::RpcError {
+                code,
+                name: "RPC_CALL_FAIL".to_owned(),
+                value: None,
+                caused_by: Some(0xa0f4cb4f),
+            }));
+            assert_eq!(error.kind(), expected);
+        }
+        assert_eq!(
+            map_invocation(InvocationError::Io(std::io::Error::from(
+                std::io::ErrorKind::TimedOut
+            )))
+            .kind(),
+            TelegramErrorKind::Network
+        );
     }
 
     #[test]
@@ -2013,16 +2170,24 @@ mod tests {
 
     #[test]
     fn download_destination_is_collision_safe_and_has_private_partial_name() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("Tokio runtime");
         let directory = tempfile::tempdir().expect("temporary directory");
         let destination = directory.path().join("report.pdf");
-        assert!(validate_download_destination(&destination).is_ok());
+        assert!(
+            runtime
+                .block_on(validate_download_destination(&destination))
+                .is_ok()
+        );
         assert_eq!(
             partial_download_path(&destination).expect("partial path"),
             directory.path().join(".report.pdf.teleark-partial")
         );
         std::fs::write(&destination, b"existing").expect("write fixture");
         assert_eq!(
-            validate_download_destination(&destination)
+            runtime
+                .block_on(validate_download_destination(&destination))
                 .expect_err("existing destination must not be replaced")
                 .kind(),
             TelegramErrorKind::PermissionDenied
@@ -2078,6 +2243,114 @@ mod tests {
         discard_partial_download(directory.path().join("resume"))
             .expect("discard resumable partial");
         assert!(!partial.exists());
+    }
+
+    fn legacy_part_map(total: u64, completed: &[bool]) -> (Vec<u8>, u64, bool) {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"TARKDPM1");
+        for value in [
+            DOWNLOAD_PART_SIZE_BYTES,
+            total,
+            completed.len() as u64,
+            completed.len().div_ceil(8) as u64,
+        ] {
+            encoded.extend_from_slice(&value.to_be_bytes());
+        }
+        encoded.resize(40 + completed.len().div_ceil(8), 0);
+        let mut received = 0;
+        for (index, complete) in completed.iter().enumerate() {
+            if *complete {
+                encoded[40 + index / 8] |= 1 << (index % 8);
+                received += (total - (index as u64) * DOWNLOAD_PART_SIZE_BYTES)
+                    .min(DOWNLOAD_PART_SIZE_BYTES);
+            }
+        }
+        (
+            encoded,
+            received,
+            completed.iter().all(|complete| *complete),
+        )
+    }
+
+    #[test]
+    fn packed_part_map_preserves_v1_bytes_and_incremental_counts() {
+        let fixture: &[u8] = include_bytes!("fixtures/native-part-map-v1.bin");
+        let map = DownloadPartMap::decode(fixture, DOWNLOAD_PART_SIZE_BYTES * 2 + 17)
+            .expect("version 1 fixture");
+        assert_eq!(map.encode().expect("canonical codec"), fixture);
+        assert_eq!(map.completed_bytes(), DOWNLOAD_PART_SIZE_BYTES + 17);
+        let mut ignored_high_bits = fixture.to_vec();
+        ignored_high_bits[40] |= 0b1111_1000;
+        assert_eq!(
+            DownloadPartMap::decode(&ignored_high_bits, map.total_bytes)
+                .expect("old reader ignores high bits")
+                .encode()
+                .expect("canonical"),
+            fixture
+        );
+        for total in [
+            0,
+            1,
+            DOWNLOAD_PART_SIZE_BYTES,
+            DOWNLOAD_PART_SIZE_BYTES * 9 + 17,
+            DOWNLOAD_PART_SIZE_BYTES * 4096 + 7,
+        ] {
+            let mut map = DownloadPartMap::new(total).expect("map");
+            let mut reference = vec![false; map.part_count];
+            assert_eq!(map.completed.len(), reference.len().div_ceil(8));
+            for index in 0..map.part_count {
+                let part = index * 37 % map.part_count;
+                reference[part] = true;
+                map.mark_completed(part as u64).expect("complete");
+                map.mark_completed(part as u64)
+                    .expect("idempotent duplicate");
+                let (bytes, received, complete) = legacy_part_map(total, &reference);
+                assert_eq!(map.encode().expect("encode"), bytes);
+                assert_eq!(map.completed_bytes(), received);
+                assert_eq!(map.is_complete(), complete);
+                let restored = DownloadPartMap::decode(&bytes, total).expect("resume old bytes");
+                assert_eq!(restored.completed_bytes(), received);
+                assert_eq!(restored.is_complete(), complete);
+            }
+            assert!(map.is_complete());
+            assert_eq!(map.completed_bytes(), total);
+            assert!(map.missing_parts().is_empty());
+            assert!(map.mark_completed(map.part_count as u64).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "manual local algorithm comparison, no wall-time pass threshold"]
+    fn perf_download_part_map() {
+        let total = DOWNLOAD_PART_SIZE_BYTES * 10_000;
+        let mut reference = vec![false; 10_000];
+        reference[..5000].fill(true);
+        let mut map =
+            DownloadPartMap::decode(&legacy_part_map(total, &reference).0, total).expect("map");
+        let started = Instant::now();
+        for part in 5000..6000 {
+            reference[part] = true;
+            std::hint::black_box(legacy_part_map(total, &reference));
+        }
+        let previous_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for part in 5000..6000 {
+            map.mark_completed(part).expect("complete");
+            std::hint::black_box((
+                map.encode().expect("encode"),
+                map.completed_bytes(),
+                map.is_complete(),
+            ));
+        }
+        let packed_us = started.elapsed().as_micros();
+        assert_eq!(
+            map.encode().expect("encode"),
+            legacy_part_map(total, &reference).0
+        );
+        eprintln!(
+            "part-map: 10000 parts, 1000 completions; previous_us={previous_us}, packed_us={packed_us}; metadata bytes old=10000 new={}",
+            map.completed.len()
+        );
     }
 
     #[test]
@@ -2139,5 +2412,41 @@ mod tests {
         assert!(DownloadPartMap::decode(&encoded, DOWNLOAD_PART_SIZE_BYTES + 2).is_err());
         encoded.push(0);
         assert!(DownloadPartMap::decode(&encoded, DOWNLOAD_PART_SIZE_BYTES + 1).is_err());
+    }
+    #[test]
+    #[ignore = "manual temporary-disk checkpoint cost probe; no timing assertion"]
+    fn perf_download_checkpoint_disk() {
+        use tokio::io::AsyncWriteExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let bytes = vec![0x55; DOWNLOAD_PART_SIZE_BYTES as usize];
+            for checkpoints in [false, true] {
+                let path = directory
+                    .path()
+                    .join(if checkpoints { "mapped" } else { "plain" });
+                let mut file = tokio::fs::File::create(&path).await.expect("create");
+                let mut map = DownloadPartMap::new(64 * DOWNLOAD_PART_SIZE_BYTES).expect("map");
+                let started = std::time::Instant::now();
+                for part in 0..64 {
+                    file.write_all(&bytes).await.expect("write");
+                    file.flush().await.expect("flush");
+                    map.mark_completed(part).expect("mark");
+                    if checkpoints {
+                        persist_download_part_map(&path.with_extension("map"), &map)
+                            .await
+                            .expect("checkpoint");
+                    }
+                }
+                file.sync_all().await.expect("final sync");
+                eprintln!(
+                    "temporary disk MiB=64 per_part_map={checkpoints} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+            }
+        });
     }
 }

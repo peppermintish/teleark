@@ -7,17 +7,15 @@ impl TeleArkApp {
         let Some(transfers) = self.transfers.clone() else {
             return;
         };
+        let mut subscription = transfers.subscribe();
         self.transfer_monitor_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
+                let reader = transfers.clone();
+                let snapshot = cx
+                    .background_spawn(async move { reader.snapshot(id) })
                     .await;
-                let snapshots = transfers.snapshots();
                 let Some(entity) = this.upgrade() else { return };
                 let outcome = entity.update(cx, |this, cx| {
-                    let snapshot = snapshots.ok().and_then(|snapshots| {
-                        snapshots.into_iter().find(|snapshot| snapshot.id == id)
-                    });
                     let state = snapshot.as_ref().map(|snapshot| snapshot.state).unwrap_or(
                         ChannelDownloadState::Failed(
                             teleark_core::ApplicationErrorKind::Persistence,
@@ -91,7 +89,8 @@ impl TeleArkApp {
                         }
                     });
                 }
-                if terminal {
+                drop(entity);
+                if terminal || !subscription.changed().await {
                     break;
                 }
             }
@@ -99,113 +98,121 @@ impl TeleArkApp {
     }
 
     pub(super) fn start_transfer_refresh(&mut self, cx: &mut Context<Self>) {
-        let transfers = self.transfers.clone();
-        let vault = self.vault.clone();
-        if transfers.is_none() && vault.is_none() {
+        if let Some(transfers) = self.transfers.clone() {
+            let mut subscription = transfers.subscribe();
+            self.transfer_refresh_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let reader = transfers.clone();
+                    let view = cx
+                        .background_spawn(async move { reader.snapshot_view() })
+                        .await;
+                    let Some(entity) = this.upgrade() else { return };
+                    entity.update(cx, |app, cx| {
+                        if let Ok(view) = view
+                            && view.revision != app.native_transfer_view.revision
+                        {
+                            app.native_transfer_view = view;
+                            app.start_transfer_clock(cx);
+                            cx.notify();
+                        }
+                    });
+                    drop(entity);
+                    if !subscription.changed().await {
+                        break;
+                    }
+                }
+            }));
+        }
+        if let Some(vault) = self.vault.clone() {
+            let mut subscription = vault.subscribe();
+            self.vault_refresh_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    let reader = vault.clone();
+                    let view = cx
+                        .background_spawn(async move { reader.snapshot_view() })
+                        .await;
+                    let Some(entity) = this.upgrade() else { return };
+                    entity.update(cx, |app, cx| {
+                        if let Some(view) = view
+                            && view.revision != app.vault_transfer_view.revision
+                        {
+                            app.vault_transfer_view = view;
+                            app.start_transfer_clock(cx);
+                            cx.notify();
+                        }
+                    });
+                    drop(entity);
+                    if !subscription.changed().await {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    pub(super) fn has_active_transfer(&self) -> bool {
+        let account = self.telegram_account.as_ref().map(|account| account.id);
+        self.native_transfer_view.items.iter().any(|row| {
+            row.account_id == account
+                && matches!(
+                    row.state,
+                    ChannelDownloadState::Queued | ChannelDownloadState::Running
+                )
+        }) || self.vault_transfer_view.items.iter().any(|row| {
+            Some(row.account_id) == account
+                && matches!(
+                    row.state,
+                    teleark_runtime::VaultTransferState::Queued
+                        | teleark_runtime::VaultTransferState::Running
+                )
+        })
+    }
+
+    fn start_transfer_clock(&mut self, cx: &mut Context<Self>) {
+        if self.transfer_clock_task.is_some() || !self.has_active_transfer() {
             return;
         }
-        self.transfer_refresh_task = Some(cx.spawn(async move |this, cx| {
-            let mut previous = Vec::new();
+        self.transfer_clock_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let Some(entity) = this.upgrade() else { return };
-                let authorized = entity.update(cx, |this, _cx| {
-                    this.transfers_account_ready
-                        && matches!(this.telegram_auth, TelegramAuthState::Authorized(_))
+                let active = entity.update(cx, |app, cx| {
+                    let active = app.has_active_transfer();
+                    if active {
+                        cx.notify();
+                    } else {
+                        app.transfer_clock_task = None;
+                    }
+                    active
                 });
-                if authorized && let Some(transfers) = transfers.as_ref() {
-                    let _ = transfers.activate_pending_downloads();
+                drop(entity);
+                if !active {
+                    break;
                 }
-                let mut signature: Vec<_> = transfers
-                    .as_ref()
-                    .and_then(|transfers| transfers.snapshots().ok())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|snapshot| {
-                        (
-                            snapshot.id,
-                            format!("native:{:?}", snapshot.state),
-                            snapshot.transferred_bytes,
-                            snapshot.current_bytes_per_second,
-                            0_u32,
-                        )
-                    })
-                    .collect();
-                signature.extend(
-                    vault
-                        .as_ref()
-                        .map(DesktopVault::transfers)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|snapshot| {
-                            (
-                                snapshot.id,
-                                format!(
-                                    "vault:{:?}:{:?}:{}",
-                                    snapshot.state,
-                                    snapshot.upload_activity,
-                                    snapshot
-                                        .upload_activity
-                                        .as_ref()
-                                        .filter(|_| matches!(
-                                            snapshot.state,
-                                            teleark_runtime::VaultTransferState::Queued
-                                                | teleark_runtime::VaultTransferState::Running
-                                        ))
-                                        .map_or(0, |activity| activity.since.elapsed().as_secs())
-                                ),
-                                snapshot.transferred_bytes,
-                                snapshot.average_bytes_per_second,
-                                snapshot.completed_parts,
-                            )
-                        }),
-                );
-                if signature == previous {
-                    continue;
-                }
-                previous = signature;
-                entity.update(cx, |_, cx| cx.notify());
             }
         }));
     }
 
-    pub(super) fn start_storage_metrics_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn start_volume_space_refresh(&mut self, cx: &mut Context<Self>) {
         let Some(library) = self.library.clone() else {
             return;
         };
-        let volume_library = library.clone();
         self.volume_space_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                let library = volume_library.clone();
+                let library = library.clone();
                 let space = cx
                     .background_spawn(async move { library.download_volume_space().ok() })
                     .await;
                 let Some(entity) = this.upgrade() else { return };
                 entity.update(cx, |this, cx| {
-                    this.volume_space = space;
-                    cx.notify();
+                    if this.volume_space != space {
+                        this.volume_space = space;
+                        cx.notify();
+                    }
                 });
+                drop(entity);
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
-                    .await;
-            }
-        }));
-        self.storage_metrics_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let library = library.clone();
-                let metrics = cx
-                    .background_spawn(async move { library.managed_storage_metrics() })
-                    .await
-                    .ok();
-                let Some(entity) = this.upgrade() else { return };
-                entity.update(cx, |this, cx| {
-                    this.overall_storage_metrics = metrics;
-                    cx.notify();
-                });
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(15))
                     .await;
             }
         }));

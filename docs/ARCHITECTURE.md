@@ -27,12 +27,12 @@ Dependencies point toward project-owned contracts. Traits belong at meaningful s
 ## Product projections
 
 - **TeleArk** is a dedicated private broadcast channel owned by the active account. Its Files view shows authenticated manifests as complete logical files; Raw Files exposes original Telegram documents and candidate encrypted objects.
-- **Channels** browse ordinary Telegram sources. Their account/chat/message identities remain attached to all file and download requests.
+- **Channels** read their local projection first; selecting one promotes background work and maintains the protocol-required viewed-channel subscription. Their account/chat/message identities remain attached to all file and download requests.
 - **Library** has separate Local files and Remote files projections. Local files pages account-scoped native/Vault completed outputs and imported originals, with cancellable Runtime filesystem observations that exclude missing/inaccessible files and use current size/date. Local copy keys stay distinct from catalog LogicalFile IDs. Remote files is the active account’s persistent catalog/FTS projection populated by browsing/indexing; those records do not prove a download. File type filtering is independent of source tabs.
 - **Transfers** is a fixed primary destination. Refreshing or scrolling channels cannot replace the route, selected transfer, filter or transfer scroll owner.
 - Existing Saved Messages packages remain available through Settings → Key Vault → Advanced → legacy recovery. New uploads never use Saved Messages, and migration never moves or deletes remote objects.
 
-The GPUI Kit 0.6.0 facade uses the matching gpui-pre 0.3.3 family. `application()` chooses the native platform and `init()` initializes the enabled layers. Base provides behavior/focus/accessibility; Component provides styled controls, segmented tabs, Sidebar and DataTable. Native/raw and managed/transfer lists virtualize visible rows. Presentation owners live under GUI `app/`; screen composition lives under `screens/`. Palette and geometry are centralized. See [UI contract](UI_GUIDELINES.md) and [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
+The GPUI Kit 0.6.0 facade uses the matching gpui-pre 0.3.3 family. `application()` chooses the native platform and `init()` initializes the enabled layers. Base provides behavior/focus/accessibility; Component provides styled controls, segmented tabs, Sidebar and DataTable. Native/raw and managed/transfer lists virtualize visible rows. Presentation owners live under GUI `app/`; screen composition lives under `screens/`. Palette and geometry are centralized. [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) records the dependency and design decision.
 
 ## Account and storage identity
 
@@ -46,11 +46,11 @@ Schema 9 records the account on each new native download. On the first configure
 
 Storage, Telegram and Vault operations run off the UI thread behind bounded request queues and retained lifecycle handles. The Vault owner alone holds the unlocked Master Key. GUI callbacks use account/source generations to reject stale results. Long network operations do not hold snapshot/state locks.
 
-Interactive raw scans own cancellation and bounded transport pages. Manifest scans have an independent cancellation token/loading generation, so leaving a source, changing projection, locking or closing the app cannot strand a shared Vault operation state. Cancellation interrupts the Telegram future and stops the recovery loop; it is not counted as an invalid manifest. Channel and transfer refresh owners cannot navigate as a side effect.
+Channel and managed private-channel synchronization share one retained account owner in Runtime. Telegram contributes bounded metadata pushes and official difference/history APIs; contiguous PTS updates commit directly and gaps recover from durable PTS. Storage returns actual deltas plus coherent local baselines. GUI awaits events and patches only the relevant rows; neither a global revision nor a fixed UI poll drives database reads. Selected/private subscription deadlines, retries and passive metadata reconciliation retain their protocol roles. Private edit/delete pushes immediately publish a pending warning; confirmed observations/acknowledgements persist through schema 12. Private Raw Files uses the shared projection; Files authenticates only new/invalidated local manifest candidates and reuses bounded derived metadata. Legacy Saved Messages remains an explicit separate recovery reader. Manifest queues, reads, authentication and terminal outcomes report through the same event feed and retain cancellation/account/generation guards. [ADR 0019](adr/0019-event-driven-channel-projections.md) supersedes the earlier polling/private-reader behavior in [ADR 0018](adr/0018-local-first-channel-sync.md).
 
 A modal keeps the requested unlock intent (browse, upload or download), takes focus and resumes it only after successful unlock/recovery acknowledgement. Changing pages does not lock the Vault. With `lock_vault_when_hidden`, inactive windows clear secret inputs and request locking; active native prompts are exempt. Already running encrypted work may finish with its retained key. Sleep/logout guarantees beyond window activation still need platform verification.
 
-The primary sidebar collapses to a 64-point icon rail or expands to 184 points. Channels have their own contextual list; inspectors own bounded, occluding scroll viewports. A retained local-output observer reads account-scoped pages and performs filesystem metadata work through Runtime off the UI thread. The bottom status bar queries download-volume space independently of directory usage scans.
+The primary sidebar collapses to a 64-point icon rail or expands to 184 points. Channels have their own contextual list; inspectors own bounded, occluding scroll viewports. A retained local-output observer reads account-scoped pages and performs filesystem metadata work through Runtime off the UI thread. The status bar spans the bottom of the entire window and opens a bounded, independently scrolling activity/observation inspector without changing pages. It also queries download-volume space independently of directory usage scans.
 
 ## Files, durability and recovery
 
@@ -60,10 +60,46 @@ Completed Vault recovery authority is the remote manifest and parts plus separat
 
 Schema 10 adds a local Vault output inventory; native completed history is projected directly. It records local availability hints, never remote recovery authority. Bounded multi-file upload plans run sequentially through the existing Vault owner. [ADR 0013](adr/0013-local-output-inventory-and-upload-batches.md) records the decisions.
 
-All durable encodings are explicit: SQLite migrations, crypto/manifest codecs, recovery bundles, native completion bitmaps and session-log schemas. Internal Rust layout never defines bytes. The [crypto](CRYPTO_FORMAT.md) and [manifest](MANIFEST_FORMAT.md) formats remain provisional; independent review, longer fuzz evidence and production recovery validation are release gates.
+All durable encodings are explicit: SQLite migrations, crypto/manifest codecs, recovery bundles, native completion bitmaps and session-log schemas. Internal Rust layout never defines bytes. The [crypto](CRYPTO_FORMAT.md) and [manifest](MANIFEST_FORMAT.md) codecs define version-1 bytes. [ADR 0017](adr/0017-versioned-automatic-migrations.md) requires versioned compatibility and automatic upgrades: each release declares supported source/read/write versions, preserves recoverable originals and provides restartable migration with visible phases. Storage owns SQL migration, Crypto owns format conversion and Runtime coordinates bounded work/events; GUI presents status and gates only conflicting actions. Startup now paints before opening/migrating SQLite on background owners and retains detection/preparation/conversion/verification events with failure/retry guidance. Schema 13 adds search indexes transactionally and is verified before commit; existing schemas and codecs retain their meanings. The remaining cross-format conversion and external-backup coordinator is still implementation work.
 
-## Contracts to consult
+## Desktop presentation
 
-[Data model](DATA_MODEL.md) · [Index](INDEX_ENGINE.md) · [Transfer and diagnostics](TRANSFER_ENGINE.md) · [Preferences](PREFERENCES_FORMAT.md) · [Security and audit gates](SECURITY.md) · [i18n](I18N.md) · [Development](DEVELOPMENT.md).
+`theme.rs`, `components.rs` and `layout.rs` own palette, reusable controls and responsive geometry. The native window has a 900×600 minimum and fits oversized requests to the display. Lists retain flex-height viewports; inspectors have independent scroll handles and occluding hitboxes so wheel events cannot move the list underneath, including at scroll boundaries. Upload dialogs keep their title/actions visible around a scrolling body. Compact layouts retain name, size and state; other metadata stays in details. UI acceptance requirements, including background visibility and graphical diagnostics, live in [AGENTS.md](../AGENTS.md).
 
-Accepted ADRs preserve historical decisions. Supersede them explicitly when policy changes; do not rewrite their original context to look current.
+Modals trap focus and restore it on dismissal. Escape handles the modal before fullscreen; Return submits only its intended action. The sign-out modal requires an explicit Cancel or confirmation and ignores Escape/backdrop dismissal. QR images use black on white in both themes. Unsupported runtime controls remain unavailable with guidance; native history deletion never deletes user files. About's English release record equals `CHANGELOG.md` through a parity test.
+
+Workspace shortcuts: ⌘1 Transfers, ⌘2 TeleArk, ⌘U Upload, ⌘F Search, ⌘R Refresh, ⌘, Settings, ⌃⌘F Fullscreen, ⌘M Minimize, ⌘Q Quit. Isolated fixtures and review commands are in [Development](DEVELOPMENT.md#isolated-ui-review).
+
+## Localization service
+
+`teleark-i18n` owns Fluent resources at `crates/teleark-i18n/resources/{en-US,zh-CN,ja-JP}/main.ftl`, locale negotiation, formatting and structured-error mappings. The catalogs are the terminology reference and share keys and named variable sets. Messages use semantic kebab-case IDs, complete grammatical units and Fluent selectors/plurals; legacy dotted/underscore aliases remain supported. The wrapper resolves top-level message values; terms/attributes require added lookup and validation support. User content is passed as literal parameters.
+
+Negotiation maps `en-*` to `en-US`, `zh-CN`/`zh-SG`/`zh-Hans-*` to `zh-CN`, and `ja-*` to `ja-JP`; unsupported or invalid tags, including unsupported Traditional Chinese, fall back to English. Tags use the locale parser. Settings changes apply live; explicit overrides persist, System Default removes the override, and a command-line locale wins for that launch. System discovery currently reads locale environment variables; native platform discovery is unfinished. Changing locale never rewrites remote channel descriptions or titles.
+
+Central `format` functions render dates, counts, percentages, durations, speeds and sizes. Human file/storage values use SI (`kB`, `MB`, `GB`, `MB/s`); exact format/configuration sizes use IEC (`MiB`, `GiB`). Timestamps are UTC instants displayed in the OS local time zone. Protocol IDs, hashes, offsets and versions stay canonical ASCII. Unknown rate/ETA is distinct from zero. Catalog validation covers parsing, duplicate IDs, key/variable parity, fallback, negotiation, formatting and error mappings; static caller IDs and actual layout need separate checks.
+
+## Technical references
+
+[Data model](DATA_MODEL.md) · [Index](INDEX_ENGINE.md) · [Transfer and diagnostics](TRANSFER_ENGINE.md) · [Preferences](PREFERENCES_FORMAT.md) · [Crypto](CRYPTO_FORMAT.md) · [Manifest](MANIFEST_FORMAT.md) · [Security and migration safety](SECURITY.md) · [Build, checks and previews](DEVELOPMENT.md) · [Current capabilities and limitations](IMPLEMENTATION_STATUS.md).
+
+Accepted ADRs preserve historical decisions and their original context.
+
+Telegram RPC scheduling uses bounded independent read, transfer and mutable control lanes; login/logout drain older work before publishing replacement state. See [ADR 0021](adr/0021-bounded-telegram-request-lanes.md).
+
+Transfer session-log callbacks stage bounded complete records for a single background file owner. Explicit gaps and a localized cumulative counter disclose diagnostic loss while task and recovery persistence remain independent. [ADR 0022](adr/0022-bounded-background-session-logs.md) records the ownership and compatibility contract.
+
+Managed-directory preparation and destination filesystem probes execute on their existing background Runtime callers. Storage receives only settings/reservation SQL requests, so a blocked mount does not occupy its database actor. Preference updates prepare the filesystem before committing settings; download name validation, historical reservations and atomic no-overwrite publication remain enforced. Telegram destination metadata uses asynchronous filesystem access.
+
+Native transfer presentation has a shared admission/history budget and a separate replay budget. Recovery restores all recoverable tasks and their batch members before selecting recent terminal history; older oversized queues are preserved automatically. Cold historical redownload uses one account-validated database record. [ADR 0023](adr/0023-native-history-and-recovery-budgets.md) specifies limits, omissions and compatibility exceptions.
+
+Catalog loading and authentication have separate GUI owners. A failed complete dialog read cannot invalidate an authenticated session or publish a partial roster. The transient `ApplicationErrorKind::Server` represents Telegram RPC 5xx; transport failures remain `Network`. The initial catalog has cancellable, bounded reads and retries with a shell-visible current-run timeline. Account changes invalidate its monotonic request generation. Native-download codecs preserve their historical `network` encoding for both categories; no stored bytes acquire a new meaning. Initial storage discovery is deferred until the catalog succeeds, and still independently verifies complete remote identity before creation.
+
+Network ownership and application-wide fail-closed egress are defined in [ADR 0024](adr/0024-fail-closed-proxy-routing.md). All Telegram pools use the retained gateway; the framework HTTP client is blocked.
+
+### Fixed channel resilience
+
+[ADR 0025](adr/0025-fixed-channel-and-retained-key-epochs.md) separates fixed peer binding, repairable management metadata, per-file health and key epochs. Telegram validates remote privacy/ownership and implements peer-scoped maintenance. Storage owns schema-15 key retention, encrypted inventory and health observations. Runtime owns typed errors, bounded progress and an independent retained health checker; GUI only confirms, presents and cancels these operations.
+
+### Session key admission and task leases
+
+[ADR 0026](adr/0026-session-unlock-and-task-key-leases.md) separates session access from already admitted background work. The key, encrypted-transfer and scan lanes each have a bounded 16-command queue; admission returns a retained `VaultJob` without I/O. Lock immediately revokes session keys, preserves task leases and synchronization, and uses generations/revisions to reject stale unlocks and invalidate decrypted catalog caches. Explicitly submitted tasks keep their authorization through internal retries; new tasks require unlocking.

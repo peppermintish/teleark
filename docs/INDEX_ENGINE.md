@@ -1,26 +1,30 @@
 # Index and search
 
-The desktop performs authorized source discovery, bounded document browsing/indexing, idempotent remote projection and SQLite restart cursors. The generic `IndexCoordinator` is separately tested through project-owned ports; its full concrete mapping, incremental updates, range compaction and retry-timing owner remain unfinished.
+The desktop uses an account-owned incremental Channel synchronizer and a local SQLite projection. Selecting a Channel only promotes already-needed work; it never starts a network scan. Storage/legacy raw browsing and the generic `IndexCoordinator` remain separate paths. The generic coordinator is tested through project-owned ports; its concrete desktop mapping and range compaction remain unfinished. [ADR 0018](adr/0018-local-first-channel-sync.md) records this decision.
 
 ## Boundaries and identity
 
 ```text
-Telegram history port -> Index coordinator -> transactional records/evidence
-                                           -> SQLite/FTS5 -> Core query -> GUI
+Telegram push hints -> Runtime ChannelSync -> channel difference/history/verification
+                                               -> Storage transaction -> local GUI query
+Generic history port -> Index coordinator -> transactional records/coverage evidence
 ```
 
 `grammers` stays in Telegram; SQL stays in Storage. Every source, query, cursor, index job and remote upsert carries account/chat identity. Runtime checks the expected authorized account at network execution. Source records preserve message sent time separately from modification time, and revisions upsert idempotently on account/chat/message identity.
 
-Interactive browsing and indexing have different authority. Browsing can show previously cached rows and upsert newly observed files, but does not advance `telegram_index_state` or prove coverage. The Local Library includes these cached/indexed file records and explains that they are not transfer history. Query results retain original channel titles and unambiguous account/chat/message provenance. Only a committed indexing page advances its checkpoint. Cancellation discards uncommitted response data; GUI generations reject late results after account/source changes.
+Channel synchronization and generic indexing have different authority. `channel_sync_state.pts` records the committed Telegram update sequence; it is never inferred from message-ID continuity. A separate exclusive `history_before` cursor records bounded older-history reads. Neither creates generic policy/range evidence in `telegram_index_state` or `index_ranges`. The Local Library includes these cached file records with original source provenance, not transfer history. Only a successful atomic metadata/deletion/cursor commit advances synchronization. Cancellation discards uncommitted response data; account/source generations reject late GUI callbacks.
 
-## Connected desktop bounds
+## Connected Channel synchronization
 
-- Raw browsing uses bounded exclusive-cursor pages with 200-message transport chunks, cancellation and slow/error feedback. DataTable virtualizes a bounded in-memory projection; it does not instantiate a whole channel.
-- Explicit indexing advances a persisted per-source cursor in bounded pages; the configured index batch sizes are 200/500/1000.
-- Native batch-download filtering is a separate scan: at most 50,000 examined messages and 2,000 retained matches, with sent-time/file-kind filters.
-- Counts distinguish examined messages from eligible files. Search in the current raw/managed projection does not claim to search unvisited Telegram history.
+- A restored account compares dialog PTS with local state. A previously unseen channel seeds one recent 200-message page, then requests a difference from the PTS captured before seeding. Existing cached rows stay available throughout; legacy cached IDs are verified in batches of 100.
+- New/edit/delete push hints coalesce by channel and highest PTS. Explicit server gaps, reconnect or hint overflow require reconciliation. Known-clean channels make no history/difference request on selection. A 15-minute dialog metadata reconciliation detects missed passive subscriptions; an unknown-source push requests debounced metadata discovery. Only a detected mismatch queues channel data synchronization.
+- Normal updates use `updates.getChannelDifference` in bounded pages, including edits within the same timestamp second and explicit deletions. `TooLong` retains the old cache, records a separate restartable history-gap cursor back to the prior local boundary, and verifies known IDs in batches of 100. Missing numeric message IDs alone are not gaps.
+- Older history loads only on explicit request, one 200-message page at a time. Gap repair does not advance or consume the user's older-history cursor/request. There is no automatic history loading caused by table scrolling. Storage/legacy raw scans retain their existing behavior.
+- One retained account owner schedules at most 10,000 sources through a 64-command queue. The selected channel has priority with bounded fairness. Network/persistence failures retry after 1/2/4 seconds, then pause; account-wide FloodWait deadlines survive manual retry. Account changes cancel the active request and release the old owner off the UI thread.
+- GUI reads SQLite off-thread, retains an eight-view/16 MiB warm cache and virtualizes up to 5,000 displayed rows. Sync commits trigger local reloads without blanking visible rows. The phase/queue/status remains visible across navigation, with duration, last activity, retry/cancel and an independently scrolling 128-event timeline. Overflow/truncation is disclosed; unmeasured percentage/rate/ETA is not fabricated.
+- Native batch-download filtering remains a separate bounded scan: at most 50,000 examined messages and 2,000 retained matches. Search in the current projection does not claim coverage of unvisited history.
 
-Large-scale full-history coverage and incremental edit/delete synchronization are not implied by a populated table.
+This implements document projection for broadcast channels/supergroups, not a complete messaging client or common/private-chat update engine. Full-history coverage, generic range compaction and million-record performance still require separate evidence.
 
 ## Coordinator state and coverage
 
@@ -36,7 +40,7 @@ Pause/cancel commit only a safe batch and release owned work. Restart requeues i
 
 Each job/range has a content-policy version and fingerprint. A file-only or minimum-size scan does not prove coverage for excluded content; broadened policies require new work. Plain text is opt-in in the generic policy. A range represents actual account/chat ordering bounds, partial/complete coverage, policy, generation and checkpoint evidence, not one global last-message ID.
 
-Current storage uses inclusive message-ID bounds and rejects overlapping ranges within the same policy scope. Date/order-rich bounds and compatible-range compaction are targets. Only a source-proven boundary plus committed batches may establish complete coverage; fetched-but-uncommitted pages are safely fetched again. Edits, deletes, gaps and out-of-order updates require explicit semantics before claiming incremental completeness.
+Current storage uses inclusive message-ID bounds and rejects overlapping ranges within the same policy scope. Date/order-rich bounds and compatible-range compaction are targets. Only a source-proven boundary plus committed batches may establish complete coverage; fetched-but-uncommitted pages are safely fetched again. The Channel path has the incremental semantics above; generic policy ranges still require independent edit/delete/gap evidence before claiming completeness.
 
 ## Search contract
 

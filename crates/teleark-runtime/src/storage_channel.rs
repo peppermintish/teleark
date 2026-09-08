@@ -1,16 +1,21 @@
-//! Remote-authoritative private storage discovery; local bindings are caches.
+//! One fixed channel per account; management metadata can be repaired in place.
 
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_storage::{Database, SettingRecord};
 
 use crate::{DesktopLibrary, StorageRequest, TelegramChatSummary, map_storage_error};
 
+const FIXED_BINDING_PREFIX: &str = "storage-channel.v2.account.";
 const BINDING_PREFIX: &str = "storage-channel.v1.account.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageChannelStatus {
     Missing,
     Ready(TelegramChatSummary),
+    Degraded {
+        channel: TelegramChatSummary,
+        health: StorageChannelHealth,
+    },
     /// Never silently substitute another channel for a saved binding.
     Unavailable {
         chat_id: i64,
@@ -19,11 +24,37 @@ pub enum StorageChannelStatus {
     Choose(Vec<TelegramChatSummary>),
 }
 
+pub use teleark_telegram::{StorageChannelHealth, StorageMaintenancePhase};
+
+impl StorageChannelStatus {
+    pub fn channel(&self) -> Option<&TelegramChatSummary> {
+        match self {
+            Self::Ready(channel) | Self::Degraded { channel, .. } => Some(channel),
+            _ => None,
+        }
+    }
+    pub fn usable_channel(&self) -> Option<&TelegramChatSummary> {
+        match self {
+            Self::Ready(channel) => Some(channel),
+            Self::Degraded { channel, health } if health.permits_files() => Some(channel),
+            _ => None,
+        }
+    }
+    pub fn health(&self) -> Option<StorageChannelHealth> {
+        match self {
+            Self::Ready(_) => Some(StorageChannelHealth::Healthy),
+            Self::Degraded { health, .. } => Some(*health),
+            _ => None,
+        }
+    }
+}
+
 /// Result of automatic management; this is transient presentation metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedStorageChannel {
     pub channel: TelegramChatSummary,
     pub created: bool,
+    pub health: StorageChannelHealth,
 }
 
 /// Complete remote discovery must yield exactly one candidate. Local identity
@@ -32,12 +63,7 @@ pub(crate) fn resolve_managed_storage_channel(
     preferred: Option<i64>,
     candidates: Vec<TelegramChatSummary>,
 ) -> StorageChannelStatus {
-    let _ = preferred; // Compatibility argument; remote evidence alone selects storage.
-    match candidates.as_slice() {
-        [] => StorageChannelStatus::Missing,
-        [channel] => StorageChannelStatus::Ready(channel.clone()),
-        _ => StorageChannelStatus::Choose(candidates),
-    }
+    resolve_storage_channel(preferred, candidates)
 }
 
 /// An ambiguous creation may have reached Telegram. Subsequent automatic work
@@ -118,6 +144,24 @@ pub(crate) fn load_binding(
     account_id: i64,
 ) -> Result<Option<i64>, ApplicationError> {
     validate_id(account_id)?;
+    if let Some(record) = database
+        .setting(&format!("{FIXED_BINDING_PREFIX}{account_id}"))
+        .map_err(map_storage_error)?
+    {
+        let fixed: serde_json::Value = serde_json::from_str(&record.value)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let id = fixed
+            .get("channel_id")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|id| *id > 0);
+        if fixed.get("version").and_then(serde_json::Value::as_u64) != Some(2)
+            || fixed.as_object().is_none_or(|v| v.len() != 2)
+            || id.is_none()
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Persistence));
+        }
+        return Ok(id);
+    }
     database
         .setting(&format!("{BINDING_PREFIX}{account_id}"))
         .map_err(map_storage_error)?
@@ -132,10 +176,13 @@ pub(crate) fn save_binding(
 ) -> Result<(), ApplicationError> {
     validate_id(account_id)?;
     validate_id(chat_id)?;
+    if load_binding(database, account_id)?.is_some_and(|bound| bound != chat_id) {
+        return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+    }
     database
         .set_setting(&SettingRecord {
-            key: format!("{BINDING_PREFIX}{account_id}"),
-            value: chat_id.to_string(),
+            key: format!("{FIXED_BINDING_PREFIX}{account_id}"),
+            value: format!("{{\"version\":2,\"channel_id\":{chat_id}}}"),
             updated_at_unix_ms: crate::system_time_unix_ms(std::time::SystemTime::now())
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
         })
@@ -165,6 +212,7 @@ mod tests {
 
     fn channel(id: i64, name: &str) -> TelegramChatSummary {
         TelegramChatSummary {
+            sync_pts: None,
             id,
             name: name.into(),
             username: None,
@@ -173,26 +221,40 @@ mod tests {
     }
 
     #[test]
-    fn automatic_management_uses_only_unique_remote_evidence() {
-        for cached in [None, Some(7), Some(99)] {
+    fn automatic_management_preserves_a_fixed_binding() {
+        assert_eq!(
+            resolve_managed_storage_channel(None, vec![channel(8, "TeleArk")]),
+            StorageChannelStatus::Ready(channel(8, "TeleArk"))
+        );
+        assert_eq!(
+            resolve_managed_storage_channel(None, vec![]),
+            StorageChannelStatus::Missing
+        );
+        for bound in [7, 99] {
             assert_eq!(
-                resolve_managed_storage_channel(cached, vec![channel(8, "TeleArk")]),
-                StorageChannelStatus::Ready(channel(8, "TeleArk"))
+                resolve_managed_storage_channel(Some(bound), vec![channel(8, "TeleArk")]),
+                StorageChannelStatus::Unavailable {
+                    chat_id: bound,
+                    candidates: vec![channel(8, "TeleArk")]
+                }
             );
             assert_eq!(
-                resolve_managed_storage_channel(cached, vec![]),
-                StorageChannelStatus::Missing
+                resolve_managed_storage_channel(Some(bound), vec![]),
+                StorageChannelStatus::Unavailable {
+                    chat_id: bound,
+                    candidates: vec![]
+                }
             );
-            for candidates in [
-                vec![channel(7, "A"), channel(8, "B")],
-                vec![channel(8, "B"), channel(7, "A")],
-            ] {
-                assert_eq!(
-                    resolve_managed_storage_channel(cached, candidates.clone()),
-                    StorageChannelStatus::Choose(candidates)
-                );
-            }
         }
+        let candidates = vec![channel(7, "Renamed"), channel(8, "TeleArk")];
+        assert_eq!(
+            resolve_managed_storage_channel(Some(7), candidates.clone()),
+            StorageChannelStatus::Ready(channel(7, "Renamed"))
+        );
+        assert_eq!(
+            resolve_managed_storage_channel(None, candidates.clone()),
+            StorageChannelStatus::Choose(candidates)
+        );
     }
 
     #[test]

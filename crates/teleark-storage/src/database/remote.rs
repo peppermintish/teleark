@@ -20,134 +20,10 @@ impl Database {
         &mut self,
         incoming: &RemoteFileUpsert,
     ) -> StorageResult<(LogicalFileRecord, RemoteObjectRecord)> {
-        validate_remote_file(incoming)?;
         let transaction = transaction(&mut self.connection)?;
-        let existing = transaction
-            .query_row(
-                r#"
-SELECT id, logical_file_id, revision, remote_key, encoded_size_bytes, modified_at_unix_ms
-FROM remote_objects
-WHERE account_id = ?1 AND chat_id = ?2 AND message_id = ?3
-"#,
-                params![
-                    incoming.account_id.get(),
-                    incoming.chat_id.get(),
-                    incoming.message_id.get()
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-
-        if let Some((remote_id, logical_id, revision, key, size, modified)) = existing {
-            let revision = stored_u64("revision", revision)?;
-            let logical_file_id = LogicalFileId::new(id_from_sql(
-                "remote_objects",
-                "logical_file_id",
-                logical_id,
-            )?);
-            if revision > incoming.revision {
-                let file = query_file_on(&transaction, logical_file_id)?;
-                let remote = RemoteObjectRecord {
-                    id: RemoteObjectId::new(id_from_sql("remote_objects", "id", remote_id)?),
-                    logical_file_id,
-                    account_id: incoming.account_id,
-                    chat_id: incoming.chat_id,
-                    message_id: incoming.message_id,
-                    revision,
-                    remote_key: key,
-                    encoded_size_bytes: stored_u64("encoded_size_bytes", size)?,
-                    modified_at_unix_ms: modified,
-                };
-                transaction.commit()?;
-                return Ok((file, remote));
-            }
-            if revision == incoming.revision
-                && (key != incoming.remote_key
-                    || u64::try_from(size).ok() != Some(incoming.size_bytes)
-                    || modified != incoming.modified_at_unix_ms)
-            {
-                return Err(StorageError::Invariant(
-                    InvariantViolation::RemoteRevisionConflict,
-                ));
-            }
-
-            let file = logical_record(logical_file_id, incoming);
-            upsert_logical_file_on(&transaction, &file)?;
-            transaction.execute(
-                r#"
-UPDATE remote_objects
-SET revision = ?1, remote_key = ?2, encoded_size_bytes = ?3, modified_at_unix_ms = ?4
-WHERE id = ?5
-"#,
-                params![
-                    unsigned_to_sql("remote_object.revision", incoming.revision)?,
-                    incoming.remote_key,
-                    unsigned_to_sql("remote_object.encoded_size_bytes", incoming.size_bytes)?,
-                    incoming.modified_at_unix_ms,
-                    remote_id
-                ],
-            )?;
-            let remote = RemoteObjectRecord {
-                id: RemoteObjectId::new(id_from_sql("remote_objects", "id", remote_id)?),
-                logical_file_id,
-                account_id: incoming.account_id,
-                chat_id: incoming.chat_id,
-                message_id: incoming.message_id,
-                revision: incoming.revision,
-                remote_key: incoming.remote_key.clone(),
-                encoded_size_bytes: incoming.size_bytes,
-                modified_at_unix_ms: incoming.modified_at_unix_ms,
-            };
-            transaction.commit()?;
-            return Ok((file, remote));
-        }
-
-        let logical_id = allocate_id(&transaction, "logical_file")?;
-        let remote_id = allocate_id(&transaction, "remote_object")?;
-        let logical_file_id = LogicalFileId::new(logical_id);
-        let file = logical_record(logical_file_id, incoming);
-        upsert_logical_file_on(&transaction, &file)?;
-        transaction.execute(
-            r#"
-INSERT INTO remote_objects (
-    id, logical_file_id, account_id, chat_id, message_id, revision,
-    remote_key, encoded_size_bytes, modified_at_unix_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-"#,
-            params![
-                sql_id("remote_object.id", remote_id)?,
-                sql_id("logical_file.id", logical_id)?,
-                incoming.account_id.get(),
-                incoming.chat_id.get(),
-                incoming.message_id.get(),
-                unsigned_to_sql("remote_object.revision", incoming.revision)?,
-                incoming.remote_key,
-                unsigned_to_sql("remote_object.encoded_size_bytes", incoming.size_bytes)?,
-                incoming.modified_at_unix_ms,
-            ],
-        )?;
-        let remote = RemoteObjectRecord {
-            id: RemoteObjectId::new(remote_id),
-            logical_file_id,
-            account_id: incoming.account_id,
-            chat_id: incoming.chat_id,
-            message_id: incoming.message_id,
-            revision: incoming.revision,
-            remote_key: incoming.remote_key.clone(),
-            encoded_size_bytes: incoming.size_bytes,
-            modified_at_unix_ms: incoming.modified_at_unix_ms,
-        };
+        let result = upsert_remote_file_on(&transaction, incoming, false)?;
         transaction.commit()?;
-        Ok((file, remote))
+        Ok(result)
     }
 
     pub fn remote_object_by_source(
@@ -218,6 +94,9 @@ SELECT ro.message_id, f.name, f.caption, f.mime_type, f.size_bytes,
 FROM remote_objects ro
 JOIN logical_files f ON f.id = ro.logical_file_id
 WHERE ro.account_id = ?1 AND ro.chat_id = ?2
+  AND NOT EXISTS (SELECT 1 FROM channel_sync_tombstones t
+      WHERE t.account_id = ro.account_id AND t.chat_id = ro.chat_id
+        AND t.message_id = ro.message_id)
 ORDER BY COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0) DESC,
          ro.message_id DESC
 LIMIT ?3
@@ -351,4 +230,144 @@ fn stored_u64(field: &'static str, value: i64) -> StorageResult<u64> {
         field,
         value: value.to_string(),
     })
+}
+
+pub(super) fn upsert_remote_file_on(
+    connection: &rusqlite::Connection,
+    incoming: &RemoteFileUpsert,
+    authoritative: bool,
+) -> StorageResult<(LogicalFileRecord, RemoteObjectRecord)> {
+    validate_remote_file(incoming)?;
+    let existing = connection
+        .query_row(
+            r#"
+SELECT id, logical_file_id, revision, remote_key, encoded_size_bytes, modified_at_unix_ms
+FROM remote_objects
+WHERE account_id = ?1 AND chat_id = ?2 AND message_id = ?3
+"#,
+            params![
+                incoming.account_id.get(),
+                incoming.chat_id.get(),
+                incoming.message_id.get()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    if let Some((remote_id, logical_id, revision, key, size, modified)) = existing {
+        let revision = stored_u64("revision", revision)?;
+        let logical_file_id = LogicalFileId::new(id_from_sql(
+            "remote_objects",
+            "logical_file_id",
+            logical_id,
+        )?);
+        if !authoritative && revision > incoming.revision {
+            let file = query_file_on(connection, logical_file_id)?;
+            let remote = RemoteObjectRecord {
+                id: RemoteObjectId::new(id_from_sql("remote_objects", "id", remote_id)?),
+                logical_file_id,
+                account_id: incoming.account_id,
+                chat_id: incoming.chat_id,
+                message_id: incoming.message_id,
+                revision,
+                remote_key: key,
+                encoded_size_bytes: stored_u64("encoded_size_bytes", size)?,
+                modified_at_unix_ms: modified,
+            };
+            return Ok((file, remote));
+        }
+        if !authoritative
+            && revision == incoming.revision
+            && (key != incoming.remote_key
+                || u64::try_from(size).ok() != Some(incoming.size_bytes)
+                || modified != incoming.modified_at_unix_ms)
+        {
+            return Err(StorageError::Invariant(
+                InvariantViolation::RemoteRevisionConflict,
+            ));
+        }
+
+        let previous = query_file_on(connection, logical_file_id)?;
+        let mut file = logical_record(logical_file_id, incoming);
+        file.locally_available = previous.locally_available;
+        file.local_source_path = previous.local_source_path;
+        file.relative_path = previous.relative_path;
+        file.package_id = previous.package_id;
+        file.encryption_state = previous.encryption_state;
+        // A new remote revision does not delete local paths, but must not
+        // inherit verification of the previous remote contents.
+        upsert_logical_file_on(connection, &file)?;
+        connection.execute(
+            r#"
+UPDATE remote_objects
+SET revision = ?1, remote_key = ?2, encoded_size_bytes = ?3, modified_at_unix_ms = ?4
+WHERE id = ?5
+"#,
+            params![
+                unsigned_to_sql("remote_object.revision", incoming.revision)?,
+                incoming.remote_key,
+                unsigned_to_sql("remote_object.encoded_size_bytes", incoming.size_bytes)?,
+                incoming.modified_at_unix_ms,
+                remote_id
+            ],
+        )?;
+        let remote = RemoteObjectRecord {
+            id: RemoteObjectId::new(id_from_sql("remote_objects", "id", remote_id)?),
+            logical_file_id,
+            account_id: incoming.account_id,
+            chat_id: incoming.chat_id,
+            message_id: incoming.message_id,
+            revision: incoming.revision,
+            remote_key: incoming.remote_key.clone(),
+            encoded_size_bytes: incoming.size_bytes,
+            modified_at_unix_ms: incoming.modified_at_unix_ms,
+        };
+        return Ok((file, remote));
+    }
+
+    let logical_id = allocate_id(connection, "logical_file")?;
+    let remote_id = allocate_id(connection, "remote_object")?;
+    let logical_file_id = LogicalFileId::new(logical_id);
+    let file = logical_record(logical_file_id, incoming);
+    upsert_logical_file_on(connection, &file)?;
+    connection.execute(
+        r#"
+INSERT INTO remote_objects (
+    id, logical_file_id, account_id, chat_id, message_id, revision,
+    remote_key, encoded_size_bytes, modified_at_unix_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+"#,
+        params![
+            sql_id("remote_object.id", remote_id)?,
+            sql_id("logical_file.id", logical_id)?,
+            incoming.account_id.get(),
+            incoming.chat_id.get(),
+            incoming.message_id.get(),
+            unsigned_to_sql("remote_object.revision", incoming.revision)?,
+            incoming.remote_key,
+            unsigned_to_sql("remote_object.encoded_size_bytes", incoming.size_bytes)?,
+            incoming.modified_at_unix_ms,
+        ],
+    )?;
+    let remote = RemoteObjectRecord {
+        id: RemoteObjectId::new(remote_id),
+        logical_file_id,
+        account_id: incoming.account_id,
+        chat_id: incoming.chat_id,
+        message_id: incoming.message_id,
+        revision: incoming.revision,
+        remote_key: incoming.remote_key.clone(),
+        encoded_size_bytes: incoming.size_bytes,
+        modified_at_unix_ms: incoming.modified_at_unix_ms,
+    };
+    Ok((file, remote))
 }

@@ -1,8 +1,6 @@
+use crate::transfer_updates::TransferSnapshots;
 use crate::vault::{VaultTransferSnapshot, VaultTransferState};
-use std::{
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +13,7 @@ pub enum VaultUploadPhase {
     SendingMessage,
     Verifying,
     Publishing,
+    Persisting,
 }
 
 /// Memory-only presentation data, never a checkpoint or verification receipt.
@@ -54,25 +53,24 @@ impl VaultUploadActivity {
 
 #[derive(Clone)]
 pub(crate) struct VaultUploadObserver {
-    transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>,
+    transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     id: u64,
 }
 
 impl VaultUploadObserver {
-    pub(crate) fn new(transfers: Arc<Mutex<Vec<VaultTransferSnapshot>>>, id: u64) -> Self {
+    pub(crate) fn new(transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>, id: u64) -> Self {
         Self { transfers, id }
     }
 
     fn update(&self, update: impl FnOnce(&mut VaultTransferSnapshot)) {
-        if let Ok(mut transfers) = self.transfers.lock()
-            && let Some(snapshot) = transfers.iter_mut().find(|item| item.id == self.id)
-            && matches!(
+        self.transfers.update(self.id, |snapshot| {
+            if matches!(
                 snapshot.state,
                 VaultTransferState::Queued | VaultTransferState::Running
-            )
-        {
-            update(snapshot);
-        }
+            ) {
+                update(snapshot);
+            }
+        });
     }
 
     pub(crate) fn phase(&self, phase: VaultUploadPhase) {

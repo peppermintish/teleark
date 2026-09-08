@@ -4,11 +4,77 @@ use crate::assets::Symbol;
 
 use super::*;
 use gpui_kit::component::{
+    Collapsible,
     avatar::Avatar,
     button::ButtonVariants as _,
     input::Input,
-    sidebar::{Sidebar, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarItem, SidebarMenuItem},
 };
+
+/// Sidebar virtualizes its `SidebarItem::render` calls, but eagerly retains its
+/// children. Keep those children as identities, not allocated menu widgets.
+#[derive(Clone)]
+struct ChannelSidebarItem {
+    owner: gpui_kit::WeakEntity<TeleArkApp>,
+    source_index: usize,
+    chat_id: i64,
+}
+
+impl Collapsible for ChannelSidebarItem {
+    fn is_collapsed(&self) -> bool {
+        false
+    }
+    fn collapsed(self, _: bool) -> Self {
+        self
+    }
+}
+
+impl SidebarItem for ChannelSidebarItem {
+    fn render(
+        self,
+        id: impl Into<gpui_kit::ElementId>,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) -> impl IntoElement {
+        let item = self
+            .owner
+            .update(cx, |app, cx| {
+                let chat = app.telegram_chats.get(self.source_index)?;
+                // A source refresh can invalidate a retained item before layout.
+                if chat.id != self.chat_id
+                    || chat.kind != TelegramChatKind::Channel
+                    || Some(chat.id) == app.storage_channel_id()
+                {
+                    return None;
+                }
+                #[cfg(test)]
+                MATERIALIZED_CHANNELS.with(|count| count.set(count.get() + 1));
+                Some(
+                    SidebarMenuItem::new(chat.name.clone())
+                        .active(app.selected_chat_id == Some(self.chat_id))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if app.telegram_chats.iter().any(|chat| {
+                                chat.id == self.chat_id && chat.kind == TelegramChatKind::Channel
+                            }) && Some(self.chat_id) != app.storage_channel_id()
+                            {
+                                app.select_channel(self.chat_id, cx);
+                            }
+                        })),
+                )
+            })
+            .ok()
+            .flatten();
+        div()
+            .debug_selector(move || format!("channel-sidebar-row-{}", self.chat_id))
+            .when_some(item, |row, item| {
+                row.child(item.render(id, window, cx).into_any_element())
+            })
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+thread_local! { static MATERIALIZED_CHANNELS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl TeleArkApp {
     pub(crate) fn account_avatar_element(&self, size: f32) -> Avatar {
@@ -83,11 +149,11 @@ impl TeleArkApp {
                     }),
                 )
                 .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, _, window, cx| {
                     if this.vault_locked {
                         this.request_vault_unlock(UnlockIntent::Browse, cx);
                     } else {
-                        this.lock_vault(cx);
+                        this.lock_vault(window, cx);
                     }
                 })),
             )
@@ -287,22 +353,10 @@ impl TeleArkApp {
     }
 
     pub(super) fn render_channels_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let channels = self
-            .telegram_chats
-            .iter()
-            .filter(|chat| {
-                chat.kind == TelegramChatKind::Channel && Some(chat.id) != self.storage_channel_id()
-            })
-            .map(|chat| {
-                let chat_id = chat.id;
-                SidebarMenuItem::new(chat.name.clone())
-                    .active(self.selected_chat_id == Some(chat_id))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_channel(chat_id, cx)))
-            })
-            .collect::<Vec<_>>();
+        let channels = self.channel_sidebar_items(cx);
         Sidebar::new("channels-sidebar")
             .collapsible(false)
-            .w(px(208.0))
+            .w_full()
             .header(
                 div()
                     .h(px(42.0))
@@ -321,42 +375,94 @@ impl TeleArkApp {
                     ),
             )
             .children(channels)
+            .footer(
+                div()
+                    .debug_selector(|| "channel-list-width-feedback".into())
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(self.tr(match self.preference_persistence {
+                        PreferencePersistence::Idle => "channel-list-resize-hint",
+                        PreferencePersistence::Saving => "settings-preferences-saving",
+                        PreferencePersistence::Saved => "settings-preferences-saved",
+                        PreferencePersistence::Failed => "settings-preferences-failed",
+                    }))
+                    .when(
+                        self.preference_persistence == PreferencePersistence::Failed,
+                        |footer| {
+                            footer.child(
+                                components::button(
+                                    "channel-width-save-retry",
+                                    self.tr("common-retry"),
+                                    None,
+                                    false,
+                                )
+                                .debug_selector(|| "channel-width-save-retry".into())
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.persist_preferences(cx)),
+                                ),
+                            )
+                        },
+                    ),
+            )
             .into_any_element()
     }
 
+    fn channel_sidebar_items(&self, cx: &Context<Self>) -> Vec<ChannelSidebarItem> {
+        let storage_id = self.storage_channel_id();
+        self.telegram_chats
+            .iter()
+            .enumerate()
+            .filter(|(_, chat)| {
+                chat.kind == TelegramChatKind::Channel && Some(chat.id) != storage_id
+            })
+            .map(|(source_index, chat)| ChannelSidebarItem {
+                owner: cx.weak_entity(),
+                source_index,
+                chat_id: chat.id,
+            })
+            .collect()
+    }
+
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut rates = self
-            .transfers
-            .as_ref()
-            .and_then(|transfers| transfers.current_rates().ok())
-            .unwrap_or_default();
-        if let Some(vault) = &self.vault {
-            for item in vault
-                .transfers()
-                .iter()
-                .filter(|item| item.state == teleark_runtime::VaultTransferState::Running)
-            {
-                match item.direction {
-                    teleark_runtime::VaultTransferDirection::Upload => {
-                        rates.upload_bytes_per_second = rates
-                            .upload_bytes_per_second
-                            .saturating_add(item.telemetry.goodput_bytes_per_second)
-                    }
-                    teleark_runtime::VaultTransferDirection::Download => {
-                        rates.download_bytes_per_second = rates
-                            .download_bytes_per_second
-                            .saturating_add(item.telemetry.goodput_bytes_per_second)
-                    }
+        let mut rates = teleark_runtime::TransferRates::default();
+        for item in self
+            .native_transfer_view
+            .items
+            .iter()
+            .filter(|item| item.state == teleark_runtime::ChannelDownloadState::Running)
+        {
+            rates.download_bytes_per_second = rates
+                .download_bytes_per_second
+                .saturating_add(item.current_bytes_per_second.unwrap_or(0));
+        }
+        for item in self
+            .vault_transfer_view
+            .items
+            .iter()
+            .filter(|item| item.state == teleark_runtime::VaultTransferState::Running)
+        {
+            match item.direction {
+                teleark_runtime::VaultTransferDirection::Upload => {
+                    rates.upload_bytes_per_second = rates
+                        .upload_bytes_per_second
+                        .saturating_add(item.telemetry.goodput_bytes_per_second)
+                }
+                teleark_runtime::VaultTransferDirection::Download => {
+                    rates.download_bytes_per_second = rates
+                        .download_bytes_per_second
+                        .saturating_add(item.telemetry.goodput_bytes_per_second)
                 }
             }
         }
         div()
-            .h(px(32.0))
+            .debug_selector(|| "global-background-status".into())
+            .h(px(28.0))
             .flex_none()
             .px_4()
             .flex()
             .items_center()
-            .gap_4()
+            .gap_2()
             .border_t_1()
             .border_color(theme::border())
             .bg(theme::surface())
@@ -365,28 +471,84 @@ impl TeleArkApp {
             .child(
                 components::button(
                     "status-disk-space",
-                    self.volume_space
-                        .map(|space| {
-                            self.tr_with(
-                                "shell-free-disk-space",
-                                MessageArgs::new().with(
-                                    "free",
-                                    format_bytes(self.locale(), space.available_bytes),
-                                ),
-                            )
-                        })
-                        .unwrap_or_else(|| self.tr("shell-disk-space-unavailable")),
+                    if self.preference_persistence == PreferencePersistence::Saving {
+                        self.tr("settings-preferences-saving")
+                    } else if self.preference_persistence == PreferencePersistence::Failed {
+                        self.tr("settings-preferences-failed")
+                    } else {
+                        self.volume_space
+                            .map(|space| {
+                                self.tr_with(
+                                    "shell-free-disk-space",
+                                    MessageArgs::new().with(
+                                        "free",
+                                        format_bytes(self.locale(), space.available_bytes),
+                                    ),
+                                )
+                            })
+                            .unwrap_or_else(|| self.tr("shell-disk-space-unavailable"))
+                    },
                     Some(IconName::HardDrive),
                     false,
                 )
                 .ghost()
                 .h(px(28.0))
-                .tooltip(self.tr("settings-managed-root-picker"))
+                .tooltip(self.tr(
+                    if self.preference_persistence == PreferencePersistence::Failed {
+                        "common-retry"
+                    } else {
+                        "settings-managed-root-picker"
+                    },
+                ))
                 .on_click(cx.listener(|this, _, _, cx| {
+                    if this.preference_persistence == PreferencePersistence::Failed {
+                        this.persist_preferences(cx);
+                        return;
+                    }
                     this.settings_section = SettingsSection::Storage;
                     this.set_page(Page::Settings, cx);
                 })),
             )
+            .when(self.dialogs.has_activity(), |bar| {
+                bar.child(self.render_dialog_status(cx))
+            })
+            .when(self.channel_sync_snapshot.is_some(), |bar| {
+                bar.child(
+                    components::button(
+                        "shell-channel-sync",
+                        self.channel_sync_label(),
+                        None,
+                        false,
+                    )
+                    .ghost()
+                    .tooltip(self.channel_sync_timing())
+                    .max_w(px(280.0))
+                    .min_w_0()
+                    .flex_1()
+                    .h(px(24.0))
+                    .overflow_hidden()
+                    .debug_selector(|| "global-sync-details".into())
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.channel_sync_details = !app.channel_sync_details;
+                        cx.notify();
+                    })),
+                )
+            })
+            .when_some(self.managed_change_warning(), |bar, warning| {
+                bar.child(
+                    components::button("managed-watch-alert", warning.clone(), None, false)
+                        .ghost()
+                        .text_color(theme::amber())
+                        .max_w(px(220.0))
+                        .overflow_hidden()
+                        .tooltip(warning)
+                        .debug_selector(|| "managed-watch-alert".into())
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.channel_sync_details = true;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -424,5 +586,101 @@ impl TeleArkApp {
             Page::Channel => self.render_channel(window, layout, cx),
             Page::Settings => self.render_settings(window, layout, cx),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn populate(app: &mut TeleArkApp) {
+        app.telegram_chats = (1..=10_000)
+            .map(|id| TelegramChatSummary {
+                id,
+                name: format!("Channel · 频道 · チャンネル {id} with a long archive title"),
+                username: None,
+                kind: TelegramChatKind::Channel,
+                sync_pts: None,
+            })
+            .collect();
+    }
+
+    #[gpui_kit::test]
+    fn channel_sidebar_only_constructs_visible_menus_and_keeps_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            populate(app);
+            assert_eq!(app.channel_sidebar_items(cx).len(), 9_999); // private storage excluded
+            MATERIALIZED_CHANNELS.with(|count| count.set(0));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let count = MATERIALIZED_CHANNELS.with(|count| count.get());
+        assert!(count > 0 && count < 200, "constructed {count} menus");
+        let row = cx
+            .debug_bounds("channel-sidebar-row-1")
+            .expect("first channel");
+        cx.simulate_click(row.center(), gpui_kit::Modifiers::default());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert_eq!(app.selected_chat_id, Some(1)));
+        let panel = cx.debug_bounds("channel-list-panel").expect("sidebar");
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: panel.center(),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-500.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("channel-sidebar-row-1").is_none());
+        assert!(cx.debug_bounds("channel-list-width-feedback").is_some());
+        app.read_with(cx, |app, _| assert_eq!(app.selected_chat_id, Some(1)));
+        let stale = app.update(cx, |app, cx| {
+            let stale = app.channel_sidebar_items(cx).remove(0);
+            app.telegram_chats.swap(0, 1);
+            stale
+        });
+        MATERIALIZED_CHANNELS.with(|count| count.set(0));
+        cx.update(|window, cx| {
+            let _ = stale.render("stale-source", window, cx);
+        });
+        assert_eq!(MATERIALIZED_CHANNELS.with(|count| count.get()), 0);
+    }
+
+    #[gpui_kit::test]
+    #[ignore = "manual comparative benchmark; no wall-time assertion"]
+    fn perf_channel_sidebar_construction(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        app.update(cx, |app, cx| {
+            populate(app);
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                let items: Vec<_> = app
+                    .telegram_chats
+                    .iter()
+                    .filter(|chat| Some(chat.id) != app.storage_channel_id())
+                    .map(|chat| {
+                        let chat_id = chat.id;
+                        SidebarMenuItem::new(chat.name.clone())
+                            .active(app.selected_chat_id == Some(chat_id))
+                            .on_click(
+                                cx.listener(move |app, _, _, cx| app.select_channel(chat_id, cx)),
+                            )
+                    })
+                    .collect();
+                std::hint::black_box(items);
+            }
+            let old = started.elapsed();
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(app.channel_sidebar_items(cx));
+            }
+            eprintln!(
+                "channel_sidebar channels=10000 renders=100 old_us={} new_us={}",
+                old.as_micros(),
+                started.elapsed().as_micros()
+            );
+        });
     }
 }
