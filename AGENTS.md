@@ -1,31 +1,47 @@
 # TeleArk contributor rules
 
-Read [architecture](docs/ARCHITECTURE.md) and [current status](docs/IMPLEMENTATION_STATUS.md) before changing code. Inspect `git status`, `git diff`, and `git log --oneline -n 10`; preserve unrelated work. Read only the additional documents relevant to the change:
+Build a mature, reliable product. Complete authorized work, make routine implementation decisions, and preserve unrelated changes. Consult [technical references](docs/ARCHITECTURE.md#technical-references) as needed; no compulsory reading sequence. Define completion through working behavior and evidence; maturity labels and mandatory third-party audits are not delivery prerequisites.
 
-| Change | Required reference |
-| --- | --- |
-| GUI or user-facing text | [UI](docs/UI_GUIDELINES.md), [i18n](docs/I18N.md) |
-| Storage, identity or settings | [Data model](docs/DATA_MODEL.md), [preferences](docs/PREFERENCES_FORMAT.md) |
-| Index/search | [Index](docs/INDEX_ENGINE.md) |
-| Transfers or diagnostics | [Transfer](docs/TRANSFER_ENGINE.md), [security](docs/SECURITY.md) |
-| Crypto, manifests or recovery | [Crypto](docs/CRYPTO_FORMAT.md), [manifest](docs/MANIFEST_FORMAT.md), [security](docs/SECURITY.md) |
-| Build, tests or releases | [Development](docs/DEVELOPMENT.md) |
+## Local agent memory and development environment
 
-## Invariants
+- Use the Git-ignored `.agent-memory/` directory for temporary coding-agent notes and handoffs. Read `.agent-memory/README.md` when present, verify stale notes against the working tree, and update concise checkpoints after meaningful work. Keep decisions, affected paths, checks and next steps; prune obsolete detail. Shared contracts and durable project decisions belong in tracked documentation.
+- Use the Git-ignored `.env.local` for local development credentials and environment overrides; `.env.example` contains empty placeholders only. Preserve existing local values. Read credentials through the scoped shell environment described in [Development](docs/DEVELOPMENT.md#local-agent-memory-and-development-environment), only when the task needs them. Keep local files private (`0700` for the memory directory, `0600` for notes and environment files).
+- Never copy credential values into notes, source, fixtures, command arguments, logs or responses. Do not print local environment files or dump the environment; disable shell tracing before loading them. Verify ignore rules and inspect staged paths before committing; never force-add these local files. Ordinary tests and UI previews keep using synthetic data.
 
-- Core, Runtime, Storage, Telegram, Crypto, Index and Transfer must not depend on GPUI. GUI calls frontend-neutral APIs; it does not execute SQL, call `grammers`, manage sessions, perform crypto or implement checkpoints. SQL stays in Storage; `grammers` types stay in Telegram.
-- `LogicalFile` is the domain abstraction. Use structured errors/events and locale-neutral persisted values; never match error strings for behavior.
-- Persistent bytes require explicit codecs, versions, documentation, fixtures and compatibility tests. Rust/Serde layout is not a durable format. Significant decisions require a new ADR; supersede accepted ADRs instead of rewriting history. Keep crypto/manifest **provisional** until their independent review and stabilization gates pass.
-- Use safe Rust. Production filesystem/network/database/crypto/input paths must not casually unwrap, expect or panic. Long operations need an owner, bounded work/queues, cancellation, error handling and retained handles. Do not hold locks across network or long awaits.
-- Every new behavior needs deterministic tests; reproducible fixes need regression tests. Normal CI must not use live Telegram credentials. Keep stable code compiling and preserve existing user data.
-- All interface text—including menus, accessibility, dialogs, validation, notifications and end-user CLI output—uses semantic message IDs in synchronized `en-US`, `zh-CN`, `ja-JP` catalogs; English is fallback. Use centralized locale-aware formatting. Never translate filenames, captions, paths, channel titles or collection names.
+## Make background work visible
 
-## Provenance and dependencies
+- Every feature change includes feedback for waiting, execution and completion. Show acknowledgment and the current phase before starting expensive work. Filesystem, network, database and crypto work stays off the UI thread.
+- Reflect every background state transition promptly in the UI and retain a bounded event timeline. Cover preparation, queues, reading/encryption, transport, verification, retries/rate limits, migration, persistence and terminal states. Navigation, collapsed batches or disabled diagnostic logging must not hide active work.
+- While waiting, show phase duration, last activity and the known reason, with supported cancel/retry actions. Unknown progress stays unknown; 100% means successful completion. A spinner, idle 0% or generic “Processing” alone is insufficient.
+- Upload/download right-hand inspectors prioritize real charts, part maps and timelines for live activity and historical replay. Visualize speed/progress, queues/concurrency, retries, errors and controller changes; connect them to expandable sanitized logs. Label time ranges, units and gaps, with text summaries and accessible labels.
+- Coalesce high-frequency samples, never silently lose state changes or terminal outcomes. Bound sampling, history and rendering; show truncation or dropped samples. Logging failures cannot stall work. Never invent rates, ETA, connections or unmeasured performance.
 
-TeleArk remains `MIT OR Apache-2.0`. **Never inspect, copy, translate, port, adapt, derive from, or use implementation details from GPL `tdl`**, including source, tests, architecture, schemas, naming, control flow, RPC sequencing, or other agents' summaries. Do not delegate that inspection. Use official Telegram/MTProto docs, public `grammers` APIs, compatible crate documentation/specifications and original TeleArk work.
+## Version data and migrate automatically
 
-Verify an external implementation's license before inspecting it. Stop and seek review for GPL/AGPL, restrictive, incompatible or unclear terms. Before adding/upgrading dependencies, review direct/relevant transitive licenses, maintenance, security and necessity; prefer permissive terms. Keep notices, `deny.toml` and the lockfile synchronized; never bypass gates to obtain a pass. ADRs [0007](docs/adr/0007-permissive-license-clean-room-policy.md) and [0012](docs/adr/0012-gpui-kit-and-private-storage-channel.md) record the GUI provenance decisions.
+- Version persistent schemas and codecs independently of app releases. Document each release's supported read/write versions and automatic upgrade paths, including skipped releases. Incompatible changes require a new version and migration; existing bytes never acquire a different meaning.
+- Ship automatic migration for supported upgrades, including data, settings and recoverable transfer state. Routine upgrades need no manual exports, scripts, resets or reconfiguration. Retain readers or verified conversion paths for older encrypted files and recovery bundles.
+- Migrations preserve recoverable originals through transactions, backups or copy-on-write; validate results before committing the new version. Make steps restartable/idempotent and recover safely from interruption, low disk space and failure. Unsupported/newer data stays intact with actionable guidance, never silently reset or downgraded.
+- Migration is a visible background operation: show detection, preparation/backup, conversion, verification and index rebuild as they occur, with progress or explicit indeterminate activity. Keep the window responsive and block only conflicting actions. Request input only when access, unlock material or a genuine unresolved choice requires it.
 
-## Before committing or handing off
+## Project boundaries
 
-Review applicable boundaries, terminology, i18n, state transitions, migrations, crypto vectors, manifest fixtures, concurrency, secret handling and the complete diff. Run the [quality gates](docs/DEVELOPMENT.md#quality-gates). Record justified exceptions and unfinished work with precise next actions in `IMPLEMENTATION_STATUS.md`; unavailable checks are not passes. Update affected contracts with behavior changes. Commit only when the session authorizes it, with one coherent change per commit. Never commit real sessions, credentials, private channel data, recovery keys or user documents.
+- `LogicalFile` is the domain object. Core, Runtime, Storage, Telegram, Crypto, Index and Transfer remain GPUI-free. SQL belongs in Storage; `grammers` and sessions in Telegram. GUI calls frontend-neutral APIs and never implements crypto/checkpoints or matches error prose for behavior.
+- Use safe Rust and explicit error handling. Long tasks have retained owners/handles, bounded queues and cancellation. Never hold locks across network or long waits; reject stale account/request generations.
+- Persist explicit codecs with format documentation and compatibility fixtures. Record significant decisions in ADRs; supersede historical decisions explicitly. Security correctness, account isolation and authenticated recovery remain product requirements.
+- All interface and end-user CLI text uses semantic IDs in synchronized `en-US`, `zh-CN`, `ja-JP` catalogs, with English fallback. Use `teleark-i18n` formatting and locale-neutral persisted values. Preserve filenames, paths, captions, channel titles and collection names.
+- Support 900×600, all three locales and light/dark themes. Keep primary actions reachable and inspectors independently scrollable. Reuse GPUI Kit and centralized theme/layout; use `--preview-ui` for layout checks.
+- Keep `MIT OR Apache-2.0`. Never inspect or derive implementation from GPL `tdl`, including tests, architecture, schemas, naming, control flow, RPC sequencing or agent summaries; never delegate that inspection. Use official Telegram/MTProto, public `grammers` APIs and license-compatible references.
+- Verify licenses before inspecting external implementations; seek review for GPL/AGPL, restrictive or unclear terms. Review dependency necessity, maintenance, security and relevant transitive licenses; synchronize notices, `deny.toml` and lockfiles. Preserve [log redaction](docs/SECURITY.md#local-data-api-configuration-and-logs); never commit credentials, sessions, private channel data, keys or user documents.
+
+## Prevent performance regressions
+
+- Render from revisioned frontend-neutral projections and materialize visible rows. Idle frames must not rebuild whole task, channel or history collections; recurring UI timers must have an explicit presentation purpose, not drive service queues or repeat unchanged database reads.
+- Treat async callbacks and destructors as latency-sensitive entry points. Keep blocking I/O, acknowledged cross-owner calls and thread joins off UI and network reactors. Isolate slow work with retained bounded owners; test that a blocked dependency does not stop unrelated work. See the ownership decisions in [Architecture](docs/ARCHITECTURE.md).
+- Bound memory across the whole session, not just each task or queue. Maintain hot counters incrementally; do not repeatedly scan or copy retained histories as progress grows. Retention must preserve active/recoverable work and disclose omitted history.
+- Verify important SQL using the actual filtered and paginated query plan, including deep cursors and null/tied sort keys. An index's existence does not prove it is used. Keep deterministic behavioral/operation-count regressions beside focused benchmarks; label measured scope and do not turn microbenchmarks into end-to-end speed claims.
+
+## Verify and deliver
+
+- Add meaningful deterministic tests for new behavior and reproducible fixes. Cover slow/blocked operations, transitions, failures/cancellation and stale callbacks. Migration tests cover supported version chains, skipped upgrades, data/key preservation, restart and rollback; verify feedback precedes expensive work.
+- Run [checks appropriate to the change](docs/DEVELOPMENT.md#quality-gates); full gates apply to releases and shared-contract changes. Broaden or repeat checks only for new changes, failures or unresolved concerns. Normal tests use temporary data, fake remotes and controlled clocks.
+- Report results, evidence and actual limitations. Update affected contracts and [status](docs/IMPLEMENTATION_STATUS.md) when capabilities or open work change. Missing checks are not passes. Commit or tag only when authorized.
