@@ -1476,3 +1476,4 @@ transfer-history-restored-label = 復元された履歴
 transfer-history-restored-detail = 保存済みのタスク集計を復元しました。ライブチャートと詳細なアクティビティは復元されていません。
 
 detail-vault-lifecycle-durable-upload = タスクの集計はローカルに保存されます。未完了のアップロードは再起動後に中断と表示されます。元のファイルを選択して新しくアップロードしてください。
+upload-error-folder = フォルダーや .app アプリケーションバンドルは直接アップロードできません。ZIP ファイルに圧縮してからアップロードしてください。

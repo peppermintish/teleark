@@ -80,6 +80,8 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 
 The default content size is 1120×680. Startup centers the native frame inside the primary display’s OS-reported work area, excluding the menu bar and Dock/taskbar, with a 16-point margin and separate 36-point native-titlebar allowance. Oversized requests shrink to fit; on unusually small work areas the window minimum also shrinks instead of forcing overlap. Record actual size separately. The legacy `--skip-telegram-api-id-prompt` flag remains accepted, but API setup is now opt-in. Non-preview startup opens real local state and can resume eligible downloads after account entry.
 
+`--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check English by default; use other locales for the localized message and wrapping checks.
+
 Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details, batch membership, scroll isolation at both boundaries, expanded/collapsed navigation, multi-file picker/removal and local-file states; Settings/About; light/dark and all locales. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
 
 ## CI and releases

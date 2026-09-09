@@ -17,6 +17,10 @@ pub fn render_upload_overlay(
     layout: LayoutPolicy,
     cx: &mut Context<TeleArkApp>,
 ) -> AnyElement {
+    let folder_rejected = matches!(
+        app.vault_activity,
+        VaultActivity::Failed(teleark_core::ApplicationErrorKind::UploadFolderUnsupported)
+    );
     let source_summary = app.tr_with(
         "upload-selection-summary",
         teleark_i18n::MessageArgs::new()
@@ -84,6 +88,22 @@ pub fn render_upload_overlay(
                     })),
                 ),
         )
+        .when(folder_rejected, |popup| {
+            popup.child(
+                div()
+                    .flex_none()
+                    .mx_6()
+                    .mb_2()
+                    .px_4()
+                    .py_3()
+                    .rounded(theme::RADIUS_MEDIUM)
+                    .bg(components::Tone::Red.background())
+                    .text_sm()
+                    .text_color(components::Tone::Red.foreground())
+                    .debug_selector(|| "upload-folder-error".into())
+                    .child(app.tr("upload-error-folder")),
+            )
+        })
         .child(components::inspector_body(
             "upload-body",
             &app.upload_body_scroll,
@@ -293,7 +313,7 @@ pub fn render_upload_overlay(
                     )
                 })
                 .when_some(
-                    super::settings::vault_activity_message(app),
+                    super::settings::vault_activity_message(app).filter(|_| !folder_rejected),
                     |popup, (message, tone)| {
                         popup.child(
                             div()
@@ -343,6 +363,7 @@ pub fn render_upload_overlay(
                         Some(IconName::ArrowUp),
                         true,
                     )
+                    .debug_selector(|| "upload-add-queue".into())
                     .disabled(
                         app.visual_preview
                             || app.upload_in_flight

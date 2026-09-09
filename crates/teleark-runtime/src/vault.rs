@@ -220,6 +220,11 @@ pub fn inspect_upload_sources(
             continue;
         }
         let metadata = std::fs::metadata(path).map_err(map_source_io)?;
+        if metadata.is_dir() {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::UploadFolderUnsupported,
+            ));
+        }
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
         }
@@ -2945,6 +2950,57 @@ fn map_transfer_error(error: TransferError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_preflight_distinguishes_folders_and_app_bundles_from_missing_files() {
+        let root = tempfile::tempdir().expect("fixture");
+        let folder = root.path().join("Photos");
+        let bundle = root.path().join("Example.app");
+        let ordinary_file = root.path().join("ordinary-file.app");
+        let empty_file = root.path().join("empty.zip");
+        std::fs::create_dir(&folder).expect("folder");
+        std::fs::create_dir_all(bundle.join("Contents")).expect("application bundle");
+        std::fs::write(&ordinary_file, b"ordinary file, despite its extension").expect("file");
+        std::fs::write(&empty_file, []).expect("empty file");
+        for path in [&folder, &bundle] {
+            for paths in [
+                vec![path.clone()],
+                vec![ordinary_file.clone(), path.clone()],
+            ] {
+                assert_eq!(
+                    inspect_upload_sources(&paths)
+                        .expect_err("directory rejected")
+                        .kind(),
+                    ApplicationErrorKind::UploadFolderUnsupported,
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("bundle-link");
+            std::os::unix::fs::symlink(&bundle, &alias).expect("symlink");
+            assert_eq!(
+                inspect_upload_sources(&[alias])
+                    .expect_err("directory alias rejected")
+                    .kind(),
+                ApplicationErrorKind::UploadFolderUnsupported,
+            );
+        }
+        for path in [root.path().join("missing.zip"), empty_file] {
+            assert_eq!(
+                inspect_upload_sources(&[path])
+                    .expect_err("unavailable source")
+                    .kind(),
+                ApplicationErrorKind::SourceMissing,
+            );
+        }
+        assert_eq!(
+            inspect_upload_sources(&[ordinary_file])
+                .expect("ordinary file")
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn transfer_session_log_is_versioned_private_and_content_free()

@@ -2214,6 +2214,9 @@ pub(crate) fn vault_activity_message(app: &TeleArkApp) -> Option<(SharedString, 
                 }
                 teleark_core::ApplicationErrorKind::InvalidRequest => "vault-error-invalid-request",
                 teleark_core::ApplicationErrorKind::Authorization => "vault-error-authorization",
+                teleark_core::ApplicationErrorKind::UploadFolderUnsupported => {
+                    "upload-error-folder"
+                }
                 teleark_core::ApplicationErrorKind::SourceMissing => "vault-error-source-missing",
                 teleark_core::ApplicationErrorKind::PermissionDenied => {
                     "vault-error-permission-denied"

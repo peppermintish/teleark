@@ -1,5 +1,11 @@
 # Implementation status — v0.4.4
 
+## Clear folder/application-bundle upload rejection (2026-09-10)
+
+Upload selection now distinguishes directories (including `.app` bundles and directory symlinks) from missing files. The frontend-neutral admission error displays an explicit localized instruction to compress the folder into ZIP, fixed above the upload composer’s scrolling content. Invalid selections preserve the existing draft; ordinary files with an `.app` suffix remain allowed. File selection validation still runs in the background. This error is returned before task admission/persistence, so no schema or persisted codec changes are introduced.
+
+Validation: all eight source gates passed for both the current worktree (510 tests) and isolated commit snapshot (494 tests), with 10 existing manual probes ignored in each. The new picker regression verifies draft preservation, explicit reason, valid retry, localized mapping and pinned error/footer bounds in all three locales, both themes and 900×600/default windows; the current worktree’s existing native-drop regression also asserts the new directory error. Native synthetic previews checked English compact light/default dark plus dedicated Chinese compact light/Japanese compact dark wrapping. The folder message and footer actions remain fully visible. Local release build and fresh macOS packaging passed; no live uploads were performed.
+
 ## Default window fits the desktop work area (2026-09-10)
 
 Startup uses GPUI Kit’s OS-reported visible display bounds, excluding the menu bar and Dock/taskbar, instead of fixed screen-edge estimates. The default content size is 1120×680. A separate native-titlebar allowance and outer margin keep the full frame inside the work area, and small work areas lower the initial minimum rather than forcing overlap. Explicit preview sizes remain supported and fit the same bounds.

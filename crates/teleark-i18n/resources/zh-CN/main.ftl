@@ -1476,3 +1476,4 @@ transfer-history-restored-label = 已恢复的历史记录
 transfer-history-restored-detail = 已恢复保存的任务汇总；实时图表与详细活动未恢复。
 
 detail-vault-lifecycle-durable-upload = 任务汇总保存在本地。重启后，未完成的上传会标记为已中断；请重新选择源文件开始上传。
+upload-error-folder = 无法直接上传文件夹或 .app 应用包。请先压缩成 ZIP 文件，再上传。

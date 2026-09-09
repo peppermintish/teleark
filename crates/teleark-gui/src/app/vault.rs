@@ -830,6 +830,101 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn folder_picker_error_is_specific_visible_and_preserves_the_upload_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use teleark_core::ApplicationErrorKind;
+        use teleark_i18n::{Localizer, SupportedLocale};
+        use teleark_runtime::AppearancePreference;
+
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        let source = std::env::current_exe().expect("synthetic executable");
+        let folder = source.parent().expect("fixture directory").to_path_buf();
+        app.update(cx, |app, cx| {
+            app.show_upload = true;
+            app.upload_sources =
+                teleark_runtime::inspect_upload_sources(std::slice::from_ref(&source))
+                    .expect("existing valid draft");
+            app.choose_upload_file(cx);
+            assert!(
+                app.upload_preparing,
+                "selection is acknowledged before the result"
+            );
+        });
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            // AppKit may present an application package as a selectable file.
+            Some(vec![folder])
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.upload_sources.len(), 1);
+            assert_eq!(app.upload_sources[0].path, source);
+            assert_eq!(
+                app.vault_activity,
+                VaultActivity::Failed(ApplicationErrorKind::UploadFolderUnsupported),
+            );
+            assert!(!app.upload_preparing);
+            assert!(
+                !app.upload_in_flight,
+                "invalid selection cannot start a transfer"
+            );
+        });
+
+        for (width, height) in [(900.0, 600.0), (1120.0, 680.0)] {
+            cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+            // Dedicated localization/wrapping checks; ordinary UI tests remain English.
+            for locale in SupportedLocale::ALL {
+                for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
+                    cx.update(|window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.localizer = Localizer::new(locale).expect("catalog");
+                            crate::theme::apply_appearance(appearance, window, cx);
+                            app.upload_body_scroll
+                                .set_offset(gpui::point(gpui::px(0.0), gpui::px(-2000.0)));
+                            let (message, _) =
+                                crate::screens::settings::vault_activity_message(app)
+                                    .expect("folder message");
+                            assert_eq!(message, app.tr("upload-error-folder"));
+                            assert_ne!(message, app.tr("vault-error-source-missing"));
+                            assert!(message.contains("ZIP"));
+                            cx.notify();
+                        });
+                    });
+                    cx.run_until_parked();
+                    let banner = cx
+                        .debug_bounds("upload-folder-error")
+                        .expect("pinned error");
+                    let action = cx.debug_bounds("upload-add-queue").expect("primary action");
+                    for bounds in [banner, action] {
+                        assert!(
+                            bounds.left() >= gpui::px(0.0) && bounds.right() <= gpui::px(width)
+                        );
+                        assert!(
+                            bounds.top() >= gpui::px(0.0) && bounds.bottom() <= gpui::px(height)
+                        );
+                    }
+                    assert!(
+                        banner.bottom() < action.top(),
+                        "error never covers the footer"
+                    );
+                }
+            }
+        }
+        app.update(cx, |app, cx| app.choose_upload_file(cx));
+        cx.simulate_path_prompt_response(|_| Some(vec![source]));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.vault_activity, VaultActivity::Idle)
+        });
+        assert!(
+            cx.debug_bounds("upload-folder-error").is_none(),
+            "valid retry clears the error"
+        );
+    }
+
     use gpui_kit as gpui;
 
     #[gpui::test]

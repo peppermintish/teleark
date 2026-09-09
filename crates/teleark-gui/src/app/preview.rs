@@ -471,6 +471,13 @@ impl TeleArkApp {
                 }
                 self.preview_transfer_rows = vec![row];
             }
+            "upload-folder" => {
+                self.page = Page::Storage;
+                self.show_upload = true;
+                self.vault_activity = VaultActivity::Failed(
+                    teleark_core::ApplicationErrorKind::UploadFolderUnsupported,
+                );
+            }
             "upload-preflight" => {
                 self.page = Page::Transfers;
                 self.preview_transfer_rows.clear();

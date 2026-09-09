@@ -1503,3 +1503,4 @@ transfer-history-restored-label = Restored history
 transfer-history-restored-detail = Saved task totals are available. Live charts and detailed activity were not restored.
 
 detail-vault-lifecycle-durable-upload = Task summary saved locally. Unfinished uploads are marked interrupted after restart; select the source file to start a new upload.
+upload-error-folder = Folders and .app application bundles cannot be uploaded directly. Compress them into a ZIP file, then upload the ZIP.

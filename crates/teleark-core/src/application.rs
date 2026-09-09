@@ -130,6 +130,8 @@ pub enum ApplicationErrorKind {
     Persistence,
     SourceMissing,
     SourceChanged,
+    /// A selected directory/application bundle is rejected before upload admission.
+    UploadFolderUnsupported,
     PermissionDenied,
     /// A local plaintext upload source cannot be read.
     SourcePermissionDenied,
