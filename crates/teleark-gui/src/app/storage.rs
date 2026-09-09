@@ -26,6 +26,7 @@ impl TeleArkApp {
         if self.storage_loading {
             return;
         }
+        self.storage_details_expanded = false;
         let progress = teleark_runtime::StorageMaintenance::new();
         self.storage_maintenance = Some(progress.clone());
         self.storage_loading = true;
@@ -134,6 +135,7 @@ impl TeleArkApp {
         let generation = self.telegram_login_generation;
         let title = self.tr("storage-remote-title").to_string();
         let description = self.tr("storage-remote-description").to_string();
+        self.storage_details_expanded = false;
         self.storage_loading = true;
         self.storage_error = None;
         cx.notify();

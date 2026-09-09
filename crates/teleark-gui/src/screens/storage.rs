@@ -355,6 +355,38 @@ impl TeleArkApp {
         let health = self.storage_status.health();
         let repair = health.is_some_and(|health| health.needs_repair());
         let confirming_repair = self.storage_confirmation == Some(StorageAction::Repair);
+        let quiet = health == Some(teleark_runtime::StorageChannelHealth::Healthy)
+            && !self.storage_loading
+            && self.storage_error.is_none()
+            && !self.storage_waiting_for_retry()
+            && self.storage_confirmation.is_none()
+            && self
+                .storage_maintenance_snapshot()
+                .is_none_or(|state| state.finished && state.error.is_none());
+        if quiet && !self.storage_details_expanded {
+            return components::card()
+                .flex_none()
+                .debug_selector(|| "storage-management-card".into())
+                .child(
+                    components::button(
+                        "storage-expand-details",
+                        self.tr("storage-connected-title"),
+                        None,
+                        false,
+                    )
+                    .ghost()
+                    .w_full()
+                    .h(px(52.0))
+                    .justify_start()
+                    .px_4()
+                    .debug_selector(|| "storage-expand-details".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.storage_details_expanded = true;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element();
+        }
         let show_activity = self.storage_loading
             || self.storage_error.is_some()
             || self.storage_waiting_for_retry()
@@ -393,11 +425,25 @@ impl TeleArkApp {
                             .min_w(px(180.0))
                             .text_sm()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(self.tr(if repair {
-                                "storage-repair-title"
+                            .child(if repair {
+                                div()
+                                    .child(self.tr("storage-repair-title"))
+                                    .into_any_element()
                             } else {
-                                "storage-connected-title"
-                            })),
+                                components::button(
+                                    "storage-collapse-details",
+                                    self.tr("storage-connected-title"),
+                                    None,
+                                    false,
+                                )
+                                .ghost()
+                                .disabled(!quiet)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.storage_details_expanded = false;
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                            }),
                     )
                     .when(
                         repair && !self.storage_loading && !confirming_repair,
@@ -662,16 +708,21 @@ impl TeleArkApp {
             .into_any_element()
     }
 
+    fn storage_maintenance_snapshot(&self) -> Option<teleark_runtime::StorageMaintenanceSnapshot> {
+        let progress = self.storage_maintenance.as_ref()?;
+        Some(
+            self.storage_maintenance_preview
+                .as_ref()
+                .filter(|_| self.visual_preview)
+                .cloned()
+                .unwrap_or_else(|| progress.snapshot()),
+        )
+    }
+
     pub(crate) fn render_storage_maintenance(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(progress) = &self.storage_maintenance else {
+        let Some(state) = self.storage_maintenance_snapshot() else {
             return div().into_any_element();
         };
-        let state = self
-            .storage_maintenance_preview
-            .as_ref()
-            .filter(|_| self.visual_preview)
-            .cloned()
-            .unwrap_or_else(|| progress.snapshot());
         let phase = storage_phase_id(state.phase);
         let duration = if state.finished {
             state.last_activity.duration_since(state.phase_since)
@@ -1258,6 +1309,7 @@ mod tests {
                             app.storage_notice = Some("storage-auto-found");
                             app.storage_loading = false;
                             app.storage_confirmation = None;
+                            app.storage_details_expanded = false;
                             app.storage_maintenance = None;
                             app.storage_maintenance_preview = None;
                             app.unlock_intent = None;
@@ -1343,6 +1395,19 @@ mod tests {
                         cx.notify();
                     });
                     cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-channel-location").is_none());
+                    assert!(cx.debug_bounds("storage-channel-notifications").is_none());
+                    assert!(cx.debug_bounds("storage-archive-action").is_none());
+                    let collapsed = cx
+                        .debug_bounds("storage-management-card")
+                        .expect("collapsed card");
+                    assert!(collapsed.size.height <= px(56.0));
+                    let expand = cx
+                        .debug_bounds("storage-expand-details")
+                        .expect("connected title");
+                    cx.simulate_click(expand.center(), gpui_kit::Modifiers::default());
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-channel-location").is_some());
                     cx.simulate_event(gpui_kit::ScrollWheelEvent {
                         position: viewport.center(),
                         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))),
@@ -1371,6 +1436,31 @@ mod tests {
                     app.update(cx, |app, _| {
                         assert_eq!(app.storage_confirmation, Some(StorageAction::Archive))
                     });
+                    app.update(cx, |app, cx| {
+                        app.storage_details_expanded = false;
+                        app.storage_confirmation = None;
+                        app.storage_loading = true;
+                        app.storage_maintenance_preview = None;
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-expand-details").is_none());
+                    assert!(cx.debug_bounds("storage-channel-location").is_some());
+                    app.update(cx, |app, cx| {
+                        app.storage_loading = false;
+                        app.storage_maintenance = None;
+                        app.storage_error = Some(teleark_core::ApplicationErrorKind::Network);
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-expand-details").is_none());
+                    assert!(cx.debug_bounds("storage-activity-card").is_some());
+                    app.update(cx, |app, cx| {
+                        app.storage_error = None;
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-expand-details").is_some());
                 }
             }
         }
