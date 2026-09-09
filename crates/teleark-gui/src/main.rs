@@ -94,7 +94,7 @@ fn main() {
             );
             let bounds = cx
                 .primary_display()
-                .map(|display| fit_window_bounds(requested_size, display.bounds()))
+                .map(|display| fit_window_bounds(requested_size, display.visible_bounds()))
                 .unwrap_or_else(|| Bounds::centered(None, requested_size, cx));
             let window = cx.open_window(main_window_options(bounds), move |window, cx| {
                 let view = cx.new(|cx| {
@@ -158,34 +158,31 @@ fn main_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
             ..Default::default()
         }),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(900.0), px(600.0))),
+        window_min_size: Some(size(px(900.0), px(600.0)).min(&bounds.size)),
         app_id: Some("com.teleark.desktop".to_owned()),
         ..Default::default()
     }
 }
 
-fn fit_window_bounds(requested: Size<Pixels>, display: Bounds<Pixels>) -> Bounds<Pixels> {
-    let horizontal_inset = px(16.0);
-    let top_inset = px(28.0);
-    let bottom_inset = px(80.0);
-    let safe_width = (display.size.width - horizontal_inset * 2.0)
-        .max(px(900.0))
-        .min(display.size.width);
-    let safe_height = (display.size.height - top_inset - bottom_inset)
-        .max(px(600.0))
-        .min(display.size.height);
-    let safe = Bounds::new(
-        point(
-            display.origin.x + (display.size.width - safe_width) / 2.0,
-            display.origin.y + top_inset.min((display.size.height - safe_height).max(px(0.0))),
-        ),
-        size(safe_width, safe_height),
+// GPUI takes a content size, then AppKit adds the native titlebar. Keep a
+// conservative decoration allowance separate from the OS-reported work area.
+const NATIVE_TITLEBAR_RESERVE: f32 = 36.0;
+
+fn fit_window_bounds(requested: Size<Pixels>, visible: Bounds<Pixels>) -> Bounds<Pixels> {
+    let margin = px(16.0);
+    let titlebar = px(NATIVE_TITLEBAR_RESERVE).min(visible.size.height);
+    let available = size(
+        (visible.size.width - margin * 2.0).max(px(1.0)),
+        (visible.size.height - titlebar - margin * 2.0).max(px(1.0)),
     );
-    let window_size = requested.min(&safe.size);
-    let center = safe.center();
-    let offset = window_size / 2.0;
+    let window_size = requested.min(&available);
+    // Center the complete native frame, including its titlebar. Never expand
+    // back to the nominal minimum when that would overlap the Dock/taskbar.
     Bounds::new(
-        point(center.x - offset.width, center.y - offset.height),
+        point(
+            visible.origin.x + (visible.size.width - window_size.width) / 2.0,
+            visible.origin.y + (visible.size.height - window_size.height - titlebar) / 2.0,
+        ),
         window_size,
     )
 }
@@ -214,7 +211,7 @@ impl LaunchOptions {
         let mut page = Page::Account;
         let mut show_upload = false;
         let mut explicit_locale = None;
-        let mut window_size = (1360, 760);
+        let mut window_size = (1120, 680);
         let mut skip_telegram_api_id_prompt = false;
 
         for argument in arguments {
@@ -336,8 +333,8 @@ mod tests {
                 page: Page::Transfers,
                 locale: SupportedLocale::ZhCn,
                 show_upload: false,
-                window_width: 1360,
-                window_height: 760,
+                window_width: 1120,
+                window_height: 680,
                 locale_from_command_line: true,
                 skip_telegram_api_id_prompt: false,
             }
@@ -352,7 +349,7 @@ mod tests {
         assert_eq!(options.locale, SupportedLocale::JaJp);
         assert!(options.show_upload);
         assert!(!options.locale_from_command_line);
-        assert_eq!((options.window_width, options.window_height), (1360, 760));
+        assert_eq!((options.window_width, options.window_height), (1120, 680));
     }
 
     #[test]
@@ -394,15 +391,61 @@ mod tests {
     }
 
     #[test]
-    fn oversized_windows_stay_inside_desktop_safe_insets() {
-        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1_440.0), px(900.0)));
-        let bounds = fit_window_bounds(size(px(1_680.0), px(960.0)), display);
-        assert_eq!(bounds.origin, point(px(16.0), px(28.0)));
-        assert_eq!(bounds.size, size(px(1_408.0), px(792.0)));
+    fn initial_native_frame_stays_in_the_os_work_area() {
+        // Normal/tall bottom Dock, left/right Dock and an offset work area.
+        for (x, y, width, height) in [
+            (0.0, 25.0, 1440.0, 795.0),
+            (0.0, 38.0, 1440.0, 682.0),
+            (126.0, 25.0, 1314.0, 875.0),
+            (0.0, 25.0, 1314.0, 875.0),
+            (-1280.0, 104.0, 1280.0, 680.0),
+        ] {
+            let visible = Bounds::new(point(px(x), px(y)), size(px(width), px(height)));
+            for requested in [size(px(1120.0), px(680.0)), size(px(1920.0), px(1080.0))] {
+                let bounds = fit_window_bounds(requested, visible);
+                assert!(bounds.left() >= visible.left() + px(16.0));
+                assert!(bounds.top() >= visible.top() + px(16.0));
+                assert!(bounds.right() <= visible.right() - px(16.0));
+                assert!(
+                    bounds.bottom() + px(NATIVE_TITLEBAR_RESERVE) <= visible.bottom() - px(16.0)
+                );
+                assert!(bounds.size.width <= requested.width);
+                assert!(bounds.size.height <= requested.height);
+            }
+            let compact = fit_window_bounds(size(px(900.0), px(600.0)), visible);
+            assert_eq!(compact.size, size(px(900.0), px(600.0)));
+        }
+    }
 
-        let compact = fit_window_bounds(size(px(900.0), px(600.0)), display);
-        assert_eq!(compact.size, size(px(900.0), px(600.0)));
-        assert!(compact.origin.y >= px(28.0));
+    #[test]
+    fn small_work_area_takes_precedence_over_nominal_window_minimum() {
+        let visible = Bounds::new(point(px(100.0), px(40.0)), size(px(880.0), px(600.0)));
+        let bounds = fit_window_bounds(size(px(1120.0), px(680.0)), visible);
+        let options = main_window_options(bounds);
+        assert_eq!(bounds.size, size(px(848.0), px(532.0)));
+        assert_eq!(options.window_min_size, Some(bounds.size));
+        assert!(bounds.bottom() + px(NATIVE_TITLEBAR_RESERVE) < visible.bottom());
+        assert!(bounds.right() < visible.right());
+    }
+
+    #[test]
+    fn default_window_is_compact_and_centers_its_native_frame() {
+        let launch = LaunchOptions::from_args(std::iter::empty::<&str>(), SupportedLocale::EnUs);
+        assert_eq!((launch.window_width, launch.window_height), (1120, 680));
+        let visible = Bounds::new(point(px(0.0), px(25.0)), size(px(1920.0), px(975.0)));
+        let bounds = fit_window_bounds(
+            size(
+                px(launch.window_width as f32),
+                px(launch.window_height as f32),
+            ),
+            visible,
+        );
+        assert_eq!(bounds.size, size(px(1120.0), px(680.0)));
+        assert_eq!(bounds.center().x, visible.center().x);
+        assert_eq!(
+            bounds.center().y + px(NATIVE_TITLEBAR_RESERVE / 2.0),
+            visible.center().y
+        );
     }
 
     #[test]

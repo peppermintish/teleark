@@ -1,5 +1,11 @@
 # Implementation status — v0.4.4
 
+## Default window fits the desktop work area (2026-09-10)
+
+Startup uses GPUI Kit’s OS-reported visible display bounds, excluding the menu bar and Dock/taskbar, instead of fixed screen-edge estimates. The default content size is 1120×680. A separate native-titlebar allowance and outer margin keep the full frame inside the work area, and small work areas lower the initial minimum rather than forcing overlap. Explicit preview sizes remain supported and fit the same bounds.
+
+Validation: current-worktree GUI 113 and i18n 21 tests passed (3 existing manual GUI benchmarks ignored), with formatting and strict affected-crate Clippy. The isolated commit snapshot passed GUI 102 and i18n 21 tests and the same checks. Native English default and 900×600 light/dark previews, plus an oversized 1920×1080 request, were visually reviewed. Actual native frames including titlebars stayed inside the OS work area; bottom status bars remained visible. Local release build and fresh macOS packaging passed. No runtime, schema, locale-message or dependency changes.
+
 ## Upload history after restart (2026-09-10)
 
 Transfers → Uploads now restores durable account-scoped task summaries and batch identity from SQLite schema 16, including while locked and before remote catalog access. Queue/start/terminal writes run on retained background owners; completion waits for persistence acknowledgment. Unfinished rows become explicit interrupted history, with instructions to check Storage and choose the original source for a new upload. Bounded recent views retain whole boundary batches and disclose omitted rows. Restored telemetry is labeled unavailable; existing sanitized session logs remain accessible. Automatic schema 0–15 upgrades preserve data/key wraps and retry safely after rollback. No encrypted automatic resume, old upload-page browser or reconstruction of already-lost pre-v16 RAM-only rows is claimed. UI tests/previews now default to English by contributor rule.
