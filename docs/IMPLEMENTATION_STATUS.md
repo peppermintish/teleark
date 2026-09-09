@@ -2,6 +2,14 @@
 
 Updated 2026-09-09. TeleArk targets a mature desktop product with Telegram/native-download and encrypted private-channel workflows. This record distinguishes implemented capabilities, validation evidence and remaining product work.
 
+## Storage repair cards and locked layout (2026-09-09)
+
+Channel identification repair now has a highlighted card with the specific missing/invalid/unpinned reason, the exact identification-message/pin/description operations, and an explicit confirmation of description replacement. Other channel actions have a separate footer. Stale discovery-success notices no longer display a contradictory Complete card. The copy distinguishes identification repair from file-data recovery and avoids claiming that locked files are verified safe.
+
+Locked content uses a bounded-width, naturally scrolling card column. The compact lock card has intrinsic height and a fixed-size icon; the unlock action stays inside its border. Unlocked file views retain a bounded overview and an independently usable file region. About release text is synchronized with the canonical changelog. No runtime, schema, encryption or Telegram mutation behavior changed.
+
+Validation: 583 workspace tests passed (10 existing manual probes ignored), full check/strict Clippy/rustdoc/cargo-deny/formatting passed. The new GPUI regression checks child containment, nonshrinking icon size, review/confirmation/unlock actions and scrolling at 900×600 and 1440×900 for all three locales and both themes. Actual synthetic native previews also covered all six locale/theme combinations at 900×600 and macOS fullscreen. The unsigned local macOS app was rebuilt and packaged; no real channel was modified.
+
 ## Session unlock and uninterrupted admitted work (2026-09-09)
 
 Vault unlock lasts for the account session across navigation, window inactivity and file selection. Explicit lock immediately hides decrypted names/paths and clears secret input, while admitted uploads, downloads, queued batch members, synchronization and internal retries retain their task keys and continue. New operations need a fresh unlock. Browsing unlock stays on the current page; upload unlock returns to the draft for explicit confirmation. Ordinary unlock has one password field. [ADR 0026](adr/0026-session-unlock-and-task-key-leases.md) records bounded owners, task key leases, stale-callback rejection and the deprecated preference field. Schema 15 and encrypted/recovery codecs are unchanged.

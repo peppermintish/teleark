@@ -169,6 +169,13 @@ impl TeleArkApp {
                 };
             }
             self.storage_notice = None;
+            if state.ends_with("locked") {
+                self.vault_locked = true;
+                self.vault_status.locked = true;
+                self.vault_status.active_key_locked = true;
+                // Reproduce the stale successful discovery notice from real startup.
+                self.storage_notice = Some("storage-auto-found");
+            }
             let statuses = [
                 teleark_runtime::VaultFileHealth::MissingParts,
                 teleark_runtime::VaultFileHealth::Present,

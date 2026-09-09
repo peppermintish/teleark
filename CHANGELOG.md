@@ -2,6 +2,7 @@
 
 ## 0.4.4 · Session unlock and resilient background work
 
+- The storage page groups channel identification changes in a highlighted card with the exact message, pin and description updates. Locked-file cards keep their controls inside the border and scroll naturally at small sizes.
 - Vault unlock lasts for the account session. Explicit lock hides decrypted names and paths while admitted transfers, queued batches and synchronization continue; new operations require unlock. Upload unlock returns to confirmation.
 - Existing private-channel bindings remain fixed, with explicit management repair, file-local health and retained historical key versions. Proxy routing fails closed and applies across Telegram connections.
 - TeleArk setup separates instructions, the current task and state changes into distinct cards. Phase badges, response panels and action bars make waiting, retries and completion easy to distinguish.

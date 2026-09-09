@@ -87,10 +87,56 @@ impl TeleArkApp {
                 )
             });
         let body = if ready {
-            let content = if self.storage_view == StorageView::Files && self.vault_locked {
-                self.storage_locked_state(cx)
+            let locked = self.storage_view == StorageView::Files && self.vault_locked;
+            let overview = div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .when(self.show_storage_guide, |body| {
+                    body.child(self.storage_guide(true, cx))
+                })
+                .when(!legacy, |body| body.child(self.render_storage_controls(cx)));
+            let content = if locked {
+                div()
+                    .debug_selector(|| "storage-locked-viewport".into())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(960.0))
+                            .mx_auto()
+                            .py_2()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(overview)
+                            .child(self.storage_locked_state(cx)),
+                    )
+                    .into_any_element()
             } else {
-                self.render_telegram_channels(layout, cx)
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_h(px(270.0))
+                            .overflow_y_scrollbar()
+                            .child(overview),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.render_telegram_channels(layout, cx)),
+                    )
+                    .into_any_element()
             };
             div()
                 .flex_1()
@@ -115,18 +161,7 @@ impl TeleArkApp {
                             )
                         })),
                 )
-                .when(self.show_storage_guide, |body| {
-                    body.child(self.storage_guide(true, cx))
-                })
-                .when(
-                    !legacy
-                        && (self.storage_notice.is_some()
-                            || self.storage_loading
-                            || self.storage_error.is_some()),
-                    |body| body.child(self.render_storage_activity(cx)),
-                )
-                .when(!legacy, |body| body.child(self.render_storage_controls(cx)))
-                .child(div().flex_1().min_h_0().child(content))
+                .child(content)
                 .into_any_element()
         } else {
             div()
@@ -312,129 +347,247 @@ impl TeleArkApp {
     }
 
     fn render_storage_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        let repair = self
-            .storage_status
-            .health()
-            .is_some_and(|health| health.needs_repair());
-        div()
+        let health = self.storage_status.health();
+        let repair = health.is_some_and(|health| health.needs_repair());
+        let confirming_repair = self.storage_confirmation == Some(StorageAction::Repair);
+        let show_activity = self.storage_loading
+            || self.storage_error.is_some()
+            || self.storage_waiting_for_retry()
+            || self
+                .storage_notice
+                .is_some_and(|id| !matches!(id, "storage-auto-found" | "storage-auto-created"));
+        components::card()
             .flex_none()
-            .max_h(px(180.0))
-            .overflow_y_scrollbar()
+            .overflow_hidden()
+            .debug_selector(|| "storage-management-card".into())
+            .when(repair, |card| card.border_color(theme::amber()))
             .child(
                 div()
+                    .p_4()
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .when(repair, |body| {
-                        body.child(
-                            div()
-                                .text_sm()
-                                .text_color(theme::text_primary())
-                                .child(self.tr("storage-health-repair")),
-                        )
-                    })
-                    .when(!self.storage_loading, |body| {
-                        body.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .when(repair, |row| {
-                                    row.child(
-                                        components::button(
-                                            "repair-storage",
-                                            self.tr("storage-repair-action"),
-                                            None,
-                                            true,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.storage_confirmation =
-                                                    Some(StorageAction::Repair);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .child(
-                                    components::button(
-                                        "archive-storage",
-                                        self.tr("storage-archive-action"),
-                                        None,
-                                        false,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.storage_confirmation =
-                                                Some(StorageAction::Archive);
-                                            cx.notify();
-                                        },
-                                    )),
+                    .flex_wrap()
+                    .items_center()
+                    .gap_3()
+                    .when(repair, |header| header.bg(theme::amber_soft()))
+                    .child(
+                        Icon::new(if repair {
+                            IconName::TriangleAlert
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .size(px(20.0))
+                        .text_color(if repair {
+                            theme::amber()
+                        } else {
+                            theme::green()
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(180.0))
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.tr(if repair {
+                                "storage-repair-title"
+                            } else {
+                                "storage-connected-title"
+                            })),
+                    )
+                    .when(
+                        repair && !self.storage_loading && !confirming_repair,
+                        |header| {
+                            header.child(
+                                components::button(
+                                    "repair-storage",
+                                    self.tr("storage-repair-action"),
+                                    None,
+                                    true,
                                 )
-                                .child(
-                                    components::button(
-                                        "recheck-storage",
-                                        self.tr("common-retry"),
-                                        None,
-                                        false,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| this.refresh_storage_channel(cx),
-                                    )),
-                                ),
-                        )
-                    })
-                    .when_some(self.storage_confirmation, |body, action| {
-                        body.child(
-                            div()
-                                .p_3()
-                                .bg(theme::canvas())
-                                .rounded(theme::RADIUS_MEDIUM)
-                                .child(div().text_sm().child(self.tr(
-                                    if action == StorageAction::Repair {
-                                        "storage-repair-confirm"
-                                    } else {
-                                        "storage-archive-confirm"
+                                .debug_selector(|| "storage-repair-action".into())
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.storage_confirmation = Some(StorageAction::Repair);
+                                        cx.notify();
                                     },
-                                )))
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .flex()
-                                        .gap_2()
-                                        .child(
-                                            components::button(
-                                                "confirm-storage-maintenance",
-                                                self.tr("storage-maintenance-confirm"),
-                                                None,
-                                                true,
-                                            )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.confirm_storage_maintenance(cx)
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            components::button(
-                                                "dismiss-storage-maintenance",
-                                                self.tr("common-cancel"),
-                                                None,
-                                                false,
-                                            )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.storage_confirmation = None;
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        ),
-                                ),
+                                )),
+                            )
+                        },
+                    ),
+            )
+            .when(repair, |card| {
+                card.child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().text_color(theme::text_primary()).child(self.tr(
+                            match health {
+                                Some(teleark_runtime::StorageChannelHealth::IdentityUnpinned) => {
+                                    "storage-repair-reason-unpinned"
+                                }
+                                Some(teleark_runtime::StorageChannelHealth::IdentityInvalid) => {
+                                    "storage-repair-reason-invalid"
+                                }
+                                _ => "storage-repair-reason-missing",
+                            },
+                        )))
+                        .child(
+                            div()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("storage-repair-explanation")),
                         )
+                        .children(
+                            [
+                                "storage-repair-step-message",
+                                "storage-repair-step-pin",
+                                "storage-repair-step-description",
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, id)| {
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(theme::text_muted())
+                                            .child(format!("{}.", index + 1)),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(self.tr(id)))
+                            }),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("storage-repair-scope")),
+                        ),
+                )
+            })
+            .when(confirming_repair, |card| {
+                card.child(self.storage_confirmation_controls(StorageAction::Repair, cx))
+            })
+            .when(
+                show_activity && self.storage_maintenance.is_none(),
+                |card| card.child(self.render_storage_activity(cx)),
+            )
+            .when(self.storage_maintenance.is_some(), |card| {
+                card.child(self.render_storage_maintenance(cx))
+                    .when(self.storage_error.is_some(), |card| {
+                        card.child(self.render_storage_activity(cx))
                     })
-                    .when(self.storage_maintenance.is_some(), |body| {
-                        body.child(self.render_storage_maintenance(cx))
-                    }),
+            })
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(theme::border_subtle())
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("storage-channel-options")),
+                    )
+                    .child(
+                        components::button(
+                            "recheck-storage",
+                            self.tr("storage-recheck-action"),
+                            Some(IconName::Redo2),
+                            false,
+                        )
+                        .disabled(self.storage_loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_storage_channel(cx))),
+                    )
+                    .child(
+                        components::button(
+                            "archive-storage",
+                            self.tr("storage-archive-action"),
+                            None,
+                            false,
+                        )
+                        .disabled(self.storage_loading)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.storage_confirmation = Some(StorageAction::Archive);
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .when(
+                self.storage_confirmation == Some(StorageAction::Archive),
+                |card| card.child(self.storage_confirmation_controls(StorageAction::Archive, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn storage_confirmation_controls(
+        &self,
+        action: StorageAction,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .p_4()
+            .border_t_1()
+            .border_color(theme::border_subtle())
+            .bg(theme::blue_soft())
+            .debug_selector(|| "storage-maintenance-confirmation".into())
+            .child(
+                div()
+                    .text_sm()
+                    .child(self.tr(if action == StorageAction::Repair {
+                        "storage-repair-confirm"
+                    } else {
+                        "storage-archive-confirm"
+                    })),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        components::button(
+                            "confirm-storage-maintenance",
+                            self.tr(if action == StorageAction::Repair {
+                                "storage-repair-confirm-action"
+                            } else {
+                                "storage-archive-action"
+                            }),
+                            None,
+                            true,
+                        )
+                        .disabled(self.storage_loading)
+                        .debug_selector(|| "storage-confirm-action".into())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.confirm_storage_maintenance(cx)),
+                        ),
+                    )
+                    .child(
+                        components::button(
+                            "dismiss-storage-maintenance",
+                            self.tr("common-cancel"),
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.storage_confirmation = None;
+                            cx.notify();
+                        })),
+                    ),
             )
             .into_any_element()
     }
@@ -518,47 +671,55 @@ impl TeleArkApp {
     }
 
     fn storage_locked_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Intrinsic height: never shrink the icon or place an action outside its card.
         components::card()
-            .size_full()
+            .flex_none()
+            .p_4()
             .flex()
-            .flex_col()
+            .flex_wrap()
             .items_center()
-            .justify_center()
-            .gap_3()
-            .p_6()
+            .gap_4()
+            .debug_selector(|| "storage-locked-card".into())
             .child(
                 div()
-                    .size(px(64.0))
-                    .rounded(px(18.0))
+                    .size(px(44.0))
+                    .flex_none()
+                    .rounded(theme::RADIUS_MEDIUM)
                     .bg(theme::blue_soft())
                     .flex()
                     .items_center()
                     .justify_center()
+                    .debug_selector(|| "storage-locked-icon".into())
                     .child(
                         Icon::new(Symbol::Lock)
-                            .size(px(29.0))
+                            .size(px(22.0))
                             .text_color(theme::blue()),
                     ),
             )
             .child(
                 div()
-                    .mt_2()
-                    .text_size(px(21.0))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(self.tr("storage-locked-title")),
-            )
-            .child(
-                div()
-                    .max_w(px(420.0))
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("storage-channel-managed-vault-locked")),
+                    .flex_1()
+                    .min_w(px(220.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.tr("storage-locked-title")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("storage-channel-managed-vault-locked")),
+                    ),
             )
             .child(
                 components::button("storage-unlock", self.tr("vault-unlock-action"), None, true)
                     .icon(Symbol::Lock)
-                    .mt_3()
+                    .debug_selector(|| "storage-unlock-action".into())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.request_vault_unlock(UnlockIntent::Browse, cx)
                     })),
@@ -981,5 +1142,108 @@ pub(crate) fn vault_health_id(health: teleark_runtime::VaultFileHealth) -> &'sta
         VaultFileHealth::MissingManifest => "vault-health-missing-manifest",
         VaultFileHealth::KeyUnavailable => "vault-health-key",
         VaultFileHealth::InvalidManifest => "vault-health-invalid",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use teleark_i18n::{Localizer, SupportedLocale};
+    use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn locked_repair_cards_keep_children_inside_and_actions_reachable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for size in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(size.0), px(size.1)));
+            for locale in [
+                SupportedLocale::EnUs,
+                SupportedLocale::ZhCn,
+                SupportedLocale::JaJp,
+            ] {
+                for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
+                    cx.update(|window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.localizer = Localizer::new(locale).expect("catalog");
+                            theme::apply_appearance(appearance, window, cx);
+                            let channel = app
+                                .storage_status
+                                .channel()
+                                .expect("preview channel")
+                                .clone();
+                            app.storage_status = StorageChannelStatus::Degraded {
+                                channel,
+                                health: StorageChannelHealth::IdentityMissing,
+                            };
+                            app.storage_notice = Some("storage-auto-found");
+                            app.storage_loading = false;
+                            app.storage_confirmation = None;
+                            app.unlock_intent = None;
+                            app.vault_locked = true;
+                            app.vault_status.locked = true;
+                            app.vault_status.active_key_locked = true;
+                            cx.notify();
+                        })
+                    });
+                    cx.run_until_parked();
+                    assert!(
+                        cx.debug_bounds("storage-activity-card").is_none(),
+                        "stale discovery success must not contradict repair"
+                    );
+                    let viewport = cx
+                        .debug_bounds("storage-locked-viewport")
+                        .expect("scroll viewport");
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(2000.0))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    let review = cx
+                        .debug_bounds("storage-repair-action")
+                        .expect("review changes");
+                    assert!(review.top() >= viewport.top() && review.bottom() <= viewport.bottom());
+                    cx.simulate_click(review.center(), gpui_kit::Modifiers::default());
+                    cx.run_until_parked();
+                    app.update(cx, |app, _| {
+                        assert_eq!(app.storage_confirmation, Some(StorageAction::Repair))
+                    });
+                    assert!(
+                        cx.debug_bounds("storage-maintenance-confirmation")
+                            .is_some()
+                    );
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    let card = cx.debug_bounds("storage-locked-card").expect("locked card");
+                    let icon = cx.debug_bounds("storage-locked-icon").expect("lock icon");
+                    let unlock = cx
+                        .debug_bounds("storage-unlock-action")
+                        .expect("unlock action");
+                    for child in [icon, unlock] {
+                        assert!(
+                            child.top() >= card.top() && child.bottom() <= card.bottom(),
+                            "child must stay within card vertically"
+                        );
+                        assert!(
+                            child.left() >= card.left() && child.right() <= card.right(),
+                            "child must stay within card horizontally"
+                        );
+                    }
+                    assert_eq!(icon.size.height, px(44.0), "lock icon must not shrink");
+                    assert!(unlock.top() >= viewport.top() && unlock.bottom() <= viewport.bottom());
+                    cx.simulate_click(unlock.center(), gpui_kit::Modifiers::default());
+                    cx.run_until_parked();
+                    app.update(cx, |app, _| {
+                        assert!(matches!(app.unlock_intent, Some(UnlockIntent::Browse)))
+                    });
+                }
+            }
+        }
     }
 }

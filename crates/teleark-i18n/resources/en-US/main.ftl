@@ -826,7 +826,7 @@ vault-error-persistence = Vault data could not be safely read, verified, or save
 upload-file-picker-prompt = Choose Files
 upload-no-file-selected = No file selected
 upload-select-file-description = Select a source file. Its original path is never uploaded.
-storage-channel-managed-vault-locked = Unlock to verify your files and reveal their original names. Raw Files is available without unlocking.
+storage-channel-managed-vault-locked = Unlock this session to view original file names and browse encrypted files. Raw Files remains available while locked.
 storage-channel-managed-runtime-ready = Authenticated manifests are shown as logical files. Downloads decrypt into a partial file, verify the whole file, then publish it in TeleArk Downloads.
 storage-channel-manifest-authenticated = Authenticated
 storage-channel-restore-ready = Ready to restore
@@ -1034,7 +1034,7 @@ storage-loading = TeleArk is finding or preparing your private channel…
 
 storage-setup-error = TeleArk could not finish preparing the channel. Temporary errors are rechecked automatically; it will check again when you return. Existing files remain unchanged.
 
-storage-locked-title = Your files are safely locked
+storage-locked-title = Unlock to view encrypted files
 
 storage-guide-title = How TeleArk storage works
 
@@ -1147,8 +1147,9 @@ transfer-batch-upload-name = Upload · { $count } files
 about-changelog-unreleased =
     ## 0.4.4 · Session unlock and resilient background work
 
+    - The storage page groups channel identification changes in a highlighted card with the exact message, pin and description updates. Locked-file cards keep their controls inside the border and scroll naturally at small sizes.
     - Vault unlock lasts for the account session. Explicit lock hides decrypted names and paths while admitted transfers, queued batches and synchronization continue; new operations require unlock. Upload unlock returns to confirmation.
-
+    - Existing private-channel bindings remain fixed, with explicit management repair, file-local health and retained historical key versions. Proxy routing fails closed and applies across Telegram connections.
     - TeleArk setup separates instructions, the current task and state changes into distinct cards. Phase badges, response panels and action bars make waiting, retries and completion easy to distinguish.
     - Recent state changes are shown in timestamped rows, with an expandable bounded history. The independently scrolling inspector uses the same cards in English, Simplified Chinese and Japanese, in both themes.
     - Channel browsing uses local projections and background synchronization. Large libraries and transfer histories use bounded updates, indexed reads and background filesystem work to keep the window responsive.
@@ -1408,19 +1409,19 @@ vault-transfer-error-source-changed = The source or encrypted content changed, o
 detail-failure-last-phase = Last recorded phase
 
 # Bound channel resilience
-storage-health-repair = Channel management information needs repair. Existing file messages are preserved.
+storage-health-repair = The channel’s TeleArk identification message or its description reference is missing, invalid or no longer pinned.
 storage-health-access = The bound channel is inaccessible or you no longer own it. Restore access and recheck.
 storage-health-unsafe = This channel must be private and have no other members. Correct its settings in Telegram, then recheck.
 storage-health-unsupported = This channel uses a newer identity format. Update TeleArk; its data has been preserved.
-storage-repair-action = Repair management information
+storage-repair-action = Review channel changes
 storage-archive-action = Mute and archive channel
-storage-repair-confirm = Repair the bound channel’s identity record, pin and description pointer. File messages, privacy and members will not be changed.
+storage-repair-confirm = Apply the changes listed above to this same channel? Its current description will be replaced with TeleArk’s description and a reference to the identification message.
 storage-archive-confirm = Mute and archive this channel once. You can change this later in Telegram; TeleArk will respect your choice.
 storage-maintenance-confirm = Confirm
 storage-maintenance-time = Phase: { $seconds } s · Last activity: { $idle } s ago
 storage-maintenance-omitted = { $count } earlier timeline events omitted
 storage-maintenance-preview = Preview only — no Telegram changes made.
-storage-repair-completed = Management information repaired and verified. Retry the affected upload.
+storage-repair-completed = The TeleArk identification message is available and pinned, and the channel description references it. These checks passed. Missing file data has not been restored.
 storage-archive-completed = Channel muted and archived.
 storage-phase-checking = Checking account, binding and privacy
 storage-phase-finding = Finding existing identity record
@@ -1469,3 +1470,16 @@ vault-session-unlock-policy = Unlock once per account session. Switching pages o
 vault-locked-file = Encrypted file — locked
 vault-locked-detail = Unlock to view
 upload-batch-still-running = The current batch is uploading. You can prepare the next batch and submit it when this one finishes.
+storage-repair-title = Restore this channel’s TeleArk identification
+storage-connected-title = Private channel connected
+storage-repair-reason-missing = The TeleArk identification message or its reference in the channel description is missing.
+storage-repair-reason-invalid = The referenced identification message does not match this account and channel.
+storage-repair-reason-unpinned = The TeleArk identification message is no longer pinned.
+storage-repair-explanation = TeleArk uses this message and the channel description to recognize your storage channel. Restoring identification will:
+storage-repair-step-message = Reuse a valid TeleArk identification message, or post one if none is found.
+storage-repair-step-pin = Pin that identification message in this channel.
+storage-repair-step-description = Replace the channel description with TeleArk’s description and a reference to that message, then verify the result.
+storage-repair-scope = File messages, the channel title, members and privacy settings stay unchanged. This does not restore missing file data.
+storage-repair-confirm-action = Restore channel identification
+storage-channel-options = Other channel actions
+storage-recheck-action = Check channel again

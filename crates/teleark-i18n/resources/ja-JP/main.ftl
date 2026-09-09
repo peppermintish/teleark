@@ -798,7 +798,7 @@ vault-error-persistence = Vault データを安全に読み取り、検証、保
 upload-file-picker-prompt = ファイルを選択
 upload-no-file-selected = ファイルが選択されていません
 upload-select-file-description = ソースファイルを選択してください。元のパスはアップロードされません。
-storage-channel-managed-vault-locked = ロックを解除してファイルを検証し、元の名前を表示します。元のファイル一覧は解除せずに確認できます。
+storage-channel-managed-vault-locked = このセッションを解除すると、元のファイル名と暗号化ファイルを表示できます。ロック中も元のメッセージは閲覧できます。
 storage-channel-managed-runtime-ready = 認証済みマニフェストを論理ファイルとして表示します。ダウンロードは一時ファイルへ復号し、全体を検証してから TeleArk Downloads に公開します。
 storage-channel-manifest-authenticated = 認証済み
 storage-channel-restore-ready = 復元可能
@@ -1006,7 +1006,7 @@ storage-loading = TeleArkがプライベートチャンネルを検索・準備�
 
 storage-setup-error = チャンネルの準備を完了できませんでした。一時的なエラーは自動で再確認し、この画面に戻った際にも確認します。既存のファイルは変更されません。
 
-storage-locked-title = ファイルはロックされています
+storage-locked-title = 解除して暗号化ファイルを表示
 
 storage-guide-title = TeleArk ストレージの使い方
 
@@ -1118,6 +1118,8 @@ transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
     ## 0.4.4 · セッションのロック解除と継続するバックグラウンド処理
+
+    - 保存先画面では識別メッセージ・ピン留め・チャンネル説明への変更を強調カードにまとめました。ロック中のカードのはみ出しを修正し、小さい画面ではスクロールできます。
 
     - Vault はアカウントのセッション中、解除状態を維持します。明示的なロックで復号済みの名前とパスを隠しても、受付済みの転送・待機中のバッチ・同期は続行します。新しい操作には解除が必要で、アップロードは解除後に確認へ戻ります。
 
@@ -1380,19 +1382,19 @@ vault-transfer-error-source-changed = 元ファイルまたは暗号化された
 detail-failure-last-phase = 最後に記録された段階
 
 # Bound channel resilience
-storage-health-repair = チャンネル管理情報の修復が必要です。既存のファイルメッセージは保持されます。
+storage-health-repair = TeleArk の識別メッセージまたはチャンネル説明からの参照がないか、無効、またはピン留めが解除されています。
 storage-health-access = 連携済みチャンネルにアクセスできないか、所有権がありません。権限を復元して再確認してください。
 storage-health-unsafe = 保存チャンネルは非公開で、他のメンバーがいない必要があります。Telegram で設定を修正して再確認してください。
 storage-health-unsupported = このチャンネルは新しい識別形式を使用しています。TeleArk を更新してください。データは保持されています。
-storage-repair-action = 管理情報を修復
+storage-repair-action = チャンネルの変更内容を確認
 storage-archive-action = チャンネルをミュートしてアーカイブ
-storage-repair-confirm = 連携済みチャンネルの識別記録、固定表示、説明内の参照を修復します。ファイルメッセージ、公開設定、メンバーは変更されません。
+storage-repair-confirm = このチャンネルに上記の変更を適用しますか？現在のチャンネル説明を、TeleArk の説明と識別メッセージへの参照に置き換えます。
 storage-archive-confirm = このチャンネルを一度だけミュートしてアーカイブします。後で Telegram で変更した設定は維持されます。
 storage-maintenance-confirm = 確認
 storage-maintenance-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
 storage-maintenance-omitted = 以前のイベント { $count } 件を省略
 storage-maintenance-preview = プレビューのみ。Telegram は変更されていません。
-storage-repair-completed = 管理情報を修復して検証しました。影響を受けたアップロードを再試行できます。
+storage-repair-completed = TeleArk の識別メッセージ、ピン留め、チャンネル説明からの参照を確認しました。失われたファイルデータは復元されていません。
 storage-archive-completed = チャンネルをミュートしてアーカイブしました。
 storage-phase-checking = アカウント・連携・公開設定を確認中
 storage-phase-finding = 既存の識別記録を検索中
@@ -1441,3 +1443,16 @@ vault-session-unlock-policy = アカウントのセッションごとに一度�
 vault-locked-file = 暗号化ファイル · ロック中
 vault-locked-detail = 解除して表示
 upload-batch-still-running = 現在のバッチをアップロード中です。次のバッチを準備して、完了後に送信できます。
+storage-repair-title = このチャンネルの TeleArk 識別情報を復元
+storage-connected-title = プライベートチャンネルに接続済み
+storage-repair-reason-missing = TeleArk の識別メッセージ、またはチャンネル説明からの参照がありません。
+storage-repair-reason-invalid = 参照先の識別メッセージが、このアカウントとチャンネルに一致しません。
+storage-repair-reason-unpinned = TeleArk の識別メッセージのピン留めが解除されています。
+storage-repair-explanation = TeleArk はこのメッセージとチャンネル説明で保存先を識別します。復元では次の操作を行います。
+storage-repair-step-message = 有効な TeleArk 識別メッセージを再利用します。見つからない場合は投稿します。
+storage-repair-step-pin = その識別メッセージをこのチャンネルにピン留めします。
+storage-repair-step-description = チャンネル説明を TeleArk の説明とそのメッセージへの参照に置き換え、結果を確認します。
+storage-repair-scope = 既存のファイルメッセージ、チャンネル名、メンバー、公開範囲は変更しません。失われたファイルデータの復元は行いません。
+storage-repair-confirm-action = チャンネルの識別情報を復元
+storage-channel-options = その他のチャンネル操作
+storage-recheck-action = チャンネルを再確認

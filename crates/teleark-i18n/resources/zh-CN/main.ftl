@@ -798,7 +798,7 @@ vault-error-persistence = 无法安全读取、验证或保存密钥库数据。
 upload-file-picker-prompt = 选择文件
 upload-no-file-selected = 尚未选择文件
 upload-select-file-description = 请选择源文件；其原始路径不会上传。
-storage-channel-managed-vault-locked = 解锁以验证文件并显示原始名称。无需解锁即可查看原始文件。
+storage-channel-managed-vault-locked = 解锁本次会话后，可查看原始文件名并浏览加密文件。锁定时仍可查看原始文件消息。
 storage-channel-managed-runtime-ready = 经过认证的 manifest 会显示为逻辑文件。下载时先解密到临时文件，完成全文件校验后再发布到 TeleArk Downloads。
 storage-channel-manifest-authenticated = 已认证
 storage-channel-restore-ready = 可以还原
@@ -1006,7 +1006,7 @@ storage-loading = TeleArk 正在查找或准备你的私有频道…
 
 storage-setup-error = TeleArk 暂时无法完成频道准备。临时错误会自动重试，返回此页面时也会重新检查。现有文件保持不变。
 
-storage-locked-title = 文件已安全锁定
+storage-locked-title = 解锁后查看加密文件
 
 storage-guide-title = 如何使用 TeleArk 存储
 
@@ -1118,6 +1118,8 @@ transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
     ## 0.4.4 · 会话解锁与可靠的后台任务
+
+    - 存储页面用高亮卡片列出识别消息、置顶与频道简介的具体修改。锁定文件卡片不再溢出，小窗口可自然滚动。
 
     - 密钥库在本次账户会话中保持解锁。主动锁定会隐藏已解密的名称和路径，已提交的传输、排队批次及同步继续运行；新任务需要解锁。上传解锁后返回确认页面。
 
@@ -1380,19 +1382,19 @@ vault-transfer-error-source-changed = 源文件或加密内容发生变化，或
 detail-failure-last-phase = 最后记录的阶段
 
 # Bound channel resilience
-storage-health-repair = 频道管理信息需要修复。现有文件消息将保留。
+storage-health-repair = 频道的 TeleArk 识别消息或简介中的引用缺失、无效，或识别消息已取消置顶。
 storage-health-access = 无法访问已绑定频道，或你不再拥有该频道。请恢复权限后重新检查。
 storage-health-unsafe = 存储频道必须私有且没有其他成员。请在 Telegram 中调整配置后重新检查。
 storage-health-unsupported = 此频道使用较新的身份格式。请升级 TeleArk；数据已保留。
-storage-repair-action = 修复管理信息
+storage-repair-action = 查看频道修改内容
 storage-archive-action = 静音并归档频道
-storage-repair-confirm = 修复已绑定频道的身份说明、置顶和简介指针。不会修改文件消息、隐私设置或成员。
+storage-repair-confirm = 要在当前频道执行以上修改吗？现有频道简介将替换为 TeleArk 的说明及识别消息引用。
 storage-archive-confirm = 仅对该频道执行一次静音和归档。之后可在 Telegram 中更改，TeleArk 不会反复强制恢复。
 storage-maintenance-confirm = 确认
 storage-maintenance-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
 storage-maintenance-omitted = 已省略 { $count } 条较早的时间线事件
 storage-maintenance-preview = 仅预览，未修改 Telegram。
-storage-repair-completed = 管理信息已修复并验证。可以重试受影响的上传。
+storage-repair-completed = TeleArk 识别消息已就绪并置顶，频道简介已引用该消息，检查已通过。此操作未恢复缺失的文件数据。
 storage-archive-completed = 频道已静音并归档。
 storage-phase-checking = 正在检查账号、绑定和私密配置
 storage-phase-finding = 正在查找现有身份说明
@@ -1441,3 +1443,16 @@ vault-session-unlock-policy = 同一账户会话解锁一次。切换页面或�
 vault-locked-file = 加密文件 · 已锁定
 vault-locked-detail = 解锁后查看
 upload-batch-still-running = 当前批次正在上传。可以先准备下一批，完成后再提交。
+storage-repair-title = 恢复当前频道的 TeleArk 识别信息
+storage-connected-title = 私人频道已连接
+storage-repair-reason-missing = TeleArk 识别消息或频道简介中指向该消息的引用缺失。
+storage-repair-reason-invalid = 频道引用的识别消息与当前账户或频道不匹配。
+storage-repair-reason-unpinned = TeleArk 识别消息已取消置顶。
+storage-repair-explanation = TeleArk 通过这条消息和频道简介识别你的存储频道。恢复识别信息将执行：
+storage-repair-step-message = 复用有效的 TeleArk 识别消息；找不到时，在当前频道补发一条。
+storage-repair-step-pin = 将这条识别消息置顶。
+storage-repair-step-description = 将频道简介替换为 TeleArk 的说明及该消息的引用，再检查修改结果。
+storage-repair-scope = 已有文件消息、频道名称、成员和隐私设置保持不变。此操作不会恢复缺失的文件数据。
+storage-repair-confirm-action = 恢复频道识别信息
+storage-channel-options = 其他频道操作
+storage-recheck-action = 重新检查频道
