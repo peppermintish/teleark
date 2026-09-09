@@ -99,21 +99,24 @@ impl TeleArkApp {
                 .when(!legacy, |body| body.child(self.render_storage_controls(cx)));
             let content = if locked {
                 div()
-                    .debug_selector(|| "storage-locked-viewport".into())
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
+                    .flex()
+                    .flex_col()
+                    .debug_selector(|| "storage-locked-viewport".into())
                     .child(
-                        div()
-                            .w_full()
-                            .max_w(px(960.0))
-                            .mx_auto()
-                            .py_2()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(overview)
-                            .child(self.storage_locked_state(cx)),
+                        div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                            div()
+                                .w_full()
+                                .max_w(px(960.0))
+                                .mx_auto()
+                                .py_2()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(overview)
+                                .child(self.storage_locked_state(cx)),
+                        ),
                     )
                     .into_any_element()
             } else {
@@ -218,6 +221,8 @@ impl TeleArkApp {
         div()
             .flex_1()
             .h_full()
+            .min_h_0()
+            .overflow_hidden()
             .min_w_0()
             .flex()
             .flex_col()
@@ -415,6 +420,46 @@ impl TeleArkApp {
                         },
                     ),
             )
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .bg(theme::canvas())
+                    .border_b_1()
+                    .border_color(theme::border_subtle())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .debug_selector(|| "storage-channel-location".into())
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.tr("storage-location-title")),
+                    )
+                    .when_some(self.storage_status.channel(), |body, channel| {
+                        body.child(
+                            div().text_sm().child(
+                                self.tr_with(
+                                    "storage-location-target",
+                                    teleark_i18n::MessageArgs::new()
+                                        .with("title", channel.name.clone())
+                                        .with("id", channel.id.to_string()),
+                                ),
+                            ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr(if repair {
+                                "storage-location-bound"
+                            } else {
+                                "storage-location-method"
+                            })),
+                    ),
+            )
             .when(repair, |card| {
                 card.child(
                     div()
@@ -484,6 +529,29 @@ impl TeleArkApp {
                         card.child(self.render_storage_activity(cx))
                     })
             })
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(theme::border_subtle())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .debug_selector(|| "storage-channel-notifications".into())
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.tr("storage-notifications-title")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("storage-notifications-explanation")),
+                    ),
+            )
             .child(
                 div()
                     .px_4()
@@ -1188,6 +1256,8 @@ mod tests {
                         })
                     });
                     cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-channel-location").is_some());
+                    assert!(cx.debug_bounds("storage-channel-notifications").is_some());
                     assert!(
                         cx.debug_bounds("storage-activity-card").is_none(),
                         "stale discovery success must not contradict repair"
@@ -1195,6 +1265,10 @@ mod tests {
                     let viewport = cx
                         .debug_bounds("storage-locked-viewport")
                         .expect("scroll viewport");
+                    assert!(
+                        viewport.bottom() <= px(size.1),
+                        "scroll viewport stays inside the window"
+                    );
                     cx.simulate_event(gpui_kit::ScrollWheelEvent {
                         position: viewport.center(),
                         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(2000.0))),
@@ -1236,7 +1310,10 @@ mod tests {
                         );
                     }
                     assert_eq!(icon.size.height, px(44.0), "lock icon must not shrink");
-                    assert!(unlock.top() >= viewport.top() && unlock.bottom() <= viewport.bottom());
+                    assert!(
+                        unlock.top() >= viewport.top() && unlock.bottom() <= viewport.bottom(),
+                        "locale={locale:?} size={size:?} viewport={viewport:?} card={card:?} unlock={unlock:?}"
+                    );
                     cx.simulate_click(unlock.center(), gpui_kit::Modifiers::default());
                     cx.run_until_parked();
                     app.update(cx, |app, _| {
