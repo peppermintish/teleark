@@ -8,6 +8,7 @@ use teleark_i18n::format::format_duration_millis;
 pub(crate) enum Phase {
     #[default]
     Idle,
+    RestoringUploads,
     Reading,
     Waiting,
     Saving,
@@ -38,7 +39,10 @@ impl Drop for DialogLoad {
 }
 impl DialogLoad {
     pub(crate) fn active(&self) -> bool {
-        matches!(self.phase, Phase::Reading | Phase::Waiting | Phase::Saving)
+        matches!(
+            self.phase,
+            Phase::RestoringUploads | Phase::Reading | Phase::Waiting | Phase::Saving
+        )
     }
     pub(crate) fn needs_initial_load(&self) -> bool {
         self.phase == Phase::Idle
@@ -77,6 +81,7 @@ fn retry_delay(attempt: u8, kind: ApplicationErrorKind) -> Option<Duration> {
 }
 fn phase_id(phase: Phase) -> &'static str {
     match phase {
+        Phase::RestoringUploads => "transfer-history-restoring",
         Phase::Idle | Phase::Reading => "dialogs-reading",
         Phase::Waiting => "dialogs-waiting",
         Phase::Saving => "dialogs-saving",
@@ -93,7 +98,9 @@ fn phase_presentation(phase: Phase) -> (&'static str, components::Tone, IconName
             Tone::Neutral,
             IconName::LoaderCircle,
         ),
-        Phase::Reading => ("activity-state-running", Tone::Blue, IconName::LoaderCircle),
+        Phase::RestoringUploads | Phase::Reading => {
+            ("activity-state-running", Tone::Blue, IconName::LoaderCircle)
+        }
         Phase::Waiting => ("activity-state-waiting", Tone::Amber, IconName::Redo2),
         Phase::Saving => ("activity-state-saving", Tone::Blue, IconName::HardDrive),
         Phase::Complete => (
@@ -170,11 +177,24 @@ impl TeleArkApp {
         self.dialogs.history.clear();
         self.dialogs.started = None;
         self.dialogs.attempt = 0;
-        self.dialogs.transition(Phase::Reading, None);
+        self.dialogs.transition(
+            if self.vault.is_some() {
+                Phase::RestoringUploads
+            } else {
+                Phase::Reading
+            },
+            None,
+        );
         let cancellation = self.dialogs.cancellation.clone();
         let transfers = self.transfers.clone();
+
         // Acknowledge before dispatching any filesystem/network work.
         cx.notify();
+        // Submit in frontend generation order so a delayed waiter cannot replace a newer account's history.
+        let history_job = self
+            .vault
+            .as_ref()
+            .map(|vault| vault.submit_upload_history_restore(account_id));
         self.dialogs_clock_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -188,6 +208,32 @@ impl TeleArkApp {
             }
         }));
         self.dialogs_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(job) = history_job {
+                let result = cx.background_spawn(async move { job?.wait() }).await;
+                let Some(entity) = this.upgrade() else { return };
+                let ready = entity.update(cx, |app, cx| {
+                    if !app.dialogs.accepts(generation)
+                        || app.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
+                    {
+                        return false;
+                    }
+                    match result {
+                        Ok(()) => {
+                            app.dialogs.transition(Phase::Reading, None);
+                            cx.notify();
+                            true
+                        }
+                        Err(error) => {
+                            app.dialogs.transition(Phase::Failed, Some(error.kind()));
+                            cx.notify();
+                            false
+                        }
+                    }
+                });
+                if !ready {
+                    return;
+                }
+            }
             for attempt in 0..3 {
                 let remote = telegram.clone();
                 let cancel = cancellation.clone();

@@ -149,6 +149,7 @@ struct Records<T> {
     entries: BTreeMap<u64, Entry<T>>,
     revision: u64,
     view: TransferSnapshotView<T>,
+    omitted: u64,
 }
 
 pub(crate) struct TransferSnapshots<T: TransferRecord> {
@@ -172,6 +173,7 @@ impl<T: TransferRecord> TransferSnapshots<T> {
                         )
                     })
                     .collect(),
+                omitted: 0,
                 revision: 1,
                 view: TransferSnapshotView::default(),
             }),
@@ -199,7 +201,7 @@ impl<T: TransferRecord> TransferSnapshots<T> {
             records.view = TransferSnapshotView {
                 revision: records.revision,
                 items,
-                omitted_items: 0,
+                omitted_items: records.omitted,
             };
         }
         Some(records.view.clone())
@@ -280,6 +282,7 @@ impl<T: TransferRecord> TransferSnapshots<T> {
             };
             removed
         };
+        records.omitted = records.omitted.saturating_add(removed.len() as u64);
         for id in removed {
             records.entries.remove(&id);
         }
@@ -294,6 +297,34 @@ impl<T: TransferRecord> TransferSnapshots<T> {
         drop(records);
         self.signal.changed(true);
         true
+    }
+
+    pub(crate) fn restore_history(
+        &self,
+        values: Vec<T>,
+        omitted: u64,
+        retain: impl Fn(&T) -> bool,
+    ) {
+        let Ok(mut records) = self.records.lock() else {
+            return;
+        };
+        let mut previous = std::mem::take(&mut records.entries);
+        for value in values {
+            let entry = previous.remove(&value.id()).unwrap_or(Entry {
+                value,
+                cached: None,
+            });
+            records.entries.insert(entry.value.id(), entry);
+        }
+        records.entries.extend(
+            previous
+                .into_iter()
+                .filter(|(_, entry)| retain(&entry.value)),
+        );
+        records.omitted = omitted;
+        records.revision = records.revision.wrapping_add(1);
+        drop(records);
+        self.signal.changed(true);
     }
 
     pub(crate) fn extend(&self, values: impl IntoIterator<Item = T>) -> bool {

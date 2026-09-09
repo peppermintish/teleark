@@ -1,5 +1,12 @@
 # Implementation status — v0.4.4
 
+## Upload history after restart (2026-09-10)
+
+Transfers → Uploads now restores durable account-scoped task summaries and batch identity from SQLite schema 16, including while locked and before remote catalog access. Queue/start/terminal writes run on retained background owners; completion waits for persistence acknowledgment. Unfinished rows become explicit interrupted history, with instructions to check Storage and choose the original source for a new upload. Bounded recent views retain whole boundary batches and disclose omitted rows. Restored telemetry is labeled unavailable; existing sanitized session logs remain accessible. Automatic schema 0–15 upgrades preserve data/key wraps and retry safely after rollback. No encrypted automatic resume, old upload-page browser or reconstruction of already-lost pre-v16 RAM-only rows is claimed. UI tests/previews now default to English by contributor rule.
+
+Validation: the isolated commit snapshot passed 490 workspace tests, with 10 existing manual probes ignored, plus formatting, all-target compilation/strict Clippy, Core/i18n, warning-free rustdoc and dependency checks. The final GUI/i18n follow-up passed after moving interruption guidance above historical metadata. English 900×600 light/dark native previews confirm the guidance is visible without scrolling. No live Telegram uploads or recovery were performed.
+
+
 Updated 2026-09-09. TeleArk targets a mature desktop product with Telegram/native-download and encrypted private-channel workflows. This record distinguishes implemented capabilities, validation evidence and remaining product work.
 
 ## Storage repair cards and locked layout (2026-09-09)

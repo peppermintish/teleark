@@ -1313,7 +1313,7 @@ managed-scan-detail = { $phase } · { $done } / { $total } records · { $cached 
 transfer-session-log-omitted-label = Log gaps
 transfer-session-log-omitted-count = All transfers this run: { $count } log records omitted
 
-transfer-history-omitted = Earlier completed/cancelled records omitted from this list, across local accounts: { $count }
+transfer-history-omitted = Older task records omitted from this list: { $count }
 transfer-controller-history-omitted = { $count } earlier controller records omitted.
 transfer-lifecycle-history-omitted = { $count } earlier state events omitted.
 transfer-footer-total-retained = Shown: { $count }
@@ -1489,3 +1489,17 @@ storage-location-bound = This channel was found using the channel ID saved on th
 storage-location-method = TeleArk saves this channel’s ID separately for your Telegram account and uses it on later visits. Without a saved binding, it checks TeleArk identification in private channels you own; it connects only to a single verified match, or creates a private channel if none exists. Multiple matches require a choice. The channel name alone is not identification.
 storage-notifications-title = Notifications and archived chats
 storage-notifications-explanation = After you choose and confirm “Mute and archive channel”, TeleArk will mute this channel’s message notifications and move it to Telegram’s Archived Chats. This runs once; you can unmute or unarchive it later in Telegram, and TeleArk will respect that choice. Restoring identification does not do this automatically. Archiving does not move or delete the stored files.
+
+transfer-history-restoring = Restoring upload history
+
+transfer-upload-interrupted = Interrupted
+
+transfer-upload-interrupted-reason = The app closed before this upload was confirmed complete.
+
+transfer-upload-interrupted-action = Select the source file on the Upload page to start a new upload. Check Storage first if the interruption happened during publication.
+
+transfer-history-restored-label = Restored history
+
+transfer-history-restored-detail = Saved task totals are available. Live charts and detailed activity were not restored.
+
+detail-vault-lifecycle-durable-upload = Task summary saved locally. Unfinished uploads are marked interrupted after restart; select the source file to start a new upload.

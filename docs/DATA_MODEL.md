@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current schema is version **14**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **16**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -29,6 +29,7 @@ transfer_tasks, transfer_parts
 native_download_batches, native_download_tasks
 collections, collection_items
 settings, id_allocators, vault_metadata, vault_downloaded_files
+vault_key_epochs, vault_inventory, vault_message_health, vault_upload_history
 ```
 
 Migrations 1–6 establish the catalog, FTS triggers, checkpoints/ranges, tagged paths, monotonic IDs, remote-object identities, cursors and native history. Version 7 adds native batch identity and source sent-time/caption/MIME metadata; version 8 adds wrapped Vault metadata; version 9 adds native account scope; version 10 adds the Vault output inventory; version 11 adds Channel synchronization cursors and deletion evidence; version 12 adds per-message projection versions and durable private-channel observations without rewriting existing records. Tests cover empty-to-latest and every prior-version upgrade, preserving indexed data.
@@ -59,7 +60,7 @@ Vault restore records its output after verified atomic publication and before re
 
 ## Channel synchronization: version 11
 
-Migration 11 introduced the fields below. The current supported source/read/write matrix is specified under version 15; the version-11 bytes retain their original meaning. Crypto/manifest/recovery codecs remain version 1; preferences, native bitmaps and wrapped keys retain their existing formats. Migration 11 is additive and transactional, and requires no export, reset or reconfiguration.
+Migration 11 introduced the fields below. The current supported source/read/write matrix is specified under version 16; the version-11 bytes retain their original meaning. Crypto/manifest/recovery codecs remain version 1; preferences, native bitmaps and wrapped keys retain their existing formats. Migration 11 is additive and transactional, and requires no export, reset or reconfiguration.
 
 `channel_sync_state` is keyed by `(account_id, chat_id)` with a scoped chat foreign key. It stores the nonnegative Telegram `pts`, independent exclusive `history_before` plus `history_exhausted`, `repair_pending` plus `repair_before` for known-ID verification, `gap_pending` plus `gap_before`/`gap_until` for missing recent history, and a positive compare-and-swap `revision`. Absence represents an uninitialized state. Cursors are locale-neutral integers; PTS is an update sequence and message IDs are exclusive scan bounds, never proof that every integer should exist.
 
@@ -69,7 +70,7 @@ An initial recent page captures dialog PTS before the read, followed by differen
 
 ## Incremental views and managed-channel observations: version 12
 
-Migration 12 introduced the additive tables and indexes below. Version-12 bytes retain their original meaning; the current supported source/read/write matrix is specified under version 15.
+Migration 12 introduced the additive tables and indexes below. Version-12 bytes retain their original meaning; the current supported source/read/write matrix is specified under version 16.
 
 `channel_file_versions` is keyed by account/chat/message and stores a positive local commit revision for changed metadata or explicit invalidation. It is independent of Telegram PTS, timestamps and encrypted format versions. Unchanged ordinary pages leave this value alone. Explicit edits and post-gap revalidation invalidate derived manifests even when filenames, sizes and timestamps compare equal. History/search only inserts previously unknown IDs and cannot overwrite a newer push. A coherent `cached_channel_view` reads rows and their channel revision in one SQLite snapshot; commit outcomes return actual upserts/deletions for bounded per-channel GUI deltas.
 
@@ -79,7 +80,7 @@ Observation records and file changes share the PTS transaction. Normal new messa
 
 ## Effective search timestamp indexes: version 13
 
-The original schema-13 implementation accepted schema 0 and upgraded schemas 1–12. The current release matrix is superseded by version 15 below. Newer schemas and different application IDs remain intact with actionable guidance. No export, reset or reconfiguration is required.
+The original schema-13 implementation accepted schema 0 and upgraded schemas 1–12. The current release matrix is superseded by version 16 below. Newer schemas and different application IDs remain intact with actionable guidance. No export, reset or reconfiguration is required.
 
 Migration 13 adds four search indexes on `COALESCE(modified_at_unix_ms, created_at_unix_ms, -9223372036854775808)` and descending logical-file ID: global, account, account/chat and kind scopes. Existing raw timestamp indexes continue to support explicit timestamp-range facets. No data rows, wrapped keys, settings or recoverable transfer state are rewritten. Search cursor version 1, the null sentinel and tie ordering retain their meaning.
 
@@ -113,7 +114,7 @@ Local pages read at most 128 candidates per storage request, cooperatively skipp
 
 ## Explicit network policy: version 14
 
-This migration introduced schema 14. The current v0.4.4 working release accepts schema 0 (new database) and upgrades every schema 1–14, including skipped releases, to read/write schema 15. Unknown/newer schemas remain intact and are rejected. Migration 14 inserts the version-1 explicit direct policy only when absent, preserving existing settings, wrapped keys, files and recoverable transfers. Its transaction validates the database before committing the version. Failure rolls back; restart resumes missing steps without scripts or reconfiguration. The existing background migration phases cover this step.
+This migration introduced schema 14. The earlier v0.4.4 checkpoint accepted schema 0 (new database) and upgraded schemas 1–14 to read/write 15; version 16 below supersedes that matrix. Unknown/newer schemas remain intact and are rejected. Migration 14 inserts the version-1 explicit direct policy only when absent, preserving existing settings, wrapped keys, files and recoverable transfers. Its transaction validates the database before committing the version. Failure rolls back; restart resumes missing steps without scripts or reconfiguration. The existing background migration phases cover this step.
 
 The schema increment prevents older readers (maximum 13) from opening a database and silently ignoring an enabled proxy. Policy bytes have an independent codec documented in [Preferences](PREFERENCES_FORMAT.md#network-proxy-policy-version-1); unsupported policy versions block network startup even when the database schema is supported. Tests cover every prior schema, setting/key preservation, failed policy insertion/rollback, restart and idempotent reopen.
 
@@ -122,3 +123,12 @@ The schema increment prevents older readers (maximum 13) from opening a database
 `vault_metadata` continues to select the active upload key. `vault_key_epochs` stores independently identified 16-byte vault IDs and the original password/recovery wrappers and their generations. Automatic migration copies the previous singleton; atomic active-key updates retain older epochs. All previous supported database versions upgrade through the ordered transaction chain.
 
 `vault_inventory` has the account/channel/manifest-message composite primary key, opaque remote name and vault ID, authenticated encrypted manifest envelope (maximum 16 MiB), observation timestamp, last full-scan token and an explicit invalid-remote-manifest flag. The first authenticated envelope remains recoverable even after remote corruption/deletion. `vault_message_health` keeps per-account/channel/message presence and observation time; sync tombstones override earlier presence. Unknown means unknown. No new plaintext names or keys are persisted. Inventory reads use descending message-ID keyset pages; a full run never materializes the full inventory. See [ADR 0025](adr/0025-fixed-channel-and-retained-key-epochs.md).
+
+
+## Upload history: version 16
+
+Current SQLite read/write version is **16**; automatic supported upgrades are **0–15 → 16**, including skipped releases. Migration 16 adds `vault_upload_history` and indexes without rewriting existing bytes. It is transactional, uses the existing visible migration owner and verification before the version commit, and preserves originals on failure. The historical version-15 matrix above is superseded by this section. Crypto, manifest, recovery, preferences and native transfer codecs do not change.
+
+Upload summaries use explicit SQL columns and independent state/error codec v1. The globally unique random task ID is scoped with its account; batch/channel identity, original filename, package ID, bytes/parts, queue/start times, duration and average throughput are durable. `sequence` is local insertion order, so tied timestamps and random IDs do not reorder history. Updates preserve this sequence. States are `queued`, `running`, `completed`, `failed`, `cancelled`, `interrupted`; failure codes are the explicit snake-case ApplicationErrorKind mappings in Runtime's upload history codec, with unknown codes rejected. Completed rows require a package ID and full confirmed byte/part counts. No source paths, content or keys are added.
+
+At service startup, queued/running rows become interrupted without changing their saved totals. Account-scoped reads retain the latest 256 rows plus the complete boundary batch (up to 128 members); omitted older rows remain stored. There is no automatic resend or old-page browser. Runtime writes acknowledged admission/start/terminal summaries outside UI and network reactors; samples remain in memory. See [ADR 0029](adr/0029-durable-upload-history.md) for publication ambiguity, local privacy and legacy-history limits.

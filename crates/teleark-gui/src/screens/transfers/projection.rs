@@ -259,7 +259,7 @@ pub(super) fn vault_transfer_state(snapshot: &VaultTransferSnapshot) -> Transfer
             VaultTransferDirection::Download => TransferState::Downloading,
         },
         VaultTransferState::Completed => TransferState::Completed,
-        VaultTransferState::Failed(_) => TransferState::Failed,
+        VaultTransferState::Failed(_) | VaultTransferState::Interrupted => TransferState::Failed,
     }
 }
 

@@ -53,6 +53,98 @@ impl Drop for TransferActionJob {
 }
 
 impl TeleArkApp {
+    pub(crate) fn preview_upload_history(&mut self) {
+        let telemetry = TransferTelemetrySnapshot {
+            phase: ControllerPhase::Ramp,
+            parameters: TransferControlParameters::conservative_upload(),
+            goodput_bytes_per_second: 0,
+            encryption_bytes_per_second: 0,
+            disk_bytes_per_second: 0,
+            round_trip_time_p95_millis: 0,
+            estimated_bdp_bytes: 0,
+            inflight_bytes: 0,
+            target_inflight_bytes: 0,
+            cpu_utilization_basis_points: 0,
+            encrypted_queue_length: 0,
+            network_waiting_for_encryption_millis: 0,
+            encryption_waiting_for_network_millis: 0,
+            bottleneck: TransferBottleneck::Unknown,
+            parts: Default::default(),
+            queues: Default::default(),
+            memory: Default::default(),
+            memory_budget_bytes: 0,
+            lanes: vec![],
+            decisions: vec![],
+        };
+        let account_id = self
+            .telegram_account
+            .as_ref()
+            .map_or(7, |account| account.id);
+        let rows = [
+            VaultTransferState::Completed,
+            VaultTransferState::Interrupted,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+            let complete = state == VaultTransferState::Completed;
+            std::sync::Arc::new(VaultTransferSnapshot {
+                restored: true,
+                upload_activity: None,
+                id: 801 + index as u64,
+                account_id,
+                chat_id: 90,
+                batch_id: Some(80),
+                queued_at_unix_ms: 1_788_950_000_000,
+                direction: VaultTransferDirection::Upload,
+                file_name: if complete {
+                    "Project archive.zip".into()
+                } else {
+                    "Field recording.wav".into()
+                },
+                package_id: complete.then(|| "0102030405060708".into()),
+                size_bytes: 128 * 1024 * 1024,
+                transferred_bytes: if complete {
+                    128 * 1024 * 1024
+                } else {
+                    60 * 1024 * 1024
+                },
+                completed_parts: if complete { 3 } else { 1 },
+                part_count: 3,
+                started_at_unix_ms: 1_788_950_000_000,
+                duration_ms: complete.then_some(8_000),
+                average_bytes_per_second: complete.then_some(16 * 1024 * 1024),
+                destination: None,
+                session_log_path: None,
+                telemetry: telemetry.clone(),
+                state,
+            })
+        })
+        .collect::<Vec<_>>();
+        self.vault_locked = false;
+        self.vault_transfer_view = teleark_runtime::TransferSnapshotView {
+            revision: self.vault_transfer_view.revision + 1,
+            items: rows.clone().into(),
+            omitted_items: 12,
+        };
+        let members = rows.iter().map(std::sync::Arc::as_ref).collect::<Vec<_>>();
+        let mut presented = vec![
+            self.transfer_row_from_vault_batch(80, &members)
+                .expect("synthetic batch"),
+        ];
+        for row in &rows {
+            let mut child = self.transfer_row_from_vault_snapshot(row);
+            child.batch_child = true;
+            presented.push(child);
+        }
+        self.focused_transfer_key = Some(transfer_selection_key(&presented[2], 2));
+        self.show_transfer_detail = true;
+        self.preview_transfer_rows = presented;
+        self.expanded_transfer_batches.insert(vault_batch_key(80));
+        self.page = crate::app::Page::Transfers;
+        self.nav_selection = "nav-uploads";
+    }
+
     fn transfer_items(&self) -> std::sync::Arc<Vec<TransferItem>> {
         if self.visual_preview {
             return std::sync::Arc::new(
@@ -169,7 +261,11 @@ impl TeleArkApp {
         });
         let transferred = vault_display_bytes(snapshot);
         TransferRow {
-            activity: activity.map(|activity| self.tr(upload_phase_message_id(activity.phase))),
+            activity: if snapshot.state == VaultTransferState::Interrupted {
+                Some(self.tr("transfer-upload-interrupted"))
+            } else {
+                activity.map(|activity| self.tr(upload_phase_message_id(activity.phase)))
+            },
             activity_detail: activity.map(|activity| self.upload_activity_detail(activity)),
             runtime_task_id: None,
             vault_transfer_id: Some(snapshot.id),
@@ -196,24 +292,30 @@ impl TeleArkApp {
                 .map(|speed| format_speed(self.locale(), speed).into())
                 .unwrap_or_else(|| self.tr("transfer-value-unavailable")),
             eta: self.tr("transfer-value-unavailable"),
-            connections: self.tr_with(
-                "transfer-controller-connections-value",
-                MessageArgs::new()
-                    .with(
-                        "connections",
-                        format_integer(
-                            self.locale(),
-                            u64::from(snapshot.telemetry.parameters.transfer_connection_count),
+            connections: if snapshot.restored {
+                self.tr("transfer-value-unavailable")
+            } else {
+                self.tr_with(
+                    "transfer-controller-connections-value",
+                    MessageArgs::new()
+                        .with(
+                            "connections",
+                            format_integer(
+                                self.locale(),
+                                u64::from(snapshot.telemetry.parameters.transfer_connection_count),
+                            ),
+                        )
+                        .with(
+                            "rpcs",
+                            format_integer(
+                                self.locale(),
+                                u64::from(
+                                    snapshot.telemetry.parameters.inflight_rpcs_per_connection,
+                                ),
+                            ),
                         ),
-                    )
-                    .with(
-                        "rpcs",
-                        format_integer(
-                            self.locale(),
-                            u64::from(snapshot.telemetry.parameters.inflight_rpcs_per_connection),
-                        ),
-                    ),
-            ),
+                )
+            },
             state,
             destination,
         }
@@ -264,7 +366,12 @@ impl TeleArkApp {
                 .count(),
             failed: items
                 .iter()
-                .filter(|item| matches!(item.state, VaultTransferState::Failed(_)))
+                .filter(|item| {
+                    matches!(
+                        item.state,
+                        VaultTransferState::Failed(_) | VaultTransferState::Interrupted
+                    )
+                })
                 .count(),
             queued_at_unix_ms: items
                 .iter()
@@ -915,7 +1022,10 @@ impl TeleArkApp {
         .flex_1()
         .min_h_0();
 
-        let omitted_tasks = self.native_transfer_view.omitted_items;
+        let omitted_tasks = self
+            .native_transfer_view
+            .omitted_items
+            .saturating_add(self.vault_transfer_view.omitted_items);
         let table_footer = div()
             .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
             .px_3()
@@ -940,7 +1050,7 @@ impl TeleArkApp {
                 ),
             ))
             .child(self.tr_with(
-                if self.native_transfer_view.omitted_items > 0 {
+                if omitted_tasks > 0 {
                     "transfer-footer-total-retained"
                 } else {
                     "transfer-footer-total-live"
@@ -2193,8 +2303,12 @@ impl TeleArkApp {
         let vault_snapshot = transfer
             .vault_transfer_id
             .and_then(|id| self.vault_transfer_snapshot(id));
+        let interrupted = vault_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.state == VaultTransferState::Interrupted);
         let telemetry = vault_snapshot
             .as_ref()
+            .filter(|snapshot| !snapshot.restored)
             .map(|snapshot| snapshot.telemetry.clone())
             .or_else(|| {
                 runtime_snapshot
@@ -2294,7 +2408,13 @@ impl TeleArkApp {
                             },
                         )
                     },
-                    |_| format_integer(self.locale(), 1).into(),
+                    |snapshot| {
+                        if snapshot.restored {
+                            unavailable.clone()
+                        } else {
+                            format_integer(self.locale(), 1).into()
+                        }
+                    },
                 ),
             ),
             (
@@ -2448,7 +2568,11 @@ impl TeleArkApp {
             ));
             details.push((
                 self.tr("detail-vault-lifecycle"),
-                self.tr("detail-vault-lifecycle-memory-only"),
+                self.tr(if upload {
+                    "detail-vault-lifecycle-durable-upload"
+                } else {
+                    "detail-vault-lifecycle-memory-only"
+                }),
             ));
         }
         if let Some(telemetry) = telemetry.as_ref() {
@@ -2571,6 +2695,15 @@ impl TeleArkApp {
             ));
         }
 
+        if vault_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.restored)
+        {
+            details.push((
+                self.tr("transfer-history-restored-label"),
+                self.tr("transfer-history-restored-detail"),
+            ));
+        }
         let omitted_records = teleark_runtime::session_log_dropped_record_count();
         if omitted_records > 0 {
             details.push((
@@ -2617,6 +2750,15 @@ impl TeleArkApp {
                     self.tr("detail-verification-passed"),
                     Tone::Green,
                     IconName::CircleCheck,
+                )
+            } else if vault_snapshot
+                .as_ref()
+                .is_some_and(|s| s.state == VaultTransferState::Interrupted)
+            {
+                (
+                    self.tr("detail-verification-not-reached"),
+                    Tone::Amber,
+                    IconName::CircleX,
                 )
             } else if failed {
                 (
@@ -2666,6 +2808,7 @@ impl TeleArkApp {
             });
 
         components::inspector_panel("transfer-inspector", layout.transfer_inspector_width())
+            .debug_selector(|| "transfer-inspector".to_owned())
             .child(
                 div()
                     .p_5()
@@ -2797,6 +2940,28 @@ impl TeleArkApp {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .when(interrupted, |details| {
+                        details.child(
+                            div()
+                                .debug_selector(|| "upload-history-guidance".to_owned())
+                                .p_3()
+                                .rounded(theme::RADIUS_SMALL)
+                                .bg(theme::red_soft())
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::red())
+                                        .child(self.tr("transfer-upload-interrupted")),
+                                )
+                                .child(self.tr("transfer-upload-interrupted-reason"))
+                                .child(self.tr("transfer-upload-interrupted-action")),
+                        )
+                    })
                     .children(
                         details
                             .into_iter()
@@ -3541,8 +3706,65 @@ mod tests {
         });
     }
 
+    #[gpui_kit::test]
+    fn restored_uploads_keep_batches_and_honest_interruption_details(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        for appearance in [
+            teleark_runtime::AppearancePreference::Light,
+            teleark_runtime::AppearancePreference::Dark,
+        ] {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.locale(), teleark_i18n::SupportedLocale::EnUs);
+                app.preferences.appearance = appearance;
+                app.preview_upload_history();
+                let items = app.transfer_rows();
+                assert_eq!(items.len(), 3);
+                assert!(items[0].batch_summary.is_some());
+                assert!(items[1].batch_child && items[2].batch_child);
+                assert_eq!(items[1].progress, 100.0);
+                assert_eq!(
+                    items[2].activity,
+                    Some(app.tr("transfer-upload-interrupted"))
+                );
+                assert_eq!(items[2].state, TransferState::Failed);
+                assert!(items[2].progress < 100.0);
+                assert_eq!(items[2].connections, app.tr("transfer-value-unavailable"));
+                assert_eq!(app.vault_transfer_view.omitted_items, 12);
+                assert!(app.vault_transfer_view.items.iter().all(|row| !matches!(
+                    row.state,
+                    VaultTransferState::Queued | VaultTransferState::Running
+                )));
+                // Real projection also filters historical account identity, independently of preview rows.
+                app.visual_preview = false;
+                assert_eq!(app.transfer_rows().len(), 3);
+                app.telegram_account.as_mut().expect("account").id += 1;
+                assert!(app.transfer_rows().is_empty());
+                app.telegram_account.as_mut().expect("account").id -= 1;
+                app.visual_preview = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("transfer-inspector").expect("inspector");
+            let guidance = cx
+                .debug_bounds("upload-history-guidance")
+                .expect("interruption guidance");
+            assert!(
+                guidance.top() >= panel.top() && guidance.bottom() <= panel.bottom(),
+                "interruption guidance must be reachable without scrolling at 900x600"
+            );
+            assert!(
+                cx.debug_bounds("upload-preflight-status").is_none(),
+                "interrupted history must not look like ongoing preparation"
+            );
+        }
+    }
+
     fn vault_snapshot_fixture() -> VaultTransferSnapshot {
         VaultTransferSnapshot {
+            restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: 1,
             account_id: 7,

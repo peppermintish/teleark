@@ -424,6 +424,9 @@ impl TeleArkApp {
             rows.push(row);
         }
         self.preview_transfer_rows = rows;
+        if state == "upload-history" {
+            self.preview_upload_history();
+        }
         match state.as_str() {
             "returning" => self.page = Page::Account,
             "upload-progress" | "session-active" => {

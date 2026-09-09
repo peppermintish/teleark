@@ -44,6 +44,7 @@ mod catalog;
 mod health;
 mod key_progress;
 mod session;
+mod upload_history;
 pub use key_progress::{VaultKeyPhase, VaultKeyProgress, VaultKeySnapshot};
 use session::{VaultEnvelope, VaultSession};
 
@@ -93,6 +94,7 @@ pub enum VaultTransferDirection {
 pub enum VaultTransferState {
     Queued,
     Running,
+    Interrupted,
     Cancelled,
     Completed,
     Failed(ApplicationErrorKind),
@@ -100,6 +102,8 @@ pub enum VaultTransferState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultTransferSnapshot {
+    /// Historical totals are durable; high-frequency telemetry is not replayed as live measurements.
+    pub restored: bool,
     pub upload_activity: Option<VaultUploadActivity>,
     pub id: u64,
     pub account_id: i64,
@@ -317,6 +321,10 @@ struct VaultInner {
 }
 
 enum VaultCommand {
+    RestoreUploadHistory {
+        account: i64,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
     #[cfg(test)]
     TestScan {
         entered: mpsc::SyncSender<()>,
@@ -410,6 +418,11 @@ impl DesktopVault {
         telegram: DesktopTelegram,
         library: DesktopLibrary,
     ) -> Result<Self, ApplicationError> {
+        library
+            .worker
+            .request("interrupt_previous_uploads", |reply| {
+                crate::StorageRequest::InterruptVaultUploads { reply }
+            })?;
         let record = library.worker.vault_metadata()?;
         if let Some(record) = record.as_ref() {
             validate_record(record)?;
@@ -459,6 +472,19 @@ impl DesktopVault {
                 joins: Mutex::new(joins),
             }),
         })
+    }
+
+    /// Background-only, works while locked and before network catalog loading.
+    pub fn restore_upload_history(&self, account: i64) -> Result<(), ApplicationError> {
+        self.submit_upload_history_restore(account)?.wait()
+    }
+
+    /// Admit in frontend request order; retain the job and wait off the UI thread.
+    pub fn submit_upload_history_restore(
+        &self,
+        account: i64,
+    ) -> Result<VaultJob<()>, ApplicationError> {
+        self.submit(|reply| VaultCommand::RestoreUploadHistory { account, reply })
     }
 
     #[must_use]
@@ -915,6 +941,9 @@ impl VaultOwner {
 
     fn execute(&mut self, command: VaultCommand) {
         match command {
+            VaultCommand::RestoreUploadHistory { account, reply } => {
+                let _ = reply.send(self.restore_upload_history(account));
+            }
             #[cfg(test)]
             VaultCommand::TestScan {
                 entered,
@@ -1509,9 +1538,11 @@ impl VaultOwner {
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? =
             Some((account_id, batch_id, cancel.clone()));
-        for plan in &plans {
-            self.push_transfer(VaultTransferSnapshot {
-                upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::CheckingStorage)),
+        let snapshots = plans
+            .iter()
+            .map(|plan| VaultTransferSnapshot {
+                restored: false,
+                upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Persisting)),
                 id: plan.id,
                 account_id,
                 chat_id,
@@ -1531,7 +1562,18 @@ impl VaultOwner {
                 session_log_path: None,
                 telemetry: queued_telemetry.clone(),
                 state: VaultTransferState::Queued,
-            });
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = self.admit_upload_window(snapshots) {
+            *self
+                .active_upload_batch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            return Err(error);
+        }
+        for plan in &plans {
+            VaultUploadObserver::new(self.transfers.clone(), plan.id)
+                .phase(VaultUploadPhase::CheckingStorage);
         }
         // Publish all queue rows before any network preflight. One complete
         // discovery covers the batch; each file still revalidates its target.
@@ -1564,6 +1606,14 @@ impl VaultOwner {
                             VaultTransferState::Failed(error.kind())
                         }
                     });
+                    if let Err(error) = self.persist_upload_id(plan.id) {
+                        self.fail_pending_upload_window(account_id, error.kind());
+                        *self
+                            .active_upload_batch
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = None;
+                        return Err(error);
+                    }
                     if error.kind() == ApplicationErrorKind::Cancelled {
                         report.cancelled.push(plan.source.path.clone());
                     } else {
@@ -1647,6 +1697,7 @@ impl VaultOwner {
             &controller.snapshot(),
         )?;
         self.push_transfer(VaultTransferSnapshot {
+            restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: transfer_id,
             account_id,
@@ -1667,7 +1718,7 @@ impl VaultOwner {
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
             state: VaultTransferState::Running,
-        });
+        })?;
         let started = Instant::now();
         let result: Result<ManagedVaultFile, ApplicationError> = (|| {
             let mut files = NativeFileSystem::new();
@@ -1967,11 +2018,11 @@ impl VaultOwner {
             result.as_ref().err().map(ApplicationError::kind),
             &controller.snapshot(),
         );
-        self.finish_transfer(
+        self.finish_upload(
             transfer_id,
             started,
             result.as_ref().ok().map(|file| file.package_id.clone()),
-        );
+        )?;
         result
     }
 
@@ -2063,6 +2114,7 @@ impl VaultOwner {
             &controller.snapshot(),
         )?;
         self.push_transfer(VaultTransferSnapshot {
+            restored: false,
             upload_activity: None,
             id: transfer_id,
             account_id: expected_account_id,
@@ -2083,7 +2135,7 @@ impl VaultOwner {
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
             state: VaultTransferState::Running,
-        });
+        })?;
         let started = Instant::now();
         let result = (|| {
             let store =
@@ -2213,9 +2265,13 @@ impl VaultOwner {
         result
     }
 
-    fn push_transfer(&self, snapshot: VaultTransferSnapshot) {
+    fn push_transfer(&self, snapshot: VaultTransferSnapshot) -> Result<(), ApplicationError> {
         self.transfers
-            .insert_pruning(snapshot, vault_transfer_evictions);
+            .insert_pruning(snapshot.clone(), vault_transfer_evictions);
+        if snapshot.direction == VaultTransferDirection::Upload {
+            self.persist_upload(&snapshot)?;
+        }
+        Ok(())
     }
 
     fn update_transfer(&self, id: u64, update: impl FnOnce(&mut VaultTransferSnapshot)) {
@@ -2503,21 +2559,24 @@ fn vault_transfer_evictions(transfers: &[&VaultTransferSnapshot]) -> Option<Vec<
     if transfers.len() < 256 {
         return Some(Vec::new());
     }
-    let item = transfers.iter().find(|item| {
-        !matches!(
-            item.state,
-            VaultTransferState::Queued | VaultTransferState::Running
-        ) && item.batch_id.is_none_or(|batch| {
-            transfers.iter().all(|member| {
-                member.batch_id != Some(batch)
-                    || member.account_id != item.account_id
-                    || !matches!(
-                        member.state,
-                        VaultTransferState::Queued | VaultTransferState::Running
-                    )
+    let item = transfers
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.state,
+                VaultTransferState::Queued | VaultTransferState::Running
+            ) && item.batch_id.is_none_or(|batch| {
+                transfers.iter().all(|member| {
+                    member.batch_id != Some(batch)
+                        || member.account_id != item.account_id
+                        || !matches!(
+                            member.state,
+                            VaultTransferState::Queued | VaultTransferState::Running
+                        )
+                })
             })
         })
-    })?;
+        .min_by_key(|item| (item.queued_at_unix_ms, item.started_at_unix_ms, item.id))?;
     Some(match item.batch_id {
         Some(batch) => transfers
             .iter()
@@ -2928,6 +2987,7 @@ mod tests {
     fn upload_activity_advances_before_first_verified_part_and_never_claims_completion() {
         use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
         let fixture = VaultTransferSnapshot {
+            restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: 1,
             account_id: 7,
@@ -3288,6 +3348,7 @@ mod tests {
     #[test]
     fn bounded_history_evicts_whole_completed_batches_and_keeps_active_members() {
         let fixture = VaultTransferSnapshot {
+            restored: false,
             upload_activity: None,
             id: 1,
             account_id: 7,

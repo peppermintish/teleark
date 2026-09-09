@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 15;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -563,6 +563,35 @@ CREATE TABLE vault_message_health (
     observed_at INTEGER NOT NULL,
     PRIMARY KEY(account_id,chat_id,message_id)
 ) STRICT, WITHOUT ROWID;
+"#,
+    },
+    Migration {
+        version: 16,
+        sql: r#"
+CREATE TABLE vault_upload_history (
+    sequence INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL CHECK (account_id > 0),
+    id INTEGER NOT NULL UNIQUE CHECK (id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    batch_id INTEGER CHECK (batch_id > 0),
+    queued_at INTEGER NOT NULL CHECK (queued_at >= 0),
+    file_name TEXT NOT NULL CHECK (length(file_name) BETWEEN 1 AND 4096),
+    package_id TEXT,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+    transferred_bytes INTEGER NOT NULL CHECK (transferred_bytes BETWEEN 0 AND size_bytes),
+    completed_parts INTEGER NOT NULL CHECK (completed_parts >= 0),
+    part_count INTEGER NOT NULL CHECK (part_count >= completed_parts),
+    started_at INTEGER NOT NULL CHECK (started_at >= 0),
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    average_bps INTEGER CHECK (average_bps >= 0),
+    state TEXT NOT NULL CHECK (state IN ('queued','running','completed','failed','cancelled','interrupted')),
+    failure_code TEXT,
+    CHECK ((state = 'failed') = (failure_code IS NOT NULL)),
+    CHECK (state != 'completed' OR (package_id IS NOT NULL AND transferred_bytes = size_bytes AND completed_parts = part_count AND part_count > 0)),
+    UNIQUE (account_id, id)
+) STRICT;
+CREATE INDEX vault_upload_history_account ON vault_upload_history(account_id, sequence DESC);
+CREATE INDEX vault_upload_history_batch ON vault_upload_history(account_id, batch_id, sequence DESC);
 "#,
     },
 ];

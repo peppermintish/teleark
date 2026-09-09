@@ -1286,7 +1286,7 @@ managed-scan-detail = { $phase } · { $done } / { $total } 件 · 変更なし {
 transfer-session-log-omitted-label = ログの欠落
 transfer-session-log-omitted-count = 今回起動中の全転送：ログ記録 { $count } 件を省略
 
-transfer-history-omitted = この一覧で省略された過去の完了・キャンセル記録（ローカルの全アカウント）：{ $count } 件
+transfer-history-omitted = この一覧に表示されていない古いタスク履歴：{ $count }
 transfer-controller-history-omitted = 過去の制御記録 { $count } 件を省略しました。
 transfer-lifecycle-history-omitted = 過去の状態イベント { $count } 件を省略しました。
 transfer-footer-total-retained = 表示中：{ $count }
@@ -1462,3 +1462,17 @@ storage-location-bound = 今回、この端末に現在の Telegram アカウン
 storage-location-method = TeleArk はアカウントごとにこのチャンネル ID を保存し、次回からその ID で特定します。保存済みの関連付けがない場合は、所有する非公開チャンネルの TeleArk 識別情報を確認します。一致が一つなら接続し、なければ作成します。複数なら選択が必要です。名前だけでは識別しません。
 storage-notifications-title = 通知とアーカイブ済みチャット
 storage-notifications-explanation = 「チャンネルをミュートしてアーカイブ」を選んで確認すると、このチャンネルのメッセージ通知を止め、Telegram のアーカイブ済みチャットへ移します。一度だけ実行し、その後 Telegram でミュートやアーカイブを解除しても変更を尊重します。識別情報の復元では自動実行しません。保存ファイルの移動や削除は行いません。
+
+transfer-history-restoring = アップロード履歴を復元中
+
+transfer-upload-interrupted = 中断
+
+transfer-upload-interrupted-reason = 完了が確認される前にアプリが終了しました。
+
+transfer-upload-interrupted-action = アップロード画面で元のファイルを選択し、新しくアップロードしてください。公開中に中断した場合は、先にストレージを確認してください。
+
+transfer-history-restored-label = 復元された履歴
+
+transfer-history-restored-detail = 保存済みのタスク集計を復元しました。ライブチャートと詳細なアクティビティは復元されていません。
+
+detail-vault-lifecycle-durable-upload = タスクの集計はローカルに保存されます。未完了のアップロードは再起動後に中断と表示されます。元のファイルを選択して新しくアップロードしてください。

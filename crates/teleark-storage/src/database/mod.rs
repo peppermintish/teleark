@@ -1,3 +1,5 @@
+mod upload_history;
+pub use upload_history::{StoredVaultUploadState, VaultUploadHistory, VaultUploadRecord};
 mod vault_inventory;
 pub use vault_inventory::{VaultFileHealth, VaultInventoryRecord};
 mod channel_sync;

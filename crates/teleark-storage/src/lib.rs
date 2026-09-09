@@ -32,3 +32,5 @@ pub use model::{
 };
 
 pub use database::{VaultFileHealth, VaultInventoryRecord};
+
+pub use database::{StoredVaultUploadState, VaultUploadHistory, VaultUploadRecord};

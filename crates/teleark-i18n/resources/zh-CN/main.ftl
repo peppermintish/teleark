@@ -1286,7 +1286,7 @@ managed-scan-detail = { $phase } · { $done } / { $total } 份清单 · { $cache
 transfer-session-log-omitted-label = 日志缺口
 transfer-session-log-omitted-count = 本次运行的所有传输：已省略 { $count } 条日志记录
 
-transfer-history-omitted = 本机各账号有 { $count } 条较早的完成/取消记录未在此列表显示
+transfer-history-omitted = 此列表未显示的较早任务记录：{ $count }
 transfer-controller-history-omitted = 已省略 { $count } 条较早的控制器记录。
 transfer-lifecycle-history-omitted = 已省略 { $count } 条较早的状态事件。
 transfer-footer-total-retained = 当前显示 { $count }
@@ -1462,3 +1462,17 @@ storage-location-bound = 本次通过当前 Telegram 账户在本机保存的频
 storage-location-method = TeleArk 按 Telegram 账户分别保存这个频道的 ID，后续通过该 ID 定位。没有已保存的绑定时，会在你拥有的私人频道中核验 TeleArk 识别信息：唯一匹配才会连接；没有匹配时才创建私人频道；多个匹配时需要选择。频道名称本身不是识别依据。
 storage-notifications-title = 通知与已归档聊天
 storage-notifications-explanation = 点击并确认“静音并归档频道”后，TeleArk 会关闭此频道的消息通知，并将它移入 Telegram 的“已归档聊天”。这只执行一次；之后你可以在 Telegram 中取消静音或取消归档，TeleArk 会尊重你的修改。恢复识别信息不会自动执行静音或归档。归档不会移动或删除频道里的文件。
+
+transfer-history-restoring = 正在恢复上传记录
+
+transfer-upload-interrupted = 已中断
+
+transfer-upload-interrupted-reason = 应用关闭时，此上传尚未确认完成。
+
+transfer-upload-interrupted-action = 请在上传页重新选择源文件开始上传。如果中断发生在发布阶段，请先检查存储中的文件。
+
+transfer-history-restored-label = 已恢复的历史记录
+
+transfer-history-restored-detail = 已恢复保存的任务汇总；实时图表与详细活动未恢复。
+
+detail-vault-lifecycle-durable-upload = 任务汇总保存在本地。重启后，未完成的上传会标记为已中断；请重新选择源文件开始上传。

@@ -61,6 +61,8 @@ The embedded pair identifies the application and is extractable from the resulti
 
 Always include `--preview-ui` for layout work:
 
+Use English (`--locale=en-US`) by default for UI tests and visual previews. Switch to another locale only for a specific localization check or an explicit user request.
+
 ```bash
 cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=en-US --window-size=1360x760
 cargo run -p teleark-gui -- --preview-ui --preview-state=unlock --locale=zh-CN --window-size=900x600
@@ -72,7 +74,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress` |
+| `--preview-state` | `upload-history`, `login`, `returning`, `setup`, `locked`, `raw`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress` |
 | `--locale` | `en-US`, `zh-CN`, `ja-JP` |
 | `--window-size` | Minimum 900×600; review 960×640, 1360×760, 1920×1080 |
 
@@ -101,3 +103,6 @@ git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
 ```
 
 `checkpoint/pre-gpui-kit-redesign-20260907` also preserves the pre-rewrite repository. Restoring source does not downgrade an already migrated user database; never replace or remove user data for a code rollback.
+
+
+`--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. Add `--preview-dark` for the dark theme; no real history or account is accessed.

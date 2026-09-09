@@ -837,6 +837,17 @@ pub struct CachedChannelView {
 }
 
 enum StorageRequest {
+    SaveVaultUploads {
+        records: Vec<teleark_storage::VaultUploadRecord>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    InterruptVaultUploads {
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    VaultUploadHistory {
+        account: i64,
+        reply: SyncSender<Result<teleark_storage::VaultUploadHistory, ApplicationError>>,
+    },
     ProxyConfiguration {
         reply: SyncSender<Result<NetworkRoute, ApplicationError>>,
     },
@@ -1833,6 +1844,27 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let _ = reply.send(
                     database
                         .resolve_legacy_native_download_accounts(account_id)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::SaveVaultUploads { records, reply } => {
+                let _ = reply.send(
+                    database
+                        .save_vault_uploads(&records)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::InterruptVaultUploads { reply } => {
+                let _ = reply.send(
+                    database
+                        .interrupt_previous_vault_uploads()
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::VaultUploadHistory { account, reply } => {
+                let _ = reply.send(
+                    database
+                        .vault_upload_history(account)
                         .map_err(map_storage_error),
                 );
             }
