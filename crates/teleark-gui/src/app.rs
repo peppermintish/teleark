@@ -10,6 +10,8 @@ mod managed_projection;
 mod navigation;
 mod preferences;
 mod preview;
+#[cfg(test)]
+pub(crate) use preview::completed_storage_maintenance_preview;
 pub(crate) mod proxy;
 pub(crate) mod storage;
 mod vault;
@@ -282,6 +284,7 @@ pub struct TeleArkApp {
     pub(crate) storage_loading: bool,
     pub(crate) storage_confirmation: Option<storage::StorageAction>,
     pub(crate) storage_maintenance: Option<teleark_runtime::StorageMaintenance>,
+    pub(crate) storage_maintenance_preview: Option<teleark_runtime::StorageMaintenanceSnapshot>,
     storage_maintenance_presentation: Option<Task<()>>,
     pub(crate) storage_notice: Option<&'static str>,
     storage_retry_task: Option<Task<()>>,
@@ -681,6 +684,7 @@ impl TeleArkApp {
             storage_loading: false,
             storage_confirmation: None,
             storage_maintenance: None,
+            storage_maintenance_preview: None,
             storage_maintenance_presentation: None,
             storage_notice: None,
             storage_retry_task: None,

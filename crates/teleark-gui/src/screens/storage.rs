@@ -578,6 +578,7 @@ impl TeleArkApp {
                             false,
                         )
                         .disabled(self.storage_loading)
+                        .debug_selector(|| "storage-recheck-action".into())
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_storage_channel(cx))),
                     )
                     .child(
@@ -588,6 +589,7 @@ impl TeleArkApp {
                             false,
                         )
                         .disabled(self.storage_loading)
+                        .debug_selector(|| "storage-archive-action".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.storage_confirmation = Some(StorageAction::Archive);
                             cx.notify();
@@ -664,15 +666,23 @@ impl TeleArkApp {
         let Some(progress) = &self.storage_maintenance else {
             return div().into_any_element();
         };
-        let state = progress.snapshot();
+        let state = self
+            .storage_maintenance_preview
+            .as_ref()
+            .filter(|_| self.visual_preview)
+            .cloned()
+            .unwrap_or_else(|| progress.snapshot());
         let phase = storage_phase_id(state.phase);
         let duration = if state.finished {
             state.last_activity.duration_since(state.phase_since)
         } else {
             state.phase_since.elapsed()
         };
+        // Give the scrollbar a measured viewport; an auto-height/max-height
+        // wrapper underestimates wrapped timelines and clips later card rows.
         div()
-            .max_h(px(120.0))
+            .h(px(104.0))
+            .flex_none()
             .overflow_y_scrollbar()
             .px_3()
             .py_2()
@@ -1248,6 +1258,8 @@ mod tests {
                             app.storage_notice = Some("storage-auto-found");
                             app.storage_loading = false;
                             app.storage_confirmation = None;
+                            app.storage_maintenance = None;
+                            app.storage_maintenance_preview = None;
                             app.unlock_intent = None;
                             app.vault_locked = true;
                             app.vault_status.locked = true;
@@ -1318,6 +1330,46 @@ mod tests {
                     cx.run_until_parked();
                     app.update(cx, |app, _| {
                         assert!(matches!(app.unlock_intent, Some(UnlockIntent::Browse)))
+                    });
+                    app.update(cx, |app, cx| {
+                        app.unlock_intent = None;
+                        app.storage_confirmation = None;
+                        let channel = app.storage_status.channel().expect("bound channel").clone();
+                        app.storage_status = StorageChannelStatus::Ready(channel);
+                        app.storage_maintenance = Some(teleark_runtime::StorageMaintenance::new());
+                        app.storage_maintenance_preview =
+                            Some(crate::app::completed_storage_maintenance_preview());
+                        app.storage_notice = Some("storage-repair-completed");
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    let management = cx
+                        .debug_bounds("storage-management-card")
+                        .expect("management card");
+                    for selector in ["storage-recheck-action", "storage-archive-action"] {
+                        let button = cx.debug_bounds(selector).expect("footer button");
+                        assert!(
+                            button.top() >= management.top()
+                                && button.bottom() <= management.bottom(),
+                            "{locale:?} {size:?} {selector} clipped: button={button:?} card={management:?}"
+                        );
+                        assert!(
+                            button.top() >= viewport.top() && button.bottom() <= viewport.bottom()
+                        );
+                    }
+                    let archive = cx
+                        .debug_bounds("storage-archive-action")
+                        .expect("archive action");
+                    cx.simulate_click(archive.center(), gpui_kit::Modifiers::default());
+                    cx.run_until_parked();
+                    app.update(cx, |app, _| {
+                        assert_eq!(app.storage_confirmation, Some(StorageAction::Archive))
                     });
                 }
             }

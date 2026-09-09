@@ -203,6 +203,14 @@ impl TeleArkApp {
                 self.storage_maintenance = Some(teleark_runtime::StorageMaintenance::new());
             }
         }
+        if state == "storage-completed-locked" {
+            self.vault_locked = true;
+            self.vault_status.locked = true;
+            self.vault_status.active_key_locked = true;
+            self.storage_notice = Some("storage-repair-completed");
+            self.storage_maintenance = Some(teleark_runtime::StorageMaintenance::new());
+            self.storage_maintenance_preview = Some(completed_storage_maintenance_preview());
+        }
         if state == "new-key" {
             self.vault_new_epoch_confirmation = true;
             self.unlock_intent = Some(UnlockIntent::Upload);
@@ -517,4 +525,26 @@ impl TeleArkApp {
             _ => {}
         }
     }
+}
+
+/// A completed repair timeline for isolated native previews and geometry regressions.
+pub(crate) fn completed_storage_maintenance_preview() -> teleark_runtime::StorageMaintenanceSnapshot
+{
+    use teleark_runtime::{StorageMaintenance, StorageMaintenancePhase as Phase};
+    let mut snapshot = StorageMaintenance::new().snapshot();
+    snapshot.phase = Phase::Completed;
+    snapshot.finished = true;
+    snapshot.timeline = [
+        Phase::Checking,
+        Phase::FindingRecord,
+        Phase::Pinning,
+        Phase::Updating,
+        Phase::Verifying,
+        Phase::Completed,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, phase)| (phase, index as u64 * 1000))
+    .collect();
+    snapshot
 }
