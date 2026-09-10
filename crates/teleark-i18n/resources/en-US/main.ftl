@@ -1504,3 +1504,24 @@ transfer-history-restored-detail = Saved task totals are available. Live charts 
 
 detail-vault-lifecycle-durable-upload = Task summary saved locally. Unfinished uploads are marked interrupted after restart; select the source file to start a new upload.
 upload-error-folder = Folders and .app application bundles cannot be uploaded directly. Compress them into a ZIP file, then upload the ZIP.
+
+speed-limits-title = Speed limits
+speed-limits-description = Total cap per direction, in KiB/s. 1024 KiB/s = 1 MiB/s. Enter 0 for unlimited.
+speed-limits-upload = Upload · KiB/s
+speed-limits-download = Download · KiB/s
+speed-limits-unlimited = Unlimited
+speed-limits-scope = Applies to all file transfers, including encrypted files. Changes apply after saving. Payload pacing allows short buffered bursts; protocol overhead is excluded.
+speed-limits-invalid = Enter non-negative whole numbers within the supported range.
+speed-limits-save-failed = Could not save. The previous limits remain active. Retry Save.
+speed-limits-ready = Save to apply to current and future transfers.
+speed-limits-summary = Limits ↑ { $upload } · ↓ { $download } · Waiting: { $waiting } · { $seconds } s
+speed-limits-budget = { $limit } · { $waiting } waiting for bandwidth · { $seconds } s
+speed-limits-last-activity = Last payload admission: { $seconds } s ago
+speed-limits-no-activity = No limited payload admitted yet.
+speed-limits-history = Show / hide recent activity
+speed-limits-event-changed = Limit changed
+speed-limits-event-waiting = Waiting for bandwidth
+speed-limits-event-resumed = Bandwidth wait ended
+speed-limits-event = { $event } · { $seconds } s ago
+speed-limits-omitted = { $count } older events omitted; latest 16 retained per direction.
+speed-limits-close = Close

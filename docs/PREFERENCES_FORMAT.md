@@ -25,6 +25,8 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `upload_encrypt_content` | retained legacy boolean | `true` |
 | `upload_hide_file_name` | retained legacy boolean | `true` |
 | `upload_encrypt_metadata` | retained legacy boolean | `true` |
+| `upload_speed_limit_bytes_per_second` | unsigned 64-bit integer; `0` means unlimited | `0` |
+| `download_speed_limit_bytes_per_second` | unsigned 64-bit integer; `0` means unlimited | `0` |
 | `download_throughput_strategy` | `balanced` or `max_throughput` | `balanced` |
 | `transfer_soft_limit_policy` | `respect`, `adaptive_override`, or `ignore` | `adaptive_override` |
 | `lock_vault_when_hidden` | boolean | `true` |
@@ -54,6 +56,19 @@ preserving a recoverable prior value set and reporting expensive preparation or
 conversion to the UI. Users should not need to recreate settings. See
 [ADR 0017](adr/0017-versioned-automatic-migrations.md); the existing legacy-value
 read/save conversion below is the current implementation baseline.
+
+The transfer-speed extension reads and writes these two additive version-1 integer
+keys. Missing keys (including upgrades that skip releases) automatically select
+unlimited, preserving prior transfer behavior; no existing value is reinterpreted
+and no schema, encrypted-file, recovery-bundle or checkpoint version changes.
+Version-1 readers predating this extension ignore the optional caps. A save writes
+the complete set transactionally, then updates both live budgets in the same
+storage-owner order. Preparation or persistence failure leaves live limits and
+stored values unchanged. Malformed speed values remain intact: library access is
+available for repair, preferences report a structured error, and configured
+network startup fails closed until the settings are corrected. Limits are local
+application preferences and are shared across all current transfer tasks, rather
+than copied into per-task recovery records.
 
 The four retained `upload_*` keys remain parseable so existing version-1
 preferences do not break, but the connected private-channel writer does not use

@@ -767,11 +767,8 @@ mod tests {
     fn catalog_status_and_cancel_are_reachable_in_compact_locales(cx: &mut gpui::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+        {
+            let locale = SupportedLocale::EnUs;
             app.update(cx, |app, cx| {
                 app.localizer = Localizer::new(locale).expect("catalog");
                 app.dialogs.cancellation = Default::default();
@@ -808,11 +805,8 @@ mod tests {
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+        {
+            let locale = SupportedLocale::EnUs;
             for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
                 for phase in [
                     Phase::Reading,

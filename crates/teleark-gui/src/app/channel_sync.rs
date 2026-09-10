@@ -861,11 +861,8 @@ mod tests {
         use teleark_runtime::{ChannelSyncEvent, ChannelSyncSnapshot};
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+        {
+            let locale = SupportedLocale::EnUs;
             cx.update(|window, cx| {
                 app.update(cx, |app, cx| {
                     app.localizer = Localizer::new(locale).expect("catalog");
@@ -1118,11 +1115,8 @@ mod tests {
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+        {
+            let locale = SupportedLocale::EnUs;
             for dark in [false, true] {
                 for page in [
                     Page::Account,

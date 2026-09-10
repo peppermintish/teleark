@@ -10,6 +10,7 @@ mod managed_projection;
 mod navigation;
 mod preferences;
 mod preview;
+mod speed_limits;
 #[cfg(test)]
 pub(crate) use preview::completed_storage_maintenance_preview;
 pub(crate) mod proxy;
@@ -419,6 +420,7 @@ pub struct TeleArkApp {
     pub(crate) show_telegram_api_id_prompt: bool,
     pub(crate) custom_telegram_credentials_enabled: bool,
     pub(crate) settings_section: SettingsSection,
+    pub(crate) speed_limits: speed_limits::SpeedLimitsUi,
     pub(crate) preferences: DesktopPreferences,
     channel_layout: Entity<ResizableState>,
     channel_layout_geometry: Option<(gpui_kit::Pixels, bool)>,
@@ -512,6 +514,7 @@ impl TeleArkApp {
             Ok(preferences) => (preferences, PreferencePersistence::Idle),
             Err(_) => (DesktopPreferences::default(), PreferencePersistence::Failed),
         };
+        let speed_limits = speed_limits::SpeedLimitsUi::new(preferences.speed_limits, window, cx);
         theme::apply_appearance(preferences.appearance, window, cx);
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.preferences.appearance == AppearancePreference::System {
@@ -827,6 +830,7 @@ impl TeleArkApp {
             custom_telegram_credentials_enabled: telegram_credential_source
                 == Some(TelegramCredentialSource::User),
             settings_section: SettingsSection::General,
+            speed_limits,
             preferences,
             channel_layout: cx.new(|_| ResizableState::default()),
             channel_layout_geometry: None,
@@ -895,6 +899,7 @@ impl TeleArkApp {
         app.start_volume_space_refresh(cx);
         app.start_local_file_refresh(cx);
         app.start_network_observer(cx);
+        app.start_bandwidth_observer(cx);
         app.restore_telegram_session(cx);
         app
     }
@@ -1239,6 +1244,7 @@ impl Render for TeleArkApp {
                         .child(self.tr("vault-session-locked-background")),
                 )
             })
+            .child(self.render_bandwidth_status(cx))
             .child(self.render_status_bar(cx))
             .when(self.channel_sync_details, |root| {
                 root.child(self.render_channel_sync_details(cx))
@@ -1254,6 +1260,9 @@ impl Render for TeleArkApp {
             })
             .when(self.show_upload, |root| {
                 root.child(screens::upload::render_upload_overlay(self, layout, cx))
+            })
+            .when(self.speed_limits.open, |root| {
+                root.child(self.render_speed_limits(cx))
             })
             .when(self.show_telegram_api_id_prompt, |root| {
                 root.child(screens::settings::render_telegram_api_id_prompt(self, cx))

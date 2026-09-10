@@ -118,6 +118,7 @@ pub struct DesktopTelegram {
 
 struct TelegramWorkerInner {
     endpoint: Mutex<Option<network_owner::Endpoint>>,
+    bandwidth: teleark_telegram::TransferBandwidth,
     changing: std::sync::atomic::AtomicBool,
     route: Mutex<NetworkRoute>,
     monitor: NetworkMonitor,
@@ -279,6 +280,7 @@ enum LoginState {
 }
 
 struct WorkerState {
+    bandwidth: teleark_telegram::TransferBandwidth,
     network_route: NetworkRoute,
     network_monitor: NetworkMonitor,
     network_generation: u64,
@@ -294,6 +296,7 @@ struct WorkerState {
 impl Default for WorkerState {
     fn default() -> Self {
         Self {
+            bandwidth: teleark_telegram::TransferBandwidth::default(),
             network_route: NetworkRoute::Direct,
             network_monitor: NetworkMonitor::new(&NetworkRoute::Direct),
             network_generation: 0,
@@ -1435,7 +1438,8 @@ async fn connect(
         network_generation: state.network_generation,
     })
     .await
-    .map_err(map_telegram_error)?;
+    .map_err(map_telegram_error)?
+    .with_bandwidth(state.bandwidth.clone());
     let authorized = connection
         .is_authorized()
         .await
@@ -2205,6 +2209,7 @@ mod tests {
             retired.send(()).expect("retirement receiver");
         });
         let inner = TelegramWorkerInner {
+            bandwidth: teleark_telegram::TransferBandwidth::default(),
             endpoint: Mutex::new(Some(network_owner::Endpoint {
                 sender,
                 generation: 0,

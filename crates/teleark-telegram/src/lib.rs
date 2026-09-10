@@ -31,7 +31,13 @@ use grammers_session::{
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod bandwidth;
 mod byte_progress;
+use bandwidth::LimitedReader;
+pub use bandwidth::{
+    BandwidthBudget, BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferBandwidth,
+    TransferSpeedLimits,
+};
 mod connection;
 use byte_progress::UploadReader;
 pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
@@ -420,6 +426,7 @@ pub struct TelegramConnection {
     api_id: i32,
     qr_login_update: Arc<AtomicBool>,
     download_flood_gate: Arc<DownloadFloodGate>,
+    bandwidth: TransferBandwidth,
     runner: Option<JoinHandle<()>>,
     gateway: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
@@ -489,11 +496,17 @@ impl TelegramConnection {
             api_id: config.api_id,
             qr_login_update,
             download_flood_gate: Arc::new(DownloadFloodGate::default()),
+            bandwidth: TransferBandwidth::default(),
             runner: Some(runner),
             gateway: Some(gateway.task),
             update_drain: Some(update_drain),
             channel_updates,
         })
+    }
+
+    pub fn with_bandwidth(mut self, bandwidth: TransferBandwidth) -> Self {
+        self.bandwidth = bandwidth;
+        self
     }
 
     pub async fn is_authorized(&self) -> Result<bool, TelegramError> {
@@ -869,6 +882,7 @@ impl TelegramConnection {
                     let client = self.client.clone();
                     let document = file.document.clone();
                     let flood_gate = Arc::clone(&flood_gate);
+                    let bandwidth = self.bandwidth.download.clone();
                     inflight_downloads.spawn(async move {
                         let attempt_started = Instant::now();
                         let result = download_logical_part(
@@ -878,6 +892,7 @@ impl TelegramConnection {
                             offset_bytes,
                             length_bytes,
                             flood_gate,
+                            bandwidth,
                         )
                         .await;
                         (
@@ -1006,8 +1021,19 @@ impl TelegramConnection {
             });
         }
         let mut bytes = Vec::with_capacity(expected);
-        let mut download = self.client.iter_download(&file.document);
-        while let Some(chunk) = download.next().await.map_err(map_invocation)? {
+        let chunk_size = self.bandwidth.download.download_chunk_size();
+        let mut download = self
+            .client
+            .iter_download(&file.document)
+            .chunk_size(chunk_size as i32);
+        while bytes.len() < expected {
+            self.bandwidth
+                .download
+                .acquire(chunk_size.min(expected - bytes.len()))
+                .await;
+            let Some(chunk) = download.next().await.map_err(map_invocation)? else {
+                break;
+            };
             let next = bytes
                 .len()
                 .checked_add(chunk.len())
@@ -1049,7 +1075,8 @@ impl TelegramConnection {
             .filter(|name| !name.is_empty())
             .ok_or_else(|| TelegramError::new(TelegramErrorKind::SourceMissing))?
             .to_owned();
-        let mut stream = tokio::fs::File::open(source).await.map_err(map_io)?;
+        let file = tokio::fs::File::open(source).await.map_err(map_io)?;
+        let mut stream = LimitedReader::new(file, size, self.bandwidth.upload.clone());
         let uploaded = self
             .client
             .upload_stream(&mut stream, size, name)
@@ -1094,7 +1121,11 @@ impl TelegramConnection {
         {
             return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
         }
-        let mut stream = UploadReader::new(bytes, observer);
+        let mut stream = LimitedReader::new(
+            UploadReader::new(bytes, observer),
+            bytes.len(),
+            self.bandwidth.upload.clone(),
+        );
         let uploaded = self
             .client
             .upload_stream(&mut stream, bytes.len(), file_name.to_owned())
@@ -1239,8 +1270,10 @@ async fn download_logical_part(
     offset_bytes: u64,
     length_bytes: u64,
     flood_gate: Arc<DownloadFloodGate>,
+    bandwidth: BandwidthBudget,
 ) -> Result<DownloadedLogicalPart, TelegramError> {
-    let skipped_chunks = i32::try_from(offset_bytes / DOWNLOAD_CHUNK_SIZE)
+    let chunk_size = bandwidth.download_chunk_size();
+    let skipped_chunks = i32::try_from(offset_bytes / chunk_size as u64)
         .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
     let expected_length = usize::try_from(length_bytes)
         .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
@@ -1248,10 +1281,13 @@ async fn download_logical_part(
     let started = Instant::now();
     let mut download = client
         .iter_download(&document)
-        .chunk_size(DOWNLOAD_CHUNK_SIZE as i32)
+        .chunk_size(chunk_size as i32)
         .skip_chunks(skipped_chunks);
     while bytes.len() < expected_length {
         flood_gate.wait().await;
+        bandwidth
+            .acquire(chunk_size.min(expected_length - bytes.len()))
+            .await;
         let chunk = download
             .next()
             .await

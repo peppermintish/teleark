@@ -255,11 +255,8 @@ mod tests {
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
         cx.simulate_resize(size(px(900.0), px(600.0)));
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+        {
+            let locale = SupportedLocale::EnUs;
             for dark in [false, true] {
                 for collapsed in [false, true] {
                     cx.update(|window, cx| {

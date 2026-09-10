@@ -1477,3 +1477,24 @@ transfer-history-restored-detail = 已恢复保存的任务汇总；实时图表
 
 detail-vault-lifecycle-durable-upload = 任务汇总保存在本地。重启后，未完成的上传会标记为已中断；请重新选择源文件开始上传。
 upload-error-folder = 无法直接上传文件夹或 .app 应用包。请先压缩成 ZIP 文件，再上传。
+
+speed-limits-title = 传输限速
+speed-limits-description = 分别设置上传和下载的总限速。单位为 KiB/s（1024 KiB/s = 1 MiB/s）；0 表示不限速。
+speed-limits-upload = 上传 · KiB/s
+speed-limits-download = 下载 · KiB/s
+speed-limits-unlimited = 不限速
+speed-limits-scope = 适用于所有文件传输，包括加密文件。保存后生效。按文件数据调速，缓冲可能产生短暂突发；不包含协议开销。
+speed-limits-invalid = 请输入有效范围内的非负整数。
+speed-limits-save-failed = 保存失败，原有限速仍然生效。请重试保存。
+speed-limits-ready = 保存后应用于当前和后续传输。
+speed-limits-summary = 限速 ↑ { $upload } · ↓ { $download } · 等待：{ $waiting } · { $seconds } 秒
+speed-limits-budget = { $limit } · { $waiting } 项等待带宽 · { $seconds } 秒
+speed-limits-last-activity = 上次放行数据：{ $seconds } 秒前
+speed-limits-no-activity = 尚未放行限速数据。
+speed-limits-history = 显示 / 隐藏近期活动
+speed-limits-event-changed = 限速已更改
+speed-limits-event-waiting = 等待带宽
+speed-limits-event-resumed = 带宽等待结束
+speed-limits-event = { $event } · { $seconds } 秒前
+speed-limits-omitted = 已省略 { $count } 条较早事件；每个方向保留最近 16 条。
+speed-limits-close = 关闭

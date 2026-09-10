@@ -622,6 +622,7 @@ impl TeleArkApp {
             self.tr("settings-download-title"),
             self.tr("settings-download-description"),
         );
+        card = card.child(self.speed_limits_button("download-speed-limits", cx));
         card = card.child(
             div()
                 .mb_4()
@@ -779,6 +780,7 @@ impl TeleArkApp {
             self.tr("settings-upload-title"),
             self.tr("settings-upload-description"),
         )
+        .child(self.speed_limits_button("upload-speed-limits", cx))
         .child(
             div()
                 .mt_4()

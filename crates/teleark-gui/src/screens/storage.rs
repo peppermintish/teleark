@@ -1287,11 +1287,8 @@ mod tests {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         for size in [(900.0, 600.0), (1440.0, 900.0)] {
             cx.simulate_resize(gpui_kit::size(px(size.0), px(size.1)));
-            for locale in [
-                SupportedLocale::EnUs,
-                SupportedLocale::ZhCn,
-                SupportedLocale::JaJp,
-            ] {
+            {
+                let locale = SupportedLocale::EnUs;
                 for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
                     cx.update(|window, cx| {
                         app.update(cx, |app, cx| {

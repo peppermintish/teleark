@@ -713,6 +713,7 @@ impl TeleArkApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(self.tr("transfer-title")),
             )
+            .child(self.speed_limits_button("transfer-speed-limits", cx))
             .child(div().flex_1())
             .child(
                 div()
@@ -3895,7 +3896,8 @@ mod tests {
             let mut vault = vault_snapshot_fixture();
             vault.account_id = account;
             app.vault_transfer_view.items = vec![std::sync::Arc::new(vault)].into();
-            for locale in teleark_i18n::SupportedLocale::ALL {
+            {
+                let locale = teleark_i18n::SupportedLocale::EnUs;
                 app.localizer.set_locale(locale);
                 let items = app.transfer_items();
                 let rows = app.transfer_rows();

@@ -99,6 +99,10 @@ pub use vault::{
     VaultUploadReport, VaultUploadSource, inspect_upload_sources,
 };
 
+pub use teleark_telegram::{
+    BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferSpeedLimits,
+};
+
 const STORAGE_QUEUE_CAPACITY: usize = 64;
 const LOCALE_OVERRIDE_SETTING_KEY: &str = "locale.override";
 const TELEGRAM_API_ID_SETTING_KEY: &str = "telegram.api_id";
@@ -122,6 +126,7 @@ pub struct DesktopPreferences {
     pub upload_hide_file_name: bool,
     pub upload_encrypt_metadata: bool,
     pub transfer_soft_limit_policy: SoftLimitPolicy,
+    pub speed_limits: TransferSpeedLimits,
     pub download_throughput_strategy: DownloadThroughputStrategy,
     pub lock_vault_when_hidden: bool,
     pub index_batch_size: u16,
@@ -147,6 +152,7 @@ impl Default for DesktopPreferences {
             upload_hide_file_name: true,
             upload_encrypt_metadata: true,
             transfer_soft_limit_policy: SoftLimitPolicy::AdaptiveOverride,
+            speed_limits: TransferSpeedLimits::default(),
             download_throughput_strategy: DownloadThroughputStrategy::Balanced,
             lock_vault_when_hidden: false,
             index_batch_size: 1_000,
@@ -350,6 +356,7 @@ pub struct DesktopLibrary {
     service: Arc<LibraryService<StorageWorker>>,
     worker: StorageWorker,
     database_path: Arc<PathBuf>,
+    pub(crate) bandwidth: teleark_telegram::TransferBandwidth,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -365,7 +372,12 @@ impl DesktopLibrary {
         let path = path.as_ref();
         prepare_database_parent(path)?;
         let worker = StorageWorker::open(path.to_owned())?;
+        let bandwidth = teleark_telegram::TransferBandwidth::default();
+        if let Ok(preferences) = worker.preferences() {
+            bandwidth.set_limits(preferences.speed_limits);
+        }
         Ok(Self {
+            bandwidth,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path.to_owned()),
@@ -385,7 +397,12 @@ impl DesktopLibrary {
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         prepare_database_parent(&path)?;
         let worker = StorageWorker::open_with_progress(path.clone(), progress)?;
+        let bandwidth = teleark_telegram::TransferBandwidth::default();
+        if let Ok(preferences) = worker.preferences() {
+            bandwidth.set_limits(preferences.speed_limits);
+        }
         Ok(Self {
+            bandwidth,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path),
@@ -489,7 +506,17 @@ impl DesktopLibrary {
         // Filesystem preparation belongs to this background caller, not the
         // shared SQL actor. Failed preparation leaves persisted settings intact.
         prepare_managed_directories(&self.database_path, preferences)?;
-        self.worker.set_preferences(preferences.clone())
+        self.worker
+            .set_preferences(preferences.clone(), self.bandwidth.clone())?;
+        Ok(())
+    }
+
+    /// Lock-bounded snapshots; no SQL or network request on presentation paths.
+    pub fn bandwidth_snapshot(&self) -> (BandwidthSnapshot, BandwidthSnapshot) {
+        (
+            self.bandwidth.upload.snapshot(),
+            self.bandwidth.download.snapshot(),
+        )
     }
 
     /// Returns and prepares the managed layout. Call from a background owner;
@@ -938,6 +965,7 @@ enum StorageRequest {
     },
     SetPreferences {
         preferences: DesktopPreferences,
+        bandwidth: teleark_telegram::TransferBandwidth,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     NativeDownloadDestinationInUse {
@@ -1192,8 +1220,13 @@ impl StorageWorker {
         self.request("preferences", |reply| StorageRequest::Preferences { reply })
     }
 
-    fn set_preferences(&self, preferences: DesktopPreferences) -> Result<(), ApplicationError> {
+    fn set_preferences(
+        &self,
+        preferences: DesktopPreferences,
+        bandwidth: teleark_telegram::TransferBandwidth,
+    ) -> Result<(), ApplicationError> {
         self.request("set_preferences", |reply| StorageRequest::SetPreferences {
+            bandwidth,
             preferences,
             reply,
         })
@@ -1599,8 +1632,17 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             StorageRequest::Preferences { reply } => {
                 let _ = reply.send(load_preferences(&database));
             }
-            StorageRequest::SetPreferences { preferences, reply } => {
-                let _ = reply.send(store_preferences(&mut database, &preferences));
+            StorageRequest::SetPreferences {
+                preferences,
+                bandwidth,
+                reply,
+            } => {
+                let result = store_preferences(&mut database, &preferences);
+                // Commit order and active-policy order are identical, even for concurrent callers.
+                if result.is_ok() {
+                    bandwidth.set_limits(preferences.speed_limits);
+                }
+                let _ = reply.send(result);
             }
             StorageRequest::NativeDownloadDestinationInUse { candidate, reply } => {
                 let _ = reply.send(
@@ -2113,6 +2155,18 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
                     _ => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
                 };
             }
+            "upload_speed_limit_bytes_per_second" => {
+                preferences.speed_limits.upload = setting
+                    .value
+                    .parse()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
+            "download_speed_limit_bytes_per_second" => {
+                preferences.speed_limits.download = setting
+                    .value
+                    .parse()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
             "transfer_soft_limit_policy" => {
                 preferences.transfer_soft_limit_policy = match setting.value.as_str() {
                     "respect" => SoftLimitPolicy::Respect,
@@ -2207,6 +2261,14 @@ fn store_preferences(
         DownloadThroughputStrategy::MaxThroughput => "max_throughput",
     };
     let values = [
+        (
+            "upload_speed_limit_bytes_per_second",
+            preferences.speed_limits.upload.to_string(),
+        ),
+        (
+            "download_speed_limit_bytes_per_second",
+            preferences.speed_limits.download.to_string(),
+        ),
         (
             "channel_sidebar_width",
             preferences.channel_sidebar_width.to_string(),
@@ -2676,6 +2738,10 @@ mod tests {
             upload_hide_file_name: false,
             upload_encrypt_metadata: false,
             transfer_soft_limit_policy: SoftLimitPolicy::Ignore,
+            speed_limits: TransferSpeedLimits {
+                upload: 256 * 1024,
+                download: 5 * 1024 * 1024,
+            },
             download_throughput_strategy: DownloadThroughputStrategy::MaxThroughput,
             lock_vault_when_hidden: false,
             index_batch_size: 500,
@@ -2958,6 +3024,59 @@ mod tests {
                 .next_download_destination("legacy.bin")
                 .expect("automatic destination"),
             legacy_directory.join("legacy.bin")
+        );
+    }
+
+    #[test]
+    fn failed_speed_limit_save_preserves_live_and_persisted_limits() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("library.sqlite3")).expect("library");
+        let mut preferences = library.preferences().expect("preferences");
+        preferences.speed_limits.upload = 1024;
+        library.set_preferences(&preferences).expect("initial save");
+        let blocked = directory.path().join("blocked");
+        std::fs::write(&blocked, b"preserve").expect("blocked directory fixture");
+        preferences.managed_files_root = Some(blocked);
+        preferences.speed_limits.upload = 2048;
+        assert!(library.set_preferences(&preferences).is_err());
+        assert_eq!(library.bandwidth_snapshot().0.bytes_per_second, 1024);
+        assert_eq!(
+            library
+                .preferences()
+                .expect("unchanged")
+                .speed_limits
+                .upload,
+            1024
+        );
+    }
+    #[test]
+    fn malformed_speed_limit_is_preserved_and_blocks_network_startup() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("library.sqlite3");
+        let mut database = Database::open(&path).expect("fixture");
+        let key = format!("{PREFERENCE_PREFIX}upload_speed_limit_bytes_per_second");
+        database
+            .set_setting(&SettingRecord {
+                key: key.clone(),
+                value: "-1".into(),
+                updated_at_unix_ms: 1,
+            })
+            .expect("malformed fixture");
+        drop(database);
+        let library = DesktopLibrary::open(&path).expect("library remains available");
+        assert!(library.preferences().is_err());
+        assert!(
+            DesktopTelegram::open_configured(directory.path().join("session"), &library).is_err()
+        );
+        let database = Database::open(&path).expect("unchanged database");
+        assert_eq!(
+            database
+                .setting(&key)
+                .expect("read original")
+                .expect("setting")
+                .value,
+            "-1"
         );
     }
 

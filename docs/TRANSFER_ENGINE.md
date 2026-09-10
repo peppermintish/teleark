@@ -118,3 +118,34 @@ Native history retention follows [ADR 0023](adr/0023-native-history-and-recovery
 ## Durable Vault upload history
 
 [ADR 0029](adr/0029-durable-upload-history.md) supersedes the memory-only history behavior. Schema 16 persists admitted upload windows, file starts and terminal summaries. Database acknowledgment precedes completion in the UI. Startup converts unfinished local operations to explicit interrupted history without resending them; the inspector explains how to check Storage and start a new upload from its source. Account-scoped restoration runs before remote catalog loading, with visible background phases and generation checks. The current view retains 256 recent rows plus the complete boundary batch and discloses older stored rows. Restored totals and available sanitized logs are real; live telemetry is explicitly unavailable. Older versions did not save task summaries, so already-lost rows cannot be reconstructed. Encrypted part resumption and browsing older upload history remain open.
+
+## Aggregate upload and download speed limits
+
+[ADR 0030](adr/0030-shared-transfer-speed-limits.md) defines independently adjustable,
+application-wide payload budgets for upload and download. Transfers and both
+transfer Settings sections open the same editor (integer KiB/s; zero is unlimited).
+Successful saves immediately update existing connection clones and survive route
+replacement and restart. Failed saves retain the active limits.
+
+Native downloads reserve a chunk before issuing its request; encrypted downloads,
+verification reads and manifest payloads use the same download budget. Uploads pace
+bounded source reads before handing bytes to the transport. Authentication, proxy
+checks, catalog control requests and avatars do not consume file-transfer budgets.
+This is payload admission pacing, not an exact socket-byte ceiling: MTProto overhead,
+internal transport retransmission and previously admitted/in-flight buffers are not
+counted again. The token burst is at most 512 KiB per direction; each upload reader
+admits at most 16 KiB per read and grammers assembles 512 KiB transport parts, so low
+upload caps can have a long visible wait before each part is sent. Existing transport
+concurrency bounds its in-flight buffers. Download requests use a 4–512 KiB aligned
+chunk chosen at logical-part start; policy changes wake waits immediately without
+changing the existing persistent logical-part map.
+
+A global status strip remains visible across navigation and collapsed batches while
+caps are configured. The editor shows waiting counts/durations, last payload
+admission and an expandable timeline (latest 16 transitions per direction, with
+omission counts). A retained 250 ms presentation sampler reads bounded in-memory
+snapshots, never SQL or queues; unchanged idle frames are not invalidated. Existing
+transfer cancel controls cancel pending admission through task cancellation. Limits
+can be changed to zero to release bandwidth waits; waiting itself is not completion.
+
+Synthetic English-only review: `--preview-ui --preview-state=speed-limits --locale=en-US` opens the editor with bounded fixture history and wait feedback. It does not run transfers or save settings.

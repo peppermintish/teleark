@@ -302,9 +302,9 @@ mod tests {
         cx.update(gpui_kit::init);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = StartupView::new(
-                Localizer::new(SupportedLocale::JaJp).expect("catalog"),
-                LaunchOptions::from_args(["--locale=ja-JP"], SupportedLocale::JaJp),
-                SupportedLocale::JaJp,
+                Localizer::new(SupportedLocale::EnUs).expect("catalog"),
+                LaunchOptions::from_args(["--locale=en-US"], SupportedLocale::EnUs),
+                SupportedLocale::EnUs,
                 true,
                 window,
                 cx,

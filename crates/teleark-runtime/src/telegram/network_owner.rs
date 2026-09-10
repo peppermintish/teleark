@@ -18,8 +18,12 @@ impl Endpoint {
         route: NetworkRoute,
         monitor: NetworkMonitor,
         generation: u64,
+        bandwidth: teleark_telegram::TransferBandwidth,
     ) -> Result<Self, ApplicationError> {
-        Self::spawn_with(route, monitor, generation, telegram_loop)
+        Self::spawn_with(route, monitor, generation, move |receiver, mut state| {
+            state.bandwidth = bandwidth;
+            telegram_loop(receiver, state)
+        })
     }
 
     fn spawn_with<F, Fut>(
@@ -118,29 +122,37 @@ impl DesktopTelegram {
     /// For isolated callers with an explicitly direct policy. The application
     /// must use `open_configured` so saved policy is loaded before any network.
     pub fn open_direct(session_path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
-        Self::open_with_route(session_path, NetworkRoute::Direct)
+        Self::open_with_route(
+            session_path,
+            NetworkRoute::Direct,
+            teleark_telegram::TransferBandwidth::default(),
+        )
     }
 
     pub fn open_configured(
         session_path: impl AsRef<Path>,
         library: &DesktopLibrary,
     ) -> Result<Self, ApplicationError> {
+        // Preserve library access for repair, but never start traffic with unreadable limits.
+        library.preferences()?;
         let route = library.proxy_configuration()?;
-        Self::open_with_route(session_path, route)
+        Self::open_with_route(session_path, route, library.bandwidth.clone())
     }
 
     fn open_with_route(
         session_path: impl AsRef<Path>,
         route: NetworkRoute,
+        bandwidth: teleark_telegram::TransferBandwidth,
     ) -> Result<Self, ApplicationError> {
         let session_path = session_path.as_ref().to_owned();
         if session_path.as_os_str().is_empty() {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         let monitor = NetworkMonitor::new(&route);
-        let endpoint = Endpoint::spawn(route.clone(), monitor.clone(), 0)?;
+        let endpoint = Endpoint::spawn(route.clone(), monitor.clone(), 0, bandwidth.clone())?;
         Ok(Self {
             inner: Arc::new(TelegramWorkerInner {
+                bandwidth,
                 endpoint: Mutex::new(Some(endpoint)),
                 changing: AtomicBool::new(false),
                 route: Mutex::new(route),
@@ -211,8 +223,12 @@ impl DesktopTelegram {
                 .publish(generation, NetworkPhase::Blocked(ProxyFailure::Persistence));
             return Err(error);
         }
-        let endpoint = match Endpoint::spawn(route.clone(), self.inner.monitor.clone(), generation)
-        {
+        let endpoint = match Endpoint::spawn(
+            route.clone(),
+            self.inner.monitor.clone(),
+            generation,
+            self.inner.bandwidth.clone(),
+        ) {
             Ok(endpoint) => endpoint,
             Err(error) => {
                 self.inner
@@ -483,6 +499,67 @@ mod tests {
             DesktopTelegram::open_configured(directory.path().join("other-session"), &library)
                 .expect("controlled proxy fixture");
         assert_eq!(reopened.network_route(), NetworkRoute::Direct);
+    }
+    #[test]
+    fn speed_limits_upgrade_missing_keys_persist_and_update_live_owners() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("library.sqlite3");
+        let library = DesktopLibrary::open(&path).expect("legacy empty preferences");
+        assert_eq!(
+            library.preferences().expect("defaults").speed_limits,
+            crate::TransferSpeedLimits::default()
+        );
+        let telegram = DesktopTelegram::open_configured(directory.path().join("session"), &library)
+            .expect("owner");
+        let mut preferences = library.preferences().expect("preferences");
+        preferences.speed_limits = crate::TransferSpeedLimits {
+            upload: 1024,
+            download: 4096,
+        };
+        library.set_preferences(&preferences).expect("save limits");
+        assert_eq!(
+            telegram.inner.bandwidth.upload.snapshot().bytes_per_second,
+            1024
+        );
+        assert_eq!(
+            telegram
+                .inner
+                .bandwidth
+                .download
+                .snapshot()
+                .bytes_per_second,
+            4096
+        );
+        let reopened = DesktopLibrary::open(&path).expect("restart");
+        assert_eq!(reopened.bandwidth_snapshot().0.bytes_per_second, 1024);
+        assert_eq!(
+            reopened.preferences().expect("restored").speed_limits,
+            preferences.speed_limits
+        );
+        telegram
+            .apply_network_route(&library, proxy_route())
+            .expect("replace network owner");
+        assert_eq!(
+            telegram.inner.bandwidth.upload.snapshot().bytes_per_second,
+            1024
+        );
+        preferences.speed_limits = crate::TransferSpeedLimits::default();
+        library
+            .set_preferences(&preferences)
+            .expect("disable limits");
+        assert_eq!(
+            telegram.inner.bandwidth.upload.snapshot().bytes_per_second,
+            0
+        );
+        assert_eq!(
+            telegram
+                .inner
+                .bandwidth
+                .download
+                .snapshot()
+                .bytes_per_second,
+            0
+        );
     }
 }
 

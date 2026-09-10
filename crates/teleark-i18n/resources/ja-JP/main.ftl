@@ -1477,3 +1477,24 @@ transfer-history-restored-detail = 保存済みのタスク集計を復元しま
 
 detail-vault-lifecycle-durable-upload = タスクの集計はローカルに保存されます。未完了のアップロードは再起動後に中断と表示されます。元のファイルを選択して新しくアップロードしてください。
 upload-error-folder = フォルダーや .app アプリケーションバンドルは直接アップロードできません。ZIP ファイルに圧縮してからアップロードしてください。
+
+speed-limits-title = 転送速度制限
+speed-limits-description = 方向ごとに合計速度を設定します。単位は KiB/s（1024 KiB/s = 1 MiB/s）。0 は無制限です。
+speed-limits-upload = アップロード · KiB/s
+speed-limits-download = ダウンロード · KiB/s
+speed-limits-unlimited = 無制限
+speed-limits-scope = 暗号化ファイルを含むすべてのファイル転送に適用されます。保存後に反映されます。データ量を制御するため短いバーストが発生する場合があります。プロトコルの通信量は含みません。
+speed-limits-invalid = 有効な範囲の非負の整数を入力してください。
+speed-limits-save-failed = 保存できませんでした。以前の制限が有効です。保存を再試行してください。
+speed-limits-ready = 保存すると現在と今後の転送に適用されます。
+speed-limits-summary = 制限 ↑ { $upload } · ↓ { $download } · 待機：{ $waiting } · { $seconds } 秒
+speed-limits-budget = { $limit } · 帯域待機 { $waiting } 件 · { $seconds } 秒
+speed-limits-last-activity = 前回のデータ通過：{ $seconds } 秒前
+speed-limits-no-activity = 制限対象のデータはまだ通過していません。
+speed-limits-history = 最近のアクティビティを表示 / 非表示
+speed-limits-event-changed = 制限を変更
+speed-limits-event-waiting = 帯域を待機中
+speed-limits-event-resumed = 帯域待機が終了
+speed-limits-event = { $event } · { $seconds } 秒前
+speed-limits-omitted = 過去の { $count } 件を省略。方向ごとに最新 16 件を保持します。
+speed-limits-close = 閉じる

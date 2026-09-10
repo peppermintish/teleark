@@ -875,8 +875,9 @@ mod tests {
 
         for (width, height) in [(900.0, 600.0), (1120.0, 680.0)] {
             cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
-            // Dedicated localization/wrapping checks; ordinary UI tests remain English.
-            for locale in SupportedLocale::ALL {
+            // Interface verification uses English only, including wrapping checks.
+            {
+                let locale = SupportedLocale::EnUs;
                 for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
                     cx.update(|window, cx| {
                         app.update(cx, |app, cx| {

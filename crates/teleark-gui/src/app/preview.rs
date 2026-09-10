@@ -428,6 +428,7 @@ impl TeleArkApp {
             self.preview_upload_history();
         }
         match state.as_str() {
+            "speed-limits" => self.preview_speed_limits(window, cx),
             "returning" => self.page = Page::Account,
             "upload-progress" | "session-active" => {
                 self.page = Page::Transfers;
