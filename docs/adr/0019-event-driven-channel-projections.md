@@ -37,4 +37,4 @@ Protected real-account delivery, cross-device latency, long outages, real server
 ## References
 
 - [Telegram channel subscriptions and updates](https://core.telegram.org/api/updates#subscribing-to-updates-of-channels-supergroups), including PTS sequencing, subscription deadlines and difference recovery.
-- Public grammers 0.10.0 APIs and the repository's existing MIT OR Apache-2.0 dependency graph. No dependency was added and no GPL `tdl` implementation or derived material was inspected.
+- Public grammers 0.10.0 APIs and the repository's existing MIT OR Apache-2.0 dependency graph. No dependency was added and no license-incompatible implementation or derived material was inspected.

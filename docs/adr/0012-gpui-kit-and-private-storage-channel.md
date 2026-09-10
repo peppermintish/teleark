@@ -17,7 +17,7 @@ The published Kit, Base, Component, Assets and gpui-pre packages declare
 Apache-2.0. In particular, the registry's versioned `gpui-pre-zlog`,
 `gpui-pre-ztracing` and `gpui-pre-ztracing-macro` 0.3.3 are Apache-2.0;
 the old unprefixed GPL packages remain banned. This is a reviewed registry
-snapshot, not authorization to adopt arbitrary Zed application code.
+snapshot; upstream application code requires a separate license review.
 The snapshot is young and has no stable API promise; retain the lockfile,
 upstream attribution and dependency gate. No prohibited source was consulted.
 

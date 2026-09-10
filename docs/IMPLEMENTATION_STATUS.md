@@ -97,7 +97,7 @@ The release includes the pending account, Library, private-channel management an
 
 Versioned settings record account-scoped channel binding and the one-time migration decision. Crypto/manifest/recovery/bitmap/session-log encodings are unchanged. Missing/invalid/truncated channel discovery fails closed, new uploads validate current privacy/ownership before touching plaintext/keys, and manifest cancellation is propagated independently from key-operation state.
 
-The permissive GPUI graph and exact license exceptions are reviewed in ADR 0012, `deny.toml` and third-party notices. No GPL `tdl` or incompatible implementation was used. Core/Runtime remain GUI-free; SQL and grammers remain adapter-owned. Three catalogs, structured domain errors and bounded retained owners remain in place.
+The permissive GPUI graph and exact license exceptions are reviewed in ADR 0012, `deny.toml` and third-party notices. No license-incompatible external implementation was used. Core/Runtime remain GUI-free; SQL and grammers remain adapter-owned. Three catalogs, structured domain errors and bounded retained owners remain in place.
 
 ## v0.4.1 usability scope
 

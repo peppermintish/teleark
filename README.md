@@ -1,42 +1,55 @@
 # TeleArk
 
-TeleArk turns Telegram collections into a desktop file workspace. Browse ordinary channels, keep encrypted logical files in your own private TeleArk channel, and follow uploads/downloads from a permanent Transfers page. One logical file stays one file even when its encrypted storage uses multiple objects.
+**A native desktop workspace for your files on Telegram.**
 
-> [!IMPORTANT]
-> v0.4.3 is an early alpha. Real Telegram browsing/native downloads and encrypted upload/discovery/restore are connected. Crypto formats remain provisional; independent security review, durable encrypted transfer controls and signed packaging are unfinished. Keep independent copies of important data and recovery material.
+Browse channel files, store encrypted files in your own private Telegram channel, and manage uploads and downloads in one place. TeleArk combines a searchable local library with encrypted storage and recovery tools.
 
-## Start using the workspace
-
-1. Sign in by phone/code (and two-step verification if enabled) or QR. A restored session opens a centered avatar/name welcome screen with **Log In** and **Switch Account**.
-2. Open **TeleArk** and create or rediscover its dedicated private channel. The channel must be owned by the active account. A distinct sidebar entry keeps it separate from ordinary channels; renaming it does not lose the binding.
-3. Use **Files** for authenticated complete logical files or **Raw Files** for original Telegram documents and encrypted storage objects. The Help guide explains the relationship and recovery requirements.
-4. Choose **Upload**. If the Key Vault needs setup/unlock, the dialog returns to the requested action after successful unlock and recovery acknowledgement. Keep the exported recovery bundle offline.
-5. Use **Transfers** for progress, native pause/resume/cancel/retry, batch actions and optional detailed diagnostics. Channel refresh and long channel lists do not hide this destination.
-
-New uploads go only to the private TeleArk channel. Existing Saved Messages packages remain recoverable through **Settings → Key Vault → Advanced**. TeleArk does not move or delete old remote objects automatically.
+[Features](#available-features) · [Build and run](#build-and-run) · [Build and packaging guide](docs/PACKAGING.md) · [Architecture](docs/ARCHITECTURE.md)
 
 ## Available features
 
-- Apple-style GPUI Kit workspace with a collapsible icon sidebar, visible free disk space, light/dark appearance, responsive layouts, keyboard shortcuts and English, Simplified Chinese and Japanese.
-- Bounded channel browsing with a virtualized file table, search, time/type filters, single/multiple downloads and channel batches.
-- Persistent native download history, missing-part restart resume, bounded retries/FloodWait handling and Balanced/Max Throughput strategies.
-- Encrypted single/multi-file upload with reviewable batches, authenticated manifest discovery, verified restoration and non-overwriting final publication.
-- Background checks for missing/changed local downloads, safe new-task re-download and account-scoped local output history.
-- Password/recovery unlock, explicit recovery-bundle export/restore, password change and recovery rotation. Advanced controls stay folded until needed.
-- Library separates accessible local downloads/imports from the current account’s indexed remote files, with independent type filtering, search, paging, details and Open/Reveal/Download actions. Importing metadata is separate from uploading a file.
-- Configurable managed storage, privacy-bounded diagnostics, live/replay transfer details and the full localized [changelog](CHANGELOG.md) in **Settings → About**.
+- **Channel browsing** — Search and filter files by type or date, select multiple files, and download channel batches.
+- **Encrypted storage** — Upload individual files or batches to a dedicated private channel. Authenticated manifests keep each file discoverable and let TeleArk verify its contents during restoration.
+- **Transfer management** — Follow progress, queues, retries and live or historical diagnostics. Ordinary Telegram downloads support pause, resume, cancel, retry and restart recovery. Upload history survives restarts; separate upload and download speed limits apply to active transfers.
+- **Local and remote library** — Browse downloaded/imported files separately from indexed Telegram files, with search, filters and file actions. Background checks identify missing or changed local downloads.
+- **Key management and recovery** — Unlock with a password or recovery material, export and restore recovery bundles, change passwords and retain older key versions for existing files.
+- **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and English, Simplified Chinese and Japanese interfaces.
 
-Native downloads currently verify byte length rather than a cryptographic content hash. Encrypted transfers use bounded buffers and a temporary 60 MiB plaintext part ceiling; their task controls/checkpoints are not yet durable. OS Credential unlock remains visibly disabled until its platform adapter is reviewed. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for precise limits.
+## How it works
+
+TeleArk treats a **logical file** as one file, even when its encrypted storage spans multiple Telegram objects. The **Files** view presents complete authenticated files; **Raw Files** exposes the underlying documents, encrypted parts and manifests.
+
+| Layer | Technology |
+| --- | --- |
+| Application | Rust 2024, organized as a Cargo workspace |
+| Desktop interface | GPUI Kit with virtualized lists and native windows |
+| Telegram connectivity | MTProto through `grammers` |
+| Local catalog | SQLite, FTS5 search and versioned migrations |
+| Encryption | AES-256-GCM, Argon2id password derivation and BLAKE3 integrity digests |
+| Localization | Fluent catalogs through `teleark-i18n` |
+
+Core, Runtime, Storage, Telegram, Crypto, Index and Transfer are independent of the GUI framework. Background workers handle network, filesystem, database and encryption work through bounded queues, keeping the interface responsive. See the [architecture](docs/ARCHITECTURE.md) and [encrypted file format](docs/CRYPTO_FORMAT.md) for the contracts and module boundaries.
 
 ## Build and run
 
-For platform prerequisites, standalone executables and installers, see the [build and packaging guide](docs/PACKAGING.md). macOS is the current build/release baseline; Windows and Linux recipes remain unverified.
+**macOS is the current build and release baseline.** Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`). The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
+
+Run the following commands from the repository root in bash or zsh. For platform prerequisites, standalone executables, macOS `.app` / `.dmg` / `.pkg` packages and Windows/Linux recipes, see the **[build and packaging guide](docs/PACKAGING.md)**. Windows and Linux builds and installers remain unverified.
 
 ### Load `.env` values before building
 
-Neither Cargo nor TeleArk automatically reads `.env`, `.env.local` or `.env.example`. The two `TELEARK_DISTRIBUTION_TELEGRAM_API_*` values are read **at compile time** using `option_env!`. A plain `cargo run -r` does not load the file, and setting variables only when launching an existing executable does not change its embedded credentials.
+Create a private local configuration without overwriting an existing file:
 
-[`.env.example`](.env.example) contains Telegram's [official public TEST ONLY identifiers](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). This file is a template only, not a build or packaging configuration. Create `.env.local` as described below and replace the samples with your own credentials, then use this temporary environment in bash/zsh on macOS/Linux, or **Git Bash with native Windows Rust** on Windows:
+```bash
+if [ ! -e .env.local ]; then
+  (umask 077; set -C; cat .env.example > .env.local)
+fi
+chmod 600 .env.local
+```
+
+Edit `.env.local` and replace both sample values with your application's API ID and API Hash from [Telegram's API development panel](https://my.telegram.org/apps). [`.env.example`](.env.example) is a template containing public **TEST ONLY** identifiers; it is never a fallback build configuration. Local environment files are Git-ignored.
+
+Build and launch with the configuration scoped to this shell command:
 
 ```bash
 (
@@ -48,46 +61,42 @@ Neither Cargo nor TeleArk automatically reads `.env`, `.env.local` or `.env.exam
 )
 ```
 
-For your own values, initialize a private file without overwriting an existing one:
-
-```bash
-if [ ! -e .env.local ]; then
-  (umask 077; set -C; cat .env.example > .env.local)
-fi
-chmod 600 .env.local
-```
-
-Edit `.env.local` locally, replacing both values with your application's API ID/Hash from [Telegram's API development panel](https://my.telegram.org/apps). Local builds and packaging use `.env.local`; `.env.example` is never a fallback. On Windows, restrict personal files with Windows file permissions as well; Git Bash's `chmod` does not guarantee a private Windows ACL. These local files are Git-ignored. Source only trusted files: shell sourcing executes their contents. Never print personal values, enable shell tracing or include these files in a package.
-
-To **build without launching**, use the helper below. It loads `.env.local`, validates both values and refuses the public sample API ID:
+To build without launching:
 
 ```bash
 scripts/build-local.sh
 ```
 
-Use this environment on every build/run that should embed the pair. Running Cargo later without the variables can rebuild without those defaults. The variables disappear when the subshell exits, but embedded identifiers remain extractable from the binary. The local packaging helper requires both values. Saved personal credentials in Settings take precedence over the embedded pair. No environment file is required alongside a built executable.
+The helper loads `.env.local`, validates both values and rejects the public sample API ID. Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time**, so supply them on each build and rebuild after changing them. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
 
-### Local state and UI preview
+Source only your trusted local configuration and keep it out of logs and packages. Embedded application identifiers are extractable from binaries. On Windows, use Git Bash with native Windows Rust and restrict the file with Windows permissions as well.
 
-The default catalog lives at `~/Library/Application Support/TeleArk/library.sqlite3`. Settings exposes the managed root containing Downloads, Cache and Logs. Switching accounts pauses/drains native work and preserves completed files/history; old unknown-account work is retained without becoming executable under a new login.
+### First launch
 
-For isolated layout review without opening real user state or contacting Telegram:
+1. **Sign in** with QR or phone/code, including two-step verification when enabled.
+2. **Open TeleArk** to create or rediscover the dedicated private channel owned by your account.
+3. **Set up the Key Vault**, export a recovery bundle and keep it offline. Then upload files, browse **Files**, and follow work in **Transfers**.
+
+New uploads go to the private TeleArk channel. Older Saved Messages packages remain recoverable through **Settings → Key Vault → Advanced**.
+
+### UI preview
+
+Preview a synthetic workspace without signing in, opening real user state or contacting Telegram:
 
 ```bash
-cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=zh-CN --window-size=900x600
-cargo run -p teleark-gui -- --preview-ui --preview-state=about --preview-dark --locale=ja-JP
+cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=en-US --window-size=900x600
 ```
 
-The minimum window is 900×600; oversized requests fit the display. [Development](docs/DEVELOPMENT.md) lists all preview routes, quality gates and documentation recovery commands.
+Add `--preview-dark` for the dark theme. See [Development](docs/DEVELOPMENT.md) for more preview routes, contributor guidance and quality checks.
 
 ## Data and recovery
 
-The local SQLite catalog is unencrypted and contains filenames, paths and other useful metadata. Personal API Hashes are stored there too; readable backups expose them. Distributor credentials are extractable from their binary. Telegram sessions stay in a separate adapter cache; QR authorization links remain memory-only.
+Encrypted storage protects remote file contents and original names. Telegram can still observe channel relationships, ciphertext sizes and timing. The local SQLite catalog is unencrypted and contains metadata and saved personal API credentials; Telegram sessions use a separate adapter cache. On macOS, the catalog defaults to `~/Library/Application Support/TeleArk/library.sqlite3`; storage paths are configurable in Settings.
 
-Vault protects remote original names/content, but cannot hide channel relationships, ciphertext sizes, timing or message counts from Telegram. A valid recovery bundle plus account access and retained manifests/parts can reconstruct completed packages after database loss. Rotating the current recovery record cannot revoke old exported bundles wrapping the same Master Key. Protect those exports separately.
+Recovery after database loss requires a valid recovery bundle, access to the Telegram account, and retained manifests and encrypted parts. Keep recovery material separately from the stored files. Rotating a recovery record does not revoke older exported bundles that wrap the same Master Key. See [Security and data integrity](docs/SECURITY.md) for details.
 
-See [Security](docs/SECURITY.md), [Architecture](docs/ARCHITECTURE.md) and [Implementation status](docs/IMPLEMENTATION_STATUS.md). The concise [contributor guide](AGENTS.md) routes contributors to the relevant contracts; accepted ADRs and before/after documentation checkpoints preserve design history.
+**Current limits:** interrupted encrypted uploads retain history but do not automatically resume. Encrypted transfers use a temporary 60 MiB plaintext part ceiling; ordinary Telegram downloads verify byte length rather than a cryptographic content hash. OS Credential unlock is disabled, and macOS packages are unsigned. [Implementation status](docs/IMPLEMENTATION_STATUS.md) tracks remaining work and validation; [Changelog](CHANGELOG.md) records release history.
 
 ## License
 
-TeleArk is licensed under your choice of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT). Distributions include [third-party notices](THIRD_PARTY_NOTICES.md).
+TeleArk is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Distributions include [third-party notices](THIRD_PARTY_NOTICES.md).

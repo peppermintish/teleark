@@ -5,13 +5,13 @@
 
 ## Context
 
-TeleArk is intended for permissive distribution. The Go project `tdl` is GPL-licensed and is therefore unsuitable as an implementation reference. Copying, translating, adapting, or reproducing its implementation details could compromise clean provenance. Dependencies and bundled assets can also introduce reciprocal terms or attribution obligations, including through upstream Git branches whose graphs differ from published releases.
+TeleArk is intended for permissive distribution. External projects with incompatible licenses are unsuitable implementation references. Copying, translating, adapting, or reproducing their implementation details could compromise clean provenance. Dependencies and bundled assets can also introduce reciprocal terms or attribution obligations, including through upstream Git branches whose graphs differ from published releases.
 
 ## Decision
 
 License TeleArk under `MIT OR Apache-2.0`, with `LICENSE-MIT` and `LICENSE-APACHE`, and understand contributions to be offered under the same terms unless explicitly stated otherwise.
 
-Apply a strict clean-room rule: contributors and agents must not inspect, copy, translate, port, adapt, derive from, or use implementation details from GPL `tdl`, including its source, tests, architecture, schemas, state machines, naming, control flow, or Telegram RPC sequencing. They may not ask another person/agent to inspect it and summarize it. Use official Telegram/MTProto documentation, public `grammers` APIs/docs, permissively licensed crate documentation, public specifications, and original TeleArk analysis/tests.
+Apply a strict clean-room rule: contributors and agents must not inspect, copy, translate, port, adapt, derive from, or use implementation details from license-incompatible external projects, including their source, tests, architecture, schemas, state machines, naming, control flow, or Telegram RPC sequencing. They may not ask another person/agent to inspect or summarize those implementations. Use official Telegram/MTProto documentation, public `grammers` APIs/docs, permissively licensed crate documentation, public specifications, and original TeleArk analysis/tests.
 
 Review each dependency's direct/transitive licenses, maintenance, security posture, and necessity before adoption. The GUI dependency baseline selected by upstream research is pinned to published crates.io releases:
 
@@ -21,7 +21,7 @@ gpui-component = "=0.5.1"
 gpui-component-assets = "=0.5.1"  # optional if its bundled assets are needed
 ```
 
-Do not substitute the current Zed/git-main dependency path without a fresh legal audit: the graph reviewed for this decision pulled `ztracing`/`zlog` under `GPL-3.0-or-later`, which is incompatible with the intended permissive distribution policy.
+Do not substitute an upstream Git development dependency path without a fresh legal audit: the graph reviewed for this decision pulled `ztracing`/`zlog` under `GPL-3.0-or-later`, which is incompatible with the intended permissive distribution policy.
 
 When Lucide icons are distributed through an assets package, preserve the Lucide ISC and applicable Feather MIT copyright/license attribution in `THIRD_PARTY_NOTICES.md`. Audit the exact bundled asset inventory and licenses; Lucide's terms do not automatically cover every neighboring asset, trademark, or font.
 

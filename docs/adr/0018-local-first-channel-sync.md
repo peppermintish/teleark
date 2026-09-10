@@ -21,8 +21,8 @@ Feedback is independent of diagnostic logging and navigation: preparation/local 
 ## References and license provenance
 
 - [Telegram update synchronization](https://core.telegram.org/api/updates): PTS ordering, channel differences and server-declared history gaps. This is a protocol reference, not implementation code.
-- [Matrix Rust SDK event cache](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk/event_cache/index.html) and [sync service](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk_ui/sync_service/index.html): account/room cache and synchronization lifetimes independent of the visible timeline. Its [Apache-2.0 license](https://github.com/matrix-org/matrix-rust-sdk/blob/main/LICENSE) was checked before reviewing the documentation; no implementation was copied.
-- The installed public grammers 0.10.0 APIs are MIT OR Apache-2.0, verified in package manifests before inspection. No dependency was added. No GPL `tdl` source, tests, architecture or summaries were consulted.
+- Permissively licensed SDK documentation informed the separation of account-scoped caches and synchronization lifetimes from the visible timeline. Its license was verified before review; no implementation was copied.
+- The installed public grammers 0.10.0 APIs are MIT OR Apache-2.0, verified in package manifests before inspection. No dependency was added. No license-incompatible source, tests, architecture or summaries were consulted.
 
 ## Consequences and evidence
 

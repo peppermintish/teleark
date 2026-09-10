@@ -12,7 +12,7 @@ Run commands from the repository root. Install Rust through rustup; this checkou
 | Windows | Native MSVC Rust toolchain, Visual Studio Build Tools with Desktop development with C++ and Windows SDK; Git Bash for the environment examples | `target/release/teleark.exe` | Manual ZIP / Inno Setup recipe; native build and installer not yet qualified by this project |
 | Linux | Rust, C/C++ toolchain, CMake, pkg-config, Clang and development libraries required by the locked GPUI backend; a working graphical session/GPU driver | `target/release/teleark` | Manual tar archive / Debian package recipe; native build and installer not yet qualified by this project |
 
-For platform dependency troubleshooting, upstream's [Windows](https://zed.dev/docs/development/windows) and [Linux](https://zed.dev/docs/development/linux) build documentation provides background; it is not a verified dependency list for TeleArk's locked GPUI version. macOS is the current build/release baseline. There is no signed installer yet.
+For platform dependency troubleshooting, check the native build requirements of the locked GPUI backend. The Windows and Linux prerequisites above are starting points, not a verified dependency list for this checkout. macOS is the current build/release baseline. There is no signed installer yet.
 
 Build without launching:
 
