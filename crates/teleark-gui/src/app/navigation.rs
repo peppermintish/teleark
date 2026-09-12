@@ -4,12 +4,15 @@ use crate::assets::Symbol;
 
 use super::*;
 use gpui_kit::component::{
-    Collapsible,
+    Collapsible, Sizable as _,
     avatar::Avatar,
     button::ButtonVariants as _,
     input::Input,
-    sidebar::{Sidebar, SidebarItem, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarItem},
 };
+
+#[cfg(test)]
+use gpui_kit::component::sidebar::SidebarMenuItem;
 
 /// Sidebar virtualizes its `SidebarItem::render` calls, but eagerly retains its
 /// children. Keep those children as identities, not allocated menu widgets.
@@ -33,7 +36,7 @@ impl SidebarItem for ChannelSidebarItem {
     fn render(
         self,
         id: impl Into<gpui_kit::ElementId>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut gpui_kit::App,
     ) -> impl IntoElement {
         let item = self
@@ -50,8 +53,19 @@ impl SidebarItem for ChannelSidebarItem {
                 #[cfg(test)]
                 MATERIALIZED_CHANNELS.with(|count| count.set(count.get() + 1));
                 Some(
-                    SidebarMenuItem::new(chat.name.clone())
-                        .active(app.selected_chat_id == Some(self.chat_id))
+                    components::list_navigation_button(id, chat.name.clone(), None)
+                        .ghost()
+                        .w_full()
+                        .h(theme::ROW_HEIGHT)
+                        .text_size(theme::LIST_TEXT_SIZE)
+                        .line_height(theme::LIST_LINE_HEIGHT)
+                        .justify_start()
+                        .px_2()
+                        .tooltip(chat.name.clone())
+                        .accessibility_label(chat.name.clone())
+                        .when(app.selected_chat_id == Some(self.chat_id), |item| {
+                            item.bg(theme::blue_soft()).text_color(theme::blue())
+                        })
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if app.telegram_chats.iter().any(|chat| {
                                 chat.id == self.chat_id && chat.kind == TelegramChatKind::Channel
@@ -64,11 +78,9 @@ impl SidebarItem for ChannelSidebarItem {
             })
             .ok()
             .flatten();
-        div()
+        components::list_row()
             .debug_selector(move || format!("channel-sidebar-row-{}", self.chat_id))
-            .when_some(item, |row, item| {
-                row.child(item.render(id, window, cx).into_any_element())
-            })
+            .when_some(item, |row, item| row.child(item))
             .into_any_element()
     }
 }
@@ -180,60 +192,67 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = self.tr(label);
-        components::button(id, "", None, false)
-            .icon(icon)
-            .ghost()
-            .tooltip(title.clone())
-            .accessibility_label(title.clone())
-            .w_full()
-            .h(px(42.0))
-            .when(!self.preferences.sidebar_collapsed, |button| {
-                button.label(title).justify_start()
-            })
-            .when(selected, |button| {
-                button.bg(theme::blue_soft()).text_color(theme::blue())
-            })
-            .on_click(cx.listener(move |this, _, _, cx| match id {
-                "nav-storage" => {
-                    this.page = Page::Storage;
-                    this.select_storage(StorageView::Files, cx);
+        components::list_navigation_button(
+            id,
+            if self.preferences.sidebar_collapsed {
+                SharedString::from("")
+            } else {
+                title.clone()
+            },
+            Some(icon.into()),
+        )
+        .ghost()
+        .tooltip(title.clone())
+        .accessibility_label(title.clone())
+        .debug_selector(move || format!("primary-nav-row-{id}"))
+        .w_full()
+        .h(theme::ROW_HEIGHT)
+        .text_size(theme::LIST_TEXT_SIZE)
+        .line_height(theme::LIST_LINE_HEIGHT)
+        .when(selected, |button| {
+            button.bg(theme::blue_soft()).text_color(theme::blue())
+        })
+        .on_click(cx.listener(move |this, _, _, cx| match id {
+            "nav-storage" => {
+                this.page = Page::Storage;
+                this.select_storage(StorageView::Files, cx);
+            }
+            "nav-transfers-all" => {
+                this.nav_selection = id;
+                this.set_page(Page::Transfers, cx);
+            }
+            "nav-channels" => {
+                let eligible = |chat: &&TelegramChatSummary| {
+                    chat.kind == TelegramChatKind::Channel
+                        && Some(chat.id) != this.storage_channel_id()
+                };
+                let target = this
+                    .telegram_chats
+                    .iter()
+                    .filter(eligible)
+                    .find(|chat| Some(chat.id) == this.last_channel_id)
+                    .or_else(|| this.telegram_chats.iter().find(eligible))
+                    .map(|chat| chat.id);
+                if let Some(chat_id) = target {
+                    this.select_channel(chat_id, cx);
+                } else {
+                    this.set_page(Page::Channel, cx);
                 }
-                "nav-transfers-all" => {
-                    this.nav_selection = id;
-                    this.set_page(Page::Transfers, cx);
-                }
-                "nav-channels" => {
-                    let eligible = |chat: &&TelegramChatSummary| {
-                        chat.kind == TelegramChatKind::Channel
-                            && Some(chat.id) != this.storage_channel_id()
-                    };
-                    let target = this
-                        .telegram_chats
-                        .iter()
-                        .filter(eligible)
-                        .find(|chat| Some(chat.id) == this.last_channel_id)
-                        .or_else(|| this.telegram_chats.iter().find(eligible))
-                        .map(|chat| chat.id);
-                    if let Some(chat_id) = target {
-                        this.select_channel(chat_id, cx);
-                    } else {
-                        this.set_page(Page::Channel, cx);
-                    }
-                }
-                "nav-settings" => {
-                    this.nav_selection = id;
-                    this.set_page(Page::Settings, cx);
-                }
-                "nav-library" => {
-                    this.nav_selection = "nav-all";
-                    this.set_page(Page::Library, cx);
-                }
-                _ => {
-                    this.nav_selection = "nav-account";
-                    this.set_page(Page::Account, cx);
-                }
-            }))
-            .into_any_element()
+            }
+            "nav-settings" => {
+                this.nav_selection = id;
+                this.set_page(Page::Settings, cx);
+            }
+            "nav-library" => {
+                this.nav_selection = "nav-all";
+                this.set_page(Page::Library, cx);
+            }
+            _ => {
+                this.nav_selection = "nav-account";
+                this.set_page(Page::Account, cx);
+            }
+        }))
+        .into_any_element()
     }
 
     pub(super) fn render_sidebar(
@@ -266,8 +285,11 @@ impl TeleArkApp {
                     false,
                 )
                 .ghost()
+                .xsmall()
                 .w_full()
-                .h(px(36.0))
+                .h(theme::ROW_HEIGHT)
+                .text_size(theme::LIST_TEXT_SIZE)
+                .line_height(theme::LIST_LINE_HEIGHT)
                 .accessibility_label(self.tr(if collapsed {
                     "shell-expand-navigation"
                 } else {
@@ -358,14 +380,17 @@ impl TeleArkApp {
             .collapsible(false)
             .w_full()
             .header(
-                div()
-                    .h(px(42.0))
+                components::list_row()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_sm().child(self.tr("nav-channels")))
                     .child(
-                        components::icon_button(
+                        div()
+                            .text_size(theme::LIST_TEXT_SIZE)
+                            .child(self.tr("nav-channels")),
+                    )
+                    .child(
+                        components::list_icon_button(
                             "channels-refresh",
                             IconName::Redo2,
                             self.tr("shell-refresh-channels"),
@@ -376,8 +401,7 @@ impl TeleArkApp {
             )
             .children(channels)
             .footer(
-                div()
-                    .debug_selector(|| "channel-list-width-feedback".into())
+                components::list_footer("channel-list-width-feedback")
                     .text_xs()
                     .text_color(theme::text_secondary())
                     .child(self.tr(match self.preference_persistence {
@@ -396,6 +420,10 @@ impl TeleArkApp {
                                     None,
                                     false,
                                 )
+                                .xsmall()
+                                .h(theme::LIST_CONTROL_SIZE)
+                                .flex_none()
+                                .text_size(theme::LIST_TEXT_SIZE)
                                 .debug_selector(|| "channel-width-save-retry".into())
                                 .ghost()
                                 .on_click(

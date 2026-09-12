@@ -1,5 +1,5 @@
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName,
+    Disableable as _, Icon, IconName, Sizable as _,
     button::ButtonVariants as _,
     input::{Input, InputState},
     scroll::ScrollableElement as _,
@@ -116,9 +116,12 @@ impl TeleArkApp {
                         }),
                         false,
                     )
+                    .xsmall()
                     .ghost()
                     .mt_4()
                     .w_full()
+                    .h(theme::ROW_HEIGHT)
+                    .text_size(theme::LIST_TEXT_SIZE)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settings_advanced_expanded = !this.settings_advanced_expanded;
                         cx.notify();
@@ -447,13 +450,13 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.settings_section == section;
-        div()
+        components::list_row()
             .id(("settings-section", section as u64))
-            .h(px(38.0))
+            .debug_selector(move || format!("settings-nav-row-{}", section as u64))
             .px_3()
             .flex()
             .items_center()
-            .gap_3()
+            .gap_2()
             .rounded(theme::RADIUS_SMALL)
             .bg(if selected {
                 theme::blue_soft()
@@ -465,7 +468,7 @@ impl TeleArkApp {
             } else {
                 theme::text_secondary()
             })
-            .text_sm()
+            .text_size(theme::LIST_TEXT_SIZE)
             .cursor_pointer()
             .focusable()
             .tab_index(0)
@@ -480,11 +483,15 @@ impl TeleArkApp {
                     }
                 }),
             )
-            .child(Icon::new(icon).text_color(if selected {
-                theme::blue()
-            } else {
-                theme::text_secondary()
-            }))
+            .child(
+                Icon::new(icon)
+                    .size(theme::LIST_ICON_SIZE)
+                    .text_color(if selected {
+                        theme::blue()
+                    } else {
+                        theme::text_secondary()
+                    }),
+            )
             .child(div().min_w_0().truncate().child(label))
             .into_any_element()
     }

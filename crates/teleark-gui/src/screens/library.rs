@@ -101,8 +101,7 @@ impl TeleArkApp {
                     .on_click(cx.listener(|this, _, _, cx| this.choose_library_files(cx))),
             );
 
-        let header = div()
-            .h(px(36.0))
+        let header = components::list_row()
             .px_4()
             .flex()
             .items_center()
@@ -607,7 +606,7 @@ impl TeleArkApp {
             .min_w_0()
             .flex()
             .items_center()
-            .gap_3()
+            .gap_2()
             .child(file_icon(file.kind))
             .child(
                 div()
@@ -615,6 +614,7 @@ impl TeleArkApp {
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::text_primary())
+                    .debug_selector(move || format!("library-name-{index}"))
                     .child(file.name.clone()),
             );
         let (state_id, state_tone) = file_status(file.remote_state, file.verification_state);
@@ -640,7 +640,7 @@ impl TeleArkApp {
         let action_file = file.clone();
         let action_path = file.local_source_path.clone();
         let download_source = file.download_source(self.telegram_account.as_ref().map(|a| a.id));
-        let action = components::icon_button(
+        let action = components::list_icon_button(
             file.id.element_id("library-row-action"),
             if action_path.is_some() {
                 IconName::FolderOpen
@@ -653,6 +653,7 @@ impl TeleArkApp {
                 download_source.err().unwrap_or("action-download")
             }),
         )
+        .debug_selector(move || format!("library-action-{index}"))
         .disabled(
             self.visual_preview
                 || action_path.is_none()
@@ -683,15 +684,15 @@ impl TeleArkApp {
                 }
                 cx.notify();
             }));
-        div()
+        components::list_row()
             .id(file.id.element_id("library-row"))
-            .h(theme::ROW_HEIGHT)
+            .debug_selector(move || format!("library-row-{index}"))
             .px_4()
             .flex()
             .items_center()
             .border_b_1()
             .border_color(theme::border_subtle())
-            .text_sm()
+            .text_size(theme::LIST_TEXT_SIZE)
             .cursor_pointer()
             .focusable()
             .tab_index(0)
@@ -775,7 +776,7 @@ fn file_icon(kind: FileKind) -> AnyElement {
     };
 
     div()
-        .size(px(26.0))
+        .size(theme::LIST_BADGE_HEIGHT)
         .flex_none()
         .flex()
         .items_center()
@@ -783,7 +784,11 @@ fn file_icon(kind: FileKind) -> AnyElement {
         .rounded(theme::RADIUS_SMALL)
         .bg(background)
         .text_color(foreground)
-        .child(Icon::new(file_kind_icon(kind)).text_color(foreground))
+        .child(
+            Icon::new(file_kind_icon(kind))
+                .size(theme::LIST_ICON_SIZE)
+                .text_color(foreground),
+        )
         .into_any_element()
 }
 

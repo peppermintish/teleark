@@ -952,8 +952,7 @@ impl TeleArkApp {
                     },
                 );
 
-        let header = div()
-            .h(px(34.0))
+        let header = components::list_row()
             .px_3()
             .flex()
             .items_center()
@@ -1268,18 +1267,18 @@ impl TeleArkApp {
             ] {
                 if action.supports_view(transfer.state) {
                     actions = actions.child(
-                        components::icon_button(
+                        components::list_icon_button(
                             (action.element_id(), id),
                             action.icon(),
                             self.tr(action.label()),
                         )
                         .ghost()
-                        .h(px(22.0))
-                        .w(px(26.0))
+                        .h(theme::LIST_CONTROL_SIZE)
+                        .w(theme::LIST_CONTROL_SIZE)
                         .disabled(self.transfer_action_job.is_some() || self.visual_preview)
                         .ghost()
-                        .h(px(22.0))
-                        .w(px(26.0))
+                        .h(theme::LIST_CONTROL_SIZE)
+                        .w(theme::LIST_CONTROL_SIZE)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if action == TransferAction::Delete {
@@ -1302,13 +1301,13 @@ impl TeleArkApp {
             )
         {
             actions = actions.child(
-                components::icon_button(
+                components::list_icon_button(
                     ("vault-batch-stop", batch_id),
                     IconName::CircleX,
                     self.tr("upload-stop-after-current"),
                 )
                 .ghost()
-                .size(px(26.0))
+                .size(theme::LIST_CONTROL_SIZE)
                 .disabled(self.visual_preview)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -1334,14 +1333,14 @@ impl TeleArkApp {
             ] {
                 if action.supports_view(transfer.state) {
                     actions = actions.child(
-                        components::icon_button(
+                        components::list_icon_button(
                             (action.element_id(), index),
                             action.icon(),
                             self.tr(action.label()),
                         )
                         .ghost()
-                        .h(px(22.0))
-                        .w(px(26.0))
+                        .h(theme::LIST_CONTROL_SIZE)
+                        .w(theme::LIST_CONTROL_SIZE)
                         .disabled(true),
                     );
                 }
@@ -1357,14 +1356,14 @@ impl TeleArkApp {
                 == Some(teleark_runtime::LocalFilePresence::Present);
             if available {
                 actions = actions.child(
-                    components::icon_button(
+                    components::list_icon_button(
                         ("transfer-reveal", index),
                         IconName::FolderOpen,
                         self.tr("action-show-in-folder"),
                     )
                     .ghost()
-                    .h(px(22.0))
-                    .w(px(26.0))
+                    .h(theme::LIST_CONTROL_SIZE)
+                    .w(theme::LIST_CONTROL_SIZE)
                     .disabled(self.visual_preview)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
@@ -1374,13 +1373,13 @@ impl TeleArkApp {
             }
             if !available && let Some(id) = transfer.runtime_task_id {
                 actions = actions.child(
-                    components::icon_button(
+                    components::list_icon_button(
                         ("transfer-redownload", id),
                         IconName::Redo2,
                         self.tr("transfer-download-again"),
                     )
                     .ghost()
-                    .size(px(26.0))
+                    .size(theme::LIST_CONTROL_SIZE)
                     .disabled(self.transfer_action_job.is_some() || self.visual_preview)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -1391,14 +1390,14 @@ impl TeleArkApp {
         }
         {
             actions = actions.child(
-                components::icon_button(
+                components::list_icon_button(
                     ("transfer-details", index),
                     IconName::Info,
                     self.tr("transfer-show-details"),
                 )
                 .ghost()
-                .h(px(22.0))
-                .w(px(26.0))
+                .h(theme::LIST_CONTROL_SIZE)
+                .w(theme::LIST_CONTROL_SIZE)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.selected_file = index;
@@ -1451,14 +1450,14 @@ impl TeleArkApp {
             .h(if is_batch {
                 theme::BATCH_ROW_HEIGHT
             } else {
-                theme::TRANSFER_ROW_HEIGHT
+                theme::ROW_HEIGHT
             })
             .px_3()
             .flex()
             .items_center()
             .border_b_1()
             .border_color(theme::border_subtle())
-            .text_xs()
+            .text_size(theme::LIST_TEXT_SIZE)
             .cursor_pointer()
             .focusable()
             .tab_index(0)
@@ -1516,7 +1515,7 @@ impl TeleArkApp {
                     .font_weight(FontWeight::MEDIUM)
                     .when_some(batch_group_id, |name, batch_id| {
                         name.child(
-                            components::icon_button(
+                            components::list_icon_button(
                                 ("batch-expand", batch_id),
                                 if batch_expanded {
                                     IconName::ChevronDown
@@ -1530,7 +1529,7 @@ impl TeleArkApp {
                                 }),
                             )
                             .ghost()
-                            .size(px(26.0))
+                            .size(theme::LIST_CONTROL_SIZE)
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -1548,7 +1547,7 @@ impl TeleArkApp {
                         } else {
                             IconName::ArrowDown
                         })
-                        .size(px(14.0))
+                        .size(theme::LIST_ICON_SIZE)
                         .text_color(
                             if transfer.direction == TransferDirection::Upload {
                                 Tone::Purple.foreground()
@@ -1567,9 +1566,9 @@ impl TeleArkApp {
                                     .debug_selector(move || {
                                         format!("transfer-title-{selection_key}")
                                     })
-                                    .text_size(px(13.0))
+                                    .text_size(theme::LIST_TEXT_SIZE)
                                     .when(is_batch, |title| title.font_weight(FontWeight::SEMIBOLD))
-                                    .line_height(px(16.0))
+                                    .line_height(theme::LIST_LINE_HEIGHT)
                                     .truncate()
                                     .child(transfer.name.clone()),
                             )
@@ -1579,8 +1578,8 @@ impl TeleArkApp {
                                         .debug_selector(move || {
                                             format!("batch-progress-{selection_key}")
                                         })
-                                        .text_size(px(11.0))
-                                        .line_height(px(16.0))
+                                        .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
+                                        .line_height(theme::LIST_LINE_HEIGHT)
                                         .text_color(theme::text_secondary())
                                         .truncate()
                                         .child(format!(
@@ -1759,47 +1758,41 @@ impl TeleArkApp {
                 } else {
                     self.tr("transfer-lane-active")
                 };
-                div()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(
-                        self.tr_with(
-                            "transfer-lane-value",
-                            MessageArgs::new()
-                                .with(
-                                    "dc",
-                                    format_integer(
-                                        self.locale(),
-                                        lane.data_center_id.max(0) as u64,
-                                    ),
-                                )
-                                .with(
-                                    "lane",
-                                    format_integer(self.locale(), u64::from(lane.lane_id)),
-                                )
-                                .with(
-                                    "inflight",
-                                    format_integer(
-                                        self.locale(),
-                                        u64::from(lane.inflight_rpc_count),
-                                    ),
-                                )
-                                .with(
-                                    "speed",
-                                    format_speed(self.locale(), lane.throughput_bytes_per_second),
-                                )
-                                .with(
-                                    "rtt",
-                                    format_duration_millis(
-                                        self.locale(),
-                                        lane.round_trip_time_p95_millis,
-                                    ),
-                                )
-                                .with("status", status.to_string()),
-                        ),
-                    )
-                    .into_any_element()
+                components::list_summary(
+                    SharedString::from(format!(
+                        "transfer-lane-{}-{}",
+                        lane.data_center_id, lane.lane_id
+                    )),
+                    self.tr_with(
+                        "transfer-lane-value",
+                        MessageArgs::new()
+                            .with(
+                                "dc",
+                                format_integer(self.locale(), lane.data_center_id.max(0) as u64),
+                            )
+                            .with(
+                                "lane",
+                                format_integer(self.locale(), u64::from(lane.lane_id)),
+                            )
+                            .with(
+                                "inflight",
+                                format_integer(self.locale(), u64::from(lane.inflight_rpc_count)),
+                            )
+                            .with(
+                                "speed",
+                                format_speed(self.locale(), lane.throughput_bytes_per_second),
+                            )
+                            .with(
+                                "rtt",
+                                format_duration_millis(
+                                    self.locale(),
+                                    lane.round_trip_time_p95_millis,
+                                ),
+                            )
+                            .with("status", status.to_string()),
+                    ),
+                )
+                .into_any_element()
             })
             .collect();
 
@@ -2125,7 +2118,9 @@ impl TeleArkApp {
                         gpui_kit::base::Button::new(("batch-member", selection_key))
                             .accessibility_label(row.name.clone())
                             .w_full()
-                            .h(theme::TRANSFER_ROW_HEIGHT)
+                            .h(theme::ROW_HEIGHT)
+                            .text_size(theme::LIST_TEXT_SIZE)
+                            .line_height(theme::LIST_LINE_HEIGHT)
                             .px_4()
                             .flex()
                             .items_center()
@@ -2138,7 +2133,7 @@ impl TeleArkApp {
                                     .w_full()
                                     .truncate()
                                     .text_left()
-                                    .text_sm()
+                                    .text_size(theme::LIST_TEXT_SIZE)
                                     .child(row.name.clone()),
                             )
                             .child(
@@ -2149,7 +2144,7 @@ impl TeleArkApp {
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
                                             .text_color(theme::text_secondary())
                                             .child(row.size.clone()),
                                     )
@@ -3006,7 +3001,7 @@ impl TeleArkApp {
                         details.child(self.render_transfer_telemetry(telemetry, active, cx))
                     })
                     .when_some(runtime_snapshot, |details, snapshot| {
-                        let events = snapshot.events.iter().map(|event| {
+                        let events = snapshot.events.iter().enumerate().map(|(index, event)| {
                             let label = self.tr(match event.kind {
                                 ChannelDownloadEventKind::Queued => "trace-event-queued",
                                 ChannelDownloadEventKind::Started => "trace-event-started",
@@ -3022,27 +3017,10 @@ impl TeleArkApp {
                                 .elapsed_ms
                                 .map(|duration| format_duration_millis(self.locale(), duration))
                                 .unwrap_or_else(|| "—".to_owned());
-                            div()
-                                .py_1()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .w(px(68.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme::text_secondary())
-                                        .child(timestamp),
-                                )
-                                .child(div().text_color(theme::text_muted()).child(elapsed))
+                            components::list_summary(
+                                ("transfer-trace-event", index),
+                                format!("{label} · {timestamp} · {elapsed}"),
+                            )
                         });
                         let shown_parts = snapshot.part_events.len().min(20);
                         let omitted_parts = snapshot.part_events.omitted().saturating_add(
@@ -3054,44 +3032,54 @@ impl TeleArkApp {
                                 .with("shown", format_integer(self.locale(), shown_parts as u64))
                                 .with("omitted", format_integer(self.locale(), omitted_parts)),
                         );
-                        let part_events = snapshot.part_events.iter().rev().take(20).map(|event| {
-                            let state = self.tr(match event.state {
-                                DownloadPartState::Inflight => "transfer-part-inflight",
-                                DownloadPartState::Completed => "transfer-part-completed",
-                                DownloadPartState::Retry => "transfer-part-retry",
-                                DownloadPartState::Failed => "transfer-part-failed",
-                            });
-                            div().py_1().flex().flex_col().gap_1().text_xs().child(
-                                self.tr_with(
-                                    "transfer-part-event-value",
-                                    MessageArgs::new()
-                                        .with(
-                                            "part",
-                                            format_integer(self.locale(), event.part_index),
-                                        )
-                                        .with(
-                                            "offset",
-                                            format_integer(self.locale(), event.offset_bytes),
-                                        )
-                                        .with(
-                                            "length",
-                                            format_bytes(self.locale(), event.length_bytes),
-                                        )
-                                        .with("state", state.to_string())
-                                        .with(
-                                            "attempt",
-                                            format_integer(self.locale(), u64::from(event.attempt)),
-                                        )
-                                        .with(
-                                            "elapsed",
-                                            format_duration_millis(
-                                                self.locale(),
-                                                event.elapsed_millis,
+                        let part_events = snapshot
+                            .part_events
+                            .iter()
+                            .rev()
+                            .take(20)
+                            .enumerate()
+                            .map(|(index, event)| {
+                                let state = self.tr(match event.state {
+                                    DownloadPartState::Inflight => "transfer-part-inflight",
+                                    DownloadPartState::Completed => "transfer-part-completed",
+                                    DownloadPartState::Retry => "transfer-part-retry",
+                                    DownloadPartState::Failed => "transfer-part-failed",
+                                });
+                                components::list_summary(
+                                    ("transfer-part-event", index),
+                                    self.tr_with(
+                                        "transfer-part-event-value",
+                                        MessageArgs::new()
+                                            .with(
+                                                "part",
+                                                format_integer(self.locale(), event.part_index),
+                                            )
+                                            .with(
+                                                "offset",
+                                                format_integer(self.locale(), event.offset_bytes),
+                                            )
+                                            .with(
+                                                "length",
+                                                format_bytes(self.locale(), event.length_bytes),
+                                            )
+                                            .with("state", state.to_string())
+                                            .with(
+                                                "attempt",
+                                                format_integer(
+                                                    self.locale(),
+                                                    u64::from(event.attempt),
+                                                ),
+                                            )
+                                            .with(
+                                                "elapsed",
+                                                format_duration_millis(
+                                                    self.locale(),
+                                                    event.elapsed_millis,
+                                                ),
                                             ),
-                                        ),
-                                ),
-                            )
-                        });
+                                    ),
+                                )
+                            });
                         details
                             .child(
                                 div()
@@ -3609,14 +3597,14 @@ fn detail_tab(label: impl Into<SharedString>, selected: bool) -> AnyElement {
 }
 
 fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
-    div()
-        .flex()
-        .gap_3()
-        .text_xs()
+    let tooltip = format!("{label}: {value}");
+    components::list_row()
+        .id(label.clone())
         .child(
             div()
                 .w(px(128.0))
                 .flex_none()
+                .truncate()
                 .text_color(theme::text_muted())
                 .child(label),
         )
@@ -3624,10 +3612,13 @@ fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .whitespace_normal()
+                .truncate()
                 .text_color(theme::text_secondary())
                 .child(value),
         )
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+        })
         .into_any_element()
 }
 

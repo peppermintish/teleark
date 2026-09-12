@@ -1,7 +1,5 @@
 //! Immutable, bounded history rows; only visible rows are materialized.
 use super::*;
-use gpui_kit::StatefulInteractiveElement as _;
-use gpui_kit::component::tooltip::Tooltip;
 use std::sync::Arc;
 
 #[derive(Clone, PartialEq)]
@@ -49,25 +47,26 @@ impl Render for SyncHistory {
                 range
                     .filter_map(|index| rows.get(index).map(|row| (index, row)))
                     .map(|(index, row)| {
-                        let tooltip = format!("{}\n{}\n{}", row.title, row.source, row.error);
-                        div()
-                            .id(("sync-history-row", index))
-                            .h(px(76.0))
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .py_2()
-                            .child(div().truncate().child(row.title.clone()))
-                            .when(!row.source.is_empty(), |row_el| {
-                                row_el.child(div().truncate().child(row.source.clone()))
+                        let summary = format!(
+                            "{} · {}{}",
+                            row.title,
+                            row.source,
+                            if row.error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", row.error)
+                            }
+                        );
+                        components::list_summary(("sync-history-row", index), summary)
+                            .debug_selector(move || format!("sync-history-row-{index}"))
+                            .text_color(if row.error.is_empty() {
+                                theme::text_secondary()
+                            } else {
+                                theme::red()
                             })
-                            .when(!row.error.is_empty(), |row_el| {
-                                row_el.child(div().truncate().child(row.error.clone()))
-                            })
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            })
+                            .border_l_2()
+                            .border_color(theme::border())
+                            .pl_2()
                     })
                     .collect::<Vec<_>>()
             },

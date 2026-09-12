@@ -111,6 +111,19 @@ impl TableDelegate for ChannelFileTableDelegate {
         self.columns[col_ix].clone()
     }
 
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
+            .id(("row", row_ix))
+            .debug_selector(move || format!("channel-file-row-{row_ix}"))
+            .text_size(theme::LIST_TEXT_SIZE)
+            .line_height(theme::LIST_LINE_HEIGHT)
+    }
+
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -120,6 +133,8 @@ impl TableDelegate for ChannelFileTableDelegate {
         if col_ix != 0 {
             return div()
                 .size_full()
+                .text_size(theme::LIST_TEXT_SIZE)
+                .line_height(theme::LIST_LINE_HEIGHT)
                 .flex()
                 .items_center()
                 .child(self.columns[col_ix].name.clone())
@@ -141,6 +156,8 @@ impl TableDelegate for ChannelFileTableDelegate {
         div()
             .id("channel-files-select-all-cell")
             .size_full()
+            .text_size(theme::LIST_TEXT_SIZE)
+            .line_height(theme::LIST_LINE_HEIGHT)
             .flex()
             .items_center()
             .justify_center()
@@ -183,6 +200,8 @@ impl TableDelegate for ChannelFileTableDelegate {
                 div()
                     .id(("channel-file-select-cell", row.message_id.unsigned_abs()))
                     .size_full()
+                    .text_size(theme::LIST_TEXT_SIZE)
+                    .line_height(theme::LIST_LINE_HEIGHT)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -222,11 +241,17 @@ impl TableDelegate for ChannelFileTableDelegate {
                 });
                 div()
                     .size_full()
+                    .text_size(theme::LIST_TEXT_SIZE)
+                    .line_height(theme::LIST_LINE_HEIGHT)
                     .min_w_0()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(Icon::new(IconName::File).text_color(theme::blue()))
+                    .child(
+                        Icon::new(IconName::File)
+                            .size(theme::LIST_ICON_SIZE)
+                            .text_color(theme::blue()),
+                    )
                     .child(div().min_w_0().flex_1().truncate().child(row.name))
                     .when_some(local, |cell, (label, presence)| {
                         cell.child(components::badge(
@@ -248,15 +273,18 @@ impl TableDelegate for ChannelFileTableDelegate {
                 let tooltip = self.download_label.clone();
                 div()
                     .size_full()
+                    .text_size(theme::LIST_TEXT_SIZE)
+                    .line_height(theme::LIST_LINE_HEIGHT)
                     .flex()
                     .items_center()
                     .justify_end()
                     .child(
-                        components::icon_button(
+                        components::list_icon_button(
                             ("channel-file-download", row.message_id.unsigned_abs()),
                             IconName::ArrowDown,
                             tooltip,
                         )
+                        .debug_selector(move || format!("channel-file-action-{row_ix}"))
                         .on_click(move |_, _, cx| {
                             if let Some(owner) = owner.as_ref() {
                                 let _ = owner.update(cx, |app, cx| {
@@ -1381,7 +1409,7 @@ impl TeleArkApp {
             .child(
                 div().flex_1().min_h_0().child(
                     DataTable::new(&self.channel_file_table)
-                        .small()
+                        .with_size(gpui_kit::component::Size::Size(theme::ROW_HEIGHT))
                         .bordered(false)
                         .scrollbar_visible(true, true),
                 ),
@@ -1708,6 +1736,12 @@ fn channel_table_columns(names: [SharedString; 6]) -> Vec<Column> {
     .map(|((key, width), name)| {
         Column::new(key, name)
             .width(px(width))
+            .paddings(gpui_kit::Edges {
+                top: px(0.0),
+                bottom: px(0.0),
+                left: px(6.0),
+                right: px(6.0),
+            })
             .resizable(false)
             .movable(false)
             .selectable(false)
@@ -1718,6 +1752,8 @@ fn channel_table_columns(names: [SharedString; 6]) -> Vec<Column> {
 fn table_cell(value: SharedString) -> AnyElement {
     div()
         .size_full()
+        .text_size(theme::LIST_TEXT_SIZE)
+        .line_height(theme::LIST_LINE_HEIGHT)
         .min_w_0()
         .flex()
         .items_center()

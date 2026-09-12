@@ -14,9 +14,15 @@ use teleark_runtime::AppearancePreference;
 thread_local! { static DARK_PALETTE: Cell<bool> = const { Cell::new(false) }; }
 
 pub const HEADER_HEIGHT: Pixels = px(58.0);
-pub const ROW_HEIGHT: Pixels = px(42.0);
-pub const LIST_FOOTER_HEIGHT: Pixels = px(24.0);
-pub const TRANSFER_ROW_HEIGHT: Pixels = px(24.0);
+// One desktop list density; batch summaries have room for a second text line.
+pub const ROW_HEIGHT: Pixels = px(24.0);
+pub const LIST_TEXT_SIZE: Pixels = px(12.0);
+pub const LIST_SECONDARY_TEXT_SIZE: Pixels = px(11.0);
+pub const LIST_LINE_HEIGHT: Pixels = px(16.0);
+pub const LIST_ICON_SIZE: Pixels = px(14.0);
+pub const LIST_CONTROL_SIZE: Pixels = px(22.0);
+pub const LIST_BADGE_HEIGHT: Pixels = px(18.0);
+pub const LIST_FOOTER_HEIGHT: Pixels = ROW_HEIGHT;
 pub const BATCH_ROW_HEIGHT: Pixels = px(34.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);
 pub const RADIUS_MEDIUM: Pixels = px(8.0);

@@ -1,5 +1,5 @@
 use gpui_kit::component::{
-    IconName,
+    IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     progress::Progress,
     scroll::ScrollableElement as _,
@@ -163,17 +163,86 @@ pub fn icon_button(
         .tooltip(tooltip)
 }
 
+/// Shared geometry and typography for data rows, menu entries and summaries.
+pub fn list_row() -> Div {
+    div()
+        .h(theme::ROW_HEIGHT)
+        .min_h(theme::ROW_HEIGHT)
+        .max_h(theme::ROW_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(theme::LIST_TEXT_SIZE)
+        .line_height(theme::LIST_LINE_HEIGHT)
+}
+
+pub fn list_icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<gpui_kit::component::Icon>,
+    tooltip: impl Into<SharedString>,
+) -> Button {
+    icon_button(id, icon.into().size(theme::LIST_ICON_SIZE), tooltip)
+        .xsmall()
+        .ghost()
+        .size(theme::LIST_CONTROL_SIZE)
+        .text_size(theme::LIST_TEXT_SIZE)
+}
+
+/// Menu labels align to the same text column, including short channel names.
+pub fn list_navigation_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    icon: Option<gpui_kit::component::Icon>,
+) -> Button {
+    let label = label.into();
+    button(id, "", None, false)
+        .xsmall()
+        .ghost()
+        .w_full()
+        .h(theme::ROW_HEIGHT)
+        .accessibility_label(label.clone())
+        .when_some(icon, |button, icon| {
+            button.icon(icon.size(theme::LIST_ICON_SIZE))
+        })
+        .when(!label.is_empty(), |button| {
+            button.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_left()
+                    .truncate()
+                    .text_size(theme::LIST_TEXT_SIZE)
+                    .line_height(theme::LIST_LINE_HEIGHT)
+                    .child(label),
+            )
+        })
+}
+
+/// Keep the complete value available when a dense summary is truncated.
+pub fn list_summary(id: impl Into<ElementId>, summary: impl Into<SharedString>) -> Stateful<Div> {
+    let summary = summary.into();
+    list_row()
+        .id(id)
+        .w_full()
+        .child(div().flex_1().min_w_0().truncate().child(summary.clone()))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(summary.clone()).build(window, cx)
+        })
+}
+
 pub fn badge(label: impl Into<SharedString>, tone: Tone) -> Div {
     div()
         .flex_none()
-        .h(px(22.0))
+        .h(theme::LIST_BADGE_HEIGHT)
         .px_2()
         .flex()
         .items_center()
         .rounded(theme::RADIUS_SMALL)
         .bg(tone.background())
         .text_color(tone.foreground())
-        .text_xs()
+        .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
+        .line_height(theme::LIST_LINE_HEIGHT)
         .font_weight(FontWeight::MEDIUM)
         .child(label.into())
 }

@@ -110,3 +110,8 @@ git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
 
 
 `--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.
+
+
+## Task completion checkpoints
+
+After completing and validating each repository task, commit only its changes and create an annotated Git tag (for example `fix/YYYYMMDD-short-description`). Preserve unrelated pending work; do not push commits or tags without a request. Use English/light-only previews at 900×600 and actual native full-screen for visual changes.

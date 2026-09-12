@@ -70,6 +70,8 @@ Modals trap focus and restore it on dismissal. Escape handles the modal before f
 
 Workspace shortcuts: ⌘1 Transfers, ⌘2 TeleArk, ⌘U Upload, ⌘F Search, ⌘R Refresh, ⌘, Settings, ⌃⌘F Fullscreen, ⌘M Minimize, ⌘Q Quit. Isolated fixtures and review commands are in [Development](DEVELOPMENT.md#isolated-ui-review).
 
+All application data lists, channel/menu entries, selection lists, metadata rows and event summaries share a 24-point row, 12-point primary text, 11-point secondary text and a 16-point text line. Batch summaries use 34 points (about 1.4 rows). `theme.rs` is the sole source for these sizes; `components::list_row`, list buttons and summaries apply them. Raw DataTable rows use the same explicit size and zero vertical cell padding, keeping checkboxes and 22-point actions inside each row. File names, sizes and state stay in the same line, with full truncated summaries available through tooltips and detailed file/transfer views. Lists retain their existing virtualization, identities, independent scroll owners and event retention.
+
 ## Localization service
 
 `teleark-i18n` owns Fluent resources at `crates/teleark-i18n/resources/{en-US,zh-CN,ja-JP}/main.ftl`, locale negotiation, formatting and structured-error mappings. The catalogs are the terminology reference and share keys and named variable sets. Messages use semantic kebab-case IDs, complete grammatical units and Fluent selectors/plurals; legacy dotted/underscore aliases remain supported. The wrapper resolves top-level message values; terms/attributes require added lookup and validation support. User content is passed as literal parameters.

@@ -985,11 +985,14 @@ impl TeleArkApp {
                         gpui_kit::base::Button::new(("managed-file", package_id))
                             .accessibility_label(file.logical_name.clone())
                             .w_full()
-                            .h(px(60.0))
+                            .h(theme::ROW_HEIGHT)
+                            .debug_selector(move || format!("managed-file-row-{package_id}"))
+                            .text_size(theme::LIST_TEXT_SIZE)
+                            .line_height(theme::LIST_LINE_HEIGHT)
                             .px_4()
                             .flex()
                             .items_center()
-                            .gap_3()
+                            .gap_2()
                             .border_b_1()
                             .border_color(theme::border_subtle())
                             .when(
@@ -998,7 +1001,7 @@ impl TeleArkApp {
                             )
                             .child(
                                 Icon::new(IconName::File)
-                                    .size(px(22.0))
+                                    .size(theme::LIST_ICON_SIZE)
                                     .text_color(theme::blue()),
                             )
                             .child(
@@ -1006,17 +1009,26 @@ impl TeleArkApp {
                                     .flex_1()
                                     .min_w_0()
                                     .text_left()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
                                             .truncate()
-                                            .text_size(px(13.0))
+                                            .text_size(theme::LIST_TEXT_SIZE)
                                             .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .debug_selector(move || {
+                                                format!("managed-file-name-{package_id}")
+                                            })
                                             .child(file.logical_name.clone()),
                                     )
                                     .child(
                                         div()
-                                            .mt_1()
-                                            .text_xs()
+                                            .max_w(px(200.0))
+                                            .truncate()
+                                            .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
                                             .text_color(theme::text_muted())
                                             .child(format!(
                                             "{} · {}",
@@ -1047,12 +1059,13 @@ impl TeleArkApp {
                                 ))
                             })
                             .child(
-                                components::icon_button(
+                                components::list_icon_button(
                                     ("managed-download", package_id),
                                     IconName::ArrowDown,
                                     this.tr("storage-channel-download-restored-action"),
                                 )
                                 .ghost()
+                                .debug_selector(move || format!("managed-file-action-{package_id}"))
                                 .disabled(matches!(
                                     file.health,
                                     teleark_runtime::VaultFileHealth::KeyUnavailable
@@ -1093,8 +1106,7 @@ impl TeleArkApp {
             .relative()
             .overflow_hidden()
             .child(
-                div()
-                    .h(px(44.0))
+                components::list_row()
                     .px_4()
                     .flex_none()
                     .flex()
@@ -1104,7 +1116,7 @@ impl TeleArkApp {
                     .border_color(theme::border())
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(theme::LIST_TEXT_SIZE)
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(self.tr("storage-channel-managed-title")),
                     )

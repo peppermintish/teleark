@@ -1,7 +1,8 @@
 use gpui_kit::component::{Disableable as _, Icon, IconName, scroll::ScrollableElement as _};
 use gpui_kit::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use teleark_core::EncryptionState;
 use teleark_i18n::{
@@ -288,7 +289,7 @@ impl TeleArkApp {
             .overflow_hidden()
             .child(card_header(self.tr("file-detail-overview")))
             .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                div().p_5().flex().flex_col().gap_4().children([
+                div().p_5().flex().flex_col().children([
                     property_row(self.tr("table-name"), file.name.clone()),
                     property_row(
                         self.tr("table-size"),
@@ -341,26 +342,28 @@ impl TeleArkApp {
                                 ),
                             ))
                             .when(file.source_account_id.is_some(), |body| {
-                                body.children([
-                                    source_id_row(
-                                        self.tr("file-detail-source-account-id"),
-                                        file.source_account_id
-                                            .map(|id| id.to_string())
-                                            .unwrap_or_else(|| not_applicable.to_string()),
-                                    ),
-                                    source_id_row(
-                                        self.tr("file-detail-source-chat-id"),
-                                        file.source_chat_id
-                                            .map(|id| id.to_string())
-                                            .unwrap_or_else(|| not_applicable.to_string()),
-                                    ),
-                                    source_id_row(
-                                        self.tr("file-detail-remote-id"),
-                                        file.source_message_id
-                                            .map(|id| id.to_string())
-                                            .unwrap_or_else(|| not_applicable.to_string()),
-                                    ),
-                                ])
+                                body.child(
+                                    div().flex().flex_col().children([
+                                        source_id_row(
+                                            self.tr("file-detail-source-account-id"),
+                                            file.source_account_id
+                                                .map(|id| id.to_string())
+                                                .unwrap_or_else(|| not_applicable.to_string()),
+                                        ),
+                                        source_id_row(
+                                            self.tr("file-detail-source-chat-id"),
+                                            file.source_chat_id
+                                                .map(|id| id.to_string())
+                                                .unwrap_or_else(|| not_applicable.to_string()),
+                                        ),
+                                        source_id_row(
+                                            self.tr("file-detail-remote-id"),
+                                            file.source_message_id
+                                                .map(|id| id.to_string())
+                                                .unwrap_or_else(|| not_applicable.to_string()),
+                                        ),
+                                    ]),
+                                )
                             })
                             .child(
                                 div()
@@ -455,15 +458,22 @@ fn card_header(title: impl Into<SharedString>) -> AnyElement {
 }
 
 fn property_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> AnyElement {
-    div()
-        .flex()
-        .text_sm()
+    let label = label.into();
+    let value = value.into();
+    let tooltip = format!("{label}: {value}");
+    let row_selector = format!("file-property-{label}");
+    let label_selector = format!("file-property-label-{label}");
+    components::list_row()
+        .id(label.clone())
+        .debug_selector(move || row_selector.clone())
         .child(
             div()
-                .w(px(116.0))
+                .w(px(144.0))
                 .flex_none()
+                .truncate()
+                .debug_selector(move || label_selector.clone())
                 .text_color(theme::text_muted())
-                .child(label.into()),
+                .child(label),
         )
         .child(
             div()
@@ -471,18 +481,14 @@ fn property_row(label: impl Into<SharedString>, value: impl Into<SharedString>) 
                 .min_w_0()
                 .truncate()
                 .text_color(theme::text_secondary())
-                .child(value.into()),
+                .child(value),
         )
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+        })
         .into_any_element()
 }
 
 fn source_id_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .text_sm()
-        .child(div().text_color(theme::text_muted()).child(label.into()))
-        .child(div().text_color(theme::text_primary()).child(value.into()))
-        .into_any_element()
+    property_row(label, value)
 }

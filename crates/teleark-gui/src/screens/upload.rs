@@ -170,9 +170,9 @@ pub fn render_upload_overlay(
                                         |(index, source)| {
                                             let tooltip =
                                                 source.path.to_string_lossy().into_owned();
-                                            div()
+                                            components::list_row()
                                         .id(("upload-source-row", index))
-                                        .h(px(48.0))
+                                        .debug_selector(move || format!("upload-source-row-{index}"))
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -182,15 +182,22 @@ pub fn render_upload_overlay(
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
                                                 .child(
                                                     div()
-                                                        .text_sm()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .text_size(theme::LIST_TEXT_SIZE)
                                                         .truncate()
+                                                        .debug_selector(move || format!("upload-source-name-{index}"))
                                                         .child(source.file_name.clone()),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_xs()
+                                                        .flex_none()
+                                                        .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
                                                         .text_color(theme::text_muted())
                                                         .child(teleark_i18n::format::format_bytes(
                                                             app.locale(),
@@ -199,13 +206,14 @@ pub fn render_upload_overlay(
                                                 ),
                                         )
                                         .child(
-                                            components::icon_button(
+                                            components::list_icon_button(
                                                 ("upload-remove-source", index),
                                                 IconName::Close,
                                                 app.tr("upload-remove-file"),
                                             )
                                             .ghost()
                                             .tooltip(tooltip)
+                                            .debug_selector(move || format!("upload-source-action-{index}"))
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
                                                     if index < this.upload_sources.len() {

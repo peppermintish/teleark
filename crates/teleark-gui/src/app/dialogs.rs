@@ -1,6 +1,6 @@
 //! Catalog activity is independent from authentication and selected-file work.
 use super::*;
-use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::{Sizable as _, button::ButtonVariants as _};
 use teleark_core::ApplicationErrorKind;
 use teleark_i18n::format::format_duration_millis;
 
@@ -579,70 +579,27 @@ impl TeleArkApp {
                     .rev()
                     .take(visible)
                     .map(|(index, (phase, error, elapsed))| {
-                        let (_, tone, icon) = phase_presentation(*phase);
-                        div()
+                        let (_, tone, _) = phase_presentation(*phase);
+                        let summary = format!(
+                            "{} · {}{}",
+                            format_duration_millis(self.locale(), *elapsed),
+                            self.tr(phase_id(*phase)),
+                            error.map_or_else(String::new, |error| format!(
+                                " · {}",
+                                self.application_error_message(error)
+                            ))
+                        );
+                        components::list_summary(("dialogs-history-event", index), summary)
+                            .debug_selector(move || format!("dialogs-history-event-{index}"))
                             .px_4()
-                            .py_3()
                             .border_t_1()
                             .border_color(theme::border_subtle())
-                            .debug_selector(move || format!("dialogs-history-event-{index}"))
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .child(
-                                Icon::new(icon)
-                                    .size(px(15.0))
-                                    .mt(px(2.0))
-                                    .flex_none()
-                                    .text_color(tone.foreground()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_start()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_xs()
-                                                    .text_color(theme::text_primary())
-                                                    .child(self.tr(phase_id(*phase))),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .text_xs()
-                                                    .text_color(theme::text_muted())
-                                                    .child(format_duration_millis(
-                                                        self.locale(),
-                                                        *elapsed,
-                                                    )),
-                                            ),
-                                    )
-                                    .when_some(*error, |row, error| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme::text_secondary())
-                                                .child(self.application_error_message(error)),
-                                        )
-                                    }),
-                            )
+                            .text_color(tone.foreground())
                     }),
             )
             .when(count > 3, |card| {
                 card.child(
-                    div()
-                        .px_3()
-                        .py_2()
+                    components::list_footer("dialogs-history-footer")
                         .border_t_1()
                         .border_color(theme::border_subtle())
                         .child(
@@ -670,6 +627,8 @@ impl TeleArkApp {
                                 false,
                             )
                             .ghost()
+                            .xsmall()
+                            .h(theme::LIST_CONTROL_SIZE)
                             .w_full()
                             .debug_selector(|| "dialogs-history-toggle".into())
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -895,6 +854,21 @@ mod tests {
         let toggle = cx
             .debug_bounds("dialogs-history-toggle")
             .expect("history disclosure");
+        assert_eq!(toggle.size.height, theme::LIST_CONTROL_SIZE);
+        assert_eq!(
+            cx.debug_bounds("dialogs-history-footer")
+                .expect("fixed footer")
+                .size
+                .height,
+            theme::ROW_HEIGHT
+        );
+        assert_eq!(
+            cx.debug_bounds("dialogs-history-event-5")
+                .expect("history row")
+                .size
+                .height,
+            theme::ROW_HEIGHT
+        );
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("dialogs-history-event-0").is_some());
