@@ -18,6 +18,17 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let page = self
+            .page_view
+            .get_or_insert_with(|| {
+                let owner = cx.entity();
+                cx.new(|cx| workspace_view::ContentView::new(owner, layout, false, cx))
+            })
+            .clone();
+        page.update(cx, |view, cx| view.set_layout(layout, cx));
+        let mut content_style = gpui_kit::StyleRefinement::default();
+        content_style.size.width = Some(gpui_kit::relative(1.0).into());
+        content_style.size.height = Some(gpui_kit::relative(1.0).into());
         let content = div()
             .debug_selector(|| "workspace-content".into())
             .flex_1()
@@ -28,17 +39,24 @@ impl TeleArkApp {
             .when(self.page != Page::Account, |body| {
                 body.child(self.render_header(window, layout, cx))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(self.render_page(window, layout, cx)),
-            );
+            .child(div().flex_1().min_h_0().min_w_0().overflow_hidden().child(
+                if window.is_a11y_active() {
+                    page.into_any_element()
+                } else {
+                    page.cached(content_style.clone()).into_any_element()
+                },
+            ));
         if self.page != Page::Channel {
             return content.into_any_element();
         }
+        let sources = self
+            .source_view
+            .get_or_insert_with(|| {
+                let owner = cx.entity();
+                cx.new(|cx| workspace_view::ContentView::new(owner, layout, true, cx))
+            })
+            .clone();
+        sources.update(cx, |view, cx| view.set_layout(layout, cx));
         div()
             .flex_1()
             .min_w_0()
@@ -58,7 +76,11 @@ impl TeleArkApp {
                                 div()
                                     .debug_selector(|| "channel-list-panel".into())
                                     .size_full()
-                                    .child(self.render_channels_sidebar(cx)),
+                                    .child(if window.is_a11y_active() {
+                                        sources.into_any_element()
+                                    } else {
+                                        sources.cached(content_style).into_any_element()
+                                    }),
                             ),
                     )
                     .child(
@@ -297,7 +319,10 @@ mod tests {
                         "channel-list-width-feedback",
                     ] {
                         let action = cx.debug_bounds(selector).expect("visible channel control");
-                        assert!(action.left() >= px(0.0) && action.right() <= px(900.0));
+                        assert!(
+                            action.left() >= px(0.0) && action.right() <= px(900.0),
+                            "{selector}: {action:?}"
+                        );
                         assert!(action.top() >= px(0.0) && action.bottom() <= px(600.0));
                     }
                     drag_to(cx, 10.0);

@@ -1,5 +1,11 @@
 # Implementation status — v0.4.4
 
+## Event-driven status presentation (2026-09-13)
+
+The status inspector no longer uses a one-second application-level notification. Visible live timing has a retained independent owner, pauses on window deactivation, stops on completion/close, and recalculates on reactivation. History records show fixed timestamps and only visible history rows are built; main page/source projections have separate cache boundaries. Accessibility uses normal rendering because the locked GPUI cache does not replay accessibility nodes. See [ADR 0032](adr/0032-event-driven-status-presentation.md) for guarantees and the compatibility-path limitation.
+
+Validation: English native 900×600 and actual full-screen light/dark previews passed, including independent history scrolling, reopen timing and retained accessibility controls. Deterministic tests verify notification/render counts, timer lifetime, quantization and terminal freezing. All eight source gates passed for the working tree (540 tests) and isolated commit snapshot (511 tests), each with 10 existing manual probes ignored. One working-tree blocked-transfer test timed out during concurrent verification; its focused rerun and subsequent full workspace run passed. The scoped release build and freshly assembled macOS app passed binary/resource checks. A 10-second-per-state synthetic dark full-screen process sample with accessibility active measured 0.10 CPU seconds closed and 0.32 CPU seconds open (approximately 1.0% and 3.2% of one CPU core); this is not a before/after comparison or real-account performance claim.
+
 ## Upload and download speed limits (2026-09-10)
 
 Transfers and both upload/download Settings sections now expose a shared limit editor, with independent totals in KiB/s and zero for unlimited. Saving updates active transfers and persists automatically across restarts. Native files, encrypted parts, manifests and verification reads share the appropriate directional budget; route replacement retains the same owners. Waiting remains visible across navigation, with duration, last payload admission and a bounded, expandable event timeline. Invalid input is rejected and failed saves retain the previous live policy. Existing settings upgrade through additive version-1 defaults; no encrypted or checkpoint format changes.

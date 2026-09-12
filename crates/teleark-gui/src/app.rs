@@ -11,6 +11,9 @@ mod navigation;
 mod preferences;
 mod preview;
 mod speed_limits;
+mod sync_history;
+mod sync_timing;
+mod workspace_view;
 #[cfg(test)]
 pub(crate) use preview::completed_storage_maintenance_preview;
 pub(crate) mod proxy;
@@ -382,7 +385,13 @@ pub struct TeleArkApp {
     pub(crate) channel_sync_snapshot: Option<teleark_runtime::ChannelSyncSnapshot>,
     channel_sync_task: Option<Task<()>>,
     channel_display_revision: i64,
-    channel_sync_clock_task: Option<Task<()>>,
+    sync_timing: Option<Entity<sync_timing::SyncTiming>>,
+    workspace_view: Option<Entity<workspace_view::WorkspaceView>>,
+    page_view: Option<Entity<workspace_view::ContentView>>,
+    source_view: Option<Entity<workspace_view::ContentView>>,
+    sync_inspector: Option<Entity<workspace_view::SyncInspector>>,
+    sync_time_anchor: sync_timing::TimeAnchor,
+    sync_history: Option<Entity<sync_history::SyncHistory>>,
     managed_display_revision: i64,
     managed_upload_receipts:
         std::collections::VecDeque<(i64, i64, teleark_runtime::ManagedVaultFile)>,
@@ -792,7 +801,13 @@ impl TeleArkApp {
             channel_sync_snapshot: None,
             channel_sync_task: None,
             channel_display_revision: 0,
-            channel_sync_clock_task: None,
+            sync_timing: None,
+            workspace_view: None,
+            page_view: None,
+            source_view: None,
+            sync_inspector: None,
+            sync_time_anchor: sync_timing::TimeAnchor::new(),
+            sync_history: None,
             managed_display_revision: 0,
             managed_upload_receipts: std::collections::VecDeque::new(),
             managed_catalog_pending: false,
@@ -1076,8 +1091,17 @@ impl Drop for TeleArkApp {
     }
 }
 
-impl Render for TeleArkApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl TeleArkApp {
+    fn render_workspace_frame(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !self.channel_sync_details {
+            self.sync_timing = None;
+            self.sync_history = None;
+            self.sync_inspector = None;
+        }
         let channel_geometry = (
             window.viewport_size().width,
             self.preferences.sidebar_collapsed,
@@ -1246,9 +1270,6 @@ impl Render for TeleArkApp {
             })
             .child(self.render_bandwidth_status(cx))
             .child(self.render_status_bar(cx))
-            .when(self.channel_sync_details, |root| {
-                root.child(self.render_channel_sync_details(cx))
-            })
             .when(self.dialogs.details, |root| {
                 root.child(self.render_dialog_details(cx))
             })
@@ -1476,5 +1497,36 @@ pub(crate) mod test_support {
                 },
             )
         })
+    }
+}
+
+impl Render for TeleArkApp {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.channel_sync_details {
+            self.sync_timing = None;
+            self.sync_history = None;
+            self.sync_inspector = None;
+        }
+        let workspace = self
+            .workspace_view
+            .get_or_insert_with(|| {
+                let owner = cx.entity();
+                cx.new(|cx| workspace_view::WorkspaceView::new(owner, cx))
+            })
+            .clone();
+        div()
+            .size_full()
+            .relative()
+            .child(workspace)
+            .when(self.channel_sync_details, |root| {
+                let inspector = self
+                    .sync_inspector
+                    .get_or_insert_with(|| {
+                        let owner = cx.weak_entity();
+                        cx.new(|_| workspace_view::SyncInspector::new(owner))
+                    })
+                    .clone();
+                root.child(inspector)
+            })
     }
 }

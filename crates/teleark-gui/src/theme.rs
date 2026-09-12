@@ -3,13 +3,15 @@
 //! Screen modules deliberately consume this palette instead of scattering
 //! one-off color values. Geometry constants live here for the same reason.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
 use gpui_kit::{Context, Pixels, Rgba, Window, WindowAppearance, px, rgb};
 use teleark_runtime::AppearancePreference;
 
-static DARK_PALETTE: AtomicBool = AtomicBool::new(false);
+// Palette reads and appearance updates belong to the GUI thread. Separate
+// test/application threads must not invalidate each other's cached styles.
+thread_local! { static DARK_PALETTE: Cell<bool> = const { Cell::new(false) }; }
 
 pub const HEADER_HEIGHT: Pixels = px(58.0);
 pub const ROW_HEIGHT: Pixels = px(42.0);
@@ -30,7 +32,7 @@ pub fn apply_appearance<T>(
         AppearancePreference::Light => false,
         AppearancePreference::Dark => true,
     };
-    DARK_PALETTE.store(dark, Ordering::Relaxed);
+    DARK_PALETTE.set(dark);
     match preference {
         AppearancePreference::System => ComponentTheme::sync_system_appearance(Some(window), cx),
         AppearancePreference::Light => ComponentTheme::change(ThemeMode::Light, Some(window), cx),
@@ -81,11 +83,7 @@ pub fn apply_appearance<T>(
 }
 
 fn color(light: u32, dark: u32) -> Rgba {
-    rgb(if DARK_PALETTE.load(Ordering::Relaxed) {
-        dark
-    } else {
-        light
-    })
+    rgb(if DARK_PALETTE.get() { dark } else { light })
 }
 
 pub fn canvas() -> Rgba {

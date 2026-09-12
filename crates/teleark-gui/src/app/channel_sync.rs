@@ -104,7 +104,6 @@ impl TeleArkApp {
                     }
                     app.apply_channel_changes(cx);
                     app.apply_managed_channel_changes(cx);
-                    app.start_channel_sync_clock(cx);
                     cx.notify();
                     true
                 });
@@ -300,7 +299,7 @@ impl TeleArkApp {
         })
     }
 
-    fn sync_clock_needed(&self) -> bool {
+    pub(super) fn sync_clock_needed(&self) -> bool {
         self.channel_sync_snapshot.as_ref().is_some_and(|snapshot| {
             !matches!(
                 snapshot.phase,
@@ -310,30 +309,6 @@ impl TeleArkApp {
                 .as_ref()
                 .is_some_and(|scan| scan.active())
         })
-    }
-
-    fn start_channel_sync_clock(&mut self, cx: &mut Context<Self>) {
-        if self.channel_sync_clock_task.is_some() || !self.sync_clock_needed() {
-            return;
-        }
-        self.channel_sync_clock_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Some(entity) = this.upgrade() else {
-                    break;
-                };
-                if !entity.update(cx, |app, cx| {
-                    if !app.sync_clock_needed() {
-                        app.channel_sync_clock_task = None;
-                        return false;
-                    }
-                    cx.notify();
-                    true
-                }) {
-                    break;
-                }
-            }
-        }));
     }
 
     pub(crate) fn request_channel_history(&mut self, cx: &mut Context<Self>) {
@@ -503,20 +478,81 @@ impl TeleArkApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_channel_sync_details(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
-            .text_xs()
-            .text_color(theme::text_secondary())
-            .child(self.channel_sync_label())
-            .child(self.channel_sync_timing());
+    pub(super) fn sync_history_rows(&self) -> Vec<sync_history::HistoryRow> {
+        let Some(snapshot) = &self.channel_sync_snapshot else {
+            return Vec::new();
+        };
+        let sources = self
+            .telegram_chats
+            .iter()
+            .map(|chat| (chat.id, &chat.name))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        snapshot
+            .events
+            .iter()
+            .rev()
+            .map(|event| sync_history::HistoryRow {
+                title: self.tr_with(
+                    "channel-sync-event-at",
+                    MessageArgs::new()
+                        .with("phase", self.tr(sync_phase_id(event.phase)).to_string())
+                        .with(
+                            "time",
+                            teleark_i18n::format::format_unix_millis(
+                                self.locale(),
+                                self.sync_time_anchor.unix_millis(event.at),
+                            ),
+                        ),
+                ),
+                source: event
+                    .chat_id
+                    .and_then(|id| sources.get(&id))
+                    .map_or_else(|| "".into(), |name| (*name).clone().into()),
+                error: event
+                    .failure
+                    .map_or_else(|| "".into(), |error| self.application_error_message(error)),
+            })
+            .collect()
+    }
+
+    pub(super) fn sync_timing_model(&self) -> Vec<sync_timing::TimedText> {
+        use sync_timing::TimedText;
+        let mut lines = Vec::new();
+        if let Some(snapshot) = &self.channel_sync_snapshot {
+            let (started, activity) = snapshot
+                .managed_scan
+                .as_ref()
+                .filter(|scan| scan.active())
+                .map_or((snapshot.phase_started, snapshot.last_activity), |scan| {
+                    (scan.phase_started, scan.last_activity)
+                });
+            lines.push(
+                TimedText::new("channel-sync-timing", MessageArgs::new())
+                    .elapsed("duration", started)
+                    .elapsed("activity", activity)
+                    .freeze_if(
+                        matches!(
+                            snapshot.phase,
+                            ChannelSyncPhase::Idle
+                                | ChannelSyncPhase::Failed
+                                | ChannelSyncPhase::Cancelled
+                        ) && !snapshot
+                            .managed_scan
+                            .as_ref()
+                            .is_some_and(|scan| scan.active()),
+                        snapshot.last_activity,
+                    ),
+            );
+        } else {
+            lines.push(TimedText::new(
+                "channel-sync-local-only",
+                MessageArgs::new(),
+            ));
+        }
         if let Some(snapshot) = &self.channel_sync_snapshot {
             if let Some(scan) = &snapshot.managed_scan {
-                body = body.child(
-                    self.tr_with(
+                lines.push(
+                    TimedText::new(
                         "managed-scan-detail",
                         MessageArgs::new()
                             .with("phase", self.tr(sync_phase_id(scan.phase)).to_string())
@@ -532,11 +568,64 @@ impl TeleArkApp {
                             .with(
                                 "rejected",
                                 format_integer(self.locale(), scan.rejected as u64),
-                            )
-                            .with("duration", sync_elapsed(self.locale(), scan.phase_started))
-                            .with("activity", sync_elapsed(self.locale(), scan.last_activity)),
-                    ),
+                            ),
+                    )
+                    .elapsed("duration", scan.phase_started)
+                    .elapsed("activity", scan.last_activity)
+                    .freeze_if(!scan.active(), scan.last_activity),
                 );
+            }
+            if let Some(at) = snapshot.retry_at {
+                lines.push(
+                    TimedText::new("channel-sync-retry-after", MessageArgs::new())
+                        .remaining("duration", at),
+                );
+            }
+        }
+        lines
+    }
+
+    pub(crate) fn render_channel_sync_details(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let timing = if let Some(timing) = &self.sync_timing {
+            timing.clone()
+        } else {
+            let model = self.sync_timing_model();
+            let text = sync_timing::SyncTiming::formatted(&model, self, std::time::Instant::now());
+            let owner = cx.entity();
+            let timing = cx.new(|cx| sync_timing::SyncTiming::new(owner, window, cx));
+            timing.update(cx, |timing, cx| {
+                timing.set(model, text, self.locale(), self.sync_clock_needed(), cx)
+            });
+            self.sync_timing = Some(timing.clone());
+            timing
+        };
+        let history = if let Some(history) = &self.sync_history {
+            history.clone()
+        } else {
+            let rows = self.sync_history_rows();
+            let owner = cx.entity();
+            let history = cx.new(|cx| sync_history::SyncHistory::new(owner, rows, cx));
+            self.sync_history = Some(history.clone());
+            history
+        };
+        let mut history_style = gpui_kit::StyleRefinement::default();
+        history_style.size.width = Some(gpui_kit::relative(1.0).into());
+        history_style.size.height = Some(px(280.0).into());
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .text_xs()
+            .text_color(theme::text_secondary())
+            .child(self.channel_sync_label())
+            .child(timing);
+        if let Some(snapshot) = &self.channel_sync_snapshot {
+            if let Some(scan) = &snapshot.managed_scan {
                 if let Some(failure) = scan.failure {
                     body = body.child(self.application_error_message(failure));
                 }
@@ -558,24 +647,7 @@ impl TeleArkApp {
             if let Some(failure) = snapshot.failure {
                 body = body.child(self.application_error_message(failure));
             }
-            if let Some(at) = snapshot.retry_at {
-                body = body.child(
-                    self.tr_with(
-                        "channel-sync-retry-after",
-                        MessageArgs::new().with(
-                            "duration",
-                            format_duration_millis(
-                                self.locale(),
-                                u64::try_from(
-                                    at.saturating_duration_since(std::time::Instant::now())
-                                        .as_millis(),
-                                )
-                                .unwrap_or(u64::MAX),
-                            ),
-                        ),
-                    ),
-                );
-            }
+
             if let Some(chat) = snapshot.chat_id.or(snapshot.managed_chat_id) {
                 body = body.child(
                     div()
@@ -697,26 +769,15 @@ impl TeleArkApp {
                 }
             }
             body = body
-                .children(snapshot.events.iter().rev().map(|event| {
-                    let mut row = div().flex().flex_col().gap_1().child(
-                        self.tr_with(
-                            "channel-sync-event",
-                            MessageArgs::new()
-                                .with("phase", self.tr(sync_phase_id(event.phase)).to_string())
-                                .with("age", sync_elapsed(self.locale(), event.at)),
-                        ),
-                    );
-                    if let Some(chat) = event
-                        .chat_id
-                        .and_then(|id| self.telegram_chats.iter().find(|chat| chat.id == id))
-                    {
-                        row = row.child(chat.name.clone());
-                    }
-                    if let Some(failure) = event.failure {
-                        row = row.child(self.application_error_message(failure));
-                    }
-                    row
-                }))
+                .child(if window.is_a11y_active() {
+                    div()
+                        .w_full()
+                        .h(px(280.0))
+                        .child(history)
+                        .into_any_element()
+                } else {
+                    history.cached(history_style).into_any_element()
+                })
                 .child(
                     self.tr_with(
                         "channel-sync-retention",
@@ -849,7 +910,7 @@ fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, component::table::TableDelegate as _};
@@ -1067,7 +1128,7 @@ mod tests {
         drop(library);
         std::fs::remove_dir_all(directory).expect("remove fixture");
     }
-    fn fixture_snapshot() -> teleark_runtime::ChannelSyncSnapshot {
+    pub(in crate::app) fn fixture_snapshot() -> teleark_runtime::ChannelSyncSnapshot {
         let now = std::time::Instant::now();
         teleark_runtime::ChannelSyncSnapshot {
             account_id: 1,

@@ -1498,3 +1498,5 @@ speed-limits-event-resumed = 带宽等待结束
 speed-limits-event = { $event } · { $seconds } 秒前
 speed-limits-omitted = 已省略 { $count } 条较早事件；每个方向保留最近 16 条。
 speed-limits-close = 关闭
+
+channel-sync-event-at = { $time } · { $phase }

@@ -1525,3 +1525,5 @@ speed-limits-event-resumed = Bandwidth wait ended
 speed-limits-event = { $event } · { $seconds } s ago
 speed-limits-omitted = { $count } older events omitted; latest 16 retained per direction.
 speed-limits-close = Close
+
+channel-sync-event-at = { $time } · { $phase }

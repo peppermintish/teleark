@@ -1498,3 +1498,5 @@ speed-limits-event-resumed = 帯域待機が終了
 speed-limits-event = { $event } · { $seconds } 秒前
 speed-limits-omitted = 過去の { $count } 件を省略。方向ごとに最新 16 件を保持します。
 speed-limits-close = 閉じる
+
+channel-sync-event-at = { $time } · { $phase }
