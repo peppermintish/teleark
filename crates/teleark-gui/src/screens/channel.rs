@@ -1449,14 +1449,7 @@ impl TeleArkApp {
     }
 
     fn render_telegram_fetch_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .min_h(px(42.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_t_1()
-            .border_color(theme::border())
+        components::list_footer("channel-fetch-footer")
             .bg(theme::surface())
             .child(Spinner::new().small().color(theme::blue().into()))
             .child(
@@ -1496,6 +1489,8 @@ impl TeleArkApp {
                     None,
                     false,
                 )
+                .h(px(22.0))
+                .flex_none()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.cancel_telegram_file_load(cx);
                 })),
@@ -1504,14 +1499,7 @@ impl TeleArkApp {
     }
 
     fn render_telegram_retry_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .min_h(px(42.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_t_1()
-            .border_color(theme::border())
+        components::list_footer("channel-retry-footer")
             .bg(theme::surface())
             .child(
                 div()
@@ -1527,6 +1515,8 @@ impl TeleArkApp {
                     Some(IconName::Redo2),
                     false,
                 )
+                .h(px(22.0))
+                .flex_none()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.retry_telegram_file_load(cx);
                 })),

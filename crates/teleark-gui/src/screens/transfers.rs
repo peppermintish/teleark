@@ -1027,22 +1027,7 @@ impl TeleArkApp {
             .native_transfer_view
             .omitted_items
             .saturating_add(self.vault_transfer_view.omitted_items);
-        let table_footer = div()
-            .min_h(px(if layout.is_compact() { 58.0 } else { 38.0 }))
-            .px_3()
-            .py_2()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(if layout.is_compact() {
-                px(8.0)
-            } else {
-                px(16.0)
-            })
-            .border_t_1()
-            .border_color(theme::border())
-            .text_xs()
-            .text_color(theme::text_secondary())
+        let table_footer = components::list_footer("transfer-list-footer")
             .child(self.tr_with(
                 "transfer-footer-selected",
                 MessageArgs::new().with(
@@ -1289,11 +1274,11 @@ impl TeleArkApp {
                             self.tr(action.label()),
                         )
                         .ghost()
-                        .h(px(26.0))
+                        .h(px(22.0))
                         .w(px(26.0))
                         .disabled(self.transfer_action_job.is_some() || self.visual_preview)
                         .ghost()
-                        .h(px(26.0))
+                        .h(px(22.0))
                         .w(px(26.0))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -1355,7 +1340,7 @@ impl TeleArkApp {
                             self.tr(action.label()),
                         )
                         .ghost()
-                        .h(px(26.0))
+                        .h(px(22.0))
                         .w(px(26.0))
                         .disabled(true),
                     );
@@ -1378,7 +1363,7 @@ impl TeleArkApp {
                         self.tr("action-show-in-folder"),
                     )
                     .ghost()
-                    .h(px(26.0))
+                    .h(px(22.0))
                     .w(px(26.0))
                     .disabled(self.visual_preview)
                     .on_click(move |_, _, cx| {
@@ -1412,7 +1397,7 @@ impl TeleArkApp {
                     self.tr("transfer-show-details"),
                 )
                 .ghost()
-                .h(px(26.0))
+                .h(px(22.0))
                 .w(px(26.0))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -1454,6 +1439,7 @@ impl TeleArkApp {
         let batch_expanded =
             batch_group_id.is_some_and(|id| self.expanded_transfer_batches.contains(&id));
 
+        let is_batch = transfer.batch_summary.is_some();
         let local_presence = (transfer.state == TransferState::Completed
             && transfer.direction == TransferDirection::Download
             && (transfer.runtime_task_id.is_some() || transfer.vault_transfer_id.is_some()))
@@ -1462,7 +1448,11 @@ impl TeleArkApp {
             .id(("transfer-row", selection_key))
             .debug_selector(move || format!("transfer-row-{selection_key}"))
             .w_full()
-            .h(theme::ROW_HEIGHT)
+            .h(if is_batch {
+                theme::BATCH_ROW_HEIGHT
+            } else {
+                theme::TRANSFER_ROW_HEIGHT
+            })
             .px_3()
             .flex()
             .items_center()
@@ -1574,42 +1564,32 @@ impl TeleArkApp {
                             .pr_4()
                             .child(
                                 div()
+                                    .debug_selector(move || {
+                                        format!("transfer-title-{selection_key}")
+                                    })
                                     .text_size(px(13.0))
+                                    .when(is_batch, |title| title.font_weight(FontWeight::SEMIBOLD))
                                     .line_height(px(16.0))
                                     .truncate()
-                                    .child(if let Some(batch) = transfer.batch_summary.as_ref() {
-                                        format!(
-                                            "{} · {}",
-                                            transfer.name,
-                                            batch
-                                                .file_names
-                                                .iter()
-                                                .map(|name| name.as_ref())
-                                                .collect::<Vec<_>>()
-                                                .join(" · ")
-                                        )
-                                        .into()
-                                    } else {
-                                        transfer.name
-                                    }),
+                                    .child(transfer.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(theme::text_muted())
-                                    .truncate()
-                                    .child(if let Some(batch) = transfer.batch_summary.as_ref() {
-                                        format!(
-                                            "{} · {} · {}",
-                                            transfer.source,
+                            .when_some(transfer.batch_summary.as_ref(), |name, batch| {
+                                name.child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("batch-progress-{selection_key}")
+                                        })
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(theme::text_secondary())
+                                        .truncate()
+                                        .child(format!(
+                                            "{} · {}",
                                             self.batch_progress_label(batch),
                                             transfer.size
-                                        )
-                                    } else {
-                                        format!("{} · {}", transfer.size, transfer.source)
-                                    }),
-                            ),
+                                        )),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -1623,6 +1603,7 @@ impl TeleArkApp {
                             .items_center()
                             .justify_between()
                             .text_size(px(10.0))
+                            .line_height(px(10.0))
                             .text_color(tone.foreground())
                             .child(
                                 div().min_w_0().truncate().child(
@@ -1656,7 +1637,7 @@ impl TeleArkApp {
                                 div()
                                     .max_w(px(100.0))
                                     .text_size(px(10.0))
-                                    .line_height(px(14.0))
+                                    .line_height(px(12.0))
                                     .text_color(theme::text_muted())
                                     .truncate()
                                     .when(
@@ -2144,12 +2125,11 @@ impl TeleArkApp {
                         gpui_kit::base::Button::new(("batch-member", selection_key))
                             .accessibility_label(row.name.clone())
                             .w_full()
-                            .h(theme::ROW_HEIGHT)
+                            .h(theme::TRANSFER_ROW_HEIGHT)
                             .px_4()
                             .flex()
-                            .flex_col()
-                            .justify_center()
-                            .gap_0()
+                            .items_center()
+                            .gap_2()
                             .border_b_1()
                             .border_color(theme::border())
                             .hover(|row| row.bg(theme::blue_pale()))
@@ -4079,25 +4059,27 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn batch_and_file_rows_match_library_height(cx: &mut gpui_kit::TestAppContext) {
+    fn batch_rows_are_34_pixels_and_file_rows_are_24_pixels(cx: &mut gpui_kit::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
-        cx.simulate_resize(gpui_kit::size(px(1360.0), px(760.0)));
-        let keys = app.update(cx, |app, cx| {
-            app.expanded_transfer_batches.insert(42);
-            cx.notify();
-            app.transfer_rows()
-                .iter()
-                .take(2)
-                .enumerate()
-                .map(|(index, row)| transfer_selection_key(row, index))
-                .collect::<Vec<_>>()
-        });
-        cx.run_until_parked();
-        for key in keys {
-            // The GPUI debug selector API requires static test labels.
-            let selector: &'static str = Box::leak(format!("transfer-row-{key}").into_boxed_str());
-            let bounds = cx.debug_bounds(selector).expect("rendered transfer row");
-            assert_eq!(bounds.size.height, theme::ROW_HEIGHT);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            let keys = app.update(cx, |app, cx| {
+                app.expanded_transfer_batches.insert(42);
+                cx.notify();
+                app.transfer_rows()
+                    .iter()
+                    .take(2)
+                    .enumerate()
+                    .map(|(index, row)| transfer_selection_key(row, index))
+                    .collect::<Vec<_>>()
+            });
+            cx.run_until_parked();
+            for (index, key) in keys.into_iter().enumerate() {
+                let selector: &'static str =
+                    Box::leak(format!("transfer-row-{key}").into_boxed_str());
+                let bounds = cx.debug_bounds(selector).expect("rendered transfer row");
+                assert_eq!(bounds.size.height, px(if index == 0 { 34.0 } else { 24.0 }));
+            }
         }
     }
 

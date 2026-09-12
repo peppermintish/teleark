@@ -305,3 +305,12 @@ Settings keeps custom API inputs collapsed until explicitly enabled, with a loca
 Local release builds use `scripts/build-local.sh` to load and validate `.env.local`; the public `.env.example` is a template only. MTProto connections report TeleArk’s workspace version instead of the transport library version. The Telegram application name still belongs to the selected API ID; saved personal credentials override the embedded pair.
 
 Encrypted transfer failure inspectors use transfer-specific reasons instead of native-download destination errors. Failed upload preflight retains its last phase, shown in the inspector; generic permission failures do not assert an OS or location without evidence.
+
+
+## Compact transfer rows and fixed list summaries (2026-09-13)
+
+Transfer file rows use 24-point content height and batch headers use 34 points (about 1.4 file rows). Inline controls and progress labels fit within those bounds; Library file rows keep their existing height. Transfer, Library, managed-file summaries and raw-channel loading/retry/history bars use one shared 24-point fixed footer with no wrapping. Overflow can scroll horizontally without consuming list height. Footer actions fit inside the bar.
+
+This supersedes the earlier 42/63-point transfer geometry and compact-window footer minimum heights. Visual previews and layout reviews now use English and light mode only, at 900×600 and actual native full-screen; existing automated dark-theme coverage may remain. No persistent formats or transfer execution behavior change.
+
+Validation: the current checkout passes 130 GUI tests (3 existing manual probes ignored); the isolated commit snapshot passes 111 (3 ignored). Strict GUI Clippy and formatting pass. Deterministic coverage verifies fixed footer/list geometry, horizontal overflow and action containment at compact and larger sizes. Native synthetic English/light previews cover Transfer, Library, Storage and Channel history at 900×600 and actual full-screen. No live account or transfer data is used.

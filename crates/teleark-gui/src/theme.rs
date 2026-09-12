@@ -15,6 +15,9 @@ thread_local! { static DARK_PALETTE: Cell<bool> = const { Cell::new(false) }; }
 
 pub const HEADER_HEIGHT: Pixels = px(58.0);
 pub const ROW_HEIGHT: Pixels = px(42.0);
+pub const LIST_FOOTER_HEIGHT: Pixels = px(24.0);
+pub const TRANSFER_ROW_HEIGHT: Pixels = px(24.0);
+pub const BATCH_ROW_HEIGHT: Pixels = px(34.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);
 pub const RADIUS_MEDIUM: Pixels = px(8.0);
 pub const RADIUS_LARGE: Pixels = px(12.0);

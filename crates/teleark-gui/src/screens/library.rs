@@ -558,22 +558,7 @@ impl TeleArkApp {
             ),
         );
 
-        div()
-            .min_h(px(if layout.is_compact() { 58.0 } else { 46.0 }))
-            .px_4()
-            .py_2()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(if layout.is_compact() {
-                px(8.0)
-            } else {
-                px(20.0)
-            })
-            .border_t_1()
-            .border_color(theme::border())
-            .text_xs()
-            .text_color(theme::text_secondary())
+        components::list_footer("library-list-footer")
             .child(total_files)
             .child(total_size)
             .when(!layout.is_compact(), |footer| footer.child(div().flex_1()))
@@ -600,6 +585,9 @@ impl TeleArkApp {
                         }),
                         false,
                     )
+                    .h(px(22.0))
+                    .flex_none()
+                    .disabled(self.library_loading_more)
                     .on_click(cx.listener(|this, _, _, cx| this.load_more_library(cx))),
                 )
             })

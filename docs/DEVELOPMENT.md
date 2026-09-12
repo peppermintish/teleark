@@ -59,14 +59,16 @@ The embedded pair identifies the application and is extractable from the resulti
 
 ## Isolated UI review
 
+Visual previews and layout reviews use English (`en-US`) and light mode only. Cover 900×600 and actual native full-screen mode; a large window does not replace full-screen. Existing automated dark-theme coverage may remain.
+
 Always include `--preview-ui` for layout work:
 
-Use English (`--locale=en-US`) by default for UI tests and visual previews. Switch to another locale only for a specific localization check or an explicit user request.
+Use English (`--locale=en-US`) only for interface tests and visual previews.
 
 ```bash
 cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=en-US --window-size=1360x760
-cargo run -p teleark-gui -- --preview-ui --preview-state=unlock --locale=zh-CN --window-size=900x600
-cargo run -p teleark-gui -- --preview-ui --preview-state=about --preview-dark --locale=ja-JP
+cargo run -p teleark-gui -- --preview-ui --preview-state=unlock --locale=en-US --window-size=900x600
+cargo run -p teleark-gui -- --preview-ui --preview-state=about --locale=en-US
 ```
 
 Preview disables Library, Telegram, diagnostics, native-transfer and Vault runtime constructors. Fixtures contain a synthetic account, 200 channel titles, 5,000 raw rows, Unicode managed files and native/upload batches with local-file states; a missing real runtime never produces fake transfer success. Preview actions cannot authenticate or move real Telegram data. `--preview-state` and `--preview-dark` are interpreted only in preview mode.
@@ -82,7 +84,7 @@ The default content size is 1120×680. Startup centers the native frame inside t
 
 `--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check English by default; use other locales for the localized message and wrapping checks.
 
-Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details, batch membership, scroll isolation at both boundaries, expanded/collapsed navigation, multi-file picker/removal and local-file states; Settings/About; light/dark and all locales. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
+Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details, batch membership, scroll isolation at both boundaries, expanded/collapsed navigation, multi-file picker/removal and local-file states; Settings/About; English light mode at 900×600 and actual native full-screen. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
 
 ## CI and releases
 
@@ -107,4 +109,4 @@ git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
 `checkpoint/pre-gpui-kit-redesign-20260907` also preserves the pre-rewrite repository. Restoring source does not downgrade an already migrated user database; never replace or remove user data for a code rollback.
 
 
-`--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. Add `--preview-dark` for the dark theme; no real history or account is accessed.
+`--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.

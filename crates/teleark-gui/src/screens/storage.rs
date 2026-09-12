@@ -1183,13 +1183,7 @@ impl TeleArkApp {
                 },
             )
             .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .text_xs()
-                    .text_color(theme::text_muted())
+                components::list_footer("storage-list-footer")
                     .when(self.page == Page::Storage, |footer| {
                         footer.child(self.tr("managed-catalog-coverage"))
                     })

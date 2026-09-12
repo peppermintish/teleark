@@ -309,3 +309,131 @@ mod tests {
         );
     }
 }
+
+/// Fixed list summaries stay on one line, including in compact windows.
+/// Horizontal overflow remains reachable without growing or shrinking the bar.
+pub fn list_footer(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .h(theme::LIST_FOOTER_HEIGHT)
+        .min_h(theme::LIST_FOOTER_HEIGHT)
+        .max_h(theme::LIST_FOOTER_HEIGHT)
+        .flex_none()
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_2()
+        .whitespace_nowrap()
+        .overflow_x_scroll()
+        .border_t_1()
+        .border_color(theme::border())
+        .text_xs()
+        .line_height(px(16.0))
+        .text_color(theme::text_secondary())
+}
+
+#[cfg(test)]
+mod list_footer_tests {
+    use super::*;
+    use gpui_kit::{ScrollDelta, ScrollWheelEvent, point, size};
+
+    struct FooterFixture {
+        scroll: ScrollHandle,
+    }
+
+    impl gpui_kit::Render for FooterFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            _: &mut gpui_kit::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .debug_selector(|| "footer-test-list".into()),
+                )
+                .child(
+                    list_footer("footer-test-bar")
+                        .track_scroll(&self.scroll)
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(1800.0))
+                                .child("Retained tasks and omitted history"),
+                        )
+                        .child(
+                            button("footer-test-retry", "Retry", None, false)
+                                .h(px(22.0))
+                                .flex_none()
+                                .debug_selector(|| "footer-test-retry".into()),
+                        ),
+                )
+        }
+    }
+
+    #[gpui_kit::test]
+    fn overflowing_footer_keeps_list_space_and_scrolls_to_its_action(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let scroll = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view(|_, _| FooterFixture {
+            scroll: scroll.clone(),
+        });
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            scroll.set_offset(point(px(0.0), px(0.0)));
+            cx.run_until_parked();
+            let footer = cx.debug_bounds("footer-test-bar").expect("footer");
+            let list = cx.debug_bounds("footer-test-list").expect("list");
+            assert_eq!(footer.size.height, px(24.0));
+            assert_eq!(footer.bottom(), px(height));
+            assert_eq!(list.bottom(), footer.top());
+            cx.simulate_event(ScrollWheelEvent {
+                position: footer.center(),
+                delta: ScrollDelta::Pixels(point(px(-4000.0), px(0.0))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            assert!(scroll.offset().x < px(0.0), "overflow stays reachable");
+            let action = cx.debug_bounds("footer-test-retry").expect("retry");
+            assert!(action.left() >= footer.left() && action.right() <= footer.right());
+            assert!(action.top() >= footer.top() && action.bottom() <= footer.bottom());
+            assert_eq!(
+                cx.debug_bounds("footer-test-bar")
+                    .expect("footer remains visible"),
+                footer
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn transfer_library_and_storage_summaries_stay_single_line(cx: &mut gpui_kit::TestAppContext) {
+        use crate::app::Page;
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            for (page, selector) in [
+                (Page::Transfers, "transfer-list-footer"),
+                (Page::Library, "library-list-footer"),
+                (Page::Storage, "storage-list-footer"),
+            ] {
+                app.update(cx, |app, cx| {
+                    app.page = page;
+                    app.vault_locked = false;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let footer = cx.debug_bounds(selector).expect(selector);
+                assert_eq!(footer.size.height, px(24.0), "{selector}");
+                assert!(footer.bottom() <= px(height), "{selector} is visible");
+            }
+        }
+    }
+}
