@@ -9,9 +9,24 @@ use tokio::io::{AsyncRead, ReadBuf};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ByteTransferEvent {
     WaitingForUpload,
-    Uploading { bytes: u64, total: u64 },
+    Uploading {
+        bytes: u64,
+        total: u64,
+    },
+    PartStarted {
+        index: u32,
+        attempt: u16,
+    },
+    PartRetry {
+        index: u32,
+        attempt: u16,
+        wait_millis: u64,
+    },
     SendingMessage,
-    Downloading { bytes: u64, total: u64 },
+    Downloading {
+        bytes: u64,
+        total: u64,
+    },
 }
 
 /// Called inline with bounded byte counters only. Implementations must not

@@ -121,7 +121,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             crypto_suite_id: CRYPTO_SUITE_ID,
             file_key_wrap: context.file_key_wrap.clone(),
             master_key_generation: context.master_key_generation,
-            flags: 0,
+            flags: 1,
         };
         let metadata = ManifestMetadata {
             logical_name: request.logical_name,

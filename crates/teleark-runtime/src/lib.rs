@@ -7,7 +7,7 @@ pub use teleark_storage::VaultFileHealth;
 pub use teleark_storage::VaultJobState as VaultRecoveryState;
 mod durable_download;
 mod durable_upload;
-pub use durable_upload::{DurablePreparedUpload, DurableUploadEncryption, DurableUploadParts};
+pub use durable_upload::DurableUploadParts;
 
 mod local_library;
 mod session_log_writer;
@@ -116,6 +116,9 @@ pub use teleark_telegram::{
     BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferSpeedLimits,
 };
 
+pub use teleark_crypto::aes256gcm_hardware_available;
+pub use teleark_telegram::TransferTuning;
+
 const STORAGE_QUEUE_CAPACITY: usize = 64;
 const LOCALE_OVERRIDE_SETTING_KEY: &str = "locale.override";
 const TELEGRAM_API_ID_SETTING_KEY: &str = "telegram.api_id";
@@ -132,6 +135,7 @@ pub enum AppearancePreference {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopPreferences {
+    pub transfer_tuning: teleark_telegram::TransferTuning,
     pub managed_files_root: Option<PathBuf>,
     pub reveal_completed_downloads: bool,
     pub upload_part_size_mib: u16,
@@ -158,6 +162,7 @@ pub const CHANNEL_SIDEBAR_DEFAULT_WIDTH: u16 = 208;
 impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
+            transfer_tuning: teleark_telegram::TransferTuning::default(),
             managed_files_root: None,
             reveal_completed_downloads: false,
             upload_part_size_mib: 1_900,
@@ -2153,6 +2158,11 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
             continue;
         };
         match key {
+            "manual_transfer_v1" => {
+                preferences.transfer_tuning =
+                    teleark_telegram::TransferTuning::decode(&setting.value)
+                        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
             "managed_files_root" => {
                 managed_root_seen = true;
                 preferences.managed_files_root = if setting.value.is_empty() {
@@ -2302,6 +2312,7 @@ fn store_preferences(
         DownloadThroughputStrategy::MaxThroughput => "max_throughput",
     };
     let values = [
+        ("manual_transfer_v1", preferences.transfer_tuning.encode()),
         (
             "upload_speed_limit_bytes_per_second",
             preferences.speed_limits.upload.to_string(),
@@ -2372,6 +2383,10 @@ fn store_preferences(
 }
 
 fn validate_preferences(preferences: &DesktopPreferences) -> Result<(), ApplicationError> {
+    if !preferences.transfer_tuning.validate() {
+        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+
     if !matches!(preferences.upload_part_size_mib, 1_024 | 1_900)
         || !matches!(preferences.index_batch_size, 200 | 500 | 1_000)
         || !(CHANNEL_SIDEBAR_MIN_WIDTH..=CHANNEL_SIDEBAR_MAX_WIDTH)
@@ -2772,6 +2787,10 @@ mod tests {
         );
 
         let preferences = DesktopPreferences {
+            transfer_tuning: TransferTuning {
+                upload_parts: 17,
+                ..Default::default()
+            },
             managed_files_root: Some(managed_files_root.clone()),
             reveal_completed_downloads: true,
             upload_part_size_mib: 1_024,
@@ -2938,6 +2957,10 @@ mod tests {
         let blocked = directory.path().join("blocked");
         std::fs::write(&blocked, b"preserve this file").expect("collision");
         let preferences = DesktopPreferences {
+            transfer_tuning: TransferTuning {
+                upload_parts: 17,
+                ..Default::default()
+            },
             managed_files_root: Some(blocked.clone()),
             ..before.clone()
         };

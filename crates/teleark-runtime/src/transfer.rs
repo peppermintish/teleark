@@ -1,5 +1,6 @@
 mod manifest_outbox;
 mod reserved;
+pub(crate) mod streaming;
 pub use reserved::ReservedPublicationStore;
 
 use std::{
@@ -31,7 +32,7 @@ use teleark_storage::{Database, StoredPartState, StoredTransferState, TransferTa
 
 use crate::DesktopTelegram;
 
-const FRAME_PLAINTEXT_BYTES: u32 = 8 * 1024 * 1024;
+const FRAME_PLAINTEXT_BYTES: u32 = 512 * 1024 - 32;
 const ENCRYPTED_PART_PLAINTEXT_BYTES: u64 = 60 * 1024 * 1024;
 const MAX_RECONCILIATION_RESULTS: usize = 1_000;
 pub(crate) const MANIFEST_CAPTION: &str = "teleark-manifest-v1";
@@ -339,7 +340,6 @@ pub(crate) struct PreparedEncryptedPart {
     pub(crate) encoded: Vec<u8>,
     pub(crate) manifest_part: ManifestPart,
     pub(crate) plaintext_digest: ContentDigest,
-    pub(crate) encryption_duration_micros: u64,
 }
 
 impl<S> EncryptedRemoteTransport<S> {
@@ -519,6 +519,7 @@ impl<S> EncryptedRemoteTransport<S> {
             self.limits,
         )
         .map_err(map_crypto_error)?;
+        let header = header.aligned(self.limits).map_err(map_crypto_error)?;
         let expected_encoded_size = header.expected_encoded_length().map_err(map_crypto_error)?;
         if expected_encoded_size > MAX_TRANSFER_OBJECT_BYTES as u64 {
             return Err(TransferError::ManifestCorrupted);
@@ -557,7 +558,6 @@ impl<S> EncryptedRemoteTransport<S> {
             .map_err(|_| TransferError::ManifestCorrupted)?;
         let mut encoded = Vec::with_capacity(capacity);
         let mut worker_usage = AeadUsageRegistry::new();
-        let encryption_started = std::time::Instant::now();
         let summary = encrypt_part_cancellable(
             &mut Cursor::new(plaintext),
             &mut encoded,
@@ -573,8 +573,6 @@ impl<S> EncryptedRemoteTransport<S> {
             },
         )
         .map_err(map_crypto_error)?;
-        let encryption_duration_micros =
-            u64::try_from(encryption_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         if summary.encoded_length != plan.expected_encoded_size || encoded.len() != capacity {
             return Err(TransferError::ManifestCorrupted);
         }
@@ -582,7 +580,6 @@ impl<S> EncryptedRemoteTransport<S> {
             key: plan.key,
             encoded,
             plaintext_digest,
-            encryption_duration_micros,
             manifest_part: ManifestPart {
                 part_index: plan.key.part_index.get(),
                 part_instance_id: summary.header.part_instance_id.0,
@@ -639,6 +636,7 @@ impl<S> EncryptedRemoteTransport<S> {
         self.finish_prepared_part(prepared, object)
     }
 
+    #[cfg(test)]
     fn finish_prepared_part(
         &mut self,
         prepared: PreparedEncryptedPart,
@@ -669,6 +667,35 @@ impl<S> EncryptedRemoteTransport<S> {
             return Err(TransferError::HashMismatch);
         }
         Ok(remote_object)
+    }
+
+    fn accept_uploaded_part(
+        &mut self,
+        mut part: ManifestPart,
+        object: RemoteByteObject,
+    ) -> Result<RemoteObject, TransferError> {
+        if object.object_id == 0
+            || object.object_id > i64::MAX as u64
+            || object.name != part.remote_locator.remote_name
+            || object.encoded_size != part.encoded_length
+        {
+            return Err(TransferError::HashMismatch);
+        }
+        part.remote_locator.message_id = object.object_id as i64;
+        let result = RemoteObject {
+            key: RemotePartKey {
+                account_id: self.account_id,
+                package_id: self.package_id,
+                part_index: PartIndex::new(part.part_index),
+            },
+            object_id: object.object_id,
+            encoded_size: object.encoded_size,
+            plaintext_size: part.plaintext_length,
+            digest: ContentDigest(part.plaintext_blake3),
+        };
+        self.manifest_parts.insert(part.part_index, part);
+        self.hydrated_objects.insert(object.object_id);
+        Ok(result)
     }
 
     fn decode(
@@ -914,7 +941,7 @@ impl<S> EncryptedRemoteTransport<S> {
             crypto_suite_id: CRYPTO_SUITE_ID,
             file_key_wrap,
             master_key_generation: request.master_key_generation,
-            flags: 0,
+            flags: 1,
         };
         let bytes = seal_manifest(
             &public,

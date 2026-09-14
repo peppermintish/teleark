@@ -21,12 +21,12 @@ use teleark_telegram::{
 };
 use teleark_transfer::{
     AdaptiveControllerConfig, AdaptiveTransferController, ControllerPhase, MemoryCounters,
-    ParameterBounds, PartCounters, PerformanceSample, QueueCounters, TransferBottleneck,
-    TransferControlParameters, TransferTelemetrySnapshot,
+    PartCounters, PerformanceSample, QueueCounters, TransferBottleneck, TransferControlParameters,
+    TransferTelemetrySnapshot,
 };
 
 use crate::{
-    DesktopLibrary, DesktopTelegram, DownloadThroughputStrategy,
+    DesktopLibrary, DesktopTelegram,
     transfer_updates::{
         TransferRecord, TransferSnapshotView, TransferSnapshots, TransferSubscription,
     },
@@ -363,7 +363,7 @@ struct RuntimeDownloadObserver {
     sample: Mutex<ProgressSample>,
     last_persisted: Mutex<Instant>,
     controller: Mutex<AdaptiveTransferController>,
-    download_strategy: DownloadThroughputStrategy,
+    tuning: teleark_telegram::TransferTuning,
     session_log: Mutex<Option<TransferSessionLog>>,
 }
 
@@ -452,11 +452,10 @@ impl DownloadObserver for RuntimeDownloadObserver {
     }
 
     fn max_part_attempts(&self) -> u32 {
-        if self.download_strategy == DownloadThroughputStrategy::MaxThroughput {
-            8
-        } else {
-            4
-        }
+        u32::from(self.tuning.download_attempts)
+    }
+    fn desired_connections(&self) -> u16 {
+        self.tuning.download_connections
     }
 
     fn desired_inflight_parts(&self) -> usize {
@@ -1492,39 +1491,19 @@ impl Drop for TransferWorkerInner {
 }
 
 fn new_download_controller(
-    soft_limit_policy: teleark_transfer::SoftLimitPolicy,
-    strategy: DownloadThroughputStrategy,
+    tuning: teleark_telegram::TransferTuning,
 ) -> Result<AdaptiveTransferController, ApplicationError> {
-    let available_parallelism = thread::available_parallelism()
-        .ok()
-        .and_then(|count| u16::try_from(count.get()).ok())
-        .unwrap_or(1)
-        .clamp(1, 16);
-    let mut config =
-        AdaptiveControllerConfig::maximum_throughput(512 * 1024 * 1024, available_parallelism)
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.transfer_connections = ParameterBounds::new(1, 1, 1)
+    let config = AdaptiveControllerConfig::maximum_throughput(512 * 1024 * 1024, 1)
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.inflight_rpcs_per_connection = ParameterBounds::new(1, 1, 1)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.active_files = ParameterBounds::new(1, 1, 1)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    let aggressive = strategy == DownloadThroughputStrategy::MaxThroughput;
-    config.download_strategy = strategy;
-    config.inflight_parts_per_file = ParameterBounds::new(
-        if aggressive { 1 } else { 4 },
-        if aggressive { 64 } else { 24 },
-        if aggressive { 16 } else { 4 },
-    )
-    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.probe_settle_millis = if aggressive { 1_000 } else { 2_000 };
-    config.soft_limit_policy = soft_limit_policy;
-    let initial_parameters = TransferControlParameters {
-        inflight_parts_per_file: 4,
-        inflight_rpcs_per_connection: 1,
+    let parameters = TransferControlParameters {
+        active_file_count: tuning.download_tasks,
+        transfer_connection_count: tuning.download_connections,
+        inflight_parts_per_file: tuning.download_parts,
+        inflight_rpcs_per_connection: tuning.download_parts.div_ceil(tuning.download_connections),
         ..TransferControlParameters::conservative_download()
     };
-    AdaptiveTransferController::with_initial_parameters(config, false, initial_parameters)
+    AdaptiveTransferController::new(config, false)
+        .map(|controller| controller.manual(parameters))
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))
 }
 
@@ -1576,6 +1555,28 @@ fn validate_batch_size(size: usize) -> Result<(), ApplicationError> {
     Ok(())
 }
 
+struct DownloadSlots {
+    active: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+struct DownloadSlot<'a>(&'a DownloadSlots);
+impl Drop for DownloadSlot<'_> {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active -= 1;
+        self.0.changed.notify_all();
+    }
+}
+impl DownloadSlots {
+    fn acquire(&self, limit: usize) -> DownloadSlot<'_> {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        while *active >= limit {
+            active = self.changed.wait(active).unwrap_or_else(|e| e.into_inner());
+        }
+        *active += 1;
+        DownloadSlot(self)
+    }
+}
 fn transfer_loop(
     receiver: mpsc::Receiver<TransferCommand>,
     backend: Arc<dyn ChannelDownloadBackend>,
@@ -1585,7 +1586,50 @@ fn transfer_loop(
     library: DesktopLibrary,
     pump: Arc<QueuePump>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    let receiver = Arc::new(Mutex::new(receiver));
+    let slots = DownloadSlots {
+        active: Mutex::new(0),
+        changed: std::sync::Condvar::new(),
+    };
+    thread::scope(|scope| {
+        for _ in 0..8 {
+            let receiver = receiver.clone();
+            let backend = backend.clone();
+            let snapshots = snapshots.clone();
+            let scheduled = scheduled.clone();
+            let shutdown = shutdown.clone();
+            let library = library.clone();
+            let pump = pump.clone();
+            let slots = &slots;
+            scope.spawn(move || {
+                download_worker(
+                    receiver, backend, snapshots, scheduled, shutdown, library, pump, slots,
+                )
+            });
+        }
+    });
+}
+#[allow(clippy::too_many_arguments)]
+fn download_worker(
+    receiver: Arc<Mutex<mpsc::Receiver<TransferCommand>>>,
+    backend: Arc<dyn ChannelDownloadBackend>,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
+    scheduled: Arc<Mutex<BTreeSet<u64>>>,
+    shutdown: Arc<AtomicBool>,
+    library: DesktopLibrary,
+    pump: Arc<QueuePump>,
+    slots: &DownloadSlots,
+) {
+    loop {
+        let command = { receiver.lock().unwrap_or_else(|e| e.into_inner()).recv() };
+        let Ok(command) = command else {
+            break;
+        };
+        let limit = library
+            .preferences()
+            .map(|p| usize::from(p.transfer_tuning.download_tasks))
+            .unwrap_or(1);
+        let _slot = slots.acquire(limit);
         match command {
             TransferCommand::Download {
                 mut snapshot,
@@ -1734,12 +1778,9 @@ fn run_download(
     );
     let started = Instant::now();
     let previous_duration_ms = snapshot.duration_ms.unwrap_or(0);
-    let (controller, download_strategy) = match library.preferences().and_then(|preferences| {
-        new_download_controller(
-            preferences.transfer_soft_limit_policy,
-            preferences.download_throughput_strategy,
-        )
-        .map(|controller| (controller, preferences.download_throughput_strategy))
+    let (controller, tuning) = match library.preferences().and_then(|preferences| {
+        new_download_controller(preferences.transfer_tuning)
+            .map(|controller| (controller, preferences.transfer_tuning))
     }) {
         Ok(controller) => controller,
         Err(error) => {
@@ -1821,7 +1862,7 @@ fn run_download(
             observations: VecDeque::from([(snapshot.transferred_bytes, started)]),
         }),
         last_persisted: Mutex::new(started),
-        download_strategy,
+        tuning,
         controller: Mutex::new(controller),
         session_log: Mutex::new(Some(session_log)),
     });
@@ -2395,35 +2436,31 @@ mod tests {
     }
 
     #[test]
-    fn native_profiles_change_real_parts_without_inventing_connections() {
-        for (strategy, initial, maximum) in [
-            (DownloadThroughputStrategy::Balanced, 4, 24),
-            (DownloadThroughputStrategy::MaxThroughput, 4, 64),
-        ] {
-            let mut controller =
-                new_download_controller(crate::SoftLimitPolicy::AdaptiveOverride, strategy)
-                    .expect("valid test fixture");
-            assert_eq!(controller.parameters().inflight_parts_per_file, initial);
-            let mut reached_maximum = false;
-            for step in 0..100 {
-                controller.observe(PerformanceSample {
-                    observed_at_millis: step * 2_000,
-                    goodput_bytes_per_second: u64::from(
-                        controller.parameters().inflight_parts_per_file,
-                    ) * 1_000_000,
-                    active_large_files: 1,
-                    ..PerformanceSample::default()
-                });
-                let parts = controller.parameters().inflight_parts_per_file;
-                assert!(parts <= maximum);
-                reached_maximum |= parts == maximum;
-            }
-            assert!(reached_maximum);
-            let parameters = controller.parameters();
-            assert_eq!(parameters.transfer_connection_count, 1);
-            assert_eq!(parameters.inflight_rpcs_per_connection, 1);
-            assert_eq!(parameters.active_file_count, 1);
+    fn manual_download_parameters_never_change_with_traffic_or_retries() {
+        let tuning = teleark_telegram::TransferTuning {
+            download_parts: 13,
+            download_connections: 3,
+            ..Default::default()
+        };
+        let mut controller = new_download_controller(tuning).expect("controller");
+        let expected = controller.parameters();
+        for step in 0..100 {
+            let sample = PerformanceSample {
+                observed_at_millis: step * 2000,
+                goodput_bytes_per_second: step * 100000,
+                flood_wait_seconds: Some(30),
+                memory: MemoryCounters {
+                    network_inflight_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            controller.observe(sample);
+            controller.recover_from_part_retry(sample);
+            assert_eq!(controller.parameters(), expected);
         }
+        assert_eq!(expected.inflight_parts_per_file, 13);
+        assert_eq!(expected.transfer_connection_count, 3);
     }
 
     #[test]
@@ -2656,16 +2693,18 @@ mod tests {
         assert_eq!(transfers.snapshots().expect("queued").len(), total);
         assert!(transfers.inner.scheduled.lock().expect("scheduled").len() < total);
         release.send(()).expect("release backend");
-        let last = transfers
+        let ids = transfers
             .snapshots()
             .expect("tasks")
-            .last()
-            .expect("last")
-            .id;
-        assert_eq!(
-            wait_for_terminal(&transfers, last).state,
-            ChannelDownloadState::Completed
-        );
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            assert_eq!(
+                wait_for_terminal(&transfers, id).state,
+                ChannelDownloadState::Completed
+            );
+        }
         assert!(
             transfers
                 .snapshots()
@@ -3088,8 +3127,12 @@ mod tests {
         let second_snapshot = wait_for_terminal(&transfers, second);
         assert_eq!(second_snapshot.chat_id, 101);
         let calls = backend.calls.lock().expect("calls");
-        assert_eq!((calls[0].0, calls[0].1), (100, 200));
-        assert_eq!((calls[1].0, calls[1].1), (101, 201));
+        let mut identities = calls
+            .iter()
+            .map(|call| (call.0, call.1))
+            .collect::<Vec<_>>();
+        identities.sort_unstable();
+        assert_eq!(identities, [(100, 200), (101, 201)]);
     }
 
     #[test]

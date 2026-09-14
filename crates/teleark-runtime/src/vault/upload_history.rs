@@ -297,7 +297,7 @@ fn orphan_upload_snapshot(
         average_bytes_per_second: None,
         destination: None,
         session_log_path: None,
-        telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+        telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
             .snapshot(),
         state: VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest),
     })
@@ -337,7 +337,7 @@ fn snapshot(r: VaultUploadRecord) -> Result<VaultTransferSnapshot, ApplicationEr
         average_bytes_per_second: r.average_bytes_per_second,
         destination: None,
         session_log_path: None,
-        telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+        telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
             .snapshot(),
         state,
     })
@@ -417,7 +417,7 @@ mod tests {
             average_bytes_per_second: None,
             destination: None,
             session_log_path: None,
-            telemetry: transfer_controller(true, 1, teleark_transfer::SoftLimitPolicy::Respect)
+            telemetry: transfer_controller(true, 1, teleark_telegram::TransferTuning::default())
                 .expect("controller")
                 .snapshot(),
             state,

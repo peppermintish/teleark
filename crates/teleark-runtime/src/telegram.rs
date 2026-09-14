@@ -260,6 +260,16 @@ enum TelegramRequest {
         cancellation: Option<TelegramScanCancellation>,
         reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
     },
+    UploadStream {
+        account_id: i64,
+        chat_id: i64,
+        file_name: String,
+        caption: String,
+        stream: teleark_telegram::UploadStream,
+        options: teleark_telegram::StreamUploadOptions,
+        cancellation: Option<TelegramScanCancellation>,
+        reply: mpsc::SyncSender<Result<i64, ApplicationError>>,
+    },
     UploadBytes {
         publication_random_id: Option<i64>,
         observer: Option<Arc<dyn ByteTransferObserver>>,
@@ -882,6 +892,29 @@ impl DesktopTelegram {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn upload_stream_observed(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        file_name: String,
+        caption: String,
+        stream: teleark_telegram::UploadStream,
+        options: teleark_telegram::StreamUploadOptions,
+        cancellation: Option<TelegramScanCancellation>,
+    ) -> Result<i64, ApplicationError> {
+        self.request("upload_stream", |reply| TelegramRequest::UploadStream {
+            account_id,
+            chat_id,
+            file_name,
+            caption,
+            stream,
+            options,
+            cancellation,
+            reply,
+        })
+    }
+
     pub fn sign_out(&self) -> Result<(), ApplicationError> {
         self.request("sign_out", |reply| TelegramRequest::SignOut { reply })
     }
@@ -1044,7 +1077,7 @@ impl TelegramRequest {
             Self::SearchFiles { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
-            Self::UploadBytes { reply, .. } => {
+            Self::UploadStream { reply, .. } | Self::UploadBytes { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
             Self::SignOut { reply, .. } => {
@@ -1058,9 +1091,10 @@ impl TelegramRequest {
         use dispatch::Lane;
         match self {
             Self::TestProxy { .. } => Lane::Probe,
-            Self::Download { .. } | Self::DownloadBytes { .. } | Self::UploadBytes { .. } => {
-                Lane::Transfer
-            }
+            Self::Download { .. }
+            | Self::DownloadBytes { .. }
+            | Self::UploadBytes { .. }
+            | Self::UploadStream { .. } => Lane::Transfer,
             Self::ChannelSignals { .. }
             | Self::SyncChannel { .. }
             | Self::AccountAvatar { .. }
@@ -1400,6 +1434,31 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             } else {
                 operation.await
             };
+            let _ = reply.send(result);
+        }
+        TelegramRequest::UploadStream {
+            account_id,
+            chat_id,
+            file_name,
+            caption,
+            stream,
+            options,
+            cancellation,
+            reply,
+        } => {
+            let operation = async {
+                require_account(state, account_id)?;
+                let chat = state
+                    .chats
+                    .get(&chat_id)
+                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+                connection_ref(state)?
+                    .upload_stream_document(chat, stream, &file_name, &caption, options)
+                    .await
+                    .map(|sent| sent.message_id)
+                    .map_err(map_telegram_error)
+            };
+            let result = interruptible_upload(operation, cancellation.as_ref()).await;
             let _ = reply.send(result);
         }
         TelegramRequest::UploadBytes {

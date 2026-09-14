@@ -6,6 +6,24 @@ use std::num::NonZeroI64;
 /// Store capability required by durable uploads. There is deliberately no
 /// fallback to ordinary upload, which could allocate a different message ID.
 pub trait ReservedPublicationStore: RemoteObjectStore {
+    fn upload_stream_reserved(
+        &mut self,
+        name: &str,
+        caption: &str,
+        mut stream: teleark_telegram::UploadStream,
+        random_id: NonZeroI64,
+        _tuning: teleark_telegram::TransferTuning,
+    ) -> Result<RemoteByteObject, UploadError> {
+        let mut bytes = Vec::new();
+        while let Some(block) = stream.blocks.blocking_recv() {
+            bytes.extend_from_slice(&block);
+            let _ = stream.recycled.try_send(block);
+        }
+        if stream.sealed.blocking_recv() != Ok(true) {
+            return Err(UploadError::Definite(TransferError::SourceChanged));
+        }
+        self.upload_reserved(name, caption, bytes, random_id)
+    }
     fn upload_reserved(
         &mut self,
         name: &str,
@@ -16,6 +34,36 @@ pub trait ReservedPublicationStore: RemoteObjectStore {
 }
 
 impl ReservedPublicationStore for TelegramObjectStore {
+    fn upload_stream_reserved(
+        &mut self,
+        name: &str,
+        caption: &str,
+        stream: teleark_telegram::UploadStream,
+        random_id: NonZeroI64,
+        tuning: teleark_telegram::TransferTuning,
+    ) -> Result<RemoteByteObject, UploadError> {
+        let encoded_size = stream.total_bytes;
+        self.telegram
+            .upload_stream_observed(
+                self.account_id,
+                self.chat_id,
+                name.into(),
+                caption.into(),
+                stream,
+                teleark_telegram::StreamUploadOptions {
+                    observer: self.observer.clone(),
+                    random_id: random_id.get(),
+                    tuning,
+                },
+                self.cancellation.clone(),
+            )
+            .map(|object_id| RemoteByteObject {
+                object_id: object_id as u64,
+                name: name.into(),
+                encoded_size,
+            })
+            .map_err(|error| UploadError::Definite(map_application_error(error)))
+    }
     fn upload_reserved(
         &mut self,
         name: &str,
@@ -46,7 +94,8 @@ impl<S> EncryptedRemoteTransport<S> {
 
     /// Reconstruct the exact ciphertext, reconcile remote publication, and
     /// verify the remote bytes before returning a receipt for durable commit.
-    pub fn resume_reserved_part(
+    #[cfg(test)]
+    pub(crate) fn resume_reserved_part(
         &mut self,
         key: RemotePartKey,
         reservation: &VaultPartRecovery,
@@ -58,6 +107,7 @@ impl<S> EncryptedRemoteTransport<S> {
         self.resume_reserved_part_with_receipt(key, reservation, plaintext, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn resume_reserved_part_with_receipt(
         &mut self,
         key: RemotePartKey,
@@ -89,10 +139,17 @@ impl<S> EncryptedRemoteTransport<S> {
             self.logical_file_size,
             self.plaintext_offset(position)?,
             self.part_sizes[position],
-            FRAME_PLAINTEXT_BYTES,
+            reservation.header.frame_plaintext_max,
             self.limits,
         )
         .map_err(map_crypto_error)?;
+        let expected_header = if reservation.header.format_major == 2 {
+            expected_header
+                .aligned(self.limits)
+                .map_err(map_crypto_error)?
+        } else {
+            expected_header
+        };
         if reservation.header != expected_header {
             return Err(TransferError::ManifestCorrupted);
         }
@@ -112,6 +169,7 @@ impl<S> EncryptedRemoteTransport<S> {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_reserved_prepared(
         &mut self,
         mut prepared: PreparedEncryptedPart,

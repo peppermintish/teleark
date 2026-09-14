@@ -49,7 +49,7 @@ impl VaultOwner {
                     telemetry: transfer_controller(
                         true,
                         0,
-                        teleark_transfer::SoftLimitPolicy::Respect,
+                        teleark_telegram::TransferTuning::default(),
                     )?
                     .snapshot(),
                     state: VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest),
@@ -249,7 +249,7 @@ pub(super) fn pending_snapshot(
         average_bytes_per_second: None,
         destination: None,
         session_log_path: None,
-        telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+        telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
             .snapshot(),
         state,
     })

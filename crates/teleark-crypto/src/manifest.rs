@@ -168,7 +168,8 @@ impl ManifestPart {
         summary: &PlaintextPartSummary,
     ) -> Result<(), CryptoError> {
         let header = &summary.header;
-        if header.package_id != public.package_id
+        if header.format_major != if public.flags == 1 { 2 } else { 1 }
+            || header.package_id != public.package_id
             || header.part_instance_id.0 != self.part_instance_id
             || header.part_index != self.part_index
             || header.part_count != public.part_count
@@ -361,7 +362,7 @@ pub fn manifest_content_commitment(
     limits: ManifestLimits,
 ) -> Result<[u8; 32], CryptoError> {
     let (public_bytes, plaintext) = manifest_payload(public_header, metadata, limits)?;
-    let prefix = encode_envelope_prefix(public_bytes.len(), plaintext.len())?;
+    let prefix = encode_envelope_prefix(public_bytes.len(), plaintext.len(), public_header.flags)?;
     let mut hash = blake3::Hasher::new();
     hash.update(b"TARK manifest commitment v1\0");
     hash.update(&prefix);
@@ -405,7 +406,11 @@ pub fn seal_manifest(
     usage: &mut AeadUsageRegistry,
 ) -> Result<Vec<u8>, CryptoError> {
     let (public_bytes, mut encrypted_metadata) = manifest_payload(public_header, metadata, limits)?;
-    let prefix = encode_envelope_prefix(public_bytes.len(), encrypted_metadata.len())?;
+    let prefix = encode_envelope_prefix(
+        public_bytes.len(),
+        encrypted_metadata.len(),
+        public_header.flags,
+    )?;
     let mut aad = Vec::with_capacity(prefix.len() + public_bytes.len());
     aad.extend_from_slice(&prefix);
     aad.extend_from_slice(&public_bytes);
@@ -446,6 +451,11 @@ pub fn manifest_vault_id_hint(
 ) -> Result<[u8; 16], CryptoError> {
     let envelope = parse_envelope(bytes, limits)?;
     let header = decode_public_header(envelope.public_header, limits)?;
+    if u16::from_be_bytes([bytes[8], bytes[9]]) != if header.flags == 1 { 2 } else { 1 } {
+        return Err(CryptoError::InvalidField {
+            field: "manifest codec flags",
+        });
+    }
     header.validate(limits)?;
     Ok(header.vault_id)
 }
@@ -459,6 +469,11 @@ pub fn open_manifest(
 ) -> Result<OpenedManifest, CryptoError> {
     let envelope = parse_envelope(bytes, limits)?;
     let public_header = decode_public_header(envelope.public_header, limits)?;
+    if u16::from_be_bytes([bytes[8], bytes[9]]) != if public_header.flags == 1 { 2 } else { 1 } {
+        return Err(CryptoError::InvalidField {
+            field: "manifest codec flags",
+        });
+    }
     public_header.validate(limits)?;
     let file_key = unwrap_file_key(
         master_key,
@@ -503,6 +518,11 @@ impl ManifestPublicHeader {
                 violation: LayoutViolation::InvalidPartCount,
             });
         }
+        if self.flags == 1 && self.frame_plaintext_max != 512 * 1024 - 32 {
+            return Err(CryptoError::InvalidField {
+                field: "aligned manifest frame size",
+            });
+        }
         if self.application_part_target == 0 || self.frame_plaintext_max == 0 {
             return Err(CryptoError::InvalidField {
                 field: "manifest geometry",
@@ -523,7 +543,7 @@ impl ManifestPublicHeader {
                 algorithm_id: self.file_key_wrap.algorithm_id,
             });
         }
-        if self.flags != 0 {
+        if self.flags > 1 {
             return Err(CryptoError::UnknownFlags {
                 field: "manifest public header",
                 flags: self.flags,
@@ -614,7 +634,13 @@ impl ManifestMetadata {
                     violation: LayoutViolation::OutOfRange,
                 });
             }
-            let expected_frames = frame_count(part.plaintext_length, public.frame_plaintext_max)?;
+            let framed_length = part
+                .plaintext_length
+                .checked_add(if public.flags == 1 { 96 } else { 0 })
+                .ok_or(CryptoError::ArithmeticOverflow {
+                    field: "aligned manifest frame count",
+                })?;
+            let expected_frames = frame_count(framed_length, public.frame_plaintext_max)?;
             if expected_frames != part.frame_count {
                 return Err(CryptoError::InvalidLayout {
                     violation: LayoutViolation::InvalidFrameCount,
@@ -794,6 +820,7 @@ struct Envelope<'a> {
 fn encode_envelope_prefix(
     public_length: usize,
     metadata_length: usize,
+    flags: u32,
 ) -> Result<[u8; ENVELOPE_PREFIX_LENGTH], CryptoError> {
     let public_length =
         u32::try_from(public_length).map_err(|_| CryptoError::ArithmeticOverflow {
@@ -805,7 +832,7 @@ fn encode_envelope_prefix(
         })?;
     let mut prefix = [0_u8; ENVELOPE_PREFIX_LENGTH];
     prefix[..8].copy_from_slice(MANIFEST_MAGIC);
-    prefix[8..10].copy_from_slice(&FORMAT_MAJOR.to_be_bytes());
+    prefix[8..10].copy_from_slice(&(if flags == 1 { 2u16 } else { FORMAT_MAJOR }).to_be_bytes());
     prefix[10..12].copy_from_slice(&FORMAT_MINOR.to_be_bytes());
     prefix[12..16].copy_from_slice(&public_length.to_be_bytes());
     prefix[16..24].copy_from_slice(&metadata_length.to_be_bytes());
@@ -825,7 +852,7 @@ fn parse_envelope(bytes: &[u8], limits: ManifestLimits) -> Result<Envelope<'_>, 
     }
     let major = u16::from_be_bytes(array_at(bytes, 8, "manifest major version")?);
     let minor = u16::from_be_bytes(array_at(bytes, 10, "manifest minor version")?);
-    if major != FORMAT_MAJOR || minor != FORMAT_MINOR {
+    if !matches!(major, 1 | 2) || minor != FORMAT_MINOR {
         return Err(CryptoError::UnsupportedVersion {
             format: FormatKind::Manifest,
             major,

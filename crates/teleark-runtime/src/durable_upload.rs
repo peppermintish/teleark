@@ -21,18 +21,23 @@ pub struct DurableUploadParts<S> {
 /// One committed reservation ready for a bounded encryption worker. It owns
 /// no database connection or transport, so expensive encryption is independent
 /// of the ledger and network owners.
-pub struct DurableUploadEncryption {
+pub(crate) struct DurableUploadEncryption {
+    #[cfg(test)]
     lease: VaultJobLease,
+    #[cfg(test)]
     context_digest: [u8; 32],
     identity: Vec<u8>,
     reservation: VaultPartRecovery,
     receipt_id: Option<u64>,
+    #[cfg(test)]
     encryption: crate::transfer::PartEncryptionContext,
+    #[cfg(test)]
     plan: crate::transfer::PartEncryptionPlan,
 }
 
 /// Opaque encrypted result retains the execution scope of its reservation.
-pub struct DurablePreparedUpload {
+#[cfg(test)]
+pub(crate) struct DurablePreparedUpload {
     lease: VaultJobLease,
     context_digest: [u8; 32],
     identity: Vec<u8>,
@@ -40,6 +45,7 @@ pub struct DurablePreparedUpload {
     receipt_id: Option<u64>,
     prepared: crate::transfer::PreparedEncryptedPart,
 }
+#[cfg(test)]
 impl DurableUploadEncryption {
     pub fn encrypt(self, plaintext: Vec<u8>) -> Result<DurablePreparedUpload, TransferError> {
         let prepared =
@@ -56,17 +62,6 @@ impl DurableUploadEncryption {
             receipt_id: self.receipt_id,
             prepared,
         })
-    }
-}
-impl DurablePreparedUpload {
-    pub fn part_index(&self) -> u32 {
-        self.prepared.key.part_index.get()
-    }
-    pub fn plaintext_length(&self) -> u64 {
-        self.prepared.manifest_part.plaintext_length
-    }
-    pub fn encryption_duration_micros(&self) -> u64 {
-        self.prepared.encryption_duration_micros
     }
 }
 
@@ -120,7 +115,8 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
     /// Commit the immutable reservation before encrypting/sending. A late
     /// successful send may be recorded while pausing/cancelling, but never
     /// after acknowledgment or after another generation has started.
-    pub fn upload_part(
+    #[cfg(test)]
+    pub(crate) fn upload_part(
         &mut self,
         database: &mut Database,
         index: u32,
@@ -133,7 +129,8 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
 
     /// Run on the admission owner before handing this job to parallel crypto
     /// workers. Only the immutable reservation crosses the worker boundary.
-    pub fn prepare_part(
+    #[cfg(test)]
+    pub(crate) fn prepare_part(
         &mut self,
         database: &mut Database,
         index: u32,
@@ -149,7 +146,7 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
 
     /// Accepts the digest produced by source admission; encryption still
     /// checks the actual bytes against it before using the saved nonce.
-    pub fn prepare_part_digest(
+    pub(crate) fn prepare_part_digest(
         &mut self,
         database: &mut Database,
         index: u32,
@@ -237,21 +234,26 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
             .as_deref()
             .map(|receipt| decode_receipt(receipt, &part.identity))
             .transpose()?;
-        let plan = self.transport.restore_reserved_plan(key, &reservation)?;
+        let _plan = self.transport.restore_reserved_plan(key, &reservation)?;
         Ok(DurableUploadEncryption {
+            #[cfg(test)]
             lease: self.lease,
+            #[cfg(test)]
             context_digest: *blake3::hash(&self.encoded_context).as_bytes(),
             identity: part.identity,
             reservation,
             receipt_id,
+            #[cfg(test)]
             encryption: self.transport.encryption_context(),
-            plan,
+            #[cfg(test)]
+            plan: _plan,
         })
     }
 
     /// The sender rechecks the lease after waiting for encryption. No mutex or
     /// database transaction is held while uploading/verifying remote bytes.
-    pub fn publish_prepared(
+    #[cfg(test)]
+    pub(crate) fn publish_prepared(
         &mut self,
         database: &mut Database,
         prepared: DurablePreparedUpload,
@@ -285,6 +287,104 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
         {
             return Err(TransferError::Cancelled);
         }
+        Ok(object)
+    }
+
+    /// Stream one application container in bounded 512 KiB wire blocks. A
+    /// surviving ciphertext spool is retransmitted verbatim; a lost/partial
+    /// spool burns its reservation before any new encryption is admitted.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn upload_source_part(
+        &mut self,
+        database: &mut Database,
+        index: u32,
+        plaintext_length: u64,
+        digest: teleark_transfer::ContentDigest,
+        source: &std::path::Path,
+        root: &std::path::Path,
+        tuning: teleark_telegram::TransferTuning,
+    ) -> Result<RemoteObject, TransferError> {
+        std::fs::create_dir_all(root).map_err(|_| TransferError::Database)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| TransferError::Database)?;
+        }
+        let key = RemotePartKey {
+            account_id: AccountId::new(self.context.account_id),
+            package_id: crate::transfer::package_id_from_bytes(self.context.package_id)?,
+            part_index: PartIndex::new(index),
+        };
+        let previous = database
+            .vault_parts(
+                self.lease.account_id,
+                self.lease.id,
+                index.checked_sub(1),
+                1,
+            )
+            .map_err(|_| TransferError::Database)?
+            .into_iter()
+            .find(|part| part.part_index == index);
+        if let Some(previous) = previous {
+            let reservation = VaultPartRecovery::decode(&previous.identity)
+                .map_err(|_| TransferError::ManifestCorrupted)?;
+            if previous.receipt.is_none()
+                && !crate::transfer::streaming::reusable_spool(
+                    root,
+                    &previous.identity,
+                    &reservation,
+                    false,
+                )
+            {
+                let mut bytes = [0; 8];
+                OsRandom
+                    .fill_bytes(&mut bytes)
+                    .map_err(|_| TransferError::KeyUnavailable)?;
+                let random_id = NonZeroI64::new(i64::from_le_bytes(bytes))
+                    .ok_or(TransferError::KeyUnavailable)?;
+                let replacement = self
+                    .transport
+                    .reserve_part_identity(key, digest, random_id)?;
+                let encoded = replacement
+                    .encode()
+                    .map_err(|_| TransferError::ManifestCorrupted)?;
+                if !database
+                    .replace_unpublished_vault_part(self.lease, index, &previous.identity, &encoded)
+                    .map_err(|_| TransferError::Database)?
+                {
+                    return Err(TransferError::Cancelled);
+                }
+                // The old identity is now permanently retired. Discard only its
+                // uncommitted local spool, after the replacement transaction.
+                let prefix = crate::transfer::streaming::spool_prefix(root, &previous.identity);
+                for extension in ["ciphertext", "seal", "seal-pending", "upload", "pending"] {
+                    let _ = std::fs::remove_file(prefix.with_extension(extension));
+                }
+            }
+        }
+        let prepared = self.prepare_part_digest(database, index, plaintext_length, digest)?;
+        let object = self.transport.stream_reserved_source(
+            key,
+            &prepared.reservation,
+            &prepared.identity,
+            source,
+            root,
+            prepared.receipt_id,
+            tuning,
+        )?;
+        let receipt = encode_receipt(object.object_id, &prepared.identity)?;
+        if !database
+            .confirm_vault_part(self.lease, index, &receipt)
+            .map_err(|_| TransferError::Database)?
+        {
+            return Err(TransferError::Cancelled);
+        }
+        // Keep the tiny summary for future manifest reconstruction; confirmed
+        // remote bytes no longer require a full local ciphertext spool.
+        let prefix = crate::transfer::streaming::spool_prefix(root, &prepared.identity);
+        let _ = std::fs::remove_file(prefix.with_extension("ciphertext"));
+        let _ = std::fs::remove_file(prefix.with_extension("upload"));
         Ok(object)
     }
 

@@ -324,11 +324,8 @@ mod tests {
                 elapsed_millis: 1,
             });
         }
-        let mut controller = new_download_controller(
-            teleark_transfer::SoftLimitPolicy::Respect,
-            DownloadThroughputStrategy::MaxThroughput,
-        )
-        .expect("controller");
+        let mut controller = new_download_controller(teleark_telegram::TransferTuning::default())
+            .expect("controller");
         for sequence in 1..=128 {
             controller.observe(PerformanceSample {
                 observed_at_millis: sequence * 1000,

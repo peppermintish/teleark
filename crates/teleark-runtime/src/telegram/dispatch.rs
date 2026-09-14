@@ -5,7 +5,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 const PENDING_CAPACITY: usize = 32;
 const READ_CAPACITY: usize = 8;
-const TRANSFER_CAPACITY: usize = 4;
+const TRANSFER_CAPACITY: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Lane {

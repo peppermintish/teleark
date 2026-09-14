@@ -7776,6 +7776,7 @@ name = "teleark-telegram"
 version = "0.4.4"
 dependencies = [
  "base64",
+ "blake3",
  "getrandom 0.4.3",
  "grammers-client",
  "grammers-mtsender",

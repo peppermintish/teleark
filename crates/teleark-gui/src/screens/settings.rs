@@ -14,9 +14,8 @@ use teleark_i18n::{
     format::{format_bytes, format_integer},
 };
 use teleark_runtime::{
-    AppearancePreference, DownloadThroughputStrategy, SoftLimitPolicy, TelegramCredentialSource,
-    default_database_path, default_managed_directories, diagnostics_status,
-    encrypted_part_plaintext_limit,
+    AppearancePreference, TelegramCredentialSource, default_database_path,
+    default_managed_directories, diagnostics_status, encrypted_part_plaintext_limit,
 };
 
 use crate::{
@@ -630,58 +629,7 @@ impl TeleArkApp {
             self.tr("settings-download-description"),
         );
         card = card.child(self.speed_limits_button("download-speed-limits", cx));
-        card = card.child(
-            div()
-                .mb_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.tr("settings-download-strategy-title")),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            components::button(
-                                "download-strategy-balanced",
-                                self.tr("settings-download-strategy-balanced"),
-                                None,
-                                self.preferences.download_throughput_strategy
-                                    == DownloadThroughputStrategy::Balanced,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.download_throughput_strategy =
-                                    DownloadThroughputStrategy::Balanced;
-                                this.persist_preferences(cx);
-                            })),
-                        )
-                        .child(
-                            components::button(
-                                "download-strategy-max",
-                                self.tr("settings-download-strategy-max"),
-                                None,
-                                self.preferences.download_throughput_strategy
-                                    == DownloadThroughputStrategy::MaxThroughput,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.download_throughput_strategy =
-                                    DownloadThroughputStrategy::MaxThroughput;
-                                this.persist_preferences(cx);
-                            })),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(self.tr("settings-download-strategy-description")),
-                ),
-        );
+        card = card.child(self.transfer_tuning_controls(false, cx));
         if let Some(directories) = directories {
             card = card
                 .child(labeled_path_panel(
@@ -819,86 +767,96 @@ impl TeleArkApp {
                         ),
                 ),
         )
+        .child(self.transfer_tuning_controls(true, cx))
         .child(
             div()
-                .mt_5()
-                .pt_4()
-                .border_t_1()
-                .border_color(theme::border())
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.tr("settings-transfer-soft-limit-title")),
-                )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(self.tr("settings-transfer-soft-limit-description")),
-                )
-                .child(
-                    div()
-                        .mt_3()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            components::button(
-                                "settings-soft-limit-respect",
-                                self.tr("settings-transfer-soft-limit-respect"),
-                                None,
-                                self.preferences.transfer_soft_limit_policy
-                                    == SoftLimitPolicy::Respect,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.transfer_soft_limit_policy =
-                                    SoftLimitPolicy::Respect;
-                                this.persist_preferences(cx);
-                            })),
-                        )
-                        .child(
-                            components::button(
-                                "settings-soft-limit-adaptive",
-                                self.tr("settings-transfer-soft-limit-adaptive"),
-                                None,
-                                self.preferences.transfer_soft_limit_policy
-                                    == SoftLimitPolicy::AdaptiveOverride,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.transfer_soft_limit_policy =
-                                    SoftLimitPolicy::AdaptiveOverride;
-                                this.persist_preferences(cx);
-                            })),
-                        )
-                        .child(
-                            components::button(
-                                "settings-soft-limit-ignore",
-                                self.tr("settings-transfer-soft-limit-ignore"),
-                                None,
-                                self.preferences.transfer_soft_limit_policy
-                                    == SoftLimitPolicy::Ignore,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preferences.transfer_soft_limit_policy =
-                                    SoftLimitPolicy::Ignore;
-                                this.persist_preferences(cx);
-                            })),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt_3()
-                        .p_3()
-                        .rounded(theme::RADIUS_SMALL)
-                        .bg(theme::amber_soft())
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(self.tr("settings-transfer-soft-limit-note")),
-                ),
+                .mt_3()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(self.tr("settings-upload-resume-window")),
         )
+        .child(div().mt_3().text_xs().child(self.tr(
+            if teleark_runtime::aes256gcm_hardware_available() {
+                "settings-aes-hardware-available"
+            } else {
+                "settings-aes-hardware-unavailable"
+            },
+        )))
         .into_any_element()
+    }
+
+    fn transfer_tuning_controls(&self, upload: bool, cx: &mut Context<Self>) -> AnyElement {
+        let labels = [
+            "settings-upload-tasks",
+            "settings-upload-parts",
+            "settings-upload-connections",
+            "settings-upload-queue",
+            "settings-upload-attempts",
+            "settings-download-tasks",
+            "settings-download-parts",
+            "settings-download-connections",
+            "settings-download-attempts",
+        ];
+        let mut container = div().mt_4().flex().flex_col().gap_2().child(
+            div()
+                .mb_2()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(self.tr("settings-transfer-manual-description")),
+        );
+        let values = self.preferences.transfer_tuning.values();
+        for index in if upload { 0..5 } else { 5..9 } {
+            let (minimum, maximum) = teleark_runtime::TransferTuning::BOUNDS[index];
+            let mut row = div().flex().items_center().gap_2().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .child(self.tr(labels[index])),
+            );
+            for increment in [false, true] {
+                if increment {
+                    row = row.child(
+                        div()
+                            .w(px(38.))
+                            .text_center()
+                            .text_xs()
+                            .child(values[index].to_string()),
+                    );
+                }
+                row = row.child(
+                    components::button(
+                        ("transfer-tuning", index * 2 + usize::from(increment)),
+                        self.tr(if increment {
+                            "settings-tuning-increase"
+                        } else {
+                            "settings-tuning-decrease"
+                        }),
+                        None,
+                        false,
+                    )
+                    .disabled(if increment {
+                        values[index] >= maximum
+                    } else {
+                        values[index] <= minimum
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut values = this.preferences.transfer_tuning.values();
+                        values[index] = if increment {
+                            values[index].saturating_add(1).min(maximum)
+                        } else {
+                            values[index].saturating_sub(1).max(minimum)
+                        };
+                        if let Some(tuning) = teleark_runtime::TransferTuning::from_values(values) {
+                            this.preferences.transfer_tuning = tuning;
+                            this.persist_preferences(cx);
+                        }
+                    })),
+                );
+            }
+            container = container.child(row);
+        }
+        container.into_any_element()
     }
 
     fn render_key_vault_settings(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -66,6 +66,7 @@ pub enum ControllerDecisionOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerDecisionReason {
+    UserSettings,
     InitialRamp,
     InflightBelowBdpTarget,
     ThroughputImproved,
@@ -378,6 +379,7 @@ struct PendingProbe {
 /// Per-DC goodput controller. It treats RTT as diagnostic evidence and never
 /// reduces concurrency solely because RTT rose.
 pub struct AdaptiveTransferController {
+    manual: bool,
     config: AdaptiveControllerConfig,
     upload: bool,
     phase: ControllerPhase,
@@ -424,6 +426,7 @@ impl AdaptiveTransferController {
             parameters.encrypted_part_queue_depth = 0;
         }
         Ok(Self {
+            manual: false,
             config,
             upload,
             phase: ControllerPhase::Ramp,
@@ -449,12 +452,42 @@ impl AdaptiveTransferController {
         })
     }
 
+    /// Retain telemetry while respecting fixed user settings. Retry/flood waits
+    /// never rewrite parameters in this mode.
+    pub fn manual(mut self, parameters: TransferControlParameters) -> Self {
+        self.parameters = parameters;
+        self.manual = true;
+        self.phase = ControllerPhase::Stable;
+        self
+    }
+    fn observe_manual(&mut self, sample: PerformanceSample) -> ControllerDecision {
+        self.latest_sample = sample;
+        self.record_decision(
+            None,
+            self.parameters,
+            self.parameters,
+            sample.goodput_bytes_per_second,
+            sample.goodput_bytes_per_second,
+            ControllerDecisionOutcome::Confirm,
+            if sample.flood_wait_seconds.is_some() {
+                ControllerDecisionReason::FloodWaitRequired
+            } else {
+                ControllerDecisionReason::UserSettings
+            },
+            sample.affected_lane,
+            sample.flood_wait_seconds,
+        )
+    }
+
     #[must_use]
     pub const fn parameters(&self) -> TransferControlParameters {
         self.parameters
     }
 
     pub fn observe(&mut self, sample: PerformanceSample) -> ControllerDecision {
+        if self.manual {
+            return self.observe_manual(sample);
+        }
         self.latest_sample = sample;
         if let Some(wait_seconds) = sample.flood_wait_seconds {
             self.phase = ControllerPhase::Recover;
@@ -618,6 +651,9 @@ impl AdaptiveTransferController {
     }
 
     pub fn recover_from_part_retry(&mut self, sample: PerformanceSample) -> ControllerDecision {
+        if self.manual {
+            return self.observe_manual(sample);
+        }
         self.latest_sample = sample;
         if self.aggressive_download() && sample.flood_wait_seconds.is_none() {
             if sample

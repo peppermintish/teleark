@@ -394,6 +394,52 @@ impl Database {
         })
     }
 
+    /// Atomically start a fresh expired upload attempt, retaining the old attempt
+    /// if any scope/state check fails. No newer codec is rewritten.
+    pub fn restart_vault_upload(
+        &mut self,
+        lease: VaultJobLease,
+        previous: &[u8],
+        replacement: &VaultJobRecord,
+    ) -> StorageResult<bool> {
+        if replacement.account_id != lease.account_id
+            || replacement.id != lease.id
+            || replacement.context_version != 1
+            || replacement.direction != VaultJobDirection::Upload
+            || replacement.context == previous
+        {
+            return Err(invalid("vault_job.restart"));
+        }
+        self.durable_vault_write(|tx| {
+            let id=unsigned_to_sql("vault_job.id",lease.id)?;
+            let changed=tx.execute("UPDATE vault_transfer_jobs SET package_id=?5,context=?6,created_at=?7,updated_at=?7 WHERE account_id=?1 AND id=?2 AND generation=?3 AND context=?4 AND context_version=1 AND state='queued' AND direction='upload'",
+                params![lease.account_id,id,unsigned_to_sql("vault_job.generation",lease.generation)?,previous,replacement.package_id,replacement.context,replacement.created_at_unix_ms])?;
+            if changed!=1 {return Ok(false);}
+            tx.execute("DELETE FROM vault_transfer_parts WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;
+            tx.execute("DELETE FROM vault_manifest_outbox WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;
+            Ok(true)
+        })
+    }
+
+    /// Burn an unreceipted reservation whose immutable ciphertext is unavailable.
+    /// The replacement must have a fresh cryptographic/publication identity.
+    pub fn replace_unpublished_vault_part(
+        &mut self,
+        lease: VaultJobLease,
+        index: u32,
+        previous: &[u8],
+        replacement: &[u8],
+    ) -> StorageResult<bool> {
+        if replacement.is_empty() || replacement.len() > 16384 || previous == replacement {
+            return Err(invalid("vault_job.part_identity"));
+        }
+        self.durable_vault_write(|tx| {
+            if !active_lease(tx,lease,false)? { return Ok(false); }
+            Ok(tx.execute("UPDATE vault_transfer_parts SET identity=?5 WHERE account_id=?1 AND task_id=?2 AND part_index=?3 AND identity=?4 AND receipt IS NULL",
+                params![lease.account_id,unsigned_to_sql("vault_job.id",lease.id)?,index,previous,replacement])? == 1)
+        })
+    }
+
     /// A late successful operation is receipted while stopping, so resume does
     /// not resend blindly. A stopped/new-generation worker cannot write receipts.
     pub fn confirm_vault_part(

@@ -31,6 +31,12 @@ use grammers_session::{
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod upload;
+pub use upload::{
+    StreamUploadOptions, UPLOAD_PART_BYTES, UPLOAD_RESUME_WINDOW_MS, UploadCheckpoint, UploadStream,
+};
+mod tuning;
+pub use tuning::TransferTuning;
 mod bandwidth;
 mod byte_progress;
 use bandwidth::LimitedReader;
@@ -105,6 +111,10 @@ pub trait DownloadObserver: Send + Sync {
 
     fn desired_inflight_parts(&self) -> usize {
         4
+    }
+
+    fn desired_connections(&self) -> u16 {
+        2
     }
 
     fn max_part_attempts(&self) -> u32 {
@@ -424,10 +434,13 @@ pub struct SentDocument {
 pub struct TelegramConnection {
     client: Client,
     sync_client: Client,
+    transfer_pools: tokio::sync::Mutex<Vec<TransferPool>>,
+    gateway_url: String,
     session: Arc<FileSession>,
     api_id: i32,
     qr_login_update: Arc<AtomicBool>,
     download_flood_gate: Arc<DownloadFloodGate>,
+    upload_flood_gate: Arc<DownloadFloodGate>,
     bandwidth: TransferBandwidth,
     runner: Option<JoinHandle<()>>,
     gateway: Option<JoinHandle<()>>,
@@ -460,7 +473,11 @@ impl TelegramConnection {
             runner,
             handle,
             mut updates,
-        } = sender_pool(Arc::clone(&session), config.api_id, gateway.proxy_url);
+        } = sender_pool(
+            Arc::clone(&session),
+            config.api_id,
+            gateway.proxy_url.clone(),
+        );
 
         let sync_client = Client::with_configuration(
             handle.clone(),
@@ -494,10 +511,13 @@ impl TelegramConnection {
         Ok(Self {
             client,
             sync_client,
+            transfer_pools: tokio::sync::Mutex::new(Vec::new()),
+            gateway_url: gateway.proxy_url,
             session,
             api_id: config.api_id,
             qr_login_update,
             download_flood_gate: Arc::new(DownloadFloodGate::default()),
+            upload_flood_gate: Arc::new(DownloadFloodGate::default()),
             bandwidth: TransferBandwidth::default(),
             runner: Some(runner),
             gateway: Some(gateway.task),
@@ -860,6 +880,7 @@ impl TelegramConnection {
                     ready_at: Instant::now(),
                 })
                 .collect::<VecDeque<_>>();
+            let clients = self.transfer_clients(false,observer.desired_connections()).await;
             let mut inflight_downloads = JoinSet::new();
             let flood_gate = Arc::clone(&self.download_flood_gate);
             loop {
@@ -881,7 +902,7 @@ impl TelegramConnection {
                         attempt: pending_part.attempt,
                         elapsed_millis: 0,
                     });
-                    let client = self.client.clone();
+                    let client = clients[part_index as usize % clients.len()].clone();
                     let document = file.document.clone();
                     let flood_gate = Arc::clone(&flood_gate);
                     let bandwidth = self.bandwidth.download.clone();
@@ -2530,5 +2551,54 @@ mod tests {
                 );
             }
         });
+    }
+}
+
+struct TransferPool {
+    upload: bool,
+    client: Client,
+    runner: JoinHandle<()>,
+    drain: JoinHandle<()>,
+}
+impl Drop for TransferPool {
+    fn drop(&mut self) {
+        self.client.disconnect();
+        self.runner.abort();
+        self.drain.abort();
+    }
+}
+impl TelegramConnection {
+    async fn transfer_clients(&self, upload: bool, count: u16) -> Vec<Client> {
+        let mut pools = self.transfer_pools.lock().await;
+        while pools.iter().filter(|p| p.upload == upload).count() < usize::from(count.clamp(1, 8)) {
+            let SenderPool {
+                runner,
+                handle,
+                mut updates,
+            } = sender_pool(
+                Arc::clone(&self.session),
+                self.api_id,
+                self.gateway_url.clone(),
+            );
+            let client = Client::with_configuration(
+                handle,
+                grammers_client::client::ClientConfiguration {
+                    retry_policy: Box::new(grammers_client::client::NoRetries),
+                    ..Default::default()
+                },
+            );
+            pools.push(TransferPool {
+                upload,
+                client,
+                runner: tokio::spawn(runner.run()),
+                drain: tokio::spawn(async move { while updates.recv().await.is_some() {} }),
+            });
+        }
+        pools
+            .iter()
+            .filter(|p| p.upload == upload)
+            .take(usize::from(count.clamp(1, 8)))
+            .map(|p| p.client.clone())
+            .collect()
     }
 }

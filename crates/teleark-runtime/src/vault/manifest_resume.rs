@@ -21,7 +21,7 @@ impl VaultOwner {
         let now = now_unix_ms()?;
         let mut log = TransferSessionLog::create(&self.library, TransferSessionKind::Vault, id)?;
         let telemetry =
-            transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?.snapshot();
+            transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?.snapshot();
         log.append_started(
             true,
             now,

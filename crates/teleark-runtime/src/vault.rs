@@ -2,7 +2,7 @@ use crate::transfer_updates::{
     TransferRecord, TransferSnapshotView, TransferSnapshots, TransferSubscription,
 };
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -25,10 +25,9 @@ use teleark_crypto::{
 };
 use teleark_storage::VaultMetadataRecord;
 use teleark_transfer::{
-    AdaptiveControllerConfig, AdaptiveTransferController, ContentDigest, EncryptionPipelineConfig,
-    EncryptionPipelineError, MemoryCounters, NativeFileSystem, ParameterBounds, PartCounters,
-    PerformanceSample, PipelinePart, QueueCounters, RemotePartKey, SourceId, SourcePort,
-    TransferControlParameters, TransferTelemetrySnapshot, run_encryption_upload_pipeline,
+    AdaptiveControllerConfig, AdaptiveTransferController, MemoryCounters, NativeFileSystem,
+    PartCounters, PerformanceSample, QueueCounters, RemotePartKey, SourceId, SourcePort,
+    TransferControlParameters, TransferTelemetrySnapshot,
 };
 use zeroize::Zeroizing;
 
@@ -1806,6 +1805,7 @@ impl VaultOwner {
             paths,
             progress,
             validate,
+            true,
             |owner, plan| owner.upload(account_id, chat_id, &plan.source.path, Some(plan), None),
         )
     }
@@ -1816,6 +1816,7 @@ impl VaultOwner {
         paths: Vec<PathBuf>,
         progress: &VaultUploadSelectionProgress,
         validate: impl FnOnce(&Self) -> Result<(), ApplicationError>,
+        parallel: bool,
         mut upload: impl FnMut(&mut Self, &QueuedUpload) -> Result<ManagedVaultFile, ApplicationError>,
     ) -> Result<VaultUploadReport, ApplicationError> {
         let (account_id, chat_id) = scope;
@@ -1896,12 +1897,8 @@ impl VaultOwner {
         })?;
         progress.saved(plans.len());
 
-        let queued_telemetry = transfer_controller(
-            true,
-            0,
-            self.library.preferences()?.transfer_soft_limit_policy,
-        )?
-        .snapshot();
+        let queued_telemetry =
+            transfer_controller(true, 0, self.library.preferences()?.transfer_tuning)?.snapshot();
         let cancel = progress.cancellation.clone();
         let mut validation = Some(validate);
         let mut policy = UploadBatchPolicy::default();
@@ -1969,8 +1966,16 @@ impl VaultOwner {
                         self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
                     }
                 }
-                for plan in plans {
-                    let result = policy.execute(&cancel, || upload(self, plan));
+                let parallel_run = parallel && policy.blocked.is_none();
+                let results = if parallel_run {
+                    self.upload_window(plans, &cancel, progress)?
+                } else {
+                    plans
+                        .iter()
+                        .map(|plan| policy.execute(&cancel, || upload(self, plan)))
+                        .collect()
+                };
+                for (plan, result) in plans.iter().zip(results) {
                     if let Err(error) = &result {
                         self.settle_pending_upload(plan, error.kind())?;
                     }
@@ -1979,11 +1984,16 @@ impl VaultOwner {
                         .get(plan.id)
                         .is_some_and(|row| row.state == VaultTransferState::Paused)
                     {
-                        progress.record_paused();
+                        if !parallel_run {
+                            progress.record_paused();
+                        }
                         report.paused_count += 1;
                         continue;
                     }
-                    progress.record(result.as_ref().map(|_| ()).map_err(ApplicationError::kind));
+                    if !parallel_run {
+                        progress
+                            .record(result.as_ref().map(|_| ()).map_err(ApplicationError::kind));
+                    }
                     match result {
                         Ok(file) => {
                             report.completed_count += 1;
@@ -2048,6 +2058,106 @@ impl VaultOwner {
             .unwrap_or_else(|e| e.into_inner()) = None;
         report.completed = recent.into_iter().collect();
         Ok(report)
+    }
+
+    fn upload_worker(&self) -> Self {
+        Self {
+            catalog: catalog::ManifestCache::default(),
+            catalog_key_revision: self.catalog_key_revision,
+            library: self.library.clone(),
+            telegram: self.telegram.clone(),
+            record: self.record.clone(),
+            master_key: self.master_key.clone(),
+            historical_key: self.historical_key.clone(),
+            health_worker: None,
+            session: self.session.clone(),
+            session_generation: self.session_generation,
+            transfers: self.transfers.clone(),
+            active_upload_batch: self.active_upload_batch.clone(),
+            upload_controls: self.upload_controls.clone(),
+        }
+    }
+    fn upload_window(
+        &self,
+        plans: &[QueuedUpload],
+        cancelled: &AtomicBool,
+        progress: &VaultUploadSelectionProgress,
+    ) -> Result<Vec<Result<ManagedVaultFile, ApplicationError>>, ApplicationError> {
+        let count =
+            usize::from(self.library.preferences()?.transfer_tuning.upload_tasks).min(plans.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let blocked = Mutex::new(None);
+        std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::sync_channel(count);
+            for _ in 0..count {
+                let mut owner = self.upload_worker();
+                let sender = sender.clone();
+                let next = &next;
+                let blocked = &blocked;
+                scope.spawn(move || {
+                    loop {
+                        let index = next.fetch_add(1, Ordering::AcqRel);
+                        let Some(plan) = plans.get(index) else {
+                            break;
+                        };
+                        let failure = if cancelled.load(Ordering::Acquire) {
+                            Some(ApplicationErrorKind::Cancelled)
+                        } else {
+                            *blocked.lock().unwrap_or_else(|e| e.into_inner())
+                        };
+                        let result = if let Some(kind) = failure {
+                            Err(ApplicationError::new(kind))
+                        } else {
+                            owner.upload(
+                                plan.pending.account_id,
+                                plan.pending.chat_id,
+                                &plan.source.path,
+                                Some(plan),
+                                None,
+                            )
+                        };
+                        if let Err(error) = &result {
+                            if matches!(
+                                error.kind(),
+                                ApplicationErrorKind::Network
+                                    | ApplicationErrorKind::Server
+                                    | ApplicationErrorKind::Authorization
+                                    | ApplicationErrorKind::PermissionDenied
+                            ) {
+                                *blocked.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(error.kind());
+                            }
+                            let _ = owner.settle_pending_upload(plan, error.kind());
+                        }
+                        if owner
+                            .transfers
+                            .get(plan.id)
+                            .is_some_and(|row| row.state == VaultTransferState::Paused)
+                        {
+                            progress.record_paused();
+                        } else {
+                            progress.record(
+                                result.as_ref().map(|_| ()).map_err(ApplicationError::kind),
+                            );
+                        }
+                        if sender.send((index, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            let mut results = (0..plans.len()).map(|_| None).collect::<Vec<_>>();
+            for (index, result) in receiver {
+                results[index] = Some(result);
+            }
+            results
+                .into_iter()
+                .map(|result| {
+                    result.ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))
+                })
+                .collect()
+        })
     }
 
     fn settle_pending_upload(
@@ -2215,13 +2325,14 @@ impl VaultOwner {
         else {
             return self.resume_pending_upload(account_id, task_id, false);
         };
-        let context = crate::VaultRecoveryContext::from_record(&record)
+        let mut context = crate::VaultRecoveryContext::from_record(&record)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
         context
             .file_key(master)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
-        let crate::VaultRecoveryDirection::Upload { source, .. } = &context.direction else {
-            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        let source = match &context.direction {
+            crate::VaultRecoveryDirection::Upload { source, .. } => source.clone(),
+            _ => return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest)),
         };
         let lease = VaultJobLease {
             account_id,
@@ -2247,6 +2358,62 @@ impl VaultOwner {
             }
             record.state = VaultJobState::Queued;
             record.failure_code = None;
+        }
+        let now = now_unix_ms()? as u64;
+        let expired = now
+            .checked_sub(context.created_at_unix_ms)
+            .is_none_or(|age| age >= teleark_telegram::UPLOAD_RESUME_WINDOW_MS);
+        let manifest_ready = db
+            .vault_manifest_outbox(account_id, task_id)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .is_some_and(|outbox| outbox.envelope.is_some());
+        let legacy_parts = db
+            .vault_parts(account_id, task_id, None, 1)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .first()
+            .map(|part| crate::VaultPartRecovery::decode(&part.identity))
+            .transpose()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
+            .is_some_and(|part| part.header.format_major == 1);
+        if (expired || legacy_parts) && !manifest_ready {
+            VaultUploadObserver::new(self.transfers.clone(), task_id).phase(if expired {
+                VaultUploadPhase::RestartingExpired
+            } else {
+                VaultUploadPhase::UpgradingUpload
+            });
+            let key = generate_file_key(&mut OsRandom).map_err(map_crypto_error)?;
+            context.package_id =
+                crate::transfer::package_bytes(PackageId::new(random_nonzero_u64()?));
+            context.file_key_wrap = teleark_crypto::wrap_file_key(
+                master,
+                &key,
+                &context.vault_id,
+                &context.package_id,
+                context.master_key_generation,
+                1,
+                &mut AeadUsageRegistry::new(),
+            )
+            .map_err(map_crypto_error)?;
+            context.created_at_unix_ms = now;
+            let replacement = context
+                .admission_record()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            if !db
+                .restart_vault_upload(lease, &record.context, &replacement)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+            record.context = replacement.context;
+            record.package_id = replacement.package_id;
+            record.created_at_unix_ms = replacement.created_at_unix_ms;
+            let root = self
+                .library
+                .database_path
+                .with_extension("upload-spool")
+                .join(account_id.to_string())
+                .join(task_id.to_string());
+            let _ = std::fs::remove_dir_all(root);
         }
         let previous = self.transfers.get(task_id);
         self.push_transfer(VaultTransferSnapshot {
@@ -2275,7 +2442,7 @@ impl VaultOwner {
             average_bytes_per_second: None,
             destination: None,
             session_log_path: None,
-            telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+            telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
                 .snapshot(),
             state: VaultTransferState::Queued,
         })?;
@@ -2287,7 +2454,7 @@ impl VaultOwner {
             if saved_manifest {
                 self.resume_manifest_upload(&mut db, &record, &context)
             } else {
-                self.upload(account_id, context.chat_id, source, None, Some(record))
+                self.upload(account_id, context.chat_id, &source, None, Some(record))
             }
         })();
         // Preflight can fail before the upload claims its Running lease. Keep
@@ -2476,7 +2643,7 @@ impl VaultOwner {
         let mut controller = transfer_controller(
             true,
             encryption_worker_count,
-            self.library.preferences()?.transfer_soft_limit_policy,
+            self.library.preferences()?.transfer_tuning,
         )?;
         let mut session_log =
             TransferSessionLog::create(&self.library, TransferSessionKind::Vault, transfer_id)?;
@@ -2712,200 +2879,70 @@ impl VaultOwner {
                 .map_err(map_transfer_error)?
                 .with_cancellation(cancellation.clone());
             let mut encoded_size = 0_u64;
-            let mut plaintext_offset = 0_u64;
-            let mut pipeline_parts = Vec::with_capacity(part_sizes.len());
-            let mut encryption_plans = Vec::with_capacity(part_sizes.len());
+            let tuning = self.library.preferences()?.transfer_tuning;
+            let spool_root = self
+                .library
+                .database_path
+                .with_extension("upload-spool")
+                .join(account_id.to_string())
+                .join(transfer_id.to_string());
+            let mut transferred_bytes = 0u64;
             for (position, plaintext_length) in part_sizes.iter().copied().enumerate() {
                 let part_index = u32::try_from(position)
                     .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
-                pipeline_parts.push(PipelinePart {
-                    part_index,
-                    plaintext_offset,
-                    plaintext_length,
-                });
                 let digest =
                     source_digests.parts.get(position).copied().ok_or_else(|| {
                         ApplicationError::new(ApplicationErrorKind::SourceChanged)
                     })?;
-                encryption_plans.push(Mutex::new(Some(
-                    durable
-                        .prepare_part_digest(database, part_index, plaintext_length, digest)
-                        .map_err(map_transfer_error)?,
-                )));
-                plaintext_offset = plaintext_offset
-                    .checked_add(plaintext_length)
-                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+                observer.begin_part(plaintext_length);
+                observer.phase(VaultUploadPhase::Preparing);
+                let object = durable
+                    .upload_source_part(
+                        database,
+                        part_index,
+                        plaintext_length,
+                        digest,
+                        source,
+                        &spool_root,
+                        tuning,
+                    )
+                    .map_err(map_transfer_error)?;
+                encoded_size = encoded_size.saturating_add(object.encoded_size);
+                transferred_bytes = transferred_bytes.saturating_add(plaintext_length);
+                let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let rate = transferred_bytes.saturating_mul(1000) / elapsed_ms.max(1);
+                let decision = controller.observe(PerformanceSample {
+                    observed_at_millis: elapsed_ms,
+                    goodput_bytes_per_second: rate,
+                    parts: PartCounters {
+                        total_parts: u64::from(part_count),
+                        completed_parts: (position + 1) as u64,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+                let telemetry = controller.snapshot();
+                session_log.append_part_confirmed(
+                    part_index,
+                    elapsed_ms,
+                    plaintext_length,
+                    &decision,
+                    &telemetry,
+                )?;
+                self.update_transfer(transfer_id, |snapshot| {
+                    snapshot.transferred_bytes = transferred_bytes;
+                    snapshot.completed_parts = part_index + 1;
+                    snapshot.average_bytes_per_second = Some(rate);
+                    snapshot.telemetry = telemetry;
+                });
             }
-            let encryption_plans = Arc::new(encryption_plans);
-            let source_path = source.to_owned();
-            let whole_plaintext_hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
-            let reader_hasher = Arc::clone(&whole_plaintext_hasher);
-            let pipeline_config = EncryptionPipelineConfig::new(
-                usize::from(encryption_worker_count),
-                1,
-                usize::from(encryption_worker_count),
-            )
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-            let completed_plaintext_bytes = Arc::new(Mutex::new(0_u64));
-            let completed_part_count = Arc::new(Mutex::new(0_u32));
-            let cumulative_encryption_micros = Arc::new(Mutex::new(0_u64));
-            let progress_bytes = Arc::clone(&completed_plaintext_bytes);
-            let progress_parts = Arc::clone(&completed_part_count);
-            let encryption_time = Arc::clone(&cumulative_encryption_micros);
-            observer.phase(VaultUploadPhase::Preparing);
-            let reader_cancellation = cancellation.clone();
-            let crypto_cancellation = cancellation.clone();
-            let report = run_encryption_upload_pipeline(
-                pipeline_config,
-                &pipeline_parts,
-                move |descriptor| {
-                    if reader_cancellation.is_cancelled() {
-                        return Err(TransferError::Cancelled);
-                    }
-                    let plaintext = read_source_part(&source_path, descriptor)?;
-                    reader_hasher
-                        .lock()
-                        .map_err(|_| TransferError::SourceChanged)?
-                        .update(&plaintext);
-                    Ok(plaintext)
-                },
-                {
-                    let encryption_plans = Arc::clone(&encryption_plans);
-                    move |descriptor, plaintext| {
-                        if crypto_cancellation.is_cancelled() {
-                            return Err(TransferError::Cancelled);
-                        }
-                        let position = usize::try_from(descriptor.part_index)
-                            .map_err(|_| TransferError::SourceChanged)?;
-                        let job = encryption_plans
-                            .get(position)
-                            .ok_or(TransferError::SourceChanged)?
-                            .lock()
-                            .map_err(|_| TransferError::SourceChanged)?
-                            .take()
-                            .ok_or(TransferError::SourceChanged)?;
-                        job.encrypt(plaintext)
-                    }
-                },
-                |part_index, prepared| {
-                    let plaintext_length = prepared.plaintext_length();
-                    observer.begin_part(plaintext_length);
-                    if let Ok(mut duration) = encryption_time.lock() {
-                        *duration = duration.saturating_add(prepared.encryption_duration_micros());
-                    }
-                    let object = durable.publish_prepared(database, prepared)?;
-                    encoded_size = encoded_size.saturating_add(object.encoded_size);
-                    let transferred_bytes = progress_bytes.lock().map_or(0, |mut bytes| {
-                        *bytes = bytes.saturating_add(plaintext_length);
-                        *bytes
-                    });
-                    let completed_parts = progress_parts.lock().map_or(0, |mut count| {
-                        *count = count.saturating_add(1);
-                        *count
-                    });
-                    let elapsed_ms = u64::try_from(started.elapsed().as_millis())
-                        .unwrap_or(u64::MAX)
-                        .max(1);
-                    let average_bytes_per_second = transferred_bytes
-                        .saturating_mul(1_000)
-                        .checked_div(elapsed_ms)
-                        .unwrap_or_default();
-                    let encryption_micros = cumulative_encryption_micros
-                        .lock()
-                        .map(|duration| (*duration).max(1))
-                        .unwrap_or(1);
-                    let encryption_bytes_per_second = transferred_bytes
-                        .saturating_mul(1_000_000)
-                        .checked_div(encryption_micros)
-                        .unwrap_or_default();
-                    let encryption_cpu_utilization_basis_points = encryption_micros
-                        .saturating_mul(10_000)
-                        .checked_div(
-                            elapsed_ms
-                                .saturating_mul(1_000)
-                                .saturating_mul(u64::from(encryption_worker_count)),
-                        )
-                        .unwrap_or_default()
-                        .min(10_000)
-                        as u16;
-                    let performance = PerformanceSample {
-                        observed_at_millis: elapsed_ms,
-                        goodput_bytes_per_second: average_bytes_per_second,
-                        encryption_bytes_per_second,
-                        cpu_utilization_basis_points: encryption_cpu_utilization_basis_points,
-                        inflight_bytes: plaintext_length.saturating_mul(u64::from(
-                            controller.parameters().inflight_parts_per_file,
-                        )),
-                        encrypted_queue_length: 0,
-                        active_large_files: 1,
-                        parts: PartCounters {
-                            total_parts: u64::from(part_count),
-                            completed_parts: u64::from(completed_parts),
-                            inflight_parts: u64::from(part_count.saturating_sub(completed_parts)),
-                            missing_parts: u64::from(part_count.saturating_sub(completed_parts)),
-                            completed_parts_per_second_milli: u64::from(completed_parts)
-                                .saturating_mul(1_000_000)
-                                .checked_div(elapsed_ms)
-                                .unwrap_or_default(),
-                            ..PartCounters::default()
-                        },
-                        queues: QueueCounters {
-                            large_files_active: 1,
-                            large_queue_weight: 100,
-                            ..QueueCounters::default()
-                        },
-                        memory: MemoryCounters {
-                            plaintext_buffer_bytes: plaintext_length.saturating_mul(u64::from(
-                                encryption_worker_count.saturating_add(1),
-                            )),
-                            encrypted_buffer_bytes: plaintext_length
-                                .saturating_mul(u64::from(encryption_worker_count)),
-                            network_inflight_bytes: object.encoded_size,
-                            writer_queue_bytes: 0,
-                        },
-                        ..PerformanceSample::default()
-                    };
-                    let decision = controller.observe(performance);
-                    let telemetry = controller.snapshot();
-                    session_log
-                        .append_part_confirmed(
-                            part_index,
-                            elapsed_ms,
-                            plaintext_length,
-                            &decision,
-                            &telemetry,
-                        )
-                        .map_err(|_| TransferError::Database)?;
-                    self.update_transfer(transfer_id, |snapshot| {
-                        snapshot.transferred_bytes = transferred_bytes;
-                        snapshot.completed_parts = completed_parts;
-                        snapshot.average_bytes_per_second = Some(average_bytes_per_second);
-                        snapshot.telemetry = telemetry;
-                    });
-                    observer.phase(VaultUploadPhase::Preparing);
-                    Ok::<(), TransferError>(())
-                },
-            )
-            .map_err(map_pipeline_error)?;
-            if report.completed_parts != part_sizes.len() {
-                return Err(ApplicationError::new(ApplicationErrorKind::Network));
-            }
-            let whole_digest = ContentDigest(
-                *whole_plaintext_hasher
-                    .lock()
-                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-                    .finalize()
-                    .as_bytes(),
-            );
+            let whole_digest = source_digests.whole;
             if !crate::vault_recovery::upload_source_metadata_matches(
                 source_identity,
                 files
                     .source_identity(source_id)
                     .map_err(map_transfer_error)?,
             ) {
-                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
-            }
-            if whole_digest != source_digests.whole {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
             observer.phase(VaultUploadPhase::Publishing);
@@ -3255,11 +3292,8 @@ impl VaultOwner {
             None => random_transfer_id()?,
         };
         let started_at = now_unix_ms()?;
-        let mut controller = transfer_controller(
-            false,
-            0,
-            self.library.preferences()?.transfer_soft_limit_policy,
-        )?;
+        let mut controller =
+            transfer_controller(false, 0, self.library.preferences()?.transfer_tuning)?;
         let mut session_log =
             TransferSessionLog::create(&self.library, TransferSessionKind::Vault, transfer_id)?;
         session_log.append_started(
@@ -3837,87 +3871,30 @@ fn retain_transfer_snapshot(
 
 fn transfer_controller(
     upload: bool,
-    encryption_worker_count: u16,
-    soft_limit_policy: teleark_transfer::SoftLimitPolicy,
+    _encryption_worker_count: u16,
+    tuning: teleark_telegram::TransferTuning,
 ) -> Result<AdaptiveTransferController, ApplicationError> {
-    let available_parallelism = recommended_encryption_worker_count();
-    let mut config = AdaptiveControllerConfig::maximum_throughput(
-        TRANSFER_MEMORY_BUDGET_BYTES,
-        available_parallelism,
-    )
-    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.transfer_connections = ParameterBounds::new(1, 1, 1)
+    let config = AdaptiveControllerConfig::maximum_throughput(TRANSFER_MEMORY_BUDGET_BYTES, 1)
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.inflight_rpcs_per_connection = ParameterBounds::new(1, 1, 1)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.active_files = ParameterBounds::new(1, 1, 1)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.inflight_parts_per_file = ParameterBounds::new(1, 1, 1)
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.encryption_workers = ParameterBounds::new(
-        encryption_worker_count.max(1),
-        encryption_worker_count.max(1),
-        1,
-    )
-    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.encrypted_queue_depth = ParameterBounds::new(
-        encryption_worker_count.max(1),
-        encryption_worker_count.max(1),
-        1,
-    )
-    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-    config.soft_limit_policy = soft_limit_policy;
     let parameters = if upload {
         TransferControlParameters {
-            inflight_rpcs_per_connection: 1,
-            inflight_parts_per_file: 1,
-            encryption_worker_count: encryption_worker_count.max(1),
-            encrypted_part_queue_depth: encryption_worker_count.max(1),
+            active_file_count: tuning.upload_tasks,
+            transfer_connection_count: tuning.upload_connections,
+            inflight_parts_per_file: tuning.upload_parts,
+            inflight_rpcs_per_connection: tuning.upload_parts.div_ceil(tuning.upload_connections),
+            encryption_worker_count: 1,
+            encrypted_part_queue_depth: tuning.upload_queue,
             ..TransferControlParameters::conservative_upload()
         }
     } else {
         TransferControlParameters {
-            inflight_rpcs_per_connection: 1,
-            inflight_parts_per_file: 1,
+            active_file_count: 1,
             ..TransferControlParameters::conservative_download()
         }
     };
-    AdaptiveTransferController::with_initial_parameters(config, upload, parameters)
+    AdaptiveTransferController::new(config, upload)
+        .map(|controller| controller.manual(parameters))
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))
-}
-
-fn read_source_part(source: &Path, descriptor: PipelinePart) -> Result<Vec<u8>, TransferError> {
-    let length =
-        usize::try_from(descriptor.plaintext_length).map_err(|_| TransferError::SourceChanged)?;
-    let mut file = std::fs::File::open(source).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => TransferError::SourceMissing,
-        std::io::ErrorKind::PermissionDenied => TransferError::PermissionDenied,
-        _ => TransferError::SourceChanged,
-    })?;
-    file.seek(SeekFrom::Start(descriptor.plaintext_offset))
-        .map_err(|_| TransferError::SourceChanged)?;
-    let mut bytes = vec![0_u8; length];
-    file.read_exact(&mut bytes)
-        .map_err(|_| TransferError::SourceChanged)?;
-    Ok(bytes)
-}
-
-fn map_pipeline_error(error: EncryptionPipelineError<TransferError>) -> ApplicationError {
-    match error {
-        EncryptionPipelineError::Read {
-            source: TransferError::PermissionDenied,
-            ..
-        } => ApplicationError::new(ApplicationErrorKind::SourcePermissionDenied),
-        EncryptionPipelineError::Read { source, .. }
-        | EncryptionPipelineError::Encrypt { source, .. }
-        | EncryptionPipelineError::Upload { source, .. } => map_transfer_error(source),
-        EncryptionPipelineError::Configuration(_) => {
-            ApplicationError::new(ApplicationErrorKind::InvalidRequest)
-        }
-        EncryptionPipelineError::WorkerStopped => {
-            ApplicationError::new(ApplicationErrorKind::Network)
-        }
-    }
 }
 
 fn validate_record(record: &VaultMetadataRecord) -> Result<(), ApplicationError> {
@@ -4569,7 +4546,7 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let library = DesktopLibrary::open(directory.path().join("library.sqlite3"))?;
         let mut controller =
-            transfer_controller(false, 0, teleark_transfer::SoftLimitPolicy::Respect)?;
+            transfer_controller(false, 0, teleark_telegram::TransferTuning::default())?;
         let mut log = TransferSessionLog::create(&library, TransferSessionKind::Vault, 41)?;
         let initial = controller.snapshot();
         log.append_started(false, 1_000, 2_048, 1, &initial)?;
@@ -4624,7 +4601,7 @@ mod tests {
             average_bytes_per_second: None,
             destination: None,
             session_log_path: None,
-            telemetry: transfer_controller(true, 1, teleark_transfer::SoftLimitPolicy::Respect)
+            telemetry: transfer_controller(true, 1, teleark_telegram::TransferTuning::default())
                 .expect("controller")
                 .snapshot(),
             state: VaultTransferState::Running,
@@ -4916,6 +4893,7 @@ mod tests {
                     validations += 1;
                     Ok(())
                 },
+                false,
                 |owner, plan| {
                     let rows = owner.transfers.all().expect("visible window");
                     assert!(rows.len() <= 256);
@@ -5202,7 +5180,7 @@ mod tests {
             average_bytes_per_second: None,
             destination: None,
             session_log_path: None,
-            telemetry: transfer_controller(true, 1, teleark_transfer::SoftLimitPolicy::Respect)
+            telemetry: transfer_controller(true, 1, teleark_telegram::TransferTuning::default())
                 .expect("controller")
                 .snapshot(),
             state: VaultTransferState::Completed,

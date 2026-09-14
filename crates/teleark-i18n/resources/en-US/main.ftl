@@ -1622,3 +1622,23 @@ upload-selection-retention = Detailed history shows recent processing batches. T
 upload-selection-timing = Current phase: { $elapsed } · Last activity: { $idle } ago
 
 upload-selection-uploading = Uploading files
+
+settings-upload-tasks = Concurrent upload tasks
+settings-upload-parts = Parallel parts per upload
+settings-upload-connections = Upload connections
+settings-upload-queue = Buffered upload parts
+settings-upload-attempts = Upload attempts per part
+settings-download-tasks = Concurrent download tasks
+settings-download-parts = Parallel parts per download
+settings-download-connections = Download connections
+settings-download-attempts = Download attempts per part
+settings-transfer-manual-description = Settings apply when work starts or resumes. TeleArk keeps these values fixed; Telegram retry deadlines still apply.
+settings-upload-resume-window = Resume within 24 hours. After this window, the upload starts again with a fresh encryption identity. Telegram may expire temporary parts earlier. Keep the source file available until completion.
+settings-aes-hardware-available = AES-256-GCM: hardware acceleration is available on this device.
+settings-aes-hardware-unavailable = AES-256-GCM: software encryption on this device.
+settings-tuning-increase = +
+settings-tuning-decrease = −
+transfer-reason-user-settings = User settings
+transfer-upload-restarting-expired = The 24-hour upload window expired. Starting again with a fresh encryption identity.
+
+transfer-upload-upgrading = Upgrading upload format with a fresh encryption identity

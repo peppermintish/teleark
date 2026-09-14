@@ -5,6 +5,8 @@ use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultUploadPhase {
+    RestartingExpired,
+    UpgradingUpload,
     CheckingStorage,
     CheckingTarget,
     CheckingSource,
@@ -132,6 +134,12 @@ impl ByteTransferObserver for VaultUploadObserver {
                             .saturating_add(logical_bytes)
                             .min(snapshot.size_bytes),
                     );
+                }
+                ByteTransferEvent::PartStarted { .. } => {
+                    activity.set_phase(VaultUploadPhase::Uploading);
+                }
+                ByteTransferEvent::PartRetry { .. } => {
+                    activity.set_phase(VaultUploadPhase::WaitingForTelegram);
                 }
                 ByteTransferEvent::SendingMessage => {
                     activity.set_phase(VaultUploadPhase::SendingMessage)

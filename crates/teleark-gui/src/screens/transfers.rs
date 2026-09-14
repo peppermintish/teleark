@@ -3604,6 +3604,7 @@ const fn decision_outcome_message_id(outcome: ControllerDecisionOutcome) -> &'st
 
 const fn decision_reason_message_id(reason: ControllerDecisionReason) -> &'static str {
     match reason {
+        ControllerDecisionReason::UserSettings => "transfer-reason-user-settings",
         ControllerDecisionReason::InitialRamp => "transfer-reason-initial-ramp",
         ControllerDecisionReason::InflightBelowBdpTarget => "transfer-reason-bdp",
         ControllerDecisionReason::ThroughputImproved => "transfer-reason-improved",
@@ -3672,6 +3673,8 @@ fn transfer_state(state: ChannelDownloadState) -> TransferState {
 
 fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
     match phase {
+        VaultUploadPhase::RestartingExpired => "transfer-upload-restarting-expired",
+        VaultUploadPhase::UpgradingUpload => "transfer-upload-upgrading",
         VaultUploadPhase::CheckingStorage => "transfer-upload-checking-storage",
         VaultUploadPhase::CheckingTarget => "transfer-upload-checking-target",
         VaultUploadPhase::CheckingSource => "transfer-upload-checking-source",

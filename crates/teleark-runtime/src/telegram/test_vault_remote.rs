@@ -192,6 +192,39 @@ impl TestVaultRemote {
                 });
                 let _ = reply.send(result);
             }
+            TelegramRequest::UploadStream {
+                account_id,
+                chat_id,
+                file_name,
+                caption,
+                mut stream,
+                options,
+                cancellation,
+                reply,
+            } => {
+                let mut bytes = Vec::new();
+                while let Some(block) = stream.blocks.blocking_recv() {
+                    bytes.extend_from_slice(&block);
+                    let _ = stream.recycled.try_send(block);
+                }
+                if stream.sealed.blocking_recv() != Ok(true) {
+                    let _ = reply.send(Err(ApplicationError::new(
+                        ApplicationErrorKind::SourceChanged,
+                    )));
+                    return;
+                }
+                self.handle(TelegramRequest::UploadBytes {
+                    account_id,
+                    chat_id,
+                    file_name,
+                    caption,
+                    bytes,
+                    publication_random_id: Some(options.random_id),
+                    observer: options.observer,
+                    cancellation,
+                    reply,
+                });
+            }
             TelegramRequest::UploadBytes {
                 account_id,
                 chat_id,

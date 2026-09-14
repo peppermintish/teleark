@@ -1595,3 +1595,23 @@ upload-selection-retention = 詳細履歴には最近の処理バッチを表示
 upload-selection-timing = 現在の処理時間：{ $elapsed } · 最後の更新から：{ $idle }
 
 upload-selection-uploading = ファイルをアップロード中
+
+settings-upload-tasks = 同時アップロード数
+settings-upload-parts = アップロードごとの並列 part 数
+settings-upload-connections = アップロード接続数
+settings-upload-queue = アップロードのバッファ part 数
+settings-upload-attempts = part ごとのアップロード試行回数
+settings-download-tasks = 同時ダウンロード数
+settings-download-parts = ダウンロードごとの並列 part 数
+settings-download-connections = ダウンロード接続数
+settings-download-attempts = part ごとのダウンロード試行回数
+settings-transfer-manual-description = 設定は開始または再開時に適用され、TeleArk は値を自動変更しません。Telegram の再試行待機時間には従います。
+settings-upload-resume-window = 24 時間以内は再開できます。期限を過ぎると新しい暗号化 ID で最初からアップロードします。Telegram が一時 part を早く削除する場合があります。完了まで元のファイルを保持してください。
+settings-aes-hardware-available = AES-256-GCM：この端末でハードウェア高速化を利用できます。
+settings-aes-hardware-unavailable = AES-256-GCM：この端末ではソフトウェア暗号化を使用します。
+settings-tuning-increase = +
+settings-tuning-decrease = −
+transfer-reason-user-settings = ユーザー設定
+transfer-upload-restarting-expired = 24 時間の再開期限が切れました。新しい暗号化 ID で再開します。
+
+transfer-upload-upgrading = 新しい暗号化識別子でアップロード形式を更新中

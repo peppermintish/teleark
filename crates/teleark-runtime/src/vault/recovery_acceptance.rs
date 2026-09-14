@@ -116,6 +116,11 @@ fn batch_stop_commits_while_current_transport_is_blocked_and_survives_restart() 
     let dir = tempfile::tempdir().expect("directory");
     let remote = TestVaultRemote::new();
     let (vault, library) = open(dir.path(), &remote);
+    let mut preferences = library.preferences().expect("preferences");
+    preferences.transfer_tuning.upload_tasks = 1;
+    library
+        .set_preferences(&preferences)
+        .expect("one-task stop-policy fixture");
     vault.initialize(PASSWORD.into()).expect("keys");
     let sources = (0..3)
         .map(|id| {

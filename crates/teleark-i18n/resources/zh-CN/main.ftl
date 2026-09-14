@@ -1595,3 +1595,23 @@ upload-selection-retention = 详细记录保留最近的处理批次；这里的
 upload-selection-timing = 当前阶段已用时 { $elapsed } · 距上次活动 { $idle }
 
 upload-selection-uploading = 正在上传文件
+
+settings-upload-tasks = 同时上传任务数
+settings-upload-parts = 每个上传任务的并行 part 数
+settings-upload-connections = 上传连接数
+settings-upload-queue = 上传缓冲 part 数
+settings-upload-attempts = 每个 part 的上传尝试次数
+settings-download-tasks = 同时下载任务数
+settings-download-parts = 每个下载任务的并行 part 数
+settings-download-connections = 下载连接数
+settings-download-attempts = 每个 part 的下载尝试次数
+settings-transfer-manual-description = 设置在任务开始或恢复时生效。TeleArk 保持这些参数不变；仍遵守 Telegram 的重试等待时间。
+settings-upload-resume-window = 支持 24 小时内恢复上传。超过窗口后使用新的加密身份重新上传。Telegram 可能提前清除临时 part。请保留源文件直到完成。
+settings-aes-hardware-available = AES-256-GCM：本机支持硬件加速。
+settings-aes-hardware-unavailable = AES-256-GCM：本机使用软件加密。
+settings-tuning-increase = +
+settings-tuning-decrease = −
+transfer-reason-user-settings = 用户设置
+transfer-upload-restarting-expired = 24 小时上传恢复窗口已过期，正在使用新的加密身份重新上传。
+
+transfer-upload-upgrading = 正在使用新的加密标识升级上传格式
