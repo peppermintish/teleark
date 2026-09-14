@@ -34,6 +34,12 @@ preserving source-change detection and immutable recovery identities. No live
 timings were collected, so these findings do not attribute a specific user's
 elapsed wait to disk, hashing, target validation or Telegram latency.
 
+The [upload performance proposal](UPLOAD_PERFORMANCE_PROPOSAL.md) separates
+ACK-derived live rates from historical averages, specifies bounded presentation
+updates and preparation measurements, and outlines versioned look-ahead admission
+and a qualified stable-source fast path. It is proposed only; the current full-file
+admission and delayed list/total speed behavior remain unchanged.
+
 ## Automatic device keys and optional application PIN (2026-09-15)
 
 Private-channel management now triggers automatic OS-random key preparation on
