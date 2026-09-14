@@ -69,6 +69,8 @@ cargo run -p teleark-gui -- --preview-ui --preview-state=unlock --locale=en-US -
 cargo run -p teleark-gui -- --preview-ui --preview-state=about --locale=en-US
 ```
 
+`--preview-state=quit-confirm`, `quit-pausing` and `quit-failed` provide static exit-dialog fixtures. Native Close, Close Window and Quit always exit preview immediately, including these fixtures. Window shortcuts are listed in [ADR 0038](adr/0038-native-window-close-and-paused-exit.md).
+
 Preview disables Library, Telegram, diagnostics, native-transfer and Vault runtime constructors. Fixtures contain a synthetic account, 200 channel titles, 5,000 raw rows, Unicode managed files and native/upload batches with local-file states; a missing real runtime never produces fake transfer success. Preview actions cannot authenticate or move real Telegram data. `--preview-state` and `--preview-dark` are interpreted only in preview mode.
 
 | Option | Values |

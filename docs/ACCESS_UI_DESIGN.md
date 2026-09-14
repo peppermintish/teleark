@@ -33,8 +33,9 @@ fonts or artwork were copied from these projects.
   available. Other settings retain their existing content width.
 - Confirmation dialogs share a 440-point surface, icon/title/description header,
   and separated action footer. Transfer confirmations add a named activity panel;
-  waiting displays the fixed request time and a cancellation action. Cancellation
-  changes only the pending operation, never the underlying transfer.
+  waiting displays the fixed request time and a cancellation action. Exit offers
+  Pause and Quit, then shows checkpoint/writer settlement. A failure keeps the
+  window open with retry/cancel actions. See [ADR 0038](adr/0038-native-window-close-and-paused-exit.md).
 - Sync history separates fixed timestamps from activity descriptions. Rows keep
   the shared 24-point height and 12-point text, semantic state markers, virtualized
   rendering, and complete hover text. All existing event sources and retention
@@ -58,3 +59,9 @@ form, General settings, the merged sync timeline, and account/transfer dialogs.
 Cancel/wait feedback, form and inspector scrolling, and display-only status-bar
 clicks were exercised. A four-column language layout that wrapped words in the
 narrower panel was found during review and corrected to two columns.
+
+The 2026-09-14 window follow-up checked exit confirmation, pausing and retry
+surfaces at both required sizes. Native Close, Command-W, Command-Q,
+Control-Command-F and Escape were exercised in the isolated preview. Close/Quit
+exited the preview process even with synthetic active tasks; keyboard-triggered
+window changes are deferred until dispatch releases the current window.

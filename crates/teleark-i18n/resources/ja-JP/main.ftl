@@ -1633,7 +1633,7 @@ app-lock-enter = PINを入力してサインイン
 app-lock-unlock = サインイン
 app-lock-background = 同期、アップロード、ダウンロードはバックグラウンドで続行します。
 app-lock-back = サインインに戻る
-transition-quit = TeleArkを終了しますか？
+transition-quit = TeleArk を終了しますか？
 transition-account = アカウントを切り替えますか？
 transition-proxy = プロキシ設定を適用しますか？
 transition-description = 実行中の転送が完了してから続行します。
@@ -1654,3 +1654,21 @@ transition-started = 要求日時：{ $time }
 sync-column-time = 時刻
 sync-column-event = アクティビティ
 sync-log-description = チャンネル更新、プライベートファイルの同期、最近のアクティビティ。
+
+menu-window-close = ウィンドウを閉じる
+
+transition-quit-description = 終了する前にアップロードとダウンロードを一時停止し、進行状況を保存します。
+
+transition-quit-preserved = 再起動後も保存済みのタスクは一時停止のままです。ファイル選択と未保存の準備処理は停止します。
+
+transition-pause-quit = 一時停止して終了
+
+transition-pausing-title = タスクを一時停止中…
+
+transition-pausing = 一時停止の要求を保存し、実行中の処理がファイルを閉じるのを待っています。
+
+transition-pause-failed-title = 一時停止を完了できませんでした
+
+transition-pause-failed = TeleArk は開いたままです。一部のタスクは一時停止済みの場合があります。ディスクの空き容量を確認して再試行してください。
+
+transition-pause-retry = 一時停止して終了を再試行

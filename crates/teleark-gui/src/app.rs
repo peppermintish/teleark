@@ -6,7 +6,7 @@ mod channel_layout;
 mod channel_sync;
 mod dialogs;
 mod library;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod local_files;
 mod managed_projection;
 mod navigation;
@@ -296,6 +296,7 @@ pub(crate) enum VaultActivity {
 pub struct TeleArkApp {
     pub(crate) app_lock: app_lock::AppLockUi,
     pub(crate) transition: Option<lifecycle::Transition>,
+    shutdown_task: Option<Task<()>>,
     main_window: gpui_kit::AnyWindowHandle,
     pub(crate) proxy: proxy::ProxyUi,
     pub(crate) page: Page,
@@ -734,6 +735,7 @@ impl TeleArkApp {
         let mut app = Self {
             app_lock,
             transition: None,
+            shutdown_task: None,
             main_window: window.window_handle(),
             proxy,
             page,
@@ -1231,6 +1233,10 @@ impl TeleArkApp {
             .font_family(".SystemUIFont")
             .text_color(theme::text_primary())
             .on_action(cx.listener(|this, _: &DismissOverlay, window, cx| {
+                if this.transition.is_some() {
+                    this.cancel_transition(cx);
+                    return;
+                }
                 if this.confirm_account_switch {
                     return;
                 }
@@ -1550,7 +1556,10 @@ pub(crate) mod test_support {
         gpui_kit::Entity<TeleArkApp>,
         &mut gpui_kit::VisualTestContext,
     ) {
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::window_commands::init(cx);
+        });
         cx.add_window_view(move |window, cx| {
             let unavailable =
                 || ApplicationError::new(teleark_core::ApplicationErrorKind::Authorization);

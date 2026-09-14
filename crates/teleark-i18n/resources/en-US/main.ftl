@@ -1681,3 +1681,21 @@ transition-started = Requested at { $time }
 sync-column-time = Time
 sync-column-event = Activity
 sync-log-description = Channel updates, private file sync and recent activity.
+
+menu-window-close = Close Window
+
+transition-quit-description = Pause uploads and downloads and save their progress before closing.
+
+transition-quit-preserved = Saved tasks remain paused after you reopen TeleArk. File selection and unsaved preparation will stop.
+
+transition-pause-quit = Pause and Quit
+
+transition-pausing-title = Pausing tasks…
+
+transition-pausing = Saving pause requests and waiting for active workers to close their files.
+
+transition-pause-failed-title = Unable to finish pausing
+
+transition-pause-failed = TeleArk is still open. Some tasks may already be paused. Check available disk space and try again.
+
+transition-pause-retry = Retry Pause and Quit

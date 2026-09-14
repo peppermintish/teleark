@@ -7,8 +7,13 @@ retains synchronization, encryption-key sessions and transfer owners. PINs are
 optional, independent of file encryption passwords, and installation-wide.
 Locked access is limited to sign-in, account switching and proxy configuration;
 auxiliary transfer windows and workspace shortcuts cannot expose the workspace.
-Quit/Close, account switching and proxy application share a cancellable,
-event-driven wait-for-transfers gate. Existing recoverable work is preserved.
+Quit/Close now offers **Pause and Quit** and waits for durable pause requests and
+writer settlement. Saved queues, including non-visible jobs, remain paused after
+restart. Preview closes immediately. Account switching and proxy application keep
+the cancellable transfer drain. Native platform shortcuts share the same close/quit
+gate and closing a batch window leaves background work running. See
+[ADR 0038](adr/0038-native-window-close-and-paused-exit.md).
+
 The bottom synchronization status is display-only. Network settings opens a
 merged timeline containing directory, ordinary/private channel, manifest and
 private-change events with fixed timestamps and revision-based rebuilding.

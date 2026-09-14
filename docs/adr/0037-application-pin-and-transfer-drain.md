@@ -43,6 +43,8 @@ writers. A failed save preserves the existing verifier and access policy.
 
 ## Disruptive actions
 
+Quit/Close policy is superseded by [ADR 0038](0038-native-window-close-and-paused-exit.md). The wait policy below remains current for account switching and proxy application.
+
 Application-menu/keyboard Quit and main-window Close, account switching and
 Apply Proxy share one transfer gate. It covers upload admission/preparation,
 Vault downloads, queued/running transfers, pending pause/cancel acknowledgments

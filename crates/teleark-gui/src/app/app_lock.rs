@@ -1,5 +1,6 @@
 //! Whole-window access gate. Locking never mutates a runtime owner or its keys.
 use super::*;
+use gpui_kit::Focusable as _;
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, button::ButtonVariants as _, input::Input,
     scroll::ScrollableElement as _,
@@ -412,6 +413,19 @@ impl TeleArkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let modal_open = self.transition.is_some();
+        if modal_open != self.modal_was_open || window.focused(cx).is_none() {
+            if modal_open {
+                self.modal_focus.focus(window, cx);
+            } else {
+                self.app_lock
+                    .pin
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            self.modal_was_open = modal_open;
+        }
         let layout = LayoutPolicy::from_window(window);
         let mut content = div()
             .id("app-lock-page")
@@ -423,6 +437,16 @@ impl TeleArkApp {
             .text_color(theme::text_primary())
             .font_family(".SystemUIFont")
             .track_focus(&self.main_focus)
+            .on_action(cx.listener(|app, _: &DismissOverlay, window, cx| {
+                if app.transition.is_some() {
+                    app.cancel_transition(cx);
+                } else if app.app_lock.show_proxy {
+                    app.app_lock.show_proxy = false;
+                    cx.notify();
+                } else if window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                }
+            }))
             .on_action(cx.listener(|_, _: &ShowSettings, _, _| {}))
             .on_action(cx.listener(|_, _: &ShowTransfers, _, _| {}))
             .on_action(cx.listener(|_, _: &ShowStorage, _, _| {}))

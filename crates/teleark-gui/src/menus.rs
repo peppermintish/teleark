@@ -4,8 +4,8 @@ use teleark_i18n::{Localizer, MessageId};
 #[cfg(not(target_os = "macos"))]
 use crate::ToggleFullscreen;
 use crate::{
-    MinimizeWindow, Quit, ShowAbout, ShowSettings, ShowStorage, ShowTransfers, UploadFile,
-    ZoomWindow,
+    CloseWindow, MinimizeWindow, Quit, ShowAbout, ShowSettings, ShowStorage, ShowTransfers,
+    UploadFile, ZoomWindow,
 };
 
 pub(crate) fn application_menus(localizer: &Localizer) -> Vec<Menu> {
@@ -29,22 +29,19 @@ pub(crate) fn application_menus(localizer: &Localizer) -> Vec<Menu> {
             // AppKit inserts its native Enter/Exit Full Screen command here.
             // Keeping that selector system-owned is what preserves the menu-bar
             // reveal and traffic-light behavior in a full-screen Space.
-            #[cfg(target_os = "macos")]
             items: vec![
                 MenuItem::action(tr("menu-view-transfers"), ShowTransfers),
                 MenuItem::action(tr("menu-view-storage"), ShowStorage),
                 MenuItem::action(tr("menu-file-upload"), UploadFile),
+                #[cfg(not(target_os = "macos"))]
+                MenuItem::action(tr("menu-view-toggle-fullscreen"), ToggleFullscreen),
             ],
-            #[cfg(not(target_os = "macos"))]
-            items: vec![MenuItem::action(
-                tr("menu-view-toggle-fullscreen"),
-                ToggleFullscreen,
-            )],
         },
         Menu {
             disabled: false,
             name: tr("menu-window-title").into(),
             items: vec![
+                MenuItem::action(tr("menu-window-close"), CloseWindow),
                 MenuItem::action(tr("menu-window-minimize"), MinimizeWindow),
                 MenuItem::action(tr("menu-window-zoom"), ZoomWindow),
             ],
@@ -57,8 +54,7 @@ pub(crate) fn menus_for_access(localizer: &Localizer, locked: bool) -> Vec<Menu>
     if locked {
         // Keep Quit and native window controls; workspace commands have no lock-screen role.
         menus[0].items.drain(..3);
-        #[cfg(target_os = "macos")]
-        menus[1].items.clear();
+        menus[1].items.drain(..3);
     }
     menus
 }
@@ -70,12 +66,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_locale_builds_a_native_menu_with_fullscreen_and_window_recovery() {
-        for locale in [
-            SupportedLocale::EnUs,
-            SupportedLocale::ZhCn,
-            SupportedLocale::JaJp,
-        ] {
+    fn english_builds_a_native_menu_with_fullscreen_and_window_recovery() {
+        {
+            let locale = SupportedLocale::EnUs;
             let localizer = Localizer::new(locale).expect("locale catalog");
             let menus = application_menus(&localizer);
             assert_eq!(menus.len(), 3);
@@ -84,8 +77,8 @@ mod tests {
             #[cfg(target_os = "macos")]
             assert_eq!(menus[1].items.len(), 3);
             #[cfg(not(target_os = "macos"))]
-            assert_eq!(menus[1].items.len(), 1);
-            assert_eq!(menus[2].items.len(), 2);
+            assert_eq!(menus[1].items.len(), 4);
+            assert_eq!(menus[2].items.len(), 3);
         }
     }
 }

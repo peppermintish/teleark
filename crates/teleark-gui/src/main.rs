@@ -10,13 +10,14 @@ mod mock;
 mod screens;
 mod startup;
 mod theme;
+mod window_commands;
 
 use app::Page;
 use assets::Assets;
 use gpui_kit::component::Root;
 use gpui_kit::{
-    App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
-    WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Pixels, Size, TitlebarOptions, WindowBounds, WindowOptions,
+    point, px, size,
 };
 use teleark_i18n::{Localizer, SupportedLocale};
 
@@ -31,6 +32,7 @@ gpui_kit::actions!(
         UploadFile,
         FocusSearch,
         MinimizeWindow,
+        CloseWindow,
         Quit,
         ToggleFullscreen,
         ZoomWindow
@@ -53,17 +55,7 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
-            cx.bind_keys([
-                KeyBinding::new("escape", DismissOverlay, None),
-                KeyBinding::new("cmd-,", ShowSettings, None),
-                KeyBinding::new("cmd-1", ShowTransfers, None),
-                KeyBinding::new("cmd-2", ShowStorage, None),
-                KeyBinding::new("cmd-u", UploadFile, None),
-                KeyBinding::new("cmd-f", FocusSearch, None),
-                KeyBinding::new("cmd-m", MinimizeWindow, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, None),
-            ]);
+            window_commands::init(cx);
 
             let localizer = match Localizer::new(launch.locale) {
                 Ok(localizer) => localizer,
@@ -73,9 +65,6 @@ fn main() {
                     return;
                 }
             };
-            cx.on_action(minimize_window);
-            cx.on_action(toggle_fullscreen);
-            cx.on_action(zoom_window);
             cx.set_menus(menus::application_menus(&localizer));
             cx.on_window_closed(|cx, _| {
                 if should_quit_after_window_close(cx.windows().len()) {
@@ -125,19 +114,25 @@ fn should_quit_after_window_close(open_window_count: usize) -> bool {
 
 fn minimize_window(_: &MinimizeWindow, cx: &mut App) {
     if let Some(handle) = cx.active_window() {
-        let _ = handle.update(cx, |_, window, _| window.minimize_window());
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.minimize_window());
+        });
     }
 }
 
 fn toggle_fullscreen(_: &ToggleFullscreen, cx: &mut App) {
     if let Some(handle) = cx.active_window() {
-        let _ = handle.update(cx, |_, window, _| window.toggle_fullscreen());
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.toggle_fullscreen());
+        });
     }
 }
 
 fn zoom_window(_: &ZoomWindow, cx: &mut App) {
     if let Some(handle) = cx.active_window() {
-        let _ = handle.update(cx, |_, window, _| window.zoom_window());
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.zoom_window());
+        });
     }
 }
 

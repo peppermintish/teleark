@@ -1654,3 +1654,21 @@ transition-started = 请求时间：{ $time }
 sync-column-time = 时间
 sync-column-event = 活动
 sync-log-description = 频道更新、私有文件同步与最近活动。
+
+menu-window-close = 关闭窗口
+
+transition-quit-description = 关闭前暂停上传和下载，并保存任务进度。
+
+transition-quit-preserved = 重新打开 TeleArk 后，已保存的任务保持暂停。文件选择和尚未保存的准备工作将停止。
+
+transition-pause-quit = 暂停并退出
+
+transition-pausing-title = 正在暂停任务…
+
+transition-pausing = 正在保存暂停请求，等待运行中的任务关闭文件。
+
+transition-pause-failed-title = 未能完成暂停
+
+transition-pause-failed = TeleArk 保持打开。部分任务可能已暂停。请检查可用磁盘空间后重试。
+
+transition-pause-retry = 重试暂停并退出

@@ -502,6 +502,19 @@ impl TeleArkApp {
                 .splice(group_index + 7..group_index + 7, extra);
         }
         match state.as_str() {
+            "quit-confirm" | "quit-pausing" | "quit-failed" => {
+                self.app_lock.locked = true;
+                self.upload_in_flight = true;
+                self.transition = Some(super::lifecycle::Transition {
+                    action: super::lifecycle::TransitionAction::Quit,
+                    phase: match state.as_str() {
+                        "quit-pausing" => super::lifecycle::TransitionPhase::Pausing,
+                        "quit-failed" => super::lifecycle::TransitionPhase::Failed,
+                        _ => super::lifecycle::TransitionPhase::Confirm,
+                    },
+                    started: std::time::Instant::now(),
+                });
+            }
             "recovery-guidance" => self.preview_recovery_failure(),
             "native-cleanup" => self.preview_native_cleanup(false),
             "native-cleanup-failed" => self.preview_native_cleanup(true),
