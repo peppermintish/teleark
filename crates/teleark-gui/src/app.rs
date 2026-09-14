@@ -13,7 +13,7 @@ mod preview;
 mod speed_limits;
 mod status_bar;
 mod sync_history;
-mod sync_timing;
+mod sync_time;
 mod workspace_view;
 #[cfg(test)]
 pub(crate) use preview::completed_storage_maintenance_preview;
@@ -51,7 +51,7 @@ use teleark_runtime::{
 use teleark_runtime::{TelegramAccount, TelegramChatKind};
 
 use crate::{
-    DismissOverlay, FocusSearch, MinimizeWindow, RefreshPage, ShowAbout, ShowSettings, ShowStorage,
+    DismissOverlay, FocusSearch, MinimizeWindow, ShowAbout, ShowSettings, ShowStorage,
     ShowTransfers, ToggleFullscreen, UploadFile, ZoomWindow,
     components::{self, Tone},
     layout::LayoutPolicy,
@@ -167,6 +167,7 @@ enum EscapeBehavior {
     DismissUnlock,
     DismissUpload,
     DismissTelegramApiIdPrompt,
+    DismissStorageDetails,
     Ignore,
 }
 
@@ -175,6 +176,7 @@ fn escape_behavior(
     unlock_visible: bool,
     upload_visible: bool,
     telegram_api_id_prompt_visible: bool,
+    storage_details_visible: bool,
 ) -> EscapeBehavior {
     if unlock_visible {
         EscapeBehavior::DismissUnlock
@@ -182,6 +184,8 @@ fn escape_behavior(
         EscapeBehavior::DismissUpload
     } else if telegram_api_id_prompt_visible {
         EscapeBehavior::DismissTelegramApiIdPrompt
+    } else if storage_details_visible {
+        EscapeBehavior::DismissStorageDetails
     } else if fullscreen {
         EscapeBehavior::ExitFullscreen
     } else {
@@ -304,6 +308,8 @@ pub struct TeleArkApp {
     pub(crate) vault_key_progress: Option<teleark_runtime::VaultKeyProgress>,
     vault_key_presentation: Option<Task<()>>,
     pub(crate) account_restoring: bool,
+    account_restore_retry_at: Option<std::time::Instant>,
+    account_restore_event_at: Option<std::time::Instant>,
     pub(crate) transfers_account_ready: bool,
     pub(crate) account_avatar: Option<std::sync::Arc<gpui_kit::Image>>,
     pub(crate) show_account_switch: bool,
@@ -343,12 +349,6 @@ pub struct TeleArkApp {
     pub(crate) transfer_batch_window_request: Option<u64>,
     pub(crate) transfer_batch_window:
         Option<(u64, gpui_kit::WindowHandle<gpui_kit::component::Root>)>,
-    pub(crate) upload_source_total_bytes: u64,
-    pub(crate) upload_selection_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
-    pub(crate) upload_preparation_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
-    upload_selection_presentation: Option<Task<()>>,
-    upload_preparation_presentation: Option<Task<()>>,
-
     pub(crate) transfer_inspector_replay: bool,
     pub(crate) transfer_replay_cursor: usize,
     pub(crate) vault_locked: bool,
@@ -364,6 +364,11 @@ pub struct TeleArkApp {
     pub(crate) managed_vault_rejected: usize,
     pub(crate) upload_sources: Vec<teleark_runtime::VaultUploadSource>,
     pub(crate) upload_preparing: bool,
+    pub(crate) upload_source_total_bytes: u64,
+    pub(crate) upload_selection_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
+    pub(crate) upload_preparation_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
+    upload_selection_presentation: Option<Task<()>>,
+    upload_preparation_presentation: Option<Task<()>>,
     pub(crate) nav_selection: &'static str,
     pub(crate) storage_view: StorageView,
     pub(crate) library_content: LibraryContent,
@@ -383,7 +388,6 @@ pub struct TeleArkApp {
     pub(crate) telegram_activity: TelegramActivity,
     pub(crate) dialogs: dialogs::DialogLoad,
     dialogs_task: Option<Task<()>>,
-    dialogs_clock_task: Option<Task<()>>,
     pub(crate) telegram_account: Option<TelegramAccount>,
     pub(crate) telegram_chats: Vec<TelegramChatSummary>,
     pub(crate) selected_chat_id: Option<i64>,
@@ -392,15 +396,17 @@ pub struct TeleArkApp {
     pub(crate) telegram_index: Option<TelegramIndexPage>,
     pub(crate) telegram_files: Vec<TelegramFileSummary>,
     channel_sync: Option<teleark_runtime::ChannelSync>,
+    channel_sources_revision: u64,
+    pub(crate) channel_history_request: Option<(i64, u64)>,
+    pub(crate) channel_history_failed: bool,
     pub(crate) channel_sync_snapshot: Option<teleark_runtime::ChannelSyncSnapshot>,
     channel_sync_task: Option<Task<()>>,
     channel_display_revision: i64,
-    sync_timing: Option<Entity<sync_timing::SyncTiming>>,
     workspace_view: Option<Entity<workspace_view::WorkspaceView>>,
     page_view: Option<Entity<workspace_view::ContentView>>,
     source_view: Option<Entity<workspace_view::ContentView>>,
     sync_inspector: Option<Entity<workspace_view::SyncInspector>>,
-    sync_time_anchor: sync_timing::TimeAnchor,
+    sync_time_anchor: sync_time::TimeAnchor,
     sync_history: Option<Entity<sync_history::SyncHistory>>,
     managed_display_revision: i64,
     managed_upload_receipts:
@@ -409,8 +415,11 @@ pub struct TeleArkApp {
     pub(crate) managed_catalog_limited: bool,
     pub(crate) managed_health_checked: Option<usize>,
     channel_local_read_failed: bool,
-    channel_view_cache: std::collections::VecDeque<(i64, i64, Vec<TelegramFileSummary>)>,
+    channel_view_cache: std::collections::VecDeque<channel_sync::CachedChannelView>,
+    channel_history_armed: bool,
+    channel_loaded_scope: Option<(i64, i64)>,
     pub(crate) channel_sync_details: bool,
+    channel_sync_private_expanded: bool,
     pub(crate) channel_sync_scroll: gpui_kit::ScrollHandle,
     pub(crate) telegram_files_next: Option<i64>,
     pub(crate) telegram_files_exhausted: bool,
@@ -450,6 +459,11 @@ pub struct TeleArkApp {
     pub(crate) transfers: Option<DesktopTransfers>,
     pub(crate) vault: Option<DesktopVault>,
     library_query_generation: u64,
+    library_sync_dirty: bool,
+    pub(crate) library_sync_loading: bool,
+    library_sync_started: Option<std::time::Instant>,
+    library_sync_error: Option<teleark_core::ApplicationErrorKind>,
+    library_sync_task: Option<Task<()>>,
     pending_locale_override: Option<LocaleOverrideChoice>,
     library_action_task: Option<Task<()>>,
     pub(crate) library_action_busy: bool,
@@ -478,6 +492,7 @@ pub struct TeleArkApp {
         teleark_runtime::TransferSnapshotView<teleark_runtime::ChannelDownloadSnapshot>,
     pub(crate) vault_transfer_view:
         teleark_runtime::TransferSnapshotView<teleark_runtime::VaultTransferSnapshot>,
+    status_rate_cache: std::cell::RefCell<status_bar::RateCache>,
     vault_task: Option<Task<()>>,
     vault_upload_task: Option<Task<()>>,
     vault_recovery_task: Option<Task<()>>,
@@ -487,12 +502,13 @@ pub struct TeleArkApp {
     vault_download_in_flight: bool,
     pub(crate) managed_scan_loading: bool,
     managed_scan_generation: u64,
+    managed_projection_scope: Option<(i64, i64)>,
+    managed_view_before_legacy: Option<vault::ManagedViewCache>,
     managed_scan_cancellation: Option<TelegramScanCancellation>,
     vault_scan_task: Option<Task<()>>,
     vault_download_task: Option<Task<()>>,
     upload_picker_task: Option<Task<()>>,
     qr_poll_task: Option<Task<()>>,
-    status_rate_cache: std::cell::RefCell<status_bar::RateCache>,
     pub(crate) telegram_login_generation: u64,
     telegram_file_generation: u64,
     telegram_file_auto_load: bool,
@@ -726,6 +742,8 @@ impl TeleArkApp {
             vault_key_progress: None,
             vault_key_presentation: None,
             account_restoring: false,
+            account_restore_retry_at: None,
+            account_restore_event_at: None,
             transfers_account_ready: false,
             account_avatar: None,
             show_account_switch: false,
@@ -761,14 +779,8 @@ impl TeleArkApp {
             upload_body_scroll: gpui_kit::ScrollHandle::new(),
             batch_detail_scroll: gpui_kit::UniformListScrollHandle::new(),
             expanded_transfer_batches: BTreeSet::new(),
-            transfer_batch_window_request: None,
             transfer_batch_window: None,
-            upload_source_total_bytes: 0,
-            upload_selection_progress: None,
-            upload_preparation_progress: None,
-            upload_selection_presentation: None,
-            upload_preparation_presentation: None,
-
+            transfer_batch_window_request: None,
             transfer_inspector_replay: false,
             transfer_replay_cursor: 0,
             vault_locked: vault_status.locked,
@@ -788,6 +800,11 @@ impl TeleArkApp {
             managed_vault_rejected: 0,
             upload_sources: Vec::new(),
             upload_preparing: false,
+            upload_source_total_bytes: 0,
+            upload_selection_progress: None,
+            upload_preparation_progress: None,
+            upload_selection_presentation: None,
+            upload_preparation_presentation: None,
             nav_selection,
             storage_view: StorageView::Files,
             library_content,
@@ -811,7 +828,6 @@ impl TeleArkApp {
             },
             dialogs: dialogs::DialogLoad::default(),
             dialogs_task: None,
-            dialogs_clock_task: None,
             telegram_account: None,
             telegram_chats: Vec::new(),
             selected_chat_id: None,
@@ -820,15 +836,17 @@ impl TeleArkApp {
             telegram_index: None,
             telegram_files: Vec::new(),
             channel_sync: None,
+            channel_sources_revision: 0,
+            channel_history_request: None,
+            channel_history_failed: false,
             channel_sync_snapshot: None,
             channel_sync_task: None,
             channel_display_revision: 0,
-            sync_timing: None,
             workspace_view: None,
             page_view: None,
             source_view: None,
             sync_inspector: None,
-            sync_time_anchor: sync_timing::TimeAnchor::new(),
+            sync_time_anchor: sync_time::TimeAnchor::new(),
             sync_history: None,
             managed_display_revision: 0,
             managed_upload_receipts: std::collections::VecDeque::new(),
@@ -837,7 +855,10 @@ impl TeleArkApp {
             managed_health_checked: None,
             channel_local_read_failed: false,
             channel_view_cache: Default::default(),
+            channel_history_armed: false,
+            channel_loaded_scope: None,
             channel_sync_details: false,
+            channel_sync_private_expanded: false,
             channel_sync_scroll: gpui_kit::ScrollHandle::new(),
             telegram_files_next: None,
             telegram_files_exhausted: false,
@@ -878,6 +899,11 @@ impl TeleArkApp {
             transfers: transfers.ok(),
             vault: vault.ok(),
             library_query_generation: 0,
+            library_sync_dirty: false,
+            library_sync_loading: false,
+            library_sync_started: None,
+            library_sync_error: None,
+            library_sync_task: None,
             pending_locale_override: None,
             library_action_task: None,
             library_action_busy: false,
@@ -904,6 +930,7 @@ impl TeleArkApp {
             transfer_clock_task: None,
             native_transfer_view: Default::default(),
             vault_transfer_view: Default::default(),
+            status_rate_cache: Default::default(),
             vault_task: None,
             vault_upload_task: None,
             vault_recovery_task: None,
@@ -913,12 +940,13 @@ impl TeleArkApp {
             vault_download_in_flight: false,
             managed_scan_loading: false,
             managed_scan_generation: 0,
+            managed_projection_scope: None,
+            managed_view_before_legacy: None,
             managed_scan_cancellation: None,
             vault_scan_task: None,
             vault_download_task: None,
             upload_picker_task: None,
             qr_poll_task: None,
-            status_rate_cache: Default::default(),
             telegram_login_generation: 0,
             telegram_file_generation: 0,
             telegram_file_auto_load: false,
@@ -961,6 +989,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.channel_history_armed = false;
         self.show_transfer_detail = false;
         self.pending_transfer_delete = None;
         self.pending_transfer_bulk_delete.clear();
@@ -970,9 +999,11 @@ impl TeleArkApp {
             Page::Channel | Page::Storage | Page::LegacyRecovery
         ) && self.page != page
         {
+            self.cancel_channel_history();
             self.cancel_telegram_file_load(cx);
         }
-        if self.page == Page::LegacyRecovery && self.page != page {
+        let leaving_legacy = self.page == Page::LegacyRecovery && self.page != page;
+        if leaving_legacy {
             self.cancel_managed_scan();
         }
         if self.page == Page::Library && page != Page::Library {
@@ -980,13 +1011,8 @@ impl TeleArkApp {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
         }
         self.page = page;
-        if let Some(sync) = &self.channel_sync {
-            let observed = (page == Page::Channel)
-                .then_some(self.selected_chat_id)
-                .flatten();
-            if let Err(error) = sync.observe(observed) {
-                self.telegram_activity = TelegramActivity::Failed(error.kind());
-            }
+        if leaving_legacy {
+            self.restore_managed_view_after_legacy(cx);
         }
         self.show_upload = false;
         if page == Page::Account {
@@ -1124,7 +1150,6 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if !self.channel_sync_details {
-            self.sync_timing = None;
             self.sync_history = None;
             self.sync_inspector = None;
         }
@@ -1188,6 +1213,7 @@ impl TeleArkApp {
                     this.unlock_intent.is_some(),
                     this.show_upload,
                     this.show_telegram_api_id_prompt,
+                    this.page == Page::Storage && this.storage_details_expanded,
                 ) {
                     EscapeBehavior::ExitFullscreen => window.toggle_fullscreen(),
                     EscapeBehavior::DismissUnlock => {
@@ -1201,6 +1227,11 @@ impl TeleArkApp {
                     }
                     EscapeBehavior::DismissTelegramApiIdPrompt => {
                         this.skip_telegram_api_id_prompt(cx);
+                    }
+                    EscapeBehavior::DismissStorageDetails => {
+                        this.storage_details_expanded = false;
+                        this.main_focus.focus(window, cx);
+                        cx.notify();
                     }
                     EscapeBehavior::Ignore => {
                         this.dialogs.details = false;
@@ -1239,15 +1270,6 @@ impl TeleArkApp {
                 this.search_input
                     .update(cx, |input, cx| input.focus(window, cx))
             }))
-            .on_action(cx.listener(|this, _: &RefreshPage, _, cx| match this.page {
-                Page::Channel => this.refresh_selected_channel(cx),
-                Page::Storage | Page::LegacyRecovery if this.storage_view == StorageView::Files => {
-                    this.refresh_managed_vault_files(cx)
-                }
-                Page::Storage | Page::LegacyRecovery => this.refresh_selected_channel(cx),
-                Page::Library => this.refresh_library(cx),
-                _ => this.load_telegram_dialogs(cx),
-            }))
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| {
                 window.minimize_window();
             }))
@@ -1282,18 +1304,6 @@ impl TeleArkApp {
                     && self.unlock_intent.is_none(),
                 |root| root.child(self.render_vault_key_progress(cx)),
             )
-            .when(self.vault_locked && self.vault_status.configured, |root| {
-                root.child(
-                    div()
-                        .id("vault-session-locked-notice")
-                        .debug_selector(|| "vault-session-locked-notice".into())
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .bg(theme::blue_pale())
-                        .child(self.tr("vault-session-locked-background")),
-                )
-            })
             .when(
                 self.upload_in_flight
                     || (self.page == Page::Transfers && self.upload_selection_progress.is_some()),
@@ -1310,6 +1320,10 @@ impl TeleArkApp {
             .when(self.confirm_account_switch, |root| {
                 root.child(self.render_account_switch_dialog(cx))
             })
+            .when(
+                self.page == Page::Storage && self.storage_details_expanded,
+                |root| root.child(self.render_storage_details_dialog(window, cx)),
+            )
             .when(self.unlock_intent.is_some(), |root| {
                 root.child(self.render_unlock_dialog(layout, cx))
             })
@@ -1414,27 +1428,31 @@ mod tests {
     #[test]
     fn escape_dismisses_the_topmost_modal_before_leaving_fullscreen() {
         assert_eq!(
-            escape_behavior(true, true, true, true),
+            escape_behavior(true, false, false, false, true),
+            EscapeBehavior::DismissStorageDetails
+        );
+        assert_eq!(
+            escape_behavior(true, true, true, true, false),
             EscapeBehavior::DismissUnlock
         );
         assert_eq!(
-            escape_behavior(true, false, true, true),
+            escape_behavior(true, false, true, true, false),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, false, true, true),
+            escape_behavior(false, false, true, true, false),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, false, false, true),
+            escape_behavior(false, false, false, true, false),
             EscapeBehavior::DismissTelegramApiIdPrompt
         );
         assert_eq!(
-            escape_behavior(false, false, false, false),
+            escape_behavior(false, false, false, false, false),
             EscapeBehavior::Ignore
         );
         assert_eq!(
-            escape_behavior(true, false, false, false),
+            escape_behavior(true, false, false, false, false),
             EscapeBehavior::ExitFullscreen
         );
     }
@@ -1537,7 +1555,6 @@ pub(crate) mod test_support {
 impl Render for TeleArkApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.channel_sync_details {
-            self.sync_timing = None;
             self.sync_history = None;
             self.sync_inspector = None;
         }

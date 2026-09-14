@@ -2,6 +2,8 @@
 
 Status: Accepted, 2026-09-13. Refines the presentation described in ADR 0019; transport scheduling, persistence and synchronization protocols do not change.
 
+The presentation clock below is superseded by [ADR 0033](0033-static-sync-inspector-and-navigation-independent-updates.md); it is retained here as historical rationale. The fixed history and projection-cache boundaries still apply.
+
 ## Decision
 
 Business notifications update the synchronization inspector. Its presentation clock never notifies the application entity or reads Runtime/Storage. The clock exists only while details are open and the native window is active; closing details releases its entity, task and subscriptions. Window deactivation cancels the timer. Reactivation immediately recalculates visible values and resumes timing only for active work. Completion stops timing on its event. The asynchronous loop retains weak ownership across waits.

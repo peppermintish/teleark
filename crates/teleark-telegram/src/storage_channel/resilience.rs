@@ -139,6 +139,23 @@ impl TelegramConnection {
         cancel: &ScanCancellation,
         observe: &(dyn Fn(StorageMaintenancePhase) + Send + Sync),
     ) -> Result<(), TelegramError> {
+        complete_channel_repair(
+            cancel,
+            self.repair_storage_identity(chat, account, branding, random_id, cancel, observe),
+            self.archive_bound_storage(chat, account, cancel, observe),
+        )
+        .await
+    }
+
+    async fn repair_storage_identity(
+        &self,
+        chat: &TelegramChat,
+        account: i64,
+        branding: (&str, &str),
+        random_id: i64,
+        cancel: &ScanCancellation,
+        observe: &(dyn Fn(StorageMaintenancePhase) + Send + Sync),
+    ) -> Result<(), TelegramError> {
         let (title, description) = branding;
         validate_branding(title, description)?;
         check_cancel(cancel)?;
@@ -244,8 +261,8 @@ impl TelegramConnection {
         Ok(())
     }
 
-    /// One explicit action; no background reconciliation of later user changes.
-    pub async fn archive_bound_storage(
+    /// Mandatory repair defaults, re-applied on every explicit repair/retry.
+    async fn archive_bound_storage(
         &self,
         chat: &TelegramChat,
         account: i64,
@@ -319,11 +336,103 @@ impl TelegramConnection {
         Ok(())
     }
 }
+// Defaults are part of completion even when identity was already repaired by an
+// interrupted attempt. Never poll their mutations before identity validation.
+async fn complete_channel_repair(
+    cancel: &ScanCancellation,
+    identity: impl std::future::Future<Output = Result<(), TelegramError>>,
+    defaults: impl std::future::Future<Output = Result<(), TelegramError>>,
+) -> Result<(), TelegramError> {
+    check_cancel(cancel)?;
+    identity.await?;
+    check_cancel(cancel)?;
+    defaults.await
+}
+
 use crate::publication::sent_message_id;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn repair_waits_for_required_defaults_and_propagates_failure_on_retry() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        for retry in 0..2 {
+            let cancel = ScanCancellation::new();
+            let (identity_done, identity_wait) = tokio::sync::oneshot::channel();
+            let (defaults_done, defaults_wait) = tokio::sync::oneshot::channel();
+            let defaults_calls = calls.clone();
+            let task = tokio::spawn(async move {
+                complete_channel_repair(
+                    &cancel,
+                    async {
+                        identity_wait.await.expect("identity released");
+                        Ok(())
+                    },
+                    async {
+                        defaults_calls.fetch_add(1, Ordering::SeqCst);
+                        defaults_wait.await.expect("defaults released")
+                    },
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            assert_eq!(calls.load(Ordering::SeqCst), retry);
+            assert!(!task.is_finished());
+            identity_done.send(()).expect("release identity");
+            tokio::task::yield_now().await;
+            assert_eq!(calls.load(Ordering::SeqCst), retry + 1);
+            assert!(!task.is_finished(), "identity success cannot finish repair");
+            if retry == 0 {
+                defaults_done
+                    .send(Err(TelegramError::new(TelegramErrorKind::Network)))
+                    .expect("release failure");
+                assert_eq!(
+                    task.await
+                        .expect("task")
+                        .expect_err("required defaults failed")
+                        .kind(),
+                    TelegramErrorKind::Network
+                );
+            } else {
+                defaults_done.send(Ok(())).expect("verified defaults");
+                task.await.expect("task").expect("complete retry");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_identity_and_cancellation_prevent_defaults() {
+        let cancel = ScanCancellation::new();
+        let result = complete_channel_repair(
+            &cancel,
+            async { Err(TelegramError::new(TelegramErrorKind::StorageAccessDenied)) },
+            async { panic!("must not mutate unsafe channel") },
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("identity failed").kind(),
+            TelegramErrorKind::StorageAccessDenied
+        );
+        let result = complete_channel_repair(
+            &cancel,
+            async {
+                cancel.cancel();
+                Ok(())
+            },
+            async { panic!("must not mutate after cancellation") },
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("cancelled").kind(),
+            TelegramErrorKind::Cancelled
+        );
+    }
+
     #[test]
     fn damage_is_localized_and_newer_identity_is_preserved() {
         let about = managed_about(3, "warning");

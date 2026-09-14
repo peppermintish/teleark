@@ -3,6 +3,20 @@
 use super::*;
 use crate::screens::transfers::TransferAction;
 
+/// Preserve the account projection while explicit legacy recovery uses its own view.
+pub(super) struct ManagedViewCache {
+    account: i64,
+    chat: i64,
+    files: std::sync::Arc<Vec<ManagedVaultFile>>,
+    rejected: usize,
+    pending: bool,
+    limited: bool,
+    health_checked: Option<usize>,
+    revision: i64,
+    scope: Option<(i64, i64)>,
+    receipts: std::collections::VecDeque<(i64, i64, ManagedVaultFile)>,
+}
+
 impl TeleArkApp {
     pub(crate) fn apply_vault_transfer_action(
         &mut self,
@@ -95,6 +109,49 @@ impl TeleArkApp {
         cx.notify();
     }
 
+    pub(super) fn save_managed_view_for_legacy(&mut self) {
+        self.cancel_managed_scan();
+        if let (Some(account), Some(chat)) = (&self.telegram_account, self.storage_channel_id()) {
+            self.managed_view_before_legacy = Some(ManagedViewCache {
+                account: account.id,
+                chat,
+                files: std::mem::take(&mut self.managed_vault_files),
+                rejected: self.managed_vault_rejected,
+                pending: self.managed_catalog_pending,
+                limited: self.managed_catalog_limited,
+                health_checked: self.managed_health_checked,
+                revision: self.managed_display_revision,
+                scope: self.managed_projection_scope,
+                receipts: std::mem::take(&mut self.managed_upload_receipts),
+            });
+        }
+        self.managed_vault_files = Default::default();
+        self.managed_projection_scope = None;
+        self.managed_health_checked = None;
+    }
+
+    pub(super) fn restore_managed_view_after_legacy(&mut self, cx: &mut Context<Self>) {
+        self.managed_vault_files = Default::default();
+        self.managed_projection_scope = None;
+        self.managed_health_checked = None;
+        if let Some(view) = self.managed_view_before_legacy.take()
+            && !self.vault_locked
+            && self.telegram_account.as_ref().map(|account| account.id) == Some(view.account)
+            && self.storage_channel_id() == Some(view.chat)
+        {
+            self.managed_vault_files = view.files;
+            self.managed_vault_rejected = view.rejected;
+            self.managed_catalog_pending = view.pending;
+            self.managed_catalog_limited = view.limited;
+            self.managed_health_checked = view.health_checked;
+            self.managed_display_revision = view.revision;
+            self.managed_projection_scope = view.scope;
+            self.managed_upload_receipts = view.receipts;
+        }
+        // Consume only actual committed changes received during the recovery view.
+        self.apply_managed_channel_changes(cx);
+    }
+
     pub(crate) fn request_vault_unlock(&mut self, intent: UnlockIntent, cx: &mut Context<Self>) {
         if self.vault_activity == VaultActivity::Working {
             return;
@@ -149,6 +206,9 @@ impl TeleArkApp {
             return;
         }
         match self.unlock_intent.take() {
+            Some(UnlockIntent::Browse) if self.page == Page::LegacyRecovery => {
+                self.scan_legacy_vault_files(cx)
+            }
             Some(UnlockIntent::Browse) => self.scan_managed_vault_files(cx),
             Some(UnlockIntent::Upload) => {
                 self.show_upload = true;
@@ -468,6 +528,7 @@ impl TeleArkApp {
                     .map(|()| VaultActivity::Succeeded)
                     .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
                 if succeeded {
+                    this.apply_managed_channel_changes(cx);
                     this.vault_recovery_secret = None;
                     this.recovery_visible = false;
                     this.resume_unlock_intent(cx);
@@ -492,6 +553,8 @@ impl TeleArkApp {
         self.vault_status.active_key_locked = true;
         self.vault_status.historical_key_unlocked = false;
         self.managed_vault_files = Default::default();
+        self.managed_projection_scope = None;
+        self.managed_view_before_legacy = None;
         self.managed_health_checked = None;
         self.managed_upload_receipts.clear();
         self.managed_vault_rejected = 0;
@@ -614,19 +677,27 @@ impl TeleArkApp {
         {
             self.vault_activity = VaultActivity::Failed(error.kind());
         }
-        self.scan_vault_files(true, cx);
+        self.scan_vault_files(true, self.page != Page::LegacyRecovery, cx);
     }
 
     pub(crate) fn scan_managed_vault_files(&mut self, cx: &mut Context<Self>) {
-        self.scan_vault_files(false, cx);
+        self.scan_vault_files(false, true, cx);
     }
 
-    fn scan_vault_files(&mut self, verify_health: bool, cx: &mut Context<Self>) {
+    pub(crate) fn scan_legacy_vault_files(&mut self, cx: &mut Context<Self>) {
+        self.scan_vault_files(false, false, cx);
+    }
+
+    fn scan_vault_files(&mut self, verify_health: bool, cached: bool, cx: &mut Context<Self>) {
         if self.vault_locked || self.managed_scan_loading {
             return;
         }
-        let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.active_storage_chat_id())
-        else {
+        let chat = if cached {
+            self.storage_channel_id()
+        } else {
+            self.telegram_account.as_ref().map(|account| account.id)
+        };
+        let (Some(vault), Some(chat_id)) = (self.vault.clone(), chat) else {
             return;
         };
         let Some(account_id) = self.telegram_account.as_ref().map(|a| a.id) else {
@@ -637,8 +708,8 @@ impl TeleArkApp {
         let generation = self.managed_scan_generation;
         let cancellation = TelegramScanCancellation::new();
         self.managed_scan_cancellation = Some(cancellation.clone());
-        let cached = self.page == Page::Storage;
         if cached {
+            self.managed_projection_scope = Some((account_id, chat_id));
             self.managed_display_revision = self
                 .channel_sync
                 .as_ref()
@@ -697,8 +768,12 @@ impl TeleArkApp {
                 }
                 this.managed_scan_loading = false;
                 this.managed_scan_cancellation = None;
-                if this.active_storage_chat_id() != Some(chat_id)
-                    || this.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
+                if this.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
+                    || if cached {
+                        this.storage_channel_id() != Some(chat_id)
+                    } else {
+                        this.page != Page::LegacyRecovery
+                    }
                 {
                     return;
                 }
@@ -1244,6 +1319,108 @@ mod tests {
     }
 
     use gpui_kit as gpui;
+
+    fn send_file_drop(cx: &mut gpui::VisualTestContext, paths: Vec<std::path::PathBuf>) {
+        use gpui::InputEvent as _;
+        let position = cx
+            .debug_bounds("upload-drop-target")
+            .expect("drop target")
+            .center();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::FileDropEvent::Entered {
+                    position,
+                    paths: gpui::ExternalPaths(paths.into_iter().collect()),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::FileDropEvent::Submit { position }.to_platform_input(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn native_file_drop_adds_deduplicates_and_preserves_selection_on_invalid_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            app.show_upload = true;
+            app.upload_sources.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let source = std::env::current_exe().expect("synthetic executable");
+        send_file_drop(cx, vec![source.clone(), source.clone()]);
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.upload_sources.len(), 1);
+            assert_eq!(app.upload_sources[0].path, source);
+            assert!(!app.upload_preparing);
+            assert!(!app.upload_in_flight, "drop only prepares the composer");
+        });
+        send_file_drop(cx, vec![source.clone()]);
+        app.read_with(cx, |app, _| assert_eq!(app.upload_sources.len(), 1));
+        send_file_drop(cx, vec![source.parent().expect("directory").to_path_buf()]);
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.upload_sources.len(), 1);
+            assert_eq!(
+                app.vault_activity,
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::UploadFolderUnsupported),
+            );
+        });
+        send_file_drop(cx, vec![source; 4096]);
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.upload_sources.len(), 1);
+            assert_eq!(app.vault_activity, VaultActivity::Idle);
+        });
+    }
+
+    #[gpui::test]
+    fn pending_file_selection_acknowledges_and_rejects_overlap_and_stale_account(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        let source = std::env::current_exe().expect("synthetic executable");
+        app.update(cx, |app, cx| {
+            app.show_upload = true;
+            app.upload_sources.clear();
+            let timer = cx.background_executor().timer(Duration::from_secs(5));
+            let source = source.clone();
+            app.prepare_upload_selection(
+                async move {
+                    timer.await;
+                    Ok(Some(vec![source]))
+                },
+                true,
+                cx,
+            );
+            assert!(app.upload_preparing, "feedback precedes the wait");
+            assert!(!app.can_accept_upload_files());
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upload-drop-feedback").is_some());
+        app.update(cx, |app, cx| {
+            app.drop_upload_files(std::slice::from_ref(&source), cx);
+            assert!(app.upload_sources.is_empty());
+            app.telegram_login_generation = app.telegram_login_generation.wrapping_add(1);
+        });
+        cx.background_executor.advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(!app.upload_preparing);
+            assert!(
+                app.upload_sources.is_empty(),
+                "previous account callback rejected"
+            );
+        });
+    }
 
     #[gpui::test]
     fn previous_batch_completion_does_not_clear_a_new_upload_draft(cx: &mut gpui::TestAppContext) {

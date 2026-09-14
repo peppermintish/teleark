@@ -151,6 +151,9 @@ impl ChannelSync {
                         });
                     }
                     if shared.manifest_generation.load(Ordering::Acquire) == generation {
+                        if scan.phase == ChannelSyncPhase::ManifestCompleted {
+                            snapshot.last_completed_at = Some(scan.last_activity);
+                        }
                         snapshot.managed_scan = Some(scan);
                     }
                 }
@@ -179,11 +182,13 @@ mod tests {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
+            sources: Mutex::new((0, Arc::new(Vec::new()))),
+            history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(2),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
-            active: Mutex::new(None),
+            active: Mutex::new(BTreeMap::new()),
         });
         let (sender, _receiver) = mpsc::sync_channel(1);
         let sync = ChannelSync {
@@ -212,7 +217,12 @@ mod tests {
             ChannelSyncPhase::ManifestQueued
         );
         let current = sync.observe_managed_scan(2);
-        old.finish(Some(ApplicationErrorKind::Cancelled));
+        old.finish(None);
+        assert_eq!(
+            sync.snapshot().expect("snapshot").last_completed_at,
+            None,
+            "stale success cannot change current completion time"
+        );
         assert_eq!(
             sync.snapshot()
                 .expect("snapshot")
@@ -234,6 +244,7 @@ mod tests {
         let scan = snapshot.managed_scan.expect("scan");
         assert_eq!((scan.completed, scan.total, scan.cached), (2, Some(2), 1));
         assert!(!scan.active());
+        assert_eq!(snapshot.last_completed_at, Some(scan.last_activity));
         assert_eq!(snapshot.events.len(), EVENT_CAPACITY);
         assert!(snapshot.dropped_events > 0);
         assert_eq!(
@@ -242,6 +253,10 @@ mod tests {
         );
         let abandoned = sync.observe_managed_scan(2);
         drop(abandoned);
+        assert_eq!(
+            sync.snapshot().expect("snapshot").last_completed_at,
+            snapshot.last_completed_at
+        );
         assert_eq!(
             sync.snapshot()
                 .expect("abandoned task")

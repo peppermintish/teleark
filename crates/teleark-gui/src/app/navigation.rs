@@ -3,6 +3,7 @@
 use crate::assets::Symbol;
 
 use super::*;
+use gpui_kit::StatefulInteractiveElement as _;
 use gpui_kit::component::{
     Collapsible, Sizable as _,
     avatar::Avatar,
@@ -214,7 +215,7 @@ impl TeleArkApp {
         })
         .on_click(cx.listener(move |this, _, _, cx| match id {
             "nav-storage" => {
-                this.page = Page::Storage;
+                this.set_page(Page::Storage, cx);
                 this.select_storage(StorageView::Files, cx);
             }
             "nav-transfers-all" => {
@@ -388,15 +389,6 @@ impl TeleArkApp {
                         div()
                             .text_size(theme::LIST_TEXT_SIZE)
                             .child(self.tr("nav-channels")),
-                    )
-                    .child(
-                        components::list_icon_button(
-                            "channels-refresh",
-                            IconName::Redo2,
-                            self.tr("shell-refresh-channels"),
-                        )
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.load_telegram_dialogs(cx))),
                     ),
             )
             .children(channels)
@@ -458,167 +450,241 @@ impl TeleArkApp {
             &self.native_transfer_view,
             &self.vault_transfer_view,
         );
+        let status = self.shell_sync_status();
+        let preparation = self.dialogs.has_activity()
+            && self.channel_sync_snapshot.is_none()
+            && !self.account_restoring;
+        let disk_label = if self.preference_persistence == PreferencePersistence::Saving {
+            self.tr("settings-preferences-saving")
+        } else if self.preference_persistence == PreferencePersistence::Failed {
+            self.tr("settings-preferences-failed")
+        } else {
+            self.volume_space.map_or_else(
+                || self.tr("shell-disk-space-unavailable"),
+                |space| {
+                    self.tr_with(
+                        "shell-free-disk-space",
+                        MessageArgs::new()
+                            .with("free", format_bytes(self.locale(), space.available_bytes)),
+                    )
+                },
+            )
+        };
         div()
             .debug_selector(|| "global-background-status".into())
-            .h(px(28.0))
+            .h(px(theme::STATUS_BAR_HEIGHT))
             .flex_none()
-            .px_4()
+            .px_3()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .border_t_1()
             .border_color(theme::border())
             .bg(theme::surface())
-            .text_xs()
+            .text_size(px(11.0))
             .text_color(theme::text_secondary())
             .child(
-                components::button(
-                    "status-disk-space",
-                    if self.preference_persistence == PreferencePersistence::Saving {
-                        self.tr("settings-preferences-saving")
-                    } else if self.preference_persistence == PreferencePersistence::Failed {
-                        self.tr("settings-preferences-failed")
-                    } else {
-                        self.volume_space
-                            .map(|space| {
-                                self.tr_with(
-                                    "shell-free-disk-space",
-                                    MessageArgs::new().with(
-                                        "free",
-                                        format_bytes(self.locale(), space.available_bytes),
-                                    ),
-                                )
-                            })
-                            .unwrap_or_else(|| self.tr("shell-disk-space-unavailable"))
-                    },
-                    Some(IconName::HardDrive),
-                    false,
-                )
-                .ghost()
-                .h(px(28.0))
-                .tooltip(self.tr(
-                    if self.preference_persistence == PreferencePersistence::Failed {
-                        "common-retry"
-                    } else {
-                        "settings-managed-root-picker"
-                    },
-                ))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.preference_persistence == PreferencePersistence::Failed {
-                        this.persist_preferences(cx);
-                        return;
-                    }
-                    this.settings_section = SettingsSection::Storage;
-                    this.set_page(Page::Settings, cx);
-                })),
-            )
-            .when(self.dialogs.has_activity(), |bar| {
-                bar.child(self.render_dialog_status(cx))
-            })
-            .when(self.channel_sync_snapshot.is_some(), |bar| {
-                bar.child(
-                    components::button(
-                        "shell-channel-sync",
-                        self.channel_sync_label(),
-                        None,
-                        false,
-                    )
-                    .ghost()
-                    .tooltip(self.channel_sync_timing())
-                    .max_w(px(280.0))
-                    .min_w_0()
+                div()
+                    .debug_selector(|| "shell-status-left".into())
                     .flex_1()
-                    .h(px(24.0))
-                    .overflow_hidden()
-                    .debug_selector(|| "global-sync-details".into())
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.channel_sync_details = !app.channel_sync_details;
-                        cx.notify();
-                    })),
-                )
-            })
-            .when_some(self.managed_change_warning(), |bar, warning| {
-                bar.child(
-                    components::button("managed-watch-alert", warning.clone(), None, false)
-                        .ghost()
-                        .text_color(theme::amber())
-                        .max_w(px(220.0))
-                        .overflow_hidden()
-                        .tooltip(warning)
-                        .debug_selector(|| "managed-watch-alert".into())
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.channel_sync_details = true;
-                            cx.notify();
-                        })),
-                )
-            })
-            .when_some(rates.cleanup, |bar, (id, phase)| {
-                let label = self.tr(match phase {
-                    teleark_runtime::ChannelDownloadCleanupPhase::WaitingForWriter => {
-                        "native-cleanup-waiting"
-                    }
-                    teleark_runtime::ChannelDownloadCleanupPhase::RemovingPartial => {
-                        "native-cleanup-removing"
-                    }
-                    teleark_runtime::ChannelDownloadCleanupPhase::Failed(_) => {
-                        "native-cleanup-failed"
-                    }
-                });
-                bar.child(
-                    components::compact_button("shell-download-cleanup", "", None, false)
-                        .child(div().truncate().child(label.clone()))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        components::compact_button("shell-channel-sync", "", None, false)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(match status.icon {
+                                        Some(icon) => Icon::new(icon)
+                                            .size(px(12.0))
+                                            .text_color(status.tone.foreground())
+                                            .into_any_element(),
+                                        None => div()
+                                            .size(px(6.0))
+                                            .rounded_full()
+                                            .bg(status.tone.foreground())
+                                            .into_any_element(),
+                                    })
+                                    .child(div().truncate().child(status.label.clone())),
+                            )
+                            .ghost()
+                            .h(px(24.0))
+                            .px_1()
+                            .max_w(px(240.0))
+                            .flex_none()
+                            .overflow_hidden()
+                            .accessibility_label(status.label)
+                            .tooltip(self.tr("shell-sync-details"))
+                            .debug_selector(move || {
+                                if preparation {
+                                    "dialogs-status"
+                                } else {
+                                    "global-sync-details"
+                                }
+                                .into()
+                            })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if preparation {
+                                    app.dialogs.details = !app.dialogs.details;
+                                } else {
+                                    app.channel_sync_details = !app.channel_sync_details;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when_some(rates.cleanup, |left, (id, phase)| {
+                        let label = self.tr(match phase {
+                            teleark_runtime::ChannelDownloadCleanupPhase::WaitingForWriter => {
+                                "native-cleanup-waiting"
+                            }
+                            teleark_runtime::ChannelDownloadCleanupPhase::RemovingPartial => {
+                                "native-cleanup-removing"
+                            }
+                            teleark_runtime::ChannelDownloadCleanupPhase::Failed(_) => {
+                                "native-cleanup-failed"
+                            }
+                        });
+                        left.child(
+                            components::compact_button("shell-download-cleanup", "", None, false)
+                                .child(div().truncate().child(label.clone()))
+                                .ghost()
+                                .h(px(24.0))
+                                .px_1()
+                                .min_w_0()
+                                .max_w(px(170.0))
+                                .overflow_hidden()
+                                .accessibility_label(label.clone())
+                                .tooltip(label)
+                                .debug_selector(|| "shell-download-cleanup".into())
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.nav_selection = "nav-downloads";
+                                    app.focused_transfer_key = Some(id);
+                                    app.set_page(Page::Transfers, cx);
+                                    app.show_transfer_detail = true;
+                                    if let Some(batch) = app
+                                        .native_transfer_view
+                                        .items
+                                        .iter()
+                                        .find(|item| item.id == id)
+                                        .and_then(|item| item.batch_id)
+                                    {
+                                        app.expanded_transfer_batches.insert(batch);
+                                    }
+                                    app.search_input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                    });
+                                })),
+                        )
+                    })
+                    .when(self.vault_locked && self.vault_status.configured, |left| {
+                        left.child(
+                            div()
+                                .id("vault-session-locked-notice")
+                                .debug_selector(|| "vault-session-locked-notice".into())
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(11.0))
+                                .text_color(theme::text_secondary())
+                                .child(Icon::new(Symbol::Lock).size(px(11.0)).flex_none())
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(self.tr("shell-vault-locked")),
+                                )
+                                .tooltip({
+                                    let text = self.tr("vault-session-locked-background");
+                                    move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(text.clone())
+                                            .build(window, cx)
+                                    }
+                                }),
+                        )
+                    })
+                    .when_some(self.managed_change_warning(), |left, warning| {
+                        left.child(
+                            components::icon_button(
+                                "managed-watch-alert",
+                                IconName::TriangleAlert,
+                                warning,
+                            )
+                            .size(px(22.0))
+                            .ghost()
+                            .text_color(theme::amber())
+                            .debug_selector(|| "managed-watch-alert".into())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.channel_sync_details = true;
+                                app.channel_sync_private_expanded = true;
+                                cx.notify();
+                            })),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "shell-status-right".into())
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        components::compact_button(
+                            "status-disk-space",
+                            disk_label,
+                            Some(IconName::HardDrive),
+                            false,
+                        )
                         .ghost()
                         .h(px(24.0))
                         .px_1()
-                        .min_w_0()
-                        .max_w(px(170.0))
+                        .max_w(px(180.0))
                         .overflow_hidden()
-                        .accessibility_label(label.clone())
-                        .tooltip(label)
-                        .debug_selector(|| "shell-download-cleanup".into())
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.nav_selection = "nav-downloads";
-                            app.focused_transfer_key = Some(id);
-                            app.set_page(Page::Transfers, cx);
-                            app.show_transfer_detail = true;
-                            if let Some(batch) = app
-                                .native_transfer_view
-                                .items
-                                .iter()
-                                .find(|item| item.id == id)
-                                .and_then(|item| item.batch_id)
-                            {
-                                app.expanded_transfer_batches.insert(batch);
+                        .debug_selector(|| "status-disk-space".into())
+                        .tooltip(self.tr(
+                            if self.preference_persistence == PreferencePersistence::Failed {
+                                "common-retry"
+                            } else {
+                                "settings-managed-root-picker"
+                            },
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.preference_persistence == PreferencePersistence::Failed {
+                                this.persist_preferences(cx);
+                            } else {
+                                this.settings_section = SettingsSection::Storage;
+                                this.set_page(Page::Settings, cx);
                             }
-                            app.search_input.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                            });
                         })),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(IconName::ArrowDown).size(px(12.0)))
+                    )
                     .child(
-                        rates
-                            .download
-                            .map_or_else(|| "—".into(), |rate| format_speed(self.locale(), rate)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(IconName::ArrowUp).size(px(12.0)))
+                        div()
+                            .debug_selector(|| "shell-download-rate".into())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(Icon::new(IconName::ArrowDown).size(px(11.0)))
+                            .child(rates.download.map_or_else(
+                                || self.tr("transfer-value-unavailable"),
+                                |value| format_speed(self.locale(), value).into(),
+                            )),
+                    )
                     .child(
-                        rates
-                            .upload
-                            .map_or_else(|| "—".into(), |rate| format_speed(self.locale(), rate)),
+                        div()
+                            .debug_selector(|| "shell-upload-rate".into())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(Icon::new(IconName::ArrowUp).size(px(11.0)))
+                            .child(rates.upload.map_or_else(
+                                || self.tr("transfer-value-unavailable"),
+                                |value| format_speed(self.locale(), value).into(),
+                            )),
                     ),
             )
             .into_any_element()

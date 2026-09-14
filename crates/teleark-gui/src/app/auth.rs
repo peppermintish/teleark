@@ -34,6 +34,8 @@ impl TeleArkApp {
     }
 
     pub(crate) fn reset_telegram_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.account_restoring = false;
+        self.account_restore_retry_at = None;
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
         self.qr_poll_task = None;
         self.reset_dialog_load(cx);
@@ -133,6 +135,11 @@ impl TeleArkApp {
                             this.vault_locked = true;
                             this.unlock_intent = None;
                             this.upload_sources.clear();
+                            this.upload_source_total_bytes = 0;
+                            if let Some(progress) = this.upload_preparation_progress.take() {
+                                progress.cancel();
+                            }
+                            this.upload_selection_progress = None;
                             this.last_channel_id = None;
                             this.local_downloads.clear();
                             this.telegram_file_generation =
@@ -287,6 +294,7 @@ impl TeleArkApp {
     ) {
         let restoring = self.account_restoring;
         self.account_restoring = false;
+        self.account_restore_retry_at = None;
         match result {
             Ok(state) => {
                 self.telegram_activity = TelegramActivity::Idle;
@@ -299,6 +307,7 @@ impl TeleArkApp {
                 } else if matches!(self.telegram_auth, TelegramAuthState::Authorized(_)) {
                     self.qr_poll_task = None;
                     self.load_account_avatar(cx);
+                    self.load_telegram_dialogs(cx);
                     if !restoring {
                         self.enter_workspace(cx);
                     }
@@ -342,12 +351,79 @@ impl TeleArkApp {
             return;
         };
         self.account_restoring = true;
+        self.account_restore_event_at = Some(std::time::Instant::now());
         self.telegram_activity = TelegramActivity::Working;
-        let work = cx.background_spawn(async move { telegram.connect_configured(&library) });
+        self.account_restore_retry_at = None;
+        let generation = self.telegram_login_generation;
+        cx.notify();
         self.telegram_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| this.apply_telegram_auth_result(result, cx));
+            let mut attempt = 0_u32;
+            loop {
+                let remote = telegram.clone();
+                let storage = library.clone();
+                let result = cx
+                    .background_spawn(async move { remote.connect_configured(&storage) })
+                    .await;
+                let Some(entity) = this.upgrade() else { return };
+                let retry = entity.update(cx, |app, cx| {
+                    if app.telegram_login_generation != generation {
+                        return None;
+                    }
+                    if let Err(error) = &result
+                        && matches!(
+                            error.kind(),
+                            teleark_core::ApplicationErrorKind::Network
+                                | teleark_core::ApplicationErrorKind::Server
+                                | teleark_core::ApplicationErrorKind::Conflict
+                        )
+                    {
+                        use std::hash::BuildHasher as _;
+                        let ceiling = (1_u64 << attempt.min(6)).min(60) * 1000;
+                        let jitter =
+                            std::collections::hash_map::RandomState::new().hash_one(attempt);
+                        let deadline = std::time::Instant::now()
+                            + Duration::from_millis(ceiling / 2 + jitter % (ceiling / 2 + 1));
+                        app.account_restore_retry_at = Some(deadline);
+                        app.account_restore_event_at = Some(std::time::Instant::now());
+                        app.telegram_activity = TelegramActivity::Failed(error.kind());
+                        cx.notify();
+                        Some(deadline)
+                    } else {
+                        app.apply_telegram_auth_result(result, cx);
+                        None
+                    }
+                });
+                drop(entity);
+                let Some(deadline) = retry else { return };
+                attempt = attempt.saturating_add(1);
+                loop {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(remaining.min(Duration::from_secs(1)))
+                        .await;
+                    let Some(entity) = this.upgrade() else { return };
+                    if !entity.update(cx, |app, cx| {
+                        cx.notify();
+                        app.telegram_login_generation == generation && app.account_restoring
+                    }) {
+                        return;
+                    }
+                }
+                let Some(entity) = this.upgrade() else { return };
+                if !entity.update(cx, |app, cx| {
+                    if app.telegram_login_generation != generation || !app.account_restoring {
+                        return false;
+                    }
+                    app.account_restore_retry_at = None;
+                    app.telegram_activity = TelegramActivity::Working;
+                    cx.notify();
+                    true
+                }) {
+                    return;
+                }
             }
         }));
     }

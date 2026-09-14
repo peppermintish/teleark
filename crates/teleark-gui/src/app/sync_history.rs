@@ -6,6 +6,8 @@ use std::sync::Arc;
 pub(super) struct HistoryRow {
     pub title: SharedString,
     pub source: SharedString,
+    pub time: SharedString,
+    pub tone: components::Tone,
     pub error: SharedString,
 }
 pub(super) struct SyncHistory {
@@ -48,8 +50,9 @@ impl Render for SyncHistory {
                     .filter_map(|index| rows.get(index).map(|row| (index, row)))
                     .map(|(index, row)| {
                         let summary = format!(
-                            "{} · {}{}",
+                            "{} · {} · {}{}",
                             row.title,
+                            row.time,
                             row.source,
                             if row.error.is_empty() {
                                 String::new()
@@ -65,7 +68,7 @@ impl Render for SyncHistory {
                                 theme::red()
                             })
                             .border_l_2()
-                            .border_color(theme::border())
+                            .border_color(row.tone.foreground())
                             .pl_2()
                     })
                     .collect::<Vec<_>>()

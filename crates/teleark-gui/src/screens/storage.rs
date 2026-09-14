@@ -20,6 +20,72 @@ use gpui_kit::{
 use teleark_runtime::StorageMaintenancePhase;
 
 impl TeleArkApp {
+    pub(crate) fn storage_is_quiet(&self) -> bool {
+        self.storage_status.health() == Some(teleark_runtime::StorageChannelHealth::Healthy)
+            && !self.storage_loading
+            && self.storage_error.is_none()
+            && !self.storage_waiting_for_retry()
+            && self.storage_confirmation.is_none()
+            && self
+                .storage_maintenance_snapshot()
+                .is_none_or(|state| state.finished && state.error.is_none())
+    }
+
+    pub(crate) fn render_storage_details_dialog(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let popup = components::card()
+            .w(px(640.0).min(window.viewport_size().width - px(48.0)))
+            .h(px(560.0).min(window.viewport_size().height - px(64.0)))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .shadow_lg()
+            .child(
+                div().flex_none().px_3().py_2().flex().justify_end().child(
+                    components::icon_button(
+                        "storage-close-details",
+                        IconName::Close,
+                        self.tr("action-close-details"),
+                    )
+                    .ghost()
+                    .debug_selector(|| "storage-close-details".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.storage_details_expanded = false;
+                        cx.notify();
+                    })),
+                ),
+            )
+            .child(
+                div()
+                    .id("storage-details-scroll")
+                    .debug_selector(|| "storage-details-scroll".into())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(self.render_storage_controls(cx)),
+            );
+        let cancel = cx.listener(|this, _, _, cx| {
+            this.storage_details_expanded = false;
+            cx.notify();
+        });
+        gpui_kit::base::Dialog::new(cx)
+            .focus_handle(self.modal_focus.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .backdrop(div().absolute().inset_0().bg(gpui_kit::rgba(0x10182060)))
+            .popup(popup)
+            .on_cancel(move |event, window, cx| {
+                cancel(event, window, cx);
+                false
+            })
+            .on_ok(|_, _, _| false)
+            .into_any_element()
+    }
+
     pub(crate) fn render_storage_workspace(
         &self,
         _window: &mut Window,
@@ -61,6 +127,25 @@ impl TeleArkApp {
                             })),
                     ),
             )
+            .when(!legacy && self.storage_is_quiet(), |bar| {
+                bar.child(
+                    components::button(
+                        "storage-expand-details",
+                        self.tr("storage-connected-title"),
+                        None,
+                        false,
+                    )
+                    .ghost()
+                    .text_xs()
+                    .text_color(theme::green())
+                    .debug_selector(|| "storage-expand-details".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.modal_focus.focus(window, cx);
+                        this.storage_details_expanded = true;
+                        cx.notify();
+                    })),
+                )
+            })
             .child(
                 components::icon_button(
                     "storage-help",
@@ -96,9 +181,10 @@ impl TeleArkApp {
                 .when(self.show_storage_guide, |body| {
                     body.child(self.storage_guide(true, cx))
                 })
-                .when(!legacy && !self.show_storage_guide, |body| {
-                    body.child(self.render_storage_controls(cx))
-                });
+                .when(
+                    !legacy && !self.storage_is_quiet() && !self.storage_details_expanded,
+                    |body| body.child(self.render_storage_controls(cx)),
+                );
             let content = if locked {
                 div()
                     .flex_1()
@@ -128,17 +214,23 @@ impl TeleArkApp {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .when(self.show_storage_guide || !legacy, |body| {
-                        body.child(
-                            div()
-                                .id("storage-overview-scroll")
-                                .debug_selector(|| "storage-guide-viewport".to_owned())
-                                .flex_none()
-                                .max_h(px(220.0))
-                                .overflow_y_scroll()
-                                .child(overview),
-                        )
-                    })
+                    .when(
+                        self.show_storage_guide
+                            || (!legacy
+                                && !self.storage_is_quiet()
+                                && !self.storage_details_expanded),
+                        |body| {
+                            body.child(
+                                div()
+                                    .id("storage-overview-scroll")
+                                    .debug_selector(|| "storage-guide-viewport".to_owned())
+                                    .flex_none()
+                                    .max_h(px(220.0))
+                                    .overflow_y_scroll()
+                                    .child(overview),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -361,38 +453,6 @@ impl TeleArkApp {
         let health = self.storage_status.health();
         let repair = health.is_some_and(|health| health.needs_repair());
         let confirming_repair = self.storage_confirmation == Some(StorageAction::Repair);
-        let quiet = health == Some(teleark_runtime::StorageChannelHealth::Healthy)
-            && !self.storage_loading
-            && self.storage_error.is_none()
-            && !self.storage_waiting_for_retry()
-            && self.storage_confirmation.is_none()
-            && self
-                .storage_maintenance_snapshot()
-                .is_none_or(|state| state.finished && state.error.is_none());
-        if quiet && !self.storage_details_expanded {
-            return components::card()
-                .flex_none()
-                .debug_selector(|| "storage-management-card".into())
-                .child(
-                    components::button(
-                        "storage-expand-details",
-                        self.tr("storage-connected-title"),
-                        None,
-                        false,
-                    )
-                    .ghost()
-                    .w_full()
-                    .h(px(52.0))
-                    .justify_start()
-                    .px_4()
-                    .debug_selector(|| "storage-expand-details".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.storage_details_expanded = true;
-                        cx.notify();
-                    })),
-                )
-                .into_any_element();
-        }
         let show_activity = self.storage_loading
             || self.storage_error.is_some()
             || self.storage_waiting_for_retry()
@@ -443,7 +503,7 @@ impl TeleArkApp {
                                     false,
                                 )
                                 .ghost()
-                                .disabled(!quiet)
+                                .disabled(!self.storage_is_quiet())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.storage_details_expanded = false;
                                     cx.notify();
@@ -542,6 +602,7 @@ impl TeleArkApp {
                                 "storage-repair-step-message",
                                 "storage-repair-step-pin",
                                 "storage-repair-step-description",
+                                "storage-repair-step-archive",
                             ]
                             .into_iter()
                             .enumerate()
@@ -632,32 +693,14 @@ impl TeleArkApp {
                         .disabled(self.storage_loading)
                         .debug_selector(|| "storage-recheck-action".into())
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_storage_channel(cx))),
-                    )
-                    .child(
-                        components::button(
-                            "archive-storage",
-                            self.tr("storage-archive-action"),
-                            None,
-                            false,
-                        )
-                        .disabled(self.storage_loading)
-                        .debug_selector(|| "storage-archive-action".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.storage_confirmation = Some(StorageAction::Archive);
-                            cx.notify();
-                        })),
                     ),
-            )
-            .when(
-                self.storage_confirmation == Some(StorageAction::Archive),
-                |card| card.child(self.storage_confirmation_controls(StorageAction::Archive, cx)),
             )
             .into_any_element()
     }
 
     fn storage_confirmation_controls(
         &self,
-        action: StorageAction,
+        _action: StorageAction,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -666,15 +709,7 @@ impl TeleArkApp {
             .border_color(theme::border_subtle())
             .bg(theme::blue_soft())
             .debug_selector(|| "storage-maintenance-confirmation".into())
-            .child(
-                div()
-                    .text_sm()
-                    .child(self.tr(if action == StorageAction::Repair {
-                        "storage-repair-confirm"
-                    } else {
-                        "storage-archive-confirm"
-                    })),
-            )
+            .child(div().text_sm().child(self.tr("storage-repair-confirm")))
             .child(
                 div()
                     .mt_3()
@@ -684,11 +719,7 @@ impl TeleArkApp {
                     .child(
                         components::button(
                             "confirm-storage-maintenance",
-                            self.tr(if action == StorageAction::Repair {
-                                "storage-repair-confirm-action"
-                            } else {
-                                "storage-archive-action"
-                            }),
+                            self.tr("storage-repair-confirm-action"),
                             None,
                             true,
                         )
@@ -1117,6 +1148,7 @@ impl TeleArkApp {
         .flex_1()
         .min_h_0();
         components::card()
+            .debug_selector(|| "storage-managed-files".into())
             .h_full()
             .min_h_0()
             .w_full()
@@ -1138,18 +1170,6 @@ impl TeleArkApp {
                             .text_size(theme::LIST_TEXT_SIZE)
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(self.tr("storage-channel-managed-title")),
-                    )
-                    .child(
-                        components::icon_button(
-                            "managed-refresh",
-                            IconName::Redo2,
-                            self.tr("telegram-files-refresh-action"),
-                        )
-                        .ghost()
-                        .disabled(self.managed_scan_loading)
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.refresh_managed_vault_files(cx)),
-                        ),
                     ),
             )
             .when_some(self.managed_health_checked, |body, count| {
@@ -1336,6 +1356,69 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn ready_files_fill_workspace_and_details_do_not_resize_them(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.bind_keys([gpui_kit::KeyBinding::new(
+                "escape",
+                crate::DismissOverlay,
+                None,
+            )])
+        });
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            {
+                let locale = SupportedLocale::EnUs;
+                for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
+                    cx.update(|window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.localizer = Localizer::new(locale).expect("catalog");
+                            theme::apply_appearance(appearance, window, cx);
+                            app.vault_locked = false;
+                            app.storage_details_expanded = false;
+                            cx.notify();
+                        })
+                    });
+                    cx.run_until_parked();
+                    let files = cx.debug_bounds("storage-managed-files").expect("files");
+                    assert!(
+                        files.size.height >= px(height * 0.55),
+                        "file list must own remaining height: {files:?}"
+                    );
+                    assert!(
+                        files.top() < px(240.0),
+                        "no reserved ready-card space: {files:?}"
+                    );
+                    assert!(files.bottom() <= px(height));
+                    assert!(cx.debug_bounds("storage-management-card").is_none());
+                    let status = cx
+                        .debug_bounds("storage-expand-details")
+                        .expect("connected status");
+                    assert!(status.top() >= px(0.0) && status.right() <= px(width));
+                    cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+                    cx.run_until_parked();
+                    assert_eq!(cx.debug_bounds("storage-managed-files"), Some(files));
+                    let details = cx
+                        .debug_bounds("storage-details-scroll")
+                        .expect("independent details");
+                    assert!(
+                        details.top() >= px(0.0) && details.bottom() <= px(height),
+                        "{locale:?} {width}x{height}: {details:?}"
+                    );
+                    assert!(cx.debug_bounds("storage-channel-location").is_some());
+                    assert!(cx.debug_bounds("storage-archive-action").is_none());
+                    cx.simulate_keystrokes("escape");
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-details-scroll").is_none());
+                    assert_eq!(cx.debug_bounds("storage-managed-files"), Some(files));
+                }
+            }
+        }
+    }
+
+    #[gpui_kit::test]
     fn locked_repair_cards_keep_children_inside_and_actions_reachable(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -1450,44 +1533,21 @@ mod tests {
                     assert!(cx.debug_bounds("storage-channel-location").is_none());
                     assert!(cx.debug_bounds("storage-channel-notifications").is_none());
                     assert!(cx.debug_bounds("storage-archive-action").is_none());
-                    let collapsed = cx
-                        .debug_bounds("storage-management-card")
-                        .expect("collapsed card");
-                    assert!(collapsed.size.height <= px(56.0));
+                    assert!(cx.debug_bounds("storage-management-card").is_none());
                     let expand = cx
                         .debug_bounds("storage-expand-details")
-                        .expect("connected title");
+                        .expect("header status");
                     cx.simulate_click(expand.center(), gpui_kit::Modifiers::default());
                     cx.run_until_parked();
                     assert!(cx.debug_bounds("storage-channel-location").is_some());
-                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
-                        position: viewport.center(),
-                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))),
-                        ..Default::default()
-                    });
+                    assert!(cx.debug_bounds("storage-archive-action").is_none());
+                    let close = cx
+                        .debug_bounds("storage-close-details")
+                        .expect("close details");
+                    assert!(close.top() >= px(0.0) && close.bottom() <= px(size.1));
+                    cx.simulate_click(close.center(), gpui_kit::Modifiers::default());
                     cx.run_until_parked();
-                    let management = cx
-                        .debug_bounds("storage-management-card")
-                        .expect("management card");
-                    for selector in ["storage-recheck-action", "storage-archive-action"] {
-                        let button = cx.debug_bounds(selector).expect("footer button");
-                        assert!(
-                            button.top() >= management.top()
-                                && button.bottom() <= management.bottom(),
-                            "{locale:?} {size:?} {selector} clipped: button={button:?} card={management:?}"
-                        );
-                        assert!(
-                            button.top() >= viewport.top() && button.bottom() <= viewport.bottom()
-                        );
-                    }
-                    let archive = cx
-                        .debug_bounds("storage-archive-action")
-                        .expect("archive action");
-                    cx.simulate_click(archive.center(), gpui_kit::Modifiers::default());
-                    cx.run_until_parked();
-                    app.update(cx, |app, _| {
-                        assert_eq!(app.storage_confirmation, Some(StorageAction::Archive))
-                    });
+                    assert!(cx.debug_bounds("storage-management-card").is_none());
                     app.update(cx, |app, cx| {
                         app.storage_details_expanded = false;
                         app.storage_confirmation = None;

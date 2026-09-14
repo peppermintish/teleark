@@ -48,6 +48,25 @@ pub struct ChannelSyncCommitOutcome {
 }
 
 impl Database {
+    /// Legacy directory baseline for installations predating the versioned restart cache.
+    /// Only sources with a channel cursor are channels; generic chats are never guessed.
+    pub fn cached_channel_sources(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Vec<crate::ChatRecord>> {
+        let mut statement = self.connection.prepare("SELECT c.id,c.title,c.username,c.updated_at_unix_ms FROM channel_sync_state s JOIN chats c ON c.account_id=s.account_id AND c.id=s.chat_id WHERE s.account_id=?1 ORDER BY s.chat_id LIMIT 10000")?;
+        let rows = statement.query_map([account.get()], |row| {
+            Ok(crate::ChatRecord {
+                account_id: account,
+                id: ChatId::new(row.get(0)?),
+                title: row.get(1)?,
+                username: row.get(2)?,
+                updated_at_unix_ms: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// A single SQLite snapshot closes races between loading rows and their revision.
     pub fn cached_channel_view(
         &self,
@@ -256,4 +275,35 @@ fn read_state(
     Ok(connection.query_row("SELECT pts,history_before,history_exhausted,repair_pending,repair_before,gap_pending,gap_before,gap_until,revision FROM channel_sync_state WHERE account_id=?1 AND chat_id=?2", params![account.get(), chat.get()], |row| Ok(ChannelSyncState {
         pts: row.get(0)?, history_before: row.get(1)?, history_exhausted: row.get(2)?, repair_pending: row.get(3)?, repair_before: row.get(4)?, gap_pending: row.get(5)?, gap_before: row.get(6)?, gap_until: row.get(7)?, revision: row.get(8)?,
     })).optional()?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+    #[test]
+    fn legacy_directory_query_uses_account_and_channel_indexes() {
+        let database = Database::open_in_memory().expect("database");
+        let mut statement = database.connection.prepare("EXPLAIN QUERY PLAN SELECT c.id,c.title,c.username,c.updated_at_unix_ms FROM channel_sync_state s JOIN chats c ON c.account_id=s.account_id AND c.id=s.chat_id WHERE s.account_id=?1 ORDER BY s.chat_id LIMIT 10000").expect("plan");
+        let plan = statement
+            .query_map([42_i64], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+            .join("\n");
+        assert!(
+            plan.contains("SEARCH s USING") && plan.contains("account_id=?"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("SEARCH c USING") && plan.contains("id=?"),
+            "{plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        assert!(
+            database
+                .cached_channel_sources(AccountId::new(42))
+                .expect("empty")
+                .is_empty()
+        );
+    }
 }

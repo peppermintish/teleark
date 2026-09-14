@@ -50,8 +50,9 @@ mod transfer_updates;
 pub use transfer_updates::{TransferSnapshotView, TransferSubscription};
 mod channel_transfer;
 pub use channel_sync::{
-    ChannelChanges, ChannelDelta, ChannelSync, ChannelSyncEvent, ChannelSyncPhase,
-    ChannelSyncSnapshot, ChannelSyncSubscription, ManagedScanObserver, ManagedScanStatus,
+    CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES, ChannelChanges, ChannelDelta, ChannelSync,
+    ChannelSyncEvent, ChannelSyncPhase, ChannelSyncSnapshot, ChannelSyncSubscription,
+    HistoryStatus, ManagedScanObserver, ManagedScanStatus,
 };
 pub use teleark_storage::{ManagedChannelChange, ManagedChannelChangeKind, ManagedChannelWatch};
 mod credentials;
@@ -1108,6 +1109,16 @@ enum StorageRequest {
         record: VaultMetadataRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    ChannelDirectory {
+        account: i64,
+        reply: SyncSender<Result<Vec<TelegramChatSummary>, ApplicationError>>,
+    },
+    SaveChannelDirectory {
+        account: TelegramAccount,
+        chats: Vec<TelegramChatSummary>,
+        cancellation: TelegramScanCancellation,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     SaveTelegramSources {
         account: AccountRecord,
         chats: Vec<ChatRecord>,
@@ -1870,6 +1881,22 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                             Err(ApplicationError::new(ApplicationErrorKind::Conflict))
                         }
                     });
+                let _ = reply.send(result);
+            }
+            StorageRequest::ChannelDirectory { account, reply } => {
+                let _ = reply.send(channel_sync::directory::load(&database, account));
+            }
+            StorageRequest::SaveChannelDirectory {
+                account,
+                chats,
+                cancellation,
+                reply,
+            } => {
+                let result = if cancellation.is_cancelled() {
+                    Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+                } else {
+                    channel_sync::directory::save(&mut database, &account, &chats)
+                };
                 let _ = reply.send(result);
             }
             StorageRequest::SaveTelegramSources {

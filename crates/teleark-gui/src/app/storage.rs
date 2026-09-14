@@ -7,7 +7,6 @@ use teleark_runtime::{StorageChannelHealth, StorageChannelStatus};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageAction {
     Repair,
-    Archive,
 }
 
 impl TeleArkApp {
@@ -20,7 +19,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn confirm_storage_maintenance(&mut self, cx: &mut Context<Self>) {
-        let Some(action) = self.storage_confirmation.take() else {
+        let Some(_action) = self.storage_confirmation.take() else {
             return;
         };
         if self.storage_loading {
@@ -75,14 +74,7 @@ impl TeleArkApp {
             }
         }));
         let work = cx.background_spawn(async move {
-            telegram.maintain_storage_channel(
-                &library,
-                account_id,
-                title,
-                description,
-                action == StorageAction::Archive,
-                progress,
-            )
+            telegram.maintain_storage_channel(&library, account_id, title, description, progress)
         });
         self.storage_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -97,11 +89,7 @@ impl TeleArkApp {
                 this.storage_maintenance_presentation = None;
                 match result {
                     Ok(()) => {
-                        this.storage_notice = Some(if action == StorageAction::Archive {
-                            "storage-archive-completed"
-                        } else {
-                            "storage-repair-completed"
-                        });
+                        this.storage_notice = Some("storage-repair-completed");
                         this.refresh_storage_channel(cx);
                     }
                     Err(error) => {
@@ -113,7 +101,7 @@ impl TeleArkApp {
         }));
     }
 
-    fn manage_storage_channel(&mut self, attempt: u8, cx: &mut Context<Self>) {
+    fn manage_storage_channel(&mut self, attempt: u32, cx: &mut Context<Self>) {
         if !self.dialogs.ready && !self.visual_preview {
             if self.dialogs.needs_initial_load() {
                 self.load_telegram_dialogs(cx);
@@ -199,6 +187,7 @@ impl TeleArkApp {
                             {
                                 this.storage_error = Some(error.kind());
                             }
+                            this.apply_managed_channel_changes(cx);
                             if this.page == Page::Storage {
                                 this.select_storage(this.storage_view, cx);
                             }
@@ -238,7 +227,7 @@ impl TeleArkApp {
                                         && this.telegram_account.as_ref().map(|a| a.id)
                                             == Some(account_id)
                                     {
-                                        this.manage_storage_channel(attempt + 1, cx);
+                                        this.manage_storage_channel(attempt.saturating_add(1), cx);
                                     }
                                 });
                             }));
@@ -251,15 +240,17 @@ impl TeleArkApp {
     }
 }
 
-fn storage_retry_delay(attempt: u8, error: teleark_core::ApplicationErrorKind) -> Option<Duration> {
-    (attempt < 2
-        && matches!(
-            error,
-            teleark_core::ApplicationErrorKind::Network
-                | teleark_core::ApplicationErrorKind::Server
-                | teleark_core::ApplicationErrorKind::Conflict
-        ))
-    .then(|| Duration::from_secs(2_u64 << attempt))
+fn storage_retry_delay(
+    attempt: u32,
+    error: teleark_core::ApplicationErrorKind,
+) -> Option<Duration> {
+    (matches!(
+        error,
+        teleark_core::ApplicationErrorKind::Network
+            | teleark_core::ApplicationErrorKind::Server
+            | teleark_core::ApplicationErrorKind::Conflict
+    ))
+    .then(|| Duration::from_secs((2_u64 << attempt.min(5)).min(60)))
 }
 
 #[cfg(test)]
@@ -276,8 +267,11 @@ mod tests {
         ] {
             assert_eq!(storage_retry_delay(0, kind), Some(Duration::from_secs(2)));
             assert_eq!(storage_retry_delay(1, kind), Some(Duration::from_secs(4)));
-            assert_eq!(storage_retry_delay(2, kind), None);
-            assert_eq!(storage_retry_delay(u8::MAX, kind), None);
+            assert_eq!(storage_retry_delay(2, kind), Some(Duration::from_secs(8)));
+            assert_eq!(
+                storage_retry_delay(u32::MAX, kind),
+                Some(Duration::from_secs(60))
+            );
         }
         for kind in [
             ApplicationErrorKind::Authorization,

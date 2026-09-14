@@ -404,8 +404,7 @@ detail-message-id = メッセージ ID
 detail-local-path = ローカルパス
 detail-speed = 転送速度
 detail-downloaded = ダウンロード済み
-
-
+detail-concurrency-limits = 設定された同時実行上限
 detail-retries = 再試行回数
 detail-created = 作成日時
 detail-started = 開始日時
@@ -1111,7 +1110,6 @@ local-file-status = ローカルファイル
 transfer-download-again = 再ダウンロード
 
 upload-selection-summary = { $count } ファイル · { $size }
-upload-batch-limit = 一度に最大128ファイル。各ファイルは個別に保存されます。
 upload-remove-file = 選択からファイルを除外
 upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
@@ -1238,12 +1236,7 @@ channel-sync-waiting = 再試行を待機中
 channel-sync-idle = 更新を待ち受け中
 channel-sync-failed = 同期への対応が必要です
 channel-sync-cancelled = 同期を一時停止しました
-channel-sync-status = { $phase } · 待機中 { $queued } 件
 channel-sync-history = 過去の履歴
-channel-sync-timing = 現在の段階：{ $duration } · 最後の動作：{ $activity }前
-channel-sync-retry-after = { $duration }後に再試行
-channel-sync-event = { $age }前 · { $phase }
-channel-sync-retention = 省略した古いイベント：{ $dropped } · 再確認が必要なオーバーフロー通知：{ $overflow }
 channel-sync-empty = ローカルにファイルのキャッシュがありません。バックグラウンド同期で一覧を更新します。
 channel-sync-seeding = 初回のローカルキャッシュを準備中
 channel-sync-history-loading = リクエストした過去の履歴を受信中
@@ -1281,8 +1274,6 @@ managed-scan-failed = マニフェストの検証に失敗しました
 managed-scan-cancelled = マニフェストの検証をキャンセルしました
 managed-sync-retry = ファイルの同期は { $seconds } 秒の待機後に自動的に再試行されます。TeleArk は引き続き使用できます。
 managed-scan-unknown = 不明
-managed-scan-progress = { $phase } · { $done } / { $total }
-managed-scan-detail = { $phase } · { $done } / { $total } 件 · 変更なし { $cached } 件 · 拒否 { $rejected } 件 · 現在の段階 { $duration } · 最終動作 { $activity } 前
 
 transfer-session-log-omitted-label = ログの欠落
 transfer-session-log-omitted-count = 今回起動中の全転送：ログ記録 { $count } 件を省略
@@ -1293,15 +1284,13 @@ transfer-lifecycle-history-omitted = 過去の状態イベント { $count } 件�
 transfer-footer-total-retained = 表示中：{ $count }
 
 telegram-error-server = Telegram サーバーがこのリクエストを処理できませんでした。ログインは有効です。しばらくしてから再試行してください。
-dialogs-reading = チャンネル一覧を読み込み中 · Telegram の応答待ち
-dialogs-waiting = チャンネル一覧 · まもなく再試行（最大 3 回）
-dialogs-saving = チャンネル一覧 · 確認済みの結果を保存中
-dialogs-complete = チャンネル一覧を更新しました
-dialogs-failed = チャンネル一覧を取得できません · ローカルデータは保持されています
-dialogs-cancelled = チャンネル一覧の読み込みをキャンセルしました
-dialogs-timing = 現在の段階 / 最後の動作から：{ $elapsed }
-dialogs-details = チャンネル一覧の処理状況
-dialogs-attempt = { $attempt } 回目（最大 3 回）
+dialogs-reading = ワークスペースを準備中
+dialogs-waiting = ワークスペースの準備 · まもなく再試行
+dialogs-saving = 保存済みの転送を有効化中
+dialogs-complete = ワークスペースの準備完了
+dialogs-failed = ワークスペースの確認が必要 · ローカルデータは保持
+dialogs-cancelled = ワークスペースの準備をキャンセルしました
+dialogs-details = ワークスペースの準備
 
 activity-state-queued = 待機中
 activity-state-running = 実行中
@@ -1311,7 +1300,7 @@ activity-state-complete = 完了
 activity-state-failed = 要確認
 activity-state-cancelled = キャンセル済み
 activity-last-response = 直近の応答
-dialogs-task-title = チャンネル一覧
+dialogs-task-title = ワークスペースの準備
 activity-history-title = 状態の変化
 activity-history-time-origin = 今回の開始からの経過時間 · 新しい順
 activity-history-show-all = 全 { $count } 件を表示
@@ -1388,15 +1377,12 @@ storage-health-access = 連携済みチャンネルにアクセスできない�
 storage-health-unsafe = 保存チャンネルは非公開で、他のメンバーがいない必要があります。Telegram で設定を修正して再確認してください。
 storage-health-unsupported = このチャンネルは新しい識別形式を使用しています。TeleArk を更新してください。データは保持されています。
 storage-repair-action = チャンネルの変更内容を確認
-storage-archive-action = チャンネルをミュートしてアーカイブ
-storage-repair-confirm = このチャンネルに上記の変更を適用しますか？現在のチャンネル説明を、TeleArk の説明と識別メッセージへの参照に置き換えます。
-storage-archive-confirm = このチャンネルのメッセージ通知を止め、Telegram のアーカイブ済みチャットへ移しますか？保存ファイルはこのチャンネルに残ります。一度だけ実行し、その後 Telegram で行う変更は尊重します。
+storage-repair-confirm = 上記の手順でこのチャンネルを修復しますか？TeleArk は識別メッセージと説明からの参照を復元し、チャンネルをミュートしてアーカイブします。すべての手順を実行します。
 storage-maintenance-confirm = 確認
 storage-maintenance-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
 storage-maintenance-omitted = 以前のイベント { $count } 件を省略
 storage-maintenance-preview = プレビューのみ。Telegram は変更されていません。
-storage-repair-completed = TeleArk の識別メッセージ、ピン留め、チャンネル説明からの参照を確認しました。失われたファイルデータは復元されていません。
-storage-archive-completed = チャンネルをミュートしてアーカイブしました。
+storage-repair-completed = 識別メッセージ、ピン留め、説明からの参照を確認し、チャンネルをミュートしてアーカイブしました。失われたファイルデータは復元されていません。
 storage-phase-checking = アカウント・連携・公開設定を確認中
 storage-phase-finding = 既存の識別記録を検索中
 storage-phase-repairing = 識別記録を復元中
@@ -1444,17 +1430,17 @@ vault-session-unlock-policy = アカウントのセッションごとに一度�
 vault-locked-file = 暗号化ファイル · ロック中
 vault-locked-detail = 解除して表示
 upload-batch-still-running = 現在のバッチをアップロード中です。次のバッチを準備して、完了後に送信できます。
-storage-repair-title = このチャンネルの TeleArk 識別情報を復元
+storage-repair-title = この TeleArk チャンネルを修復
 storage-connected-title = プライベートチャンネルに接続済み
 storage-repair-reason-missing = TeleArk の識別メッセージ、またはチャンネル説明からの参照がありません。
 storage-repair-reason-invalid = 参照先の識別メッセージが、このアカウントとチャンネルに一致しません。
 storage-repair-reason-unpinned = TeleArk の識別メッセージのピン留めが解除されています。
-storage-repair-explanation = TeleArk はこのメッセージとチャンネル説明で保存先を識別します。復元では次の操作を行います。
+storage-repair-explanation = TeleArk は次のすべての手順で保存先チャンネルを修復します。
 storage-repair-step-message = 有効な TeleArk 識別メッセージを再利用します。見つからない場合は投稿します。
 storage-repair-step-pin = その識別メッセージをこのチャンネルにピン留めします。
 storage-repair-step-description = チャンネル説明を TeleArk の説明とそのメッセージへの参照に置き換え、結果を確認します。
 storage-repair-scope = 既存のファイルメッセージ、チャンネル名、メンバー、公開範囲は変更しません。失われたファイルデータの復元は行いません。
-storage-repair-confirm-action = チャンネルの識別情報を復元
+storage-repair-confirm-action = チャンネルを修復
 storage-channel-options = その他のチャンネル操作
 storage-recheck-action = チャンネルを再確認
 storage-location-title = TeleArk がこのチャンネルを特定する方法
@@ -1462,18 +1448,33 @@ storage-location-target = チャンネル：{ $title } · ID { $id }
 storage-location-bound = 今回、この端末に現在の Telegram アカウント用として保存されたチャンネル ID で特定し、所有者と非公開設定を確認しました。名前の変更や識別メッセージの欠落で保存先は変わりません。名前だけで別のチャンネルに置き換えることはありません。
 storage-location-method = TeleArk はアカウントごとにこのチャンネル ID を保存し、次回からその ID で特定します。保存済みの関連付けがない場合は、所有する非公開チャンネルの TeleArk 識別情報を確認します。一致が一つなら接続し、なければ作成します。複数なら選択が必要です。名前だけでは識別しません。
 storage-notifications-title = 通知とアーカイブ済みチャット
-storage-notifications-explanation = 「チャンネルをミュートしてアーカイブ」を選んで確認すると、このチャンネルのメッセージ通知を止め、Telegram のアーカイブ済みチャットへ移します。一度だけ実行し、その後 Telegram でミュートやアーカイブを解除しても変更を尊重します。識別情報の復元では自動実行しません。保存ファイルの移動や削除は行いません。
+storage-notifications-explanation = TeleArk はチャンネルを修復するたびに通知をミュートし、Telegram のアーカイブ済みチャットへ移動します。これは修復に必須の設定で、個別の切り替えはありません。手順を確認し、修復するかどうかを選べます。保存ファイルの移動や削除は行いません。
+storage-repair-step-archive = チャンネルの通知をミュートしてアーカイブ済みチャットへ移動し、両方の設定を確認します。
+upload-drop-files = このアップロード画面にファイルをドロップして追加するか、ファイルを選択してください。
+upload-files-independent = 各ファイルは個別に保存されます。
+upload-folders-unsupported = フォルダにはまだ対応していません。
+upload-selection-queued = ファイル選択または処理の開始を待っています
+upload-selection-checking-files = ファイル情報を確認中
+upload-selection-checking-channel = プライベートチャンネルを確認中
+upload-selection-uploading = ファイルをアップロード中
+upload-selection-finished = 処理が終了しました
+upload-selection-cancelling = 現在の処理が安全に終わるのを待って停止します…
+upload-selection-inspecting = 選択した { $total } 件のパスのうち { $inspected } 件を確認しました。
+upload-selection-counts = { $total } ファイル · { $completed } アップロード済み · { $paused } 一時停止 · { $failed } 失敗 · { $cancelled } キャンセル · { $pending } 未処理
+upload-selection-timing = 現在の処理時間：{ $elapsed } · 最後の更新から：{ $idle }
+upload-selection-retention = 詳細履歴には最近の処理バッチを表示します。この合計には選択した全ファイルが含まれます。
+upload-selection-history-entry = { $time }：{ $phase }
+
+transfer-batch-open-window = 別ウィンドウでバッチを表示
+transfer-batch-window-title = バッチ内のファイル
+transfer-batch-unavailable = 現在のタスク履歴にこのバッチはありません。
+transfer-batch-window-live = 進捗を随時更新 · このウィンドウを閉じても転送は続きます
 
 transfer-history-restoring = アップロード履歴を復元中
-
 transfer-upload-interrupted = 中断
-
 transfer-upload-interrupted-reason = 完了が確認される前にアプリが終了しました。
-
 transfer-upload-interrupted-action = アップロード画面で元のファイルを選択し、新しくアップロードしてください。公開中に中断した場合は、先にストレージを確認してください。
-
 transfer-history-restored-label = 復元された履歴
-
 transfer-history-restored-detail = 保存済みのタスク集計を復元しました。ライブチャートと詳細なアクティビティは復元されていません。
 
 detail-vault-lifecycle-durable-upload = タスクの集計はローカルに保存されます。未完了のアップロードは再起動後に中断と表示されます。元のファイルを選択して新しくアップロードしてください。
@@ -1500,101 +1501,77 @@ speed-limits-event = { $event } · { $seconds } 秒前
 speed-limits-omitted = 過去の { $count } 件を省略。方向ごとに最新 16 件を保持します。
 speed-limits-close = 閉じる
 
-channel-sync-event-at = { $time } · { $phase }
+global-sync-connecting = アカウントの接続を待機中
+global-sync-discovering = チャンネル一覧を更新中
+global-sync-account = アカウント
 
-transfer-upload-pausing = 一時停止中：確認済みの進捗を保存
+global-sync-library = ファイルライブラリを更新中
+global-sync-library-failed = ファイルライブラリの更新を確認してください
 
-native-cleanup-unsupported = この削除を安全に完了できません。一時ファイルは保持しています。アプリを更新してから再試行してください。
 
-transfer-recovery-unavailable-detail = 保存された復元情報が破損しているか、未対応のバージョンです。元の記録とファイルは保持されています。
+# Fixed synchronization event timestamps
+sync-last-completed = 前回の完了日時
+sync-no-completion = 完了した同期はまだありません
+sync-event-time = イベント日時：{ $time }
+sync-event-completed = 同期完了
+sync-file-verification = ファイルの検証
+sync-recent-events = 最近のアクティビティ
+sync-no-events = イベントはまだありません
+sync-older-events = 一部の古いアクティビティは表示されていません。
+sync-event-times-local = イベント日時 · 現地時間
 
-upload-selection-counts = { $total } ファイル · { $completed } アップロード済み · { $paused } 一時停止 · { $failed } 失敗 · { $cancelled } キャンセル · { $pending } 未処理
+sync-silence-policy = チャンネルの更新が { $minutes } 分間届かない場合、復旧確認を行います。
+channel-file-count = { $count } ファイル
+channel-select-all-compact = すべて選択
+channel-download-compact = ダウンロード
+shell-sync-complete = 同期済み
+shell-sync-ready = 準備完了
+shell-sync-active = 同期中
+shell-sync-active-channel = 1 チャンネルを同期中
+shell-sync-active-channels = { $count } チャンネルを同期中
+shell-sync-active-attention = { $count } チャンネルを同期中 · 要確認
+shell-sync-connecting = 接続中
+shell-sync-waiting = 同期待機中
+shell-sync-paused = 同期一時停止中
+shell-sync-attention = 同期の確認が必要
+shell-sync-details = 同期アクティビティを表示
+shell-vault-locked = ロック中 · バックグラウンド処理は継続
 
-native-cleanup-failed = 一時ファイルの確認が必要です
-
-transfer-recovery-legacy-guidance = この保存済みタスクには利用可能な復旧操作がありません。記録とファイルを保持してください。新しい復旧データには対応するアプリのバージョンが必要な場合があります。それ以外は新しい転送を開始してください。履歴があっても再開できるとは限りません。
-
-transfer-recovery-source-guidance = 現在の元ファイルではアップロードを続行できません。元ファイルを保持し、可能であればアクセスを復旧してください。準備ができたら「アップロード」から新しいタスクを開始してください。停止したタスクは履歴に残ります。
-
-transfer-recovery-unavailable = 復元できません
-
-storage-guide-transfers-title = 5. 転送の一時停止と再開
-
-transfer-recovery-verification-pending = 保存済みの進捗は再利用前にローカルで検証されます。
-
-storage-guide-resume-title = 6. 復旧の制限を理解する
-
-transfer-recovery-retry-guidance = このタスクは再試行できます。上記の原因を解消してから、タスク行で再試行を選択してください。保存済みの進捗は検証後に再利用されます。失敗したタスクは自動では再試行されません。
-
-native-cleanup-waiting = ダウンロードの停止を待機中
-
-native-cleanup-finished = 一時ファイルの削除が完了しました
-
-native-cleanup-error-guidance = { $error } 一時ファイルは保持しています。問題を解決してから再試行してください。削除に成功してからダウンロードを開始します。
-
-transfer-upload-saving-recovery = 再開情報を保存中
-
-upload-selection-saving-queue = アップロード待ちの一覧を保存中
-
-transfer-recovery-key-guidance = 「設定 → キー保管庫」で、このファイルに必要なキーを解除してください。再開や再試行の操作がない場合は、解除後に新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。
-
-detail-concurrency-limits = 設定された同時実行上限
-
-transfer-recovery-saved-download = 保存済みのダウンロード
-
-native-cleanup-explanation = キャンセルを保存しました。前のダウンロードがファイルを解放してから削除します。完了済みのファイルは保持します。
-
-native-cleanup-removing = 一時ファイルを削除中
-
-transfer-upload-cancelling = キャンセル中：実行中の処理を停止
-
-storage-guide-transfers-body = 「転送」の各タスクには対応する操作が表示されます。一時停止は実行中の処理が安全に止まるまで待機し、再開は保存済みデータを検証します。アップロード元を変更したり未完了のダウンロードを移動したりしないでください。キャンセルしても送信済みデータは取り消されません。
-
-transfer-recovery-blocked-guidance = このタスクは現在の状態では再開できません。上記の原因を解消してから新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。新しいタスクでは再転送が必要になる場合があります。
+shell-sync-queued = 同期待ち
 
 transfer-upload-checking-source = 安全な再開のために元ファイルを確認中
+transfer-upload-saving-recovery = 再開情報を保存中
 
-native-cleanup-retry-waiting = 再試行を保存しました。一時ファイルを安全に削除してから開始します。
+transfer-upload-pausing = 一時停止中：確認済みの進捗を保存
+transfer-upload-cancelling = キャンセル中：実行中の処理を停止
 
-upload-selection-saved-count = { $total } 件中 { $saved } 件をアップロード待ちの一覧に保存しました。
+transfer-recovery-unavailable = 復元できません
+transfer-recovery-unavailable-detail = 保存された復元情報が破損しているか、未対応のバージョンです。元の記録とファイルは保持されています。
+transfer-recovery-verification-pending = 保存済みの進捗は再利用前にローカルで検証されます。
+transfer-recovery-saved-download = 保存済みのダウンロード
 
-native-cleanup-detail = { $reason } · 待機：{ $elapsed } · 最終更新：{ $last }
-
+transfer-recovery-retry-guidance = このタスクは再試行できます。上記の原因を解消してから、タスク行で再試行を選択してください。保存済みの進捗は検証後に再利用されます。失敗したタスクは自動では再試行されません。
+transfer-recovery-source-guidance = 現在の元ファイルではアップロードを続行できません。元ファイルを保持し、可能であればアクセスを復旧してください。準備ができたら「アップロード」から新しいタスクを開始してください。停止したタスクは履歴に残ります。
+transfer-recovery-key-guidance = 「設定 → キー保管庫」で、このファイルに必要なキーを解除してください。再開や再試行の操作がない場合は、解除後に新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。
+transfer-recovery-blocked-guidance = このタスクは現在の状態では再開できません。上記の原因を解消してから新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。新しいタスクでは再転送が必要になる場合があります。
+transfer-recovery-legacy-guidance = この保存済みタスクには利用可能な復旧操作がありません。記録とファイルを保持してください。新しい復旧データには対応するアプリのバージョンが必要な場合があります。それ以外は新しい転送を開始してください。履歴があっても再開できるとは限りません。
+storage-guide-transfers-title = 5. 転送の一時停止と再開
+storage-guide-transfers-body = 「転送」の各タスクには対応する操作が表示されます。一時停止は実行中の処理が安全に止まるまで待機し、再開は保存済みデータを検証します。アップロード元を変更したり未完了のダウンロードを移動したりしないでください。キャンセルしても送信済みデータは取り消されません。
+storage-guide-resume-title = 6. 復旧の制限を理解する
 storage-guide-resume-body = 再起動とロック解除後、条件を満たす待機中の転送は続行できます。一時停止したタスクは再開操作を待ち、失敗したタスクは対処が必要です。タスクを開くと原因と次の手順を確認できます。古い履歴や破損した復旧データでは新しい転送が必要になる場合があります。元ファイル、キー、Telegramのファイルの変更によっても復旧できなくなる場合があります。
 
-transfer-batch-open-window = 別ウィンドウでバッチを表示
+upload-selection-saving-queue = アップロード待ちの一覧を保存中
+upload-selection-saved-count = { $total } 件中 { $saved } 件をアップロード待ちの一覧に保存しました。
 
-transfer-batch-unavailable = 現在のタスク履歴にこのバッチはありません。
-
-transfer-batch-window-live = 進捗を随時更新 · このウィンドウを閉じても転送は続きます
-
-transfer-batch-window-title = バッチ内のファイル
-
-upload-drop-files = このアップロード画面にファイルをドロップして追加するか、ファイルを選択してください。
-
-upload-files-independent = 各ファイルは個別に保存されます。
-
-upload-folders-unsupported = フォルダにはまだ対応していません。
-
-upload-selection-cancelling = 現在の処理が安全に終わるのを待って停止します…
-
-upload-selection-checking-channel = プライベートチャンネルを確認中
-
-upload-selection-checking-files = ファイル情報を確認中
-
-upload-selection-finished = 処理が終了しました
-
-upload-selection-history-entry = { $time }：{ $phase }
-
-upload-selection-inspecting = 選択した { $total } 件のパスのうち { $inspected } 件を確認しました。
-
-upload-selection-queued = ファイル選択または処理の開始を待っています
-
-upload-selection-retention = 詳細履歴には最近の処理バッチを表示します。この合計には選択した全ファイルが含まれます。
-
-upload-selection-timing = 現在の処理時間：{ $elapsed } · 最後の更新から：{ $idle }
-
-upload-selection-uploading = ファイルをアップロード中
+native-cleanup-waiting = ダウンロードの停止を待機中
+native-cleanup-removing = 一時ファイルを削除中
+native-cleanup-failed = 一時ファイルの確認が必要です
+native-cleanup-explanation = キャンセルを保存しました。前のダウンロードがファイルを解放してから削除します。完了済みのファイルは保持します。
+native-cleanup-retry-waiting = 再試行を保存しました。一時ファイルを安全に削除してから開始します。
+native-cleanup-detail = { $reason } · 待機：{ $elapsed } · 最終更新：{ $last }
+native-cleanup-finished = 一時ファイルの削除が完了しました
+native-cleanup-unsupported = この削除を安全に完了できません。一時ファイルは保持しています。アプリを更新してから再試行してください。
+native-cleanup-error-guidance = { $error } 一時ファイルは保持しています。問題を解決してから再試行してください。削除に成功してからダウンロードを開始します。
 
 settings-upload-tasks = 同時アップロード数
 settings-upload-parts = アップロードごとの並列 512 KiB part 数

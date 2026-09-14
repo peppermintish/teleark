@@ -2,7 +2,6 @@
 use super::*;
 use gpui_kit::component::{Sizable as _, button::ButtonVariants as _};
 use teleark_core::ApplicationErrorKind;
-use teleark_i18n::format::format_duration_millis;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -28,7 +27,7 @@ pub(crate) struct DialogLoad {
     attempt: u8,
     generation: u64,
     changed: Option<std::time::Instant>,
-    history: std::collections::VecDeque<(Phase, Option<ApplicationErrorKind>, u64)>,
+    history: std::collections::VecDeque<(Phase, Option<ApplicationErrorKind>, std::time::Instant)>,
     started: Option<std::time::Instant>,
     cancellation: teleark_runtime::TelegramScanCancellation,
 }
@@ -38,6 +37,9 @@ impl Drop for DialogLoad {
     }
 }
 impl DialogLoad {
+    pub(super) fn phase(&self) -> Phase {
+        self.phase
+    }
     pub(crate) fn active(&self) -> bool {
         matches!(
             self.phase,
@@ -56,12 +58,7 @@ impl DialogLoad {
         self.phase = phase;
         self.error = error;
         self.changed = Some(now);
-        self.history.push_back((
-            phase,
-            error,
-            self.started
-                .map_or(0, |start| now.duration_since(start).as_millis() as u64),
-        ));
+        self.history.push_back((phase, error, now));
         // Three attempts produce at most eight events; each new manual run resets the journal.
         while self.history.len() > 16 {
             self.history.pop_front();
@@ -156,18 +153,18 @@ impl TeleArkApp {
             self.dialogs.transition(Phase::Cancelled, None);
         }
         self.dialogs.generation = self.dialogs.generation.wrapping_add(1);
-        self.dialogs_clock_task = None;
         cx.notify();
     }
     pub(crate) fn load_telegram_dialogs(&mut self, cx: &mut Context<Self>) {
-        if self.dialogs.active() || self.telegram_activity == TelegramActivity::Working {
+        if self.visual_preview
+            || self.telegram.is_none()
+            || self.library.is_none()
+            || self.dialogs.active()
+            || self.telegram_activity == TelegramActivity::Working
+        {
             return;
         }
-        let (Some(telegram), Some(library), Some(account)) = (
-            self.telegram.clone(),
-            self.library.clone(),
-            self.telegram_account.clone(),
-        ) else {
+        let Some(account) = self.telegram_account.clone() else {
             return;
         };
         self.dialogs.generation = self.dialogs.generation.wrapping_add(1);
@@ -185,7 +182,7 @@ impl TeleArkApp {
             },
             None,
         );
-        let cancellation = self.dialogs.cancellation.clone();
+        self.start_channel_sync(cx);
         let transfers = self.transfers.clone();
 
         // Acknowledge before dispatching any filesystem/network work.
@@ -195,18 +192,6 @@ impl TeleArkApp {
             .vault
             .as_ref()
             .map(|vault| vault.submit_upload_history_restore(account_id));
-        self.dialogs_clock_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Some(entity) = this.upgrade() else { break };
-                if !entity.update(cx, |app, cx| {
-                    cx.notify();
-                    app.dialogs.accepts(generation)
-                }) {
-                    break;
-                }
-            }
-        }));
         self.dialogs_task = Some(cx.spawn(async move |this, cx| {
             if let Some(job) = history_job {
                 let result = cx.background_spawn(async move { job?.wait() }).await;
@@ -236,12 +221,22 @@ impl TeleArkApp {
                 }
             }
             for attempt in 0..3 {
-                let remote = telegram.clone();
-                let cancel = cancellation.clone();
+                if let Some(entity) = this.upgrade() {
+                    entity.update(cx, |app, cx| {
+                        if app.dialogs.accepts(generation) {
+                            app.dialogs.transition(Phase::Saving, None);
+                            cx.notify();
+                        }
+                    });
+                }
+                let transfers = transfers.clone();
                 let result = cx
-                    .background_spawn(
-                        async move { remote.list_dialogs_cancellable(account_id, cancel) },
-                    )
+                    .background_spawn(async move {
+                        if let Some(transfers) = transfers {
+                            transfers.activate_account(account_id)?;
+                        }
+                        Ok::<_, ApplicationError>(())
+                    })
                     .await;
                 let Some(entity) = this.upgrade() else { return };
                 let current = entity.update(cx, |app, _| {
@@ -280,61 +275,17 @@ impl TeleArkApp {
                             return;
                         }
                     }
-                    Ok(chats) => {
-                        entity.update(cx, |app, cx| {
-                            app.dialogs.transition(Phase::Saving, None);
-                            cx.notify();
-                        });
-                        drop(entity);
-                        let cancel = cancellation.clone();
-                        let result = cx
-                            .background_spawn(async move {
-                                if cancel.is_cancelled() {
-                                    return Err(ApplicationError::new(
-                                        ApplicationErrorKind::Cancelled,
-                                    ));
-                                }
-                                library.save_telegram_sources(&account, &chats)?;
-                                if cancel.is_cancelled() {
-                                    return Err(ApplicationError::new(
-                                        ApplicationErrorKind::Cancelled,
-                                    ));
-                                }
-                                if let Some(transfers) = transfers {
-                                    transfers.activate_account(account_id)?;
-                                }
-                                Ok::<_, ApplicationError>(chats)
-                            })
-                            .await;
-                        let Some(entity) = this.upgrade() else { return };
+                    Ok(()) => {
                         entity.update(cx, |app, cx| {
                             if !app.dialogs.accepts(generation)
                                 || app.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
                             {
                                 return;
                             }
-                            match result {
-                                Ok(chats) => {
-                                    app.telegram_chats = chats;
-                                    app.dialogs.ready = true;
-                                    app.dialogs.transition(Phase::Complete, None);
-                                    app.transfers_account_ready = true;
-                                    app.start_channel_sync(cx);
-                                    if app.page == Page::Channel
-                                        && app.selected_chat_id.is_none()
-                                        && let Some(chat) = app
-                                            .telegram_chats
-                                            .iter()
-                                            .find(|c| c.kind == TelegramChatKind::Channel)
-                                    {
-                                        app.select_telegram_chat(chat.id, cx);
-                                    }
-                                    app.refresh_storage_channel(cx);
-                                }
-                                Err(error) => {
-                                    app.dialogs.transition(Phase::Failed, Some(error.kind()))
-                                }
-                            }
+                            app.dialogs.ready = true;
+                            app.dialogs.transition(Phase::Complete, None);
+                            app.transfers_account_ready = true;
+                            app.refresh_storage_channel(cx);
                             cx.notify();
                         });
                         return;
@@ -344,38 +295,52 @@ impl TeleArkApp {
         }));
     }
     fn dialog_timing(&self) -> gpui_kit::SharedString {
-        self.tr_with(
-            "dialogs-timing",
-            MessageArgs::new().with(
-                "elapsed",
-                format_duration_millis(
-                    self.locale(),
-                    self.dialogs
-                        .changed
-                        .map_or(0, |t| t.elapsed().as_millis() as u64),
-                ),
-            ),
+        self.dialogs.changed.map_or_else(
+            || self.tr("sync-no-events"),
+            |at| {
+                self.tr_with(
+                    "sync-event-time",
+                    MessageArgs::new().with("time", self.sync_event_time(at).to_string()),
+                )
+            },
         )
     }
-    pub(crate) fn render_dialog_status(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        components::button(
-            "dialogs-status",
-            self.tr(phase_id(self.dialogs.phase)),
-            None,
-            false,
-        )
-        .ghost()
-        .max_w(px(230.0))
-        .min_w_0()
-        .overflow_hidden()
-        .h(px(24.0))
-        .tooltip(self.dialog_timing())
-        .debug_selector(|| "dialogs-status".into())
-        .on_click(cx.listener(|app, _, _, cx| {
-            app.dialogs.details = !app.dialogs.details;
-            cx.notify();
-        }))
-        .into_any_element()
+
+    pub(super) fn render_dialog_sync_activity(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme::text_primary())
+                    .child(self.tr(phase_id(self.dialogs.phase))),
+            )
+            .child(self.dialog_timing())
+            .when_some(self.dialogs.error, |body, error| {
+                body.child(self.application_error_message(error))
+            })
+            .child(
+                components::button(
+                    "sync-dialogs-action",
+                    self.tr(if self.dialogs.active() {
+                        "common-cancel"
+                    } else {
+                        "common-retry"
+                    }),
+                    None,
+                    false,
+                )
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if app.dialogs.active() {
+                        app.cancel_dialog_load(cx);
+                    } else {
+                        app.load_telegram_dialogs(cx);
+                    }
+                })),
+            )
+            .into_any_element()
     }
     pub(crate) fn render_dialog_details(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         components::inspector_panel("dialogs-inspector", 340.0)
@@ -502,19 +467,11 @@ impl TeleArkApp {
                                 .gap_1()
                                 .text_xs()
                                 .text_color(theme::text_secondary())
-                                .child(self.dialog_timing())
-                                .child(self.tr_with(
-                                    "dialogs-attempt",
-                                    MessageArgs::new().with(
-                                        "attempt",
-                                        teleark_i18n::format::format_integer(
-                                            self.locale(),
-                                            u64::from(self.dialogs.attempt) + 1,
-                                        ),
-                                    ),
-                                )),
+                                .child(self.dialog_timing()),
                         )
-                        .child(action),
+                        .when(self.dialogs.phase != Phase::Complete, |footer| {
+                            footer.child(action)
+                        }),
                 );
         div()
             .flex()
@@ -564,13 +521,9 @@ impl TeleArkApp {
                                 div()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child(self.tr("activity-history-time-origin")),
+                                    .child(self.tr("sync-event-times-local")),
                             ),
-                    )
-                    .child(components::badge(
-                        teleark_i18n::format::format_integer(self.locale(), count as u64),
-                        components::Tone::Neutral,
-                    )),
+                    ),
             )
             .children(
                 self.dialogs
@@ -579,11 +532,11 @@ impl TeleArkApp {
                     .enumerate()
                     .rev()
                     .take(visible)
-                    .map(|(index, (phase, error, elapsed))| {
+                    .map(|(index, (phase, error, at))| {
                         let (_, tone, _) = phase_presentation(*phase);
                         let summary = format!(
                             "{} · {}{}",
-                            format_duration_millis(self.locale(), *elapsed),
+                            self.sync_event_time(*at),
                             self.tr(phase_id(*phase)),
                             error.map_or_else(String::new, |error| format!(
                                 " · {}",
@@ -802,6 +755,13 @@ mod tests {
                     let history = cx
                         .debug_bounds("dialogs-history-card")
                         .expect("separate history card");
+                    if phase == Phase::Complete {
+                        assert!(
+                            cx.debug_bounds("dialogs-action").is_none(),
+                            "completed automatic work has no refresh button"
+                        );
+                        continue;
+                    }
                     let action = cx.debug_bounds("dialogs-action").expect("task action");
                     assert!(
                         current.bottom() < history.top(),

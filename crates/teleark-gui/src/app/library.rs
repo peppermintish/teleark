@@ -73,7 +73,7 @@ impl TeleArkApp {
             }
         });
         self.library_action_task = Some(cx.spawn(async move |this, cx| {
-            let (queued, batches, result) = work.await;
+            let (queued, _batches, result) = work.await;
             let Some(this) = this.upgrade() else {
                 return;
             };
@@ -85,7 +85,6 @@ impl TeleArkApp {
                     return;
                 }
                 this.library_selection.retain(|id| !queued.contains(id));
-                this.expanded_transfer_batches.extend(batches);
                 match result {
                     Ok(()) if this.page == Page::Library => this.set_page(Page::Transfers, cx),
                     Ok(()) => {}
@@ -167,7 +166,105 @@ impl TeleArkApp {
         cx.notify();
     }
 
+    pub(crate) fn invalidate_library_from_sync(&mut self, cx: &mut Context<Self>) {
+        self.library_sync_dirty = true;
+        self.apply_library_sync(cx);
+    }
+
+    fn apply_library_sync(&mut self, cx: &mut Context<Self>) {
+        if !self.library_sync_dirty
+            || self.library_sync_loading
+            || self.visual_preview
+            || self.page != Page::Library
+            || self.library_view != LibraryView::Remote
+            || self.library_content.snapshot().is_none()
+            || self.library_loading_more
+        {
+            return;
+        }
+        let Some(library) = self.library.clone() else {
+            return;
+        };
+        let query = self.library_query(cx);
+        let account = self.telegram_account.as_ref().map(|account| account.id);
+        let generation = self.library_query_generation;
+        let cancellation = self.library_scan_cancellation.clone();
+        let rows = self
+            .library_content
+            .snapshot()
+            .map_or(0, |snapshot| snapshot.rows.len())
+            .min(5000);
+        self.library_sync_dirty = false;
+        self.library_sync_loading = true;
+        self.library_sync_error = None;
+        self.library_sync_started = Some(std::time::Instant::now());
+        // Preserve the visible projection and selection while its replacement is read.
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            let mut snapshot = load_library_snapshot(
+                &library,
+                LibraryView::Remote,
+                account,
+                query.clone(),
+                None,
+                &cancellation,
+            )?;
+            while snapshot.rows.len() < rows {
+                let Some(after) = snapshot.next_cursor.clone() else {
+                    break;
+                };
+                let page = load_library_snapshot(
+                    &library,
+                    LibraryView::Remote,
+                    account,
+                    query.clone(),
+                    Some(after),
+                    &cancellation,
+                )?;
+                if page.rows.is_empty() {
+                    snapshot.next_cursor = page.next_cursor;
+                    break;
+                }
+                snapshot.append_snapshot(page);
+            }
+            Ok::<_, ApplicationError>(snapshot)
+        });
+        self.library_sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(entity) = this.upgrade() else { return };
+            entity.update(cx, |app, cx| {
+                app.library_sync_loading = false;
+                if app.library_query_generation != generation
+                    || app.telegram_account.as_ref().map(|account| account.id) != account
+                {
+                    app.apply_library_sync(cx);
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        let selected = app
+                            .library_content
+                            .snapshot()
+                            .and_then(|old| old.rows.get(app.selected_file))
+                            .map(|row| row.id.clone());
+                        app.library_selection
+                            .retain(|id| snapshot.rows.iter().any(|row| &row.id == id));
+                        app.selected_file = selected
+                            .and_then(|id| snapshot.rows.iter().position(|row| row.id == id))
+                            .unwrap_or(0);
+                        app.library_content = LibraryContent::from_snapshot(snapshot);
+                    }
+                    Err(error) => app.library_sync_error = Some(error.kind()),
+                }
+                app.apply_library_sync(cx);
+                cx.notify();
+            });
+        }));
+    }
+
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
+        self.library_sync_error = None;
         self.library_selection.clear();
         if is_preview_library_selection(self.nav_selection) {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
@@ -217,13 +314,14 @@ impl TeleArkApp {
                     Ok(snapshot) => LibraryContent::from_snapshot(snapshot),
                     Err(error) => LibraryContent::Failed(error.kind()),
                 };
+                this.apply_library_sync(cx);
                 cx.notify();
             });
         }));
     }
 
     pub(crate) fn load_more_library(&mut self, cx: &mut Context<Self>) {
-        if self.library_loading_more {
+        if self.library_loading_more || self.library_sync_loading {
             return;
         }
         let Some(after) = self
@@ -268,6 +366,7 @@ impl TeleArkApp {
                     }
                     Err(error) => this.library_load_more_error = Some(error.kind()),
                 }
+                this.apply_library_sync(cx);
                 cx.notify();
             });
         }));
@@ -494,6 +593,106 @@ mod tests {
     use super::*;
     use gpui_kit as gpui;
     use teleark_core::ApplicationErrorKind;
+
+    #[gpui::test]
+    fn automatic_remote_library_updates_keep_rows_and_selection_and_reject_old_accounts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Library);
+        let directory = std::env::temp_dir().join(format!(
+            "teleark-library-sync-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let library = DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("library");
+        let account = TelegramAccount {
+            id: 7,
+            display_name: "Fixture".into(),
+            username: None,
+        };
+        let chat = TelegramChatSummary {
+            id: 20,
+            name: "Source".into(),
+            username: None,
+            kind: TelegramChatKind::Channel,
+            sync_pts: None,
+        };
+        library
+            .save_telegram_sources(&account, &[chat])
+            .expect("sources");
+        let file = |name: &str, revision| TelegramFileSummary {
+            message_id: 8,
+            file_name: name.into(),
+            caption: String::new(),
+            mime_type: None,
+            size_bytes: 42,
+            sent_at_unix_ms: 1000,
+            modified_at_unix_ms: revision,
+        };
+        library
+            .cache_telegram_files(7, 20, &[file("Before.bin", 1000)])
+            .expect("baseline file");
+        let baseline = load_library_snapshot(
+            &library,
+            LibraryView::Remote,
+            Some(7),
+            Default::default(),
+            None,
+            &Default::default(),
+        )
+        .expect("baseline");
+        let selected = baseline.rows[0].id.clone();
+        app.update(cx, |app, _| {
+            app.visual_preview = false;
+            app.library = Some(library.clone());
+            app.telegram_account = Some(account);
+            app.library_view = LibraryView::Remote;
+            app.nav_selection = "nav-all";
+            app.library_content = LibraryContent::from_snapshot(baseline);
+            app.library_selection = vec![selected.clone()];
+        });
+        library
+            .cache_telegram_files(7, 20, &[file("After.bin", 2000)])
+            .expect("changed file");
+        app.update(cx, |app, cx| {
+            app.invalidate_library_from_sync(cx);
+            app.invalidate_library_from_sync(cx);
+            assert!(app.library_sync_loading);
+            assert_eq!(
+                app.library_content.rows()[0].name,
+                "Before.bin",
+                "no loading flash"
+            );
+            assert_eq!(app.library_selection, vec![selected.clone()]);
+        });
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            assert!(!app.library_sync_loading);
+            assert!(!app.library_sync_dirty);
+            assert!(app.library_sync_error.is_none());
+            assert_eq!(app.library_content.rows()[0].name, "After.bin");
+            assert_eq!(app.library_selection, vec![selected.clone()]);
+            app.invalidate_library_from_sync(cx);
+            app.telegram_account.as_mut().expect("account").id = 99;
+            app.library_content = LibraryContent::Loading;
+        });
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert!(
+                matches!(app.library_content, LibraryContent::Loading),
+                "old-account result must not appear"
+            );
+            app.library = None;
+            app.library_sync_task = None;
+            app.visual_preview = true;
+        });
+        drop(library);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
 
     #[gpui::test]
     fn library_selection_is_scoped_to_loaded_results_and_clears_on_filter(

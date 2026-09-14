@@ -586,7 +586,7 @@ impl TeleArkApp {
                     )
                     .h(px(22.0))
                     .flex_none()
-                    .disabled(self.library_loading_more)
+                    .disabled(self.library_loading_more || self.library_sync_loading)
                     .on_click(cx.listener(|this, _, _, cx| this.load_more_library(cx))),
                 )
             })

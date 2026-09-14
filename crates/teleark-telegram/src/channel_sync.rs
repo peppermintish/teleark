@@ -64,6 +64,7 @@ pub struct ChannelUpdateHints {
     pub pushes: VecDeque<ChannelPush>,
     pending_bytes: usize,
     pub reconcile_all: bool,
+    pub metadata_changed: bool,
     pub overflow_count: u64,
 }
 
@@ -84,12 +85,26 @@ impl ChannelUpdateSignals {
     pub fn set_waker(&self, wake: Option<ChannelWake>) {
         let ready = if let Ok(mut pending) = self.0.lock() {
             pending.wake = wake.clone();
-            !pending.hints.channels.is_empty() || pending.hints.reconcile_all
+            !pending.hints.channels.is_empty()
+                || pending.hints.reconcile_all
+                || pending.hints.metadata_changed
         } else {
             true
         };
         if ready && let Some(wake) = wake {
             wake(None, false);
+        }
+    }
+
+    /// A retiring consumer must not clear a replacement consumer's wake callback.
+    pub fn clear_waker(&self, expected: &ChannelWake) {
+        if let Ok(mut pending) = self.0.lock()
+            && pending
+                .wake
+                .as_ref()
+                .is_some_and(|wake| Arc::ptr_eq(wake, expected))
+        {
+            pending.wake = None;
         }
     }
 
@@ -193,6 +208,10 @@ fn observe_update(
             false,
             u.messages.iter().copied().map(i64::from).collect(),
         ),
+        tl::enums::Update::Channel(u) => {
+            hints.metadata_changed = true;
+            return Some((Some(u.channel_id), false));
+        }
         tl::enums::Update::ChannelTooLong(u) => {
             ChannelUpdateSignals::channel(hints, u.channel_id, 0);
             return Some((Some(u.channel_id), false));
@@ -468,6 +487,33 @@ fn record_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_metadata_wakes_and_old_consumer_cannot_clear_replacement_subscription() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let signals = ChannelUpdateSignals::default();
+        let old: ChannelWake = Arc::new(|_, _| panic!("retired callback"));
+        signals.set_waker(Some(old.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let current: ChannelWake = Arc::new(move |_, _| {
+            count.fetch_add(1, Ordering::Relaxed);
+        });
+        signals.set_waker(Some(current.clone()));
+        signals.clear_waker(&old);
+        signals.observe(&UpdatesLike::Updates(
+            tl::types::UpdateShort {
+                update: tl::types::UpdateChannel { channel_id: 2 }.into(),
+                date: 1,
+            }
+            .into(),
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(signals.take().metadata_changed);
+        signals.clear_waker(&current);
+        signals.observe(&UpdatesLike::ConnectionClosed);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn push_hints_coalesce_without_losing_an_explicit_gap() {

@@ -2,47 +2,6 @@
 use super::*;
 
 impl TeleArkApp {
-    pub(crate) fn preview_batch_groups(&mut self) {
-        // Short adjacent groups expose both ends alongside ordinary tasks.
-        self.preview_transfer_rows.retain(|row| {
-            !row.batch_child
-                || row.runtime_task_id.is_some_and(|id| id < 202)
-                || row.vault_transfer_id.is_some_and(|id| id < 302)
-        });
-        let upload_name = self.tr_with(
-            "transfer-batch-upload-name",
-            MessageArgs::new().with("count", "2"),
-        );
-        let download_name = self.tr_with(
-            "transfer-batch-name",
-            MessageArgs::new()
-                .with("count", "2")
-                .with("source", "Kyoto · September"),
-        );
-        for row in &mut self.preview_transfer_rows {
-            if let Some(summary) = row.batch_summary.as_mut() {
-                summary.total = 2;
-                summary.completed = 2;
-                summary.file_names.truncate(2);
-                row.name = if row.direction == crate::mock::TransferDirection::Upload {
-                    upload_name.clone()
-                } else {
-                    download_name.clone()
-                };
-                row.size = format_bytes(self.localizer.locale(), 3 * 123 * 1024 * 1024).into();
-                row.transferred = row.size.clone();
-                row.progress = 100.0;
-                row.state = crate::mock::TransferState::Completed;
-            }
-        }
-        self.preview_transfer_rows
-            .insert(0, crate::mock::transfers(false)[0].clone());
-        self.expanded_transfer_batches.insert(42);
-        self.expanded_transfer_batches
-            .insert(0x6000_0000_0000_0000 | 17);
-        self.page = Page::Transfers;
-    }
-
     pub(super) fn refresh_preview_library(&mut self, cx: &mut Context<Self>) {
         let local = self.library_view == LibraryView::Local;
         let names = [
@@ -239,9 +198,6 @@ impl TeleArkApp {
             if state.ends_with("repair") {
                 self.storage_confirmation = Some(super::storage::StorageAction::Repair);
             }
-            if state.ends_with("archive") {
-                self.storage_confirmation = Some(super::storage::StorageAction::Archive);
-            }
             if state.ends_with("waiting") {
                 self.storage_loading = true;
                 self.storage_maintenance = Some(teleark_runtime::StorageMaintenance::new());
@@ -294,11 +250,23 @@ impl TeleArkApp {
             use teleark_runtime::{ChannelSyncEvent, ChannelSyncPhase, ChannelSyncSnapshot};
             let now = std::time::Instant::now();
             let waiting = state == "channel-sync-wait";
+            let synced = state == "channel-sync-synced";
+            let failed = state == "channel-sync-failed";
             let phase = if waiting {
                 ChannelSyncPhase::RateLimited
+            } else if synced {
+                ChannelSyncPhase::Idle
+            } else if failed {
+                ChannelSyncPhase::Failed
             } else {
                 ChannelSyncPhase::Receiving
             };
+            if synced {
+                self.telegram_files.truncate(7);
+                self.vault_locked = true;
+                self.vault_status.locked = true;
+                self.vault_status.active_key_locked = true;
+            }
             self.page = Page::Channel;
             self.storage_view = StorageView::RawFiles;
             self.selected_chat_id = Some(1001);
@@ -311,12 +279,14 @@ impl TeleArkApp {
                 chat_id: Some(1001),
                 phase_started: now - Duration::from_secs(12),
                 last_activity: now - Duration::from_secs(8),
+                last_completed_at: Some(now - Duration::from_secs(if synced { 12 } else { 300 })),
                 retry_at: waiting.then_some(now + Duration::from_secs(30)),
-                failure: None,
-                queued: 3,
-                failed_channels: 0,
+                failure: failed.then_some(teleark_core::ApplicationErrorKind::Network),
+                queued: if synced { 0 } else { 3 },
+                failed_channels: usize::from(failed),
                 committed_pages: 4,
                 data_revision: 4,
+                active: Vec::new(),
                 events: [
                     ChannelSyncPhase::Queued,
                     ChannelSyncPhase::ReadingLocal,
@@ -335,7 +305,7 @@ impl TeleArkApp {
                 dropped_events: 0,
                 overflow_signals: 0,
                 managed_chat_id: Some(9000),
-                managed_watch: Some(teleark_runtime::ManagedChannelWatch {
+                managed_watch: (!synced).then_some(teleark_runtime::ManagedChannelWatch {
                     catalog_ready: true,
                     change_count: 2,
                     acknowledged_count: 0,
@@ -347,7 +317,7 @@ impl TeleArkApp {
                         observed_at_unix_ms: 1_788_912_000_000,
                     }],
                 }),
-                managed_review_pending: !waiting,
+                managed_review_pending: !waiting && !synced && !failed,
                 managed_scan: None,
             });
             if state == "channel-sync-vault-retry" {
@@ -374,6 +344,13 @@ impl TeleArkApp {
                 }
             }
         }
+        // Synthetic rows represent an accepted local projection, just as a
+        // completed cache read does, so navigation can retain the fixture.
+        self.channel_loaded_scope = self
+            .telegram_account
+            .as_ref()
+            .zip(self.selected_chat_id)
+            .map(|(account, chat)| (account.id, chat));
         self.refresh_channel_file_table(cx);
         self.refresh_preview_library(cx);
         let fixture = crate::mock::transfers(false);
@@ -498,8 +475,33 @@ impl TeleArkApp {
         if state == "upload-history" {
             self.preview_upload_history();
         }
+        if state == "batch-groups" {
+            self.preview_batch_groups();
+        }
+        if state == "batch-large" {
+            let group_index = self
+                .preview_transfer_rows
+                .iter()
+                .position(|row| row.vault_batch_id == Some(17) && !row.batch_child)
+                .expect("preview batch");
+            let name = self.tr_with(
+                "transfer-batch-upload-name",
+                MessageArgs::new().with("count", "12"),
+            );
+            let group = &mut self.preview_transfer_rows[group_index];
+            group.name = name;
+            group.batch_summary.as_mut().expect("preview summary").total = 12;
+            let template = self.preview_transfer_rows[group_index + 6].clone();
+            let extra = (0..6).map(|index| {
+                let mut row = template.clone();
+                row.vault_transfer_id = Some(1000 + index);
+                row.name = format!("Additional recording {}.wav", index + 1).into();
+                row
+            });
+            self.preview_transfer_rows
+                .splice(group_index + 7..group_index + 7, extra);
+        }
         match state.as_str() {
-            "batch-groups" => self.preview_batch_groups(),
             "recovery-guidance" => self.preview_recovery_failure(),
             "native-cleanup" => self.preview_native_cleanup(false),
             "native-cleanup-failed" => self.preview_native_cleanup(true),
@@ -574,6 +576,13 @@ impl TeleArkApp {
                 self.page = Page::Storage;
                 self.storage_view = StorageView::RawFiles;
             }
+            "channel-selected" => {
+                self.page = Page::Channel;
+                self.channel_file_table.update(cx, |table, cx| {
+                    table.set_selected_row(1, cx);
+                });
+                self.selected_channel_message_ids.insert(4999);
+            }
             "locked" => self.page = Page::Storage,
             "unlock" => {
                 self.page = Page::Storage;
@@ -615,6 +624,47 @@ impl TeleArkApp {
             _ => {}
         }
     }
+
+    pub(crate) fn preview_batch_groups(&mut self) {
+        // Short adjacent groups expose both ends alongside ordinary tasks.
+        self.preview_transfer_rows.retain(|row| {
+            !row.batch_child
+                || row.runtime_task_id.is_some_and(|id| id < 202)
+                || row.vault_transfer_id.is_some_and(|id| id < 302)
+        });
+        let upload_name = self.tr_with(
+            "transfer-batch-upload-name",
+            MessageArgs::new().with("count", "2"),
+        );
+        let download_name = self.tr_with(
+            "transfer-batch-name",
+            MessageArgs::new()
+                .with("count", "2")
+                .with("source", "Kyoto · September"),
+        );
+        for row in &mut self.preview_transfer_rows {
+            if let Some(summary) = row.batch_summary.as_mut() {
+                summary.total = 2;
+                summary.completed = 2;
+                summary.file_names.truncate(2);
+                row.name = if row.direction == crate::mock::TransferDirection::Upload {
+                    upload_name.clone()
+                } else {
+                    download_name.clone()
+                };
+                row.size = format_bytes(self.localizer.locale(), 3 * 123 * 1024 * 1024).into();
+                row.transferred = row.size.clone();
+                row.progress = 100.0;
+                row.state = crate::mock::TransferState::Completed;
+            }
+        }
+        self.preview_transfer_rows
+            .insert(0, crate::mock::transfers(false)[0].clone());
+        self.expanded_transfer_batches.insert(42);
+        self.expanded_transfer_batches
+            .insert(0x6000_0000_0000_0000 | 17);
+        self.page = Page::Transfers;
+    }
 }
 
 /// A completed repair timeline for isolated native previews and geometry regressions.
@@ -629,6 +679,8 @@ pub(crate) fn completed_storage_maintenance_preview() -> teleark_runtime::Storag
         Phase::FindingRecord,
         Phase::Pinning,
         Phase::Updating,
+        Phase::Muting,
+        Phase::Archiving,
         Phase::Verifying,
         Phase::Completed,
     ]

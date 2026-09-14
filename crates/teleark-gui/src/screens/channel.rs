@@ -456,8 +456,8 @@ impl TeleArkApp {
         ]);
         let owner = cx.weak_entity();
         let load_scope = self.channel_file_load_scope();
-        let loading = self.telegram_files_loading;
-        let exhausted = self.telegram_files_exhausted;
+        let loading = self.telegram_files_loading || self.channel_history_request.is_some();
+        let exhausted = self.telegram_files_exhausted || self.channel_history_failed;
         let select_all_label = self.tr("telegram-files-select-all");
         let select_file_label = self.tr("telegram-file-select-action");
         let download_label = self.tr("telegram-file-download-action");
@@ -592,11 +592,12 @@ impl TeleArkApp {
             .h_full()
             .flex()
             .flex_col()
-            .px(px(layout.content_padding()))
-            .pb(px(layout.content_padding()))
+            .px(px(layout.content_padding().min(16.0)))
+            .pb(px(12.0))
             .child(
                 div()
-                    .h(px(76.0))
+                    .debug_selector(|| "channel-page-heading".into())
+                    .h(px(theme::CHANNEL_HEADING_HEIGHT))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -606,7 +607,7 @@ impl TeleArkApp {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(23.0))
+                            .text_size(px(18.0))
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(name),
                     )
@@ -891,15 +892,6 @@ impl TeleArkApp {
             return self.render_storage_managed(layout, cx);
         }
 
-        let selected_name = if self.viewing_storage() {
-            self.tr("storage-channel-title").to_string()
-        } else {
-            self.selected_chat_id
-                .and_then(|id| self.telegram_chats.iter().find(|chat| chat.id == id))
-                .map(|chat| chat.name.clone())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| self.tr("telegram-no-channel-selected").to_string())
-        };
         let detail = components::card()
             .flex_1()
             .min_w_0()
@@ -909,42 +901,6 @@ impl TeleArkApp {
             .flex_col()
             .overflow_hidden()
             .p_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(components::section_title(selected_name)),
-                    )
-                    .child(
-                        components::icon_button(
-                            "telegram-files-refresh",
-                            IconName::Redo2,
-                            self.tr("telegram-files-refresh-action"),
-                        )
-                        .debug_selector(|| "channel-files-refresh".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.refresh_selected_channel(cx);
-                        })),
-                    )
-                    .when(self.channel_batch_expanded, |header| {
-                        header.child(
-                            components::button(
-                                "telegram-index-next",
-                                self.tr("telegram-index-next-action"),
-                                Some(IconName::Search),
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.index_selected_telegram_chat(cx);
-                            })),
-                        )
-                    }),
-            )
             .when_some(self.telegram_index.as_ref(), |detail, progress| {
                 detail.child(
                     div()
@@ -1175,23 +1131,57 @@ impl TeleArkApp {
             (FileKind::Image, "telegram-batch-kind-image"),
             (FileKind::Other, "telegram-batch-kind-other"),
         ];
+        let selected = self.selected_channel_message_ids.len();
         div()
-            .mt_2()
-            .py_2()
-            .border_y_1()
-            .border_color(theme::border_subtle())
+            .debug_selector(|| "channel-compact-toolbar".into())
+            .flex_none()
             .child(
                 div()
+                    .min_h(px(theme::COMPACT_CONTROL_HEIGHT))
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
-                        components::button(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_xs()
+                            .text_color(if selected == 0 {
+                                theme::text_secondary()
+                            } else {
+                                theme::blue()
+                            })
+                            .child(self.tr_with(
+                                if selected == 0 {
+                                    "channel-file-count"
+                                } else {
+                                    "telegram-files-selected"
+                                },
+                                MessageArgs::new().with(
+                                    "count",
+                                    format_integer(
+                                        self.locale(),
+                                        if selected == 0 {
+                                            result_count as u64
+                                        } else {
+                                            selected as u64
+                                        },
+                                    ),
+                                ),
+                            )),
+                    )
+                    .child(
+                        components::compact_button(
                             "telegram-batch-toggle",
                             self.tr("transfer-filter-title"),
                             Some(IconName::Settings2),
-                            self.channel_batch_expanded,
+                            false,
                         )
+                        .ghost()
+                        .when(self.channel_batch_expanded, |button| {
+                            button.bg(theme::blue_soft()).text_color(theme::blue())
+                        })
                         .debug_selector(|| "channel-filter-toggle".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.channel_batch_expanded = !this.channel_batch_expanded;
@@ -1199,23 +1189,54 @@ impl TeleArkApp {
                         })),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr_with(
-                                "telegram-files-title",
-                                MessageArgs::new().with(
-                                    "count",
-                                    format_integer(self.locale(), result_count as u64),
-                                ),
-                            )),
-                    ),
+                        components::compact_button(
+                            "telegram-files-select-all-results",
+                            self.tr("channel-select-all-compact"),
+                            None,
+                            false,
+                        )
+                        .ghost()
+                        .tooltip(self.tr("telegram-files-select-all"))
+                        .disabled(preparing || result_count == 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_all_channel_files_selected(true, cx)
+                        })),
+                    )
+                    .when(selected > 0, |row| {
+                        row.child(
+                            components::icon_button(
+                                "telegram-files-clear-selection",
+                                IconName::Close,
+                                self.tr("telegram-files-clear-selection"),
+                            )
+                            .small()
+                            .size(px(theme::COMPACT_CONTROL_HEIGHT))
+                            .ghost()
+                            .disabled(preparing)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_all_channel_files_selected(false, cx)
+                            })),
+                        )
+                        .child(
+                            components::compact_button(
+                                "telegram-batch-download",
+                                self.tr("channel-download-compact"),
+                                Some(IconName::ArrowDown),
+                                true,
+                            )
+                            .tooltip(self.tr("telegram-batch-download-action"))
+                            .debug_selector(|| "channel-files-download".into())
+                            .disabled(preparing)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.download_filtered_telegram_files(cx)
+                            })),
+                        )
+                    }),
             )
             .when(self.channel_batch_expanded, |card| {
                 card.child(
                     div()
-                        .mt_3()
+                        .mt_2()
                         .text_xs()
                         .text_color(theme::text_muted())
                         .child(self.tr("telegram-batch-period-label")),
@@ -1227,7 +1248,7 @@ impl TeleArkApp {
                         .flex_wrap()
                         .gap_2()
                         .children(periods.into_iter().map(|(period, label)| {
-                            components::button(
+                            components::compact_button(
                                 ("telegram-batch-period", period as usize),
                                 self.tr(label),
                                 None,
@@ -1247,7 +1268,7 @@ impl TeleArkApp {
                 )
                 .child(
                     div()
-                        .mt_3()
+                        .mt_2()
                         .text_xs()
                         .text_color(theme::text_muted())
                         .child(self.tr("telegram-batch-kind-label")),
@@ -1259,7 +1280,7 @@ impl TeleArkApp {
                         .flex_wrap()
                         .gap_2()
                         .child(
-                            components::button(
+                            components::compact_button(
                                 "telegram-batch-kind-all",
                                 self.tr("telegram-batch-kind-all"),
                                 None,
@@ -1275,7 +1296,7 @@ impl TeleArkApp {
                             })),
                         )
                         .children(kinds.into_iter().enumerate().map(|(index, (kind, label))| {
-                            components::button(
+                            components::compact_button(
                                 ("telegram-batch-kind", index),
                                 self.tr(label),
                                 None,
@@ -1297,7 +1318,7 @@ impl TeleArkApp {
                 )
                 .child(
                     div()
-                        .mt_3()
+                        .mt_2()
                         .text_xs()
                         .text_color(theme::text_secondary())
                         .child(
@@ -1310,70 +1331,24 @@ impl TeleArkApp {
                             ),
                         ),
                 )
-            })
-            .child(
-                div()
-                    .mt_2()
-                    .min_h(px(40.0))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(components::badge(
-                        self.tr_with(
-                            "telegram-files-selected",
-                            MessageArgs::new().with(
-                                "count",
-                                format_integer(
-                                    self.locale(),
-                                    self.selected_channel_message_ids.len() as u64,
-                                ),
-                            ),
+                .child(
+                    div().flex().mt_2().child(
+                        components::compact_button(
+                            "telegram-index-next",
+                            self.tr("telegram-index-next-action"),
+                            Some(IconName::Search),
+                            false,
+                        )
+                        .ghost()
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.index_selected_telegram_chat(cx)),
                         ),
-                        Tone::Blue,
-                    ))
-                    .child(
-                        components::button(
-                            "telegram-files-select-all-results",
-                            self.tr("telegram-files-select-all"),
-                            None,
-                            false,
-                        )
-                        .disabled(result_count == 0)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_all_channel_files_selected(true, cx);
-                        })),
-                    )
-                    .child(
-                        components::button(
-                            "telegram-files-clear-selection",
-                            self.tr("telegram-files-clear-selection"),
-                            None,
-                            false,
-                        )
-                        .disabled(self.selected_channel_message_ids.is_empty())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_all_channel_files_selected(false, cx);
-                        })),
-                    )
-                    .child(div().flex_1())
-                    .when_some(channel_batch_status(self), |row, (label, tone)| {
-                        row.child(components::badge(label, tone))
-                    })
-                    .child(
-                        components::button(
-                            "telegram-batch-download",
-                            self.tr("telegram-batch-download-action"),
-                            Some(IconName::ArrowDown),
-                            true,
-                        )
-                        .debug_selector(|| "channel-files-download".into())
-                        .disabled(preparing || self.selected_channel_message_ids.is_empty())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.download_filtered_telegram_files(cx);
-                        })),
                     ),
-            )
+                )
+            })
+            .when_some(channel_batch_status(self), |toolbar, (label, tone)| {
+                toolbar.child(div().mt_2().child(components::badge(label, tone)))
+            })
             .into_any_element()
     }
 
@@ -1396,6 +1371,24 @@ impl TeleArkApp {
                 .find(|file| file.message_id == message_id)
         });
         let table = div()
+            .id("channel-file-table-viewport")
+            .debug_selector(|| "channel-file-table-viewport".into())
+            .on_scroll_wheel(
+                cx.listener(|app, event: &gpui_kit::ScrollWheelEvent, _, cx| {
+                    let down = match event.delta {
+                        gpui_kit::ScrollDelta::Pixels(delta) => delta.y < px(0.0),
+                        gpui_kit::ScrollDelta::Lines(delta) => delta.y < 0.0,
+                    };
+                    if down {
+                        app.arm_channel_history(cx);
+                    }
+                }),
+            )
+            .capture_key_down(cx.listener(|app, event: &gpui_kit::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "pagedown" | "end" | "down") {
+                    app.arm_channel_history(cx);
+                }
+            }))
             .min_w_0()
             .flex_1()
             .h_full()
@@ -1415,14 +1408,36 @@ impl TeleArkApp {
                 ),
             )
             .when(
+                matches!(self.page, Page::Channel | Page::Storage)
+                    && !self.telegram_files_exhausted,
+                |table| {
+                    table.child(
+                        components::list_footer("channel-history-footer")
+                            .justify_end()
+                            .child(
+                                components::compact_button(
+                                    "channel-earlier-history",
+                                    self.tr("channel-sync-history"),
+                                    Some(IconName::ChevronDown),
+                                    false,
+                                )
+                                .ghost()
+                                .h(px(22.0))
+                                .flex_none()
+                                .debug_selector(|| "channel-earlier-history".into())
+                                .disabled(self.channel_history_request.is_some())
+                                .on_click(
+                                    cx.listener(|app, _, _, cx| app.request_channel_history(cx)),
+                                ),
+                            ),
+                    )
+                },
+            )
+            .when(
                 self.page == Page::LegacyRecovery
                     && self.telegram_files_loading
                     && !self.telegram_files.is_empty(),
                 |table| table.child(self.render_telegram_fetch_footer(cx)),
-            )
-            .when(
-                matches!(self.page, Page::Channel | Page::Storage),
-                |table| table.child(self.render_channel_sync(cx)),
             )
             .when(
                 !self.telegram_files_loading
@@ -2053,6 +2068,160 @@ thread_local! { static FILTER_EVALUATIONS: std::cell::Cell<usize> = const { std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn compact_channel_chrome_preserves_rows_and_reveals_selection_actions(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        for appearance in [
+            teleark_runtime::AppearancePreference::Light,
+            teleark_runtime::AppearancePreference::Dark,
+        ] {
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    theme::apply_appearance(appearance, window, cx);
+                    app.storage_view = StorageView::RawFiles;
+                    app.telegram_files_exhausted = false;
+                    app.channel_batch_expanded = false;
+                    app.selected_channel_message_ids.clear();
+                    app.refresh_channel_file_table(cx);
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let heading = cx.debug_bounds("channel-page-heading").expect("heading");
+            let toolbar = cx.debug_bounds("channel-compact-toolbar").expect("toolbar");
+            let table = cx
+                .debug_bounds("channel-file-table-viewport")
+                .expect("table");
+            let earlier = cx
+                .debug_bounds("channel-earlier-history")
+                .expect("small history action");
+            let footer = cx
+                .debug_bounds("channel-history-footer")
+                .expect("history footer");
+            assert_eq!(heading.size.height, px(48.0));
+            assert!(toolbar.size.height <= px(28.0));
+            assert!(table.top() - heading.bottom() <= px(52.0));
+            assert!(
+                earlier.size.height <= px(26.0) && earlier.size.width <= px(180.0),
+                "history action: {earlier:?}"
+            );
+            assert_eq!(footer.size.height, theme::LIST_FOOTER_HEIGHT);
+            assert!(
+                cx.debug_bounds("channel-files-download").is_none(),
+                "empty selection has no disabled bulk row"
+            );
+            app.update(cx, |app, cx| {
+                let id = app.telegram_files[0].message_id;
+                app.set_channel_file_selected(id, true, cx);
+            });
+            cx.run_until_parked();
+            let action = cx
+                .debug_bounds("channel-files-download")
+                .expect("selection reveals download");
+            assert!(action.right() <= px(900.0));
+            assert_eq!(
+                cx.debug_bounds("channel-file-table-viewport")
+                    .expect("table")
+                    .top(),
+                table.top(),
+                "selection does not move the list"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn selected_rows_keep_readable_content_and_independent_checkboxes(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::ActiveTheme as _;
+
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        for (width, height) in [(900.0, 600.0), (1360.0, 760.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            {
+                let locale = teleark_i18n::SupportedLocale::EnUs;
+                for appearance in [
+                    teleark_runtime::AppearancePreference::Light,
+                    teleark_runtime::AppearancePreference::Dark,
+                ] {
+                    app.update(cx, |app, cx| {
+                        app.localizer = teleark_i18n::Localizer::new(locale).expect("catalog");
+                        app.preferences.appearance = appearance;
+                        app.selected_channel_message_ids.clear();
+                        app.show_channel_detail = false;
+                        app.refresh_channel_file_table(cx);
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    let row = cx.debug_bounds("channel-file-row-1").expect("second row");
+                    let first = cx.debug_bounds("channel-file-row-0").expect("first row");
+                    cx.simulate_click(
+                        gpui_kit::point(row.left() + px(120.0), row.center().y),
+                        Default::default(),
+                    );
+                    cx.run_until_parked();
+                    assert_eq!(cx.debug_bounds("channel-file-row-1"), Some(row));
+                    assert_eq!(first.bottom(), row.top());
+                    app.read_with(cx, |app, cx| {
+                        assert_eq!(app.channel_file_table.read(cx).selected_row(), Some(1));
+                        assert_eq!(app.selected_telegram_message_id, Some(4999));
+                        assert!(app.show_channel_detail);
+                        assert!(app.selected_channel_message_ids.is_empty());
+                    });
+                    cx.update(|window, cx| {
+                        let theme = cx.theme();
+                        let overlay = theme.table_active;
+                        assert!(overlay.a > 0.0 && overlay.a <= 0.20);
+                        assert!(
+                            window.painted_quads().iter().any(|quad| {
+                                quad.background == theme.tokens.table_active.background
+                            }),
+                            "selected row must paint the translucent theme token"
+                        );
+                        let background = gpui_kit::Rgba::from(theme.table).blend(overlay.into());
+                        let text = gpui_kit::Rgba::from(theme.foreground).blend(overlay.into());
+                        let luminance = |color: gpui_kit::Rgba| {
+                            let linear = |value: f32| {
+                                if value <= 0.04045 {
+                                    value / 12.92
+                                } else {
+                                    ((value + 0.055) / 1.055).powf(2.4)
+                                }
+                            };
+                            0.2126 * linear(color.r)
+                                + 0.7152 * linear(color.g)
+                                + 0.0722 * linear(color.b)
+                        };
+                        let (a, b) = (luminance(text), luminance(background));
+                        assert!(
+                            (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                            "selection must preserve normal-text contrast after compositing"
+                        );
+                    });
+                    cx.simulate_keystrokes("down");
+                    cx.run_until_parked();
+                    app.read_with(cx, |app, cx| {
+                        assert_eq!(app.channel_file_table.read(cx).selected_row(), Some(2));
+                        assert_eq!(app.selected_telegram_message_id, Some(4998));
+                    });
+                    let third = cx.debug_bounds("channel-file-row-2").expect("third row");
+                    cx.simulate_click(
+                        gpui_kit::point(third.left() + px(18.0), third.center().y),
+                        Default::default(),
+                    );
+                    cx.run_until_parked();
+                    app.read_with(cx, |app, _| {
+                        assert_eq!(app.selected_channel_message_ids, [4998].into());
+                        assert_eq!(app.selected_telegram_message_id, Some(4998));
+                    });
+                }
+            }
+        }
+    }
 
     #[gpui_kit::test]
     fn batch_controls_and_select_all_reuse_the_displayed_projection(

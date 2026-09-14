@@ -38,3 +38,16 @@ Protected real-account delivery, cross-device latency, long outages, real server
 
 - [Telegram channel subscriptions and updates](https://core.telegram.org/api/updates#subscribing-to-updates-of-channels-supergroups), including PTS sequencing, subscription deadlines and difference recovery.
 - Public grammers 0.10.0 APIs and the repository's existing MIT OR Apache-2.0 dependency graph. No dependency was added and no license-incompatible implementation or derived material was inspected.
+
+## Automatic account supervision (2026-09-12)
+
+[ADR 0031](0031-automatic-account-synchronization.md) supersedes this document's
+GUI-owned discovery, single synchronous execution lane and explicit history
+controls. Runtime now owns initial discovery, generation-scoped connection
+rebinding, independent bounded calls and committed source metadata publication.
+Scrolling creates a cancellable history demand; ordinary refresh controls and
+the duplicate sync footer are removed. The global inspector remains visible
+across navigation, including while locked. Capped jittered retries, authoritative
+FloodWait, PTS-based recovery and authenticated private-file projection retain
+their existing meaning. The new directory restart cache is independently
+versioned; SQLite and encrypted formats are unchanged.

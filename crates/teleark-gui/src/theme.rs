@@ -15,6 +15,8 @@ thread_local! { static DARK_PALETTE: Cell<bool> = const { Cell::new(false) }; }
 
 pub const HEADER_HEIGHT: Pixels = px(58.0);
 pub const COMPACT_CONTROL_HEIGHT: f32 = 26.0;
+pub const CHANNEL_HEADING_HEIGHT: f32 = 48.0;
+pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 // One desktop list density; batch summaries have room for a second text line.
 pub const ROW_HEIGHT: Pixels = px(24.0);
 pub const LIST_TEXT_SIZE: Pixels = px(12.0);
@@ -208,3 +210,6 @@ pub fn cyan() -> Rgba {
 pub fn cyan_soft() -> Rgba {
     color(0xe8f8fb, 0x173946)
 }
+
+/// A readable event timeline with a fixed time line in the narrow inspector.
+pub const SYNC_INSPECTOR_WIDTH: f32 = 360.0;

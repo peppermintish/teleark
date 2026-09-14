@@ -21,16 +21,18 @@ fn file(id: i64) -> TelegramFileSummary {
         size_bytes: 42,
     }
 }
-fn shared() -> Arc<Shared> {
+pub(super) fn shared() -> Arc<Shared> {
     Arc::new(Shared {
         snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
         changes: tokio::sync::watch::channel(()).0,
         deltas: Mutex::new(feed::DeltaJournal::default()),
+        sources: Mutex::new((0, Arc::new(Vec::new()))),
+        history: Mutex::new(history::Requests::default()),
         managed_id: AtomicI64::new(0),
         observation: AtomicU64::new(0),
         manifest_generation: AtomicU64::new(0),
         stop: AtomicBool::new(false),
-        active: Mutex::new(None),
+        active: Mutex::new(BTreeMap::new()),
     })
 }
 fn setup() -> (tempfile::TempDir, DesktopLibrary, Scheduler) {
@@ -111,7 +113,6 @@ fn page(pts: i32) -> ChannelReadPage {
         files: vec![],
         removed: vec![],
         edited: vec![],
-        timeout_seconds: Some(20),
         before: None,
     }
 }
@@ -218,16 +219,14 @@ fn missing_push_sequence_fetches_one_difference_and_does_not_apply_unverified_pa
 }
 
 #[test]
-fn subscribed_deadlines_stop_on_navigation_and_blank_differences_do_not_write() {
+fn completed_differences_do_not_create_polling_or_write_unchanged_rows() {
     let (_temp, library, mut scheduler) = setup();
     let shared = shared();
-    scheduler.command(Command::Observe(Some(2)));
-    scheduler.due_subscriptions(Instant::now());
     let source = Source {
         calls: RefCell::new(vec![]),
         page: RefCell::new(Some(page(50))),
     };
-    let before = Instant::now();
+    scheduler.hint(2, 0); // An actual gap signal, never viewport selection.
     step(
         &source,
         &library,
@@ -237,9 +236,8 @@ fn subscribed_deadlines_stop_on_navigation_and_blank_differences_do_not_write() 
         &shared,
         TelegramScanCancellation::new(),
     )
-    .expect("deadline check");
-    let deadline = scheduler.jobs[&2].next_check.expect("server timeout");
-    assert!(deadline >= before + Duration::from_secs(20));
+    .expect("gap recovery");
+    assert_eq!(source.calls.borrow().len(), 1);
     assert_eq!(
         library
             .cached_channel_view(1, 2, 100)
@@ -249,15 +247,13 @@ fn subscribed_deadlines_stop_on_navigation_and_blank_differences_do_not_write() 
     );
     assert_eq!(shared.snapshot.lock().expect("snapshot").committed_pages, 0);
     scheduler.queue.clear();
-    scheduler.due_subscriptions(deadline - Duration::from_millis(1));
-    assert!(scheduler.queue.is_empty());
-    scheduler.command(Command::Observe(None));
-    scheduler.due_subscriptions(deadline);
-    assert!(scheduler.queue.is_empty());
-    // The private protection interest survives closing the visible channel.
-    handle_command(Command::Watch(2), &library, 1, &mut scheduler, &shared);
-    scheduler.command(Command::Observe(None));
-    assert!(scheduler.jobs[&2].followed);
+    for seconds in [1, 20, 60, 900, 86400] {
+        assert_eq!(
+            scheduler.pop(Instant::now() + Duration::from_secs(seconds)),
+            None
+        );
+        assert!(!needed(&scheduler.jobs[&2]));
+    }
 }
 
 #[test]
@@ -438,4 +434,225 @@ fn failed_watch_registration_never_starts_remote_work_and_can_retry() {
         !job.state.as_ref().expect("fresh source").repair_pending,
         "fresh seeds do not re-download their own rows"
     );
+}
+
+#[test]
+fn transient_failure_recovers_after_more_than_three_attempts_without_refresh() {
+    let (_temp, library, mut scheduler) = setup();
+    let shared = shared();
+    scheduler.hint(2, 51);
+    let mut now = Instant::now();
+    for attempt in 0..12 {
+        assert_eq!(scheduler.pop(now), Some(2));
+        let job = scheduler.jobs.get_mut(&2).expect("job");
+        let before = job.state.clone();
+        let error = ChannelSyncFailure {
+            kind: ApplicationErrorKind::Network,
+            retry_after: None,
+        };
+        assert_eq!(job.fail(&error, now, 0), ChannelSyncPhase::Waiting);
+        assert!(!job.paused);
+        assert_eq!(job.retries, attempt + 1);
+        assert_eq!(job.state, before, "a failed read cannot advance the cursor");
+        let deadline = job.retry_at.expect("automatic retry");
+        assert!(deadline > now && deadline <= now + Duration::from_secs(60));
+        scheduler.enqueue(2);
+        // Another channel continues while this channel waits.
+        scheduler.hint(3, 51);
+        assert_eq!(scheduler.pop(now), Some(3));
+        assert_eq!(scheduler.pop(deadline - Duration::from_nanos(1)), None);
+        now = deadline;
+    }
+    assert_eq!(scheduler.pop(now), Some(2));
+    let source = Source {
+        calls: RefCell::new(vec![]),
+        page: RefCell::new(Some(page(51))),
+    };
+    step(
+        &source,
+        &library,
+        1,
+        2,
+        scheduler.jobs.get_mut(&2).expect("job"),
+        &shared,
+        TelegramScanCancellation::new(),
+    )
+    .expect("recovers automatically");
+    assert_eq!(
+        library
+            .cached_channel_view(1, 2, 200)
+            .expect("cache")
+            .revision,
+        2
+    );
+}
+
+#[test]
+fn retry_policy_is_bounded_jittered_and_classified_without_error_prose() {
+    for (attempt, seconds) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
+        let lower = recovery_delay(ApplicationErrorKind::Server, attempt as u32, 0).expect("retry");
+        let upper = recovery_delay(ApplicationErrorKind::Server, attempt as u32, seconds * 500)
+            .expect("retry");
+        assert_eq!(lower, Duration::from_millis(seconds * 500));
+        assert_eq!(upper, Duration::from_secs(seconds));
+    }
+    assert!(
+        recovery_delay(ApplicationErrorKind::Network, u32::MAX, u64::MAX).expect("saturates")
+            <= Duration::from_secs(60)
+    );
+    for kind in [
+        ApplicationErrorKind::Authorization,
+        ApplicationErrorKind::PermissionDenied,
+        ApplicationErrorKind::Persistence,
+        ApplicationErrorKind::Cancelled,
+    ] {
+        assert_eq!(recovery_delay(kind, 0, 0), None);
+    }
+}
+
+#[test]
+fn server_deadline_overrides_jitter_and_storage_failure_preserves_committed_state() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    let job = scheduler.jobs.get_mut(&2).expect("job");
+    let original = job.state.clone();
+    assert_eq!(
+        job.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Server,
+                retry_after: Some(Duration::from_secs(120))
+            },
+            now,
+            0
+        ),
+        ChannelSyncPhase::RateLimited
+    );
+    assert_eq!(job.retry_at, Some(now + Duration::from_secs(120)));
+    scheduler.command(Command::History(2));
+    scheduler.command(Command::Refresh(2));
+    assert_eq!(scheduler.pop(now + Duration::from_secs(119)), None);
+    assert_eq!(scheduler.pop(now + Duration::from_secs(120)), Some(2));
+    let job = scheduler.jobs.get_mut(&2).expect("job");
+    assert_eq!(
+        job.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Persistence,
+                retry_after: None
+            },
+            now,
+            0
+        ),
+        ChannelSyncPhase::Failed
+    );
+    assert!(job.paused);
+    assert_eq!(job.retry_at, None);
+    assert_eq!(job.state, original);
+}
+
+#[test]
+fn resumed_delivery_wakes_network_retries_but_never_shortens_flood_wait() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    scheduler.hint(2, 51);
+    let job = scheduler.jobs.get_mut(&2).expect("job");
+    job.retries = 10;
+    job.fail(
+        &ChannelSyncFailure {
+            kind: ApplicationErrorKind::Network,
+            retry_after: None,
+        },
+        now,
+        0,
+    );
+    scheduler.transport_available(now, Some(now + Duration::from_secs(120)));
+    assert_eq!(
+        scheduler.pop(now),
+        None,
+        "delivery cannot bypass server embargo"
+    );
+    scheduler.transport_available(now, None);
+    assert_eq!(
+        scheduler.pop(now),
+        Some(2),
+        "delivery wakes the queued network retry"
+    );
+    let job = scheduler.jobs.get_mut(&2).expect("job");
+    job.fail(
+        &ChannelSyncFailure {
+            kind: ApplicationErrorKind::Server,
+            retry_after: None,
+        },
+        now,
+        0,
+    );
+    scheduler.enqueue(2);
+    scheduler.transport_available(now, None);
+    assert_eq!(
+        scheduler.pop(now),
+        None,
+        "server backoff survives network delivery"
+    );
+}
+
+#[test]
+fn completion_time_survives_history_eviction_and_failures_are_not_successes() {
+    let shared = shared();
+    assert_eq!(
+        shared.snapshot.lock().expect("snapshot").last_completed_at,
+        None
+    );
+    publish_completed(&shared, Some(2));
+    let completed = shared.snapshot.lock().expect("snapshot").last_completed_at;
+    assert!(completed.is_some());
+    for _ in 0..EVENT_CAPACITY {
+        publish(&shared, ChannelSyncPhase::Receiving, Some(2), None, None);
+        publish(
+            &shared,
+            ChannelSyncPhase::Failed,
+            Some(2),
+            Some(ApplicationErrorKind::Network),
+            None,
+        );
+    }
+    publish(&shared, ChannelSyncPhase::Cancelled, Some(2), None, None);
+    publish(&shared, ChannelSyncPhase::Idle, None, None, None);
+    let snapshot = shared.snapshot.lock().expect("snapshot");
+    assert_eq!(snapshot.last_completed_at, completed);
+    assert!(snapshot.dropped_events > 0);
+    assert_eq!(ChannelSyncSnapshot::new(99, 0).last_completed_at, None);
+}
+
+#[test]
+fn silence_recovery_is_postponed_by_delivery_and_metadata_hints_are_coalesced() {
+    let now = Instant::now();
+    assert_eq!(
+        source_reconciliation_deadline(now, now, false),
+        now + Duration::from_secs(420)
+    );
+    let delivered = now + Duration::from_secs(419);
+    assert_eq!(
+        source_reconciliation_deadline(now, delivered, false),
+        delivered + Duration::from_secs(420)
+    );
+    assert_eq!(
+        source_reconciliation_deadline(now, delivered, true),
+        now + Duration::from_secs(1)
+    );
+}
+
+#[test]
+fn message_pts_alone_does_not_rebuild_source_metadata() {
+    let shared = shared();
+    let mut sources = vec![chat(2)];
+    publish_sources(&shared, &sources);
+    let revision = shared.sources.lock().expect("sources").0;
+    let mut subscription = shared.changes.subscribe();
+    sources[0].sync_pts = Some(999);
+    publish_sources(&shared, &sources);
+    assert_eq!(shared.sources.lock().expect("sources").0, revision);
+    assert!(!subscription.has_changed().expect("no metadata change"));
+    sources[0].name = "Renamed".into();
+    publish_sources(&shared, &sources);
+    assert!(subscription.has_changed().expect("rename event"));
+    subscription.borrow_and_update();
 }

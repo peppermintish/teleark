@@ -148,9 +148,6 @@ enum TelegramRequest {
             >,
         >,
     },
-    ChannelSignals {
-        reply: mpsc::SyncSender<Result<teleark_telegram::ChannelUpdateSignals, ApplicationError>>,
-    },
     SyncChannel {
         account_id: i64,
         chat_id: i64,
@@ -178,7 +175,6 @@ enum TelegramRequest {
         title: String,
         description: String,
         random_id: i64,
-        archive: bool,
         progress: crate::StorageMaintenance,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
@@ -345,14 +341,6 @@ impl DesktopTelegram {
         })
         .map_err(crate::channel_sync::ChannelSyncFailure::from)?
     }
-    pub(crate) fn channel_signals(
-        &self,
-    ) -> Result<teleark_telegram::ChannelUpdateSignals, ApplicationError> {
-        self.request("channel_signals", |reply| TelegramRequest::ChannelSignals {
-            reply,
-        })
-    }
-
     pub(crate) fn sync_channel(
         &self,
         account_id: i64,
@@ -484,7 +472,6 @@ impl DesktopTelegram {
         account_id: i64,
         title: String,
         description: String,
-        archive: bool,
         progress: crate::StorageMaintenance,
     ) -> Result<(), ApplicationError> {
         let result = (|| {
@@ -498,19 +485,15 @@ impl DesktopTelegram {
                 .fill_bytes(&mut bytes)
                 .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
             let proposed = (i64::from_le_bytes(bytes) & i64::MAX).max(1);
-            let random_id = if archive {
-                proposed
-            } else {
-                library.worker.request("storage_repair_token", |reply| {
-                    crate::StorageRequest::StorageRepairToken {
-                        account: account_id,
-                        chat: chat_id,
-                        proposed,
-                        clear: false,
-                        reply,
-                    }
-                })?
-            };
+            let random_id = library.worker.request("storage_repair_token", |reply| {
+                crate::StorageRequest::StorageRepairToken {
+                    account: account_id,
+                    chat: chat_id,
+                    proposed,
+                    clear: false,
+                    reply,
+                }
+            })?;
             self.request("maintain_storage_channel", |reply| {
                 TelegramRequest::MaintainStorage {
                     account_id,
@@ -518,22 +501,19 @@ impl DesktopTelegram {
                     title,
                     description,
                     random_id,
-                    archive,
                     progress: progress.clone(),
                     reply,
                 }
             })?;
-            if !archive {
-                library.worker.request("storage_repair_complete", |reply| {
-                    crate::StorageRequest::StorageRepairToken {
-                        account: account_id,
-                        chat: chat_id,
-                        proposed: random_id,
-                        clear: true,
-                        reply,
-                    }
-                })?;
-            }
+            library.worker.request("storage_repair_complete", |reply| {
+                crate::StorageRequest::StorageRepairToken {
+                    account: account_id,
+                    chat: chat_id,
+                    proposed: random_id,
+                    clear: true,
+                    reply,
+                }
+            })?;
             Ok(())
         })();
         progress.finish(result.as_ref().err().map(ApplicationError::kind));
@@ -1023,9 +1003,6 @@ impl TelegramRequest {
             Self::SyncSources { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
-            Self::ChannelSignals { reply, .. } => {
-                let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
-            }
             Self::SyncChannel { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
@@ -1095,8 +1072,7 @@ impl TelegramRequest {
             | Self::DownloadBytes { .. }
             | Self::UploadBytes { .. }
             | Self::UploadStream { .. } => Lane::Transfer,
-            Self::ChannelSignals { .. }
-            | Self::SyncChannel { .. }
+            Self::SyncChannel { .. }
             | Self::AccountAvatar { .. }
             | Self::ScanPage { .. }
             | Self::ScanFilteredFiles { .. }
@@ -1187,9 +1163,6 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             };
             let _ = reply.send(Ok(result));
         }
-        TelegramRequest::ChannelSignals { reply } => {
-            let _ = reply.send(connection_ref(state).map(|c| c.channel_update_signals()));
-        }
         TelegramRequest::SyncChannel {
             account_id,
             chat_id,
@@ -1239,7 +1212,6 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             title,
             description,
             random_id,
-            archive,
             progress,
             reply,
         } => {
@@ -1251,11 +1223,7 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
                     let chat = state.chats.get(&chat_id).ok_or_else(|| ApplicationError::new(ApplicationErrorKind::StorageAccessDenied))?;
                     let connection = connection_ref(state)?;
                     let observe = |phase| progress.phase(phase);
-                    if archive {
-                        connection.archive_bound_storage(chat, account_id, &progress.cancellation, &observe).await
-                    } else {
-                        connection.repair_bound_storage(chat, account_id, (&title, &description), random_id, &progress.cancellation, &observe).await
-                    }.map_err(map_telegram_error)
+                    connection.repair_bound_storage(chat, account_id, (&title, &description), random_id, &progress.cancellation, &observe).await.map_err(map_telegram_error)
                 }) => result.unwrap_or_else(|_| Err(ApplicationError::new(ApplicationErrorKind::Network))),
             };
             let _ = reply.send(result);
@@ -1900,7 +1868,6 @@ async fn channel_read(
                 history_gap: page.history_gap,
                 before: None,
                 edited: page.edited,
-                timeout_seconds: page.timeout_seconds,
             })
         }
         ChannelRead::History(before) | ChannelRead::GapHistory(before) => {
@@ -1917,7 +1884,6 @@ async fn channel_read(
                 history_gap: false,
                 before,
                 edited: Vec::new(),
-                timeout_seconds: None,
             })
         }
         ChannelRead::Verify(ids) => {
@@ -1933,7 +1899,6 @@ async fn channel_read(
                 history_gap: false,
                 before: None,
                 edited: Vec::new(),
-                timeout_seconds: None,
             })
         }
         ChannelRead::ManagedManifests => {
@@ -1949,7 +1914,6 @@ async fn channel_read(
                 complete: true,
                 history_gap: false,
                 before: None,
-                timeout_seconds: None,
             })
         }
         ChannelRead::Push => {

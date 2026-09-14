@@ -404,8 +404,7 @@ detail-message-id = 消息 ID
 detail-local-path = 本地路径
 detail-speed = 传输速度
 detail-downloaded = 已下载
-
-
+detail-concurrency-limits = 配置的并发上限
 detail-retries = 重试次数
 detail-created = 创建时间
 detail-started = 开始时间
@@ -1111,7 +1110,6 @@ local-file-status = 本地文件
 transfer-download-again = 重新下载
 
 upload-selection-summary = { $count } 个文件 · { $size }
-upload-batch-limit = 一次最多选择 128 个文件，每个文件均独立保存。
 upload-remove-file = 从选择中移除文件
 upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
@@ -1238,12 +1236,7 @@ channel-sync-waiting = 等待重试
 channel-sync-idle = 正在监听更新
 channel-sync-failed = 同步需要处理
 channel-sync-cancelled = 同步已暂停
-channel-sync-status = { $phase } · { $queued } 个排队中
 channel-sync-history = 更早历史
-channel-sync-timing = 当前阶段：{ $duration } · 最近活动：{ $activity }前
-channel-sync-retry-after = 将在 { $duration }后重试
-channel-sync-event = { $age }前 · { $phase }
-channel-sync-retention = 已省略的较早事件：{ $dropped } · 需要重新核对的溢出信号：{ $overflow }
 channel-sync-empty = 本地尚无文件缓存，后台同步会更新此列表。
 channel-sync-seeding = 正在准备首次本地缓存
 channel-sync-history-loading = 正在接收请求的更早历史
@@ -1281,8 +1274,6 @@ managed-scan-failed = 清单核验失败
 managed-scan-cancelled = 清单核验已取消
 managed-sync-retry = 文件同步将在等待 { $seconds } 秒后自动重试。您可以继续使用 TeleArk。
 managed-scan-unknown = 未知
-managed-scan-progress = { $phase } · { $done } / { $total }
-managed-scan-detail = { $phase } · { $done } / { $total } 份清单 · { $cached } 份未变更 · { $rejected } 份被拒绝 · 本阶段 { $duration } · 上次活动于 { $activity } 前
 
 transfer-session-log-omitted-label = 日志缺口
 transfer-session-log-omitted-count = 本次运行的所有传输：已省略 { $count } 条日志记录
@@ -1293,15 +1284,13 @@ transfer-lifecycle-history-omitted = 已省略 { $count } 条较早的状态事�
 transfer-footer-total-retained = 当前显示 { $count }
 
 telegram-error-server = Telegram 服务器未能处理此请求。登录仍然有效，请稍后重试。
-dialogs-reading = 正在加载频道列表 · 等待 Telegram 响应
-dialogs-waiting = 频道列表 · 即将重试（最多尝试 3 次）
-dialogs-saving = 频道列表 · 正在保存已验证的结果
-dialogs-complete = 频道列表已更新
-dialogs-failed = 频道列表暂不可用 · 本地数据已保留
-dialogs-cancelled = 已取消频道列表加载
-dialogs-timing = 当前阶段 / 距上次活动：{ $elapsed }
-dialogs-details = 频道列表加载详情
-dialogs-attempt = 第 { $attempt } 次尝试，最多 3 次
+dialogs-reading = 正在准备工作区
+dialogs-waiting = 工作区准备 · 即将重试
+dialogs-saving = 正在激活已保存的传输
+dialogs-complete = 工作区已就绪
+dialogs-failed = 工作区需要处理 · 本地数据已保留
+dialogs-cancelled = 已取消工作区准备
+dialogs-details = 工作区准备
 
 activity-state-queued = 排队中
 activity-state-running = 进行中
@@ -1311,7 +1300,7 @@ activity-state-complete = 已完成
 activity-state-failed = 需要处理
 activity-state-cancelled = 已取消
 activity-last-response = 最近一次响应
-dialogs-task-title = 频道目录
+dialogs-task-title = 工作区准备
 activity-history-title = 状态变化
 activity-history-time-origin = 自本次开始计时 · 最新在前
 activity-history-show-all = 查看全部 { $count } 条变化
@@ -1388,15 +1377,12 @@ storage-health-access = 无法访问已绑定频道，或你不再拥有该频�
 storage-health-unsafe = 存储频道必须私有且没有其他成员。请在 Telegram 中调整配置后重新检查。
 storage-health-unsupported = 此频道使用较新的身份格式。请升级 TeleArk；数据已保留。
 storage-repair-action = 查看频道修改内容
-storage-archive-action = 静音并归档频道
-storage-repair-confirm = 要在当前频道执行以上修改吗？现有频道简介将替换为 TeleArk 的说明及识别消息引用。
-storage-archive-confirm = 现在关闭此频道的消息通知，并将它移入 Telegram 的“已归档聊天”吗？文件仍保留在这个频道中。这只执行一次；之后你在 Telegram 中的修改会被保留。
+storage-repair-confirm = 要按以上步骤修复当前频道吗？TeleArk 将恢复识别消息及频道简介引用，然后将频道静音并归档。所有步骤都会执行。
 storage-maintenance-confirm = 确认
 storage-maintenance-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
 storage-maintenance-omitted = 已省略 { $count } 条较早的时间线事件
 storage-maintenance-preview = 仅预览，未修改 Telegram。
-storage-repair-completed = TeleArk 识别消息已就绪并置顶，频道简介已引用该消息，检查已通过。此操作未恢复缺失的文件数据。
-storage-archive-completed = 频道已静音并归档。
+storage-repair-completed = 频道识别消息、置顶和简介引用已核验，频道已静音并归档。此操作未恢复缺失的文件数据。
 storage-phase-checking = 正在检查账号、绑定和私密配置
 storage-phase-finding = 正在查找现有身份说明
 storage-phase-repairing = 正在恢复身份说明
@@ -1444,17 +1430,17 @@ vault-session-unlock-policy = 同一账户会话解锁一次。切换页面或�
 vault-locked-file = 加密文件 · 已锁定
 vault-locked-detail = 解锁后查看
 upload-batch-still-running = 当前批次正在上传。可以先准备下一批，完成后再提交。
-storage-repair-title = 恢复当前频道的 TeleArk 识别信息
+storage-repair-title = 修复当前 TeleArk 频道
 storage-connected-title = 私人频道已连接
 storage-repair-reason-missing = TeleArk 识别消息或频道简介中指向该消息的引用缺失。
 storage-repair-reason-invalid = 频道引用的识别消息与当前账户或频道不匹配。
 storage-repair-reason-unpinned = TeleArk 识别消息已取消置顶。
-storage-repair-explanation = TeleArk 通过这条消息和频道简介识别你的存储频道。恢复识别信息将执行：
+storage-repair-explanation = TeleArk 将按以下固定步骤修复此存储频道：
 storage-repair-step-message = 复用有效的 TeleArk 识别消息；找不到时，在当前频道补发一条。
 storage-repair-step-pin = 将这条识别消息置顶。
 storage-repair-step-description = 将频道简介替换为 TeleArk 的说明及该消息的引用，再检查修改结果。
 storage-repair-scope = 已有文件消息、频道名称、成员和隐私设置保持不变。此操作不会恢复缺失的文件数据。
-storage-repair-confirm-action = 恢复频道识别信息
+storage-repair-confirm-action = 修复频道
 storage-channel-options = 其他频道操作
 storage-recheck-action = 重新检查频道
 storage-location-title = TeleArk 如何定位这个频道
@@ -1462,18 +1448,33 @@ storage-location-target = 频道：{ $title } · ID { $id }
 storage-location-bound = 本次通过当前 Telegram 账户在本机保存的频道 ID 找到此频道，并检查你是否拥有该频道及其私人配置。频道改名或识别消息缺失不会改变已保存的目标；TeleArk 不会按名称猜测并替换为其他频道。
 storage-location-method = TeleArk 按 Telegram 账户分别保存这个频道的 ID，后续通过该 ID 定位。没有已保存的绑定时，会在你拥有的私人频道中核验 TeleArk 识别信息：唯一匹配才会连接；没有匹配时才创建私人频道；多个匹配时需要选择。频道名称本身不是识别依据。
 storage-notifications-title = 通知与已归档聊天
-storage-notifications-explanation = 点击并确认“静音并归档频道”后，TeleArk 会关闭此频道的消息通知，并将它移入 Telegram 的“已归档聊天”。这只执行一次；之后你可以在 Telegram 中取消静音或取消归档，TeleArk 会尊重你的修改。恢复识别信息不会自动执行静音或归档。归档不会移动或删除频道里的文件。
+storage-notifications-explanation = TeleArk 会在每次修复频道时关闭该频道的消息通知，并将它移入 Telegram 的“已归档聊天”。这是修复的固定默认设置，不提供单独开关。你可以查看操作说明，并选择是否修复频道。归档不会移动或删除已存储的文件。
+storage-repair-step-archive = 关闭频道消息通知，将频道移入“已归档聊天”，并核验这两项设置。
+upload-drop-files = 将文件拖入此上传窗口即可添加，也可以点击选择文件。
+upload-files-independent = 每个文件均独立保存。
+upload-folders-unsupported = 暂不支持文件夹。
+upload-selection-queued = 等待选择文件或上传任务开始
+upload-selection-checking-files = 正在检查文件信息
+upload-selection-checking-channel = 正在检查私人频道
+upload-selection-uploading = 正在上传文件
+upload-selection-finished = 处理已结束
+upload-selection-cancelling = 正在停止，等待当前操作安全结束…
+upload-selection-inspecting = 已检查 { $inspected } / { $total } 个所选路径。
+upload-selection-counts = { $total } 个文件 · { $completed } 已上传 · { $paused } 已暂停 · { $failed } 失败 · { $cancelled } 已取消 · { $pending } 未处理
+upload-selection-timing = 当前阶段已用时 { $elapsed } · 距上次活动 { $idle }
+upload-selection-retention = 详细记录保留最近的处理批次；这里的总计包含全部所选文件。
+upload-selection-history-entry = { $time }：{ $phase }
+
+transfer-batch-open-window = 在独立窗口中查看批次
+transfer-batch-window-title = 批次文件
+transfer-batch-unavailable = 当前任务历史中已没有此批次。
+transfer-batch-window-live = 实时进度 · 关闭此窗口不会停止传输
 
 transfer-history-restoring = 正在恢复上传记录
-
 transfer-upload-interrupted = 已中断
-
 transfer-upload-interrupted-reason = 应用关闭时，此上传尚未确认完成。
-
 transfer-upload-interrupted-action = 请在上传页重新选择源文件开始上传。如果中断发生在发布阶段，请先检查存储中的文件。
-
 transfer-history-restored-label = 已恢复的历史记录
-
 transfer-history-restored-detail = 已恢复保存的任务汇总；实时图表与详细活动未恢复。
 
 detail-vault-lifecycle-durable-upload = 任务汇总保存在本地。重启后，未完成的上传会标记为已中断；请重新选择源文件开始上传。
@@ -1500,101 +1501,77 @@ speed-limits-event = { $event } · { $seconds } 秒前
 speed-limits-omitted = 已省略 { $count } 条较早事件；每个方向保留最近 16 条。
 speed-limits-close = 关闭
 
-channel-sync-event-at = { $time } · { $phase }
+global-sync-connecting = 等待账号连接
+global-sync-discovering = 正在更新频道列表
+global-sync-account = 账号
 
-transfer-upload-pausing = 正在暂停，保留已确认的进度
+global-sync-library = 正在更新文件库
+global-sync-library-failed = 文件库更新需要处理
 
-native-cleanup-unsupported = 应用无法安全完成此次清理，临时文件已保留。请更新应用后再尝试。
 
-transfer-recovery-unavailable-detail = 保存的恢复信息已损坏或版本暂不受支持。原始记录和文件已保留。
+# Fixed synchronization event timestamps
+sync-last-completed = 上次完成时间
+sync-no-completion = 尚无已完成的同步
+sync-event-time = 事件时间：{ $time }
+sync-event-completed = 同步完成
+sync-file-verification = 文件验证
+sync-recent-events = 最近活动
+sync-no-events = 暂无事件
+sync-older-events = 部分较早的活动已不再显示。
+sync-event-times-local = 事件时间 · 本地时间
 
-upload-selection-counts = { $total } 个文件 · { $completed } 已上传 · { $paused } 已暂停 · { $failed } 失败 · { $cancelled } 已取消 · { $pending } 未处理
+sync-silence-policy = 连续 { $minutes } 分钟未收到频道更新时进行恢复核对。
+channel-file-count = { $count } 个文件
+channel-select-all-compact = 全选
+channel-download-compact = 下载
+shell-sync-complete = 已同步
+shell-sync-ready = 就绪
+shell-sync-active = 正在同步
+shell-sync-active-channel = 正在同步 1 个频道
+shell-sync-active-channels = 正在同步 { $count } 个频道
+shell-sync-active-attention = 正在同步 { $count } 个频道 · 有问题待处理
+shell-sync-connecting = 正在连接
+shell-sync-waiting = 等待同步
+shell-sync-paused = 同步已暂停
+shell-sync-attention = 同步需要处理
+shell-sync-details = 查看同步活动
+shell-vault-locked = 已锁定 · 后台任务继续运行
 
-native-cleanup-failed = 临时文件需要处理
-
-transfer-recovery-legacy-guidance = 此历史任务没有可用的恢复操作。请保留记录和文件。较新版本的恢复数据可能需要兼容的应用版本；否则请开始新传输。存在历史记录并不代表数据可以续传。
-
-transfer-recovery-source-guidance = 当前源文件无法用于继续此上传。请保留原文件，并尽可能恢复访问。文件准备好后，从“上传”开始新任务；此停止的任务会保留在历史记录中。
-
-transfer-recovery-unavailable = 暂时无法恢复
-
-storage-guide-transfers-title = 5. 暂停和继续传输
-
-transfer-recovery-verification-pending = 复用数据前会先校验本地保存的进度。
-
-storage-guide-resume-title = 6. 了解恢复限制
-
-transfer-recovery-retry-guidance = 此任务可以重试。处理上述原因后，在任务行选择“重试”。TeleArk 会先检查已保存的进度再复用；失败任务不会自动重试。
-
-native-cleanup-waiting = 等待下载停止
-
-native-cleanup-finished = 临时文件清理完成
-
-native-cleanup-error-guidance = { $error } 临时文件已保留。解决问题后可重试，清理成功后才会开始下载。
-
-transfer-upload-saving-recovery = 保存续传信息
-
-upload-selection-saving-queue = 正在保存上传队列
-
-transfer-recovery-key-guidance = 打开“设置 → 密钥库”，解锁此文件所需的密钥。如果任务没有“继续”或“重试”操作，请在解锁后开始新传输。保留原始源文件和任何未完成的下载文件。
-
-detail-concurrency-limits = 配置的并发上限
-
-transfer-recovery-saved-download = 已保存的下载任务
-
-native-cleanup-explanation = 取消请求已保存。清理会等待旧下载释放文件，已完成的文件会保留。
-
-native-cleanup-removing = 正在清理临时文件
-
-transfer-upload-cancelling = 正在取消，等待后台工作停止
-
-storage-guide-transfers-body = “传输”中的每个任务会显示支持的操作。暂停会等待正在执行的工作安全停止；继续前会检查已保存的数据。请勿修改上传源文件或移动未完成的下载文件。取消会停止任务，但不会撤回已经发送的数据。
-
-transfer-recovery-blocked-guidance = 此任务目前无法继续。请先处理上述原因，再开始新传输。保留原始源文件和任何未完成的下载文件；新任务可能需要重新传输数据。
+shell-sync-queued = 同步已排队
 
 transfer-upload-checking-source = 校验源文件以确保安全续传
+transfer-upload-saving-recovery = 保存续传信息
 
-native-cleanup-retry-waiting = 重试请求已保存，临时文件安全清理后将开始重试。
+transfer-upload-pausing = 正在暂停，保留已确认的进度
+transfer-upload-cancelling = 正在取消，等待后台工作停止
 
-upload-selection-saved-count = 已将 { $saved } / { $total } 个文件保存到上传队列。
+transfer-recovery-unavailable = 暂时无法恢复
+transfer-recovery-unavailable-detail = 保存的恢复信息已损坏或版本暂不受支持。原始记录和文件已保留。
+transfer-recovery-verification-pending = 复用数据前会先校验本地保存的进度。
+transfer-recovery-saved-download = 已保存的下载任务
 
-native-cleanup-detail = { $reason } · 等待：{ $elapsed } · 最后活动：{ $last }
-
+transfer-recovery-retry-guidance = 此任务可以重试。处理上述原因后，在任务行选择“重试”。TeleArk 会先检查已保存的进度再复用；失败任务不会自动重试。
+transfer-recovery-source-guidance = 当前源文件无法用于继续此上传。请保留原文件，并尽可能恢复访问。文件准备好后，从“上传”开始新任务；此停止的任务会保留在历史记录中。
+transfer-recovery-key-guidance = 打开“设置 → 密钥库”，解锁此文件所需的密钥。如果任务没有“继续”或“重试”操作，请在解锁后开始新传输。保留原始源文件和任何未完成的下载文件。
+transfer-recovery-blocked-guidance = 此任务目前无法继续。请先处理上述原因，再开始新传输。保留原始源文件和任何未完成的下载文件；新任务可能需要重新传输数据。
+transfer-recovery-legacy-guidance = 此历史任务没有可用的恢复操作。请保留记录和文件。较新版本的恢复数据可能需要兼容的应用版本；否则请开始新传输。存在历史记录并不代表数据可以续传。
+storage-guide-transfers-title = 5. 暂停和继续传输
+storage-guide-transfers-body = “传输”中的每个任务会显示支持的操作。暂停会等待正在执行的工作安全停止；继续前会检查已保存的数据。请勿修改上传源文件或移动未完成的下载文件。取消会停止任务，但不会撤回已经发送的数据。
+storage-guide-resume-title = 6. 了解恢复限制
 storage-guide-resume-body = 重启并解锁后，符合条件的排队任务可以继续。暂停任务等待手动继续；失败任务需要处理。打开任务可查看原因和下一步操作。旧历史记录或损坏的恢复数据可能需要新建任务；源文件、密钥或 Telegram 文件变化也可能导致无法恢复。
 
-transfer-batch-open-window = 在独立窗口中查看批次
+upload-selection-saving-queue = 正在保存上传队列
+upload-selection-saved-count = 已将 { $saved } / { $total } 个文件保存到上传队列。
 
-transfer-batch-unavailable = 当前任务历史中已没有此批次。
-
-transfer-batch-window-live = 实时进度 · 关闭此窗口不会停止传输
-
-transfer-batch-window-title = 批次文件
-
-upload-drop-files = 将文件拖入此上传窗口即可添加，也可以点击选择文件。
-
-upload-files-independent = 每个文件均独立保存。
-
-upload-folders-unsupported = 暂不支持文件夹。
-
-upload-selection-cancelling = 正在停止，等待当前操作安全结束…
-
-upload-selection-checking-channel = 正在检查私人频道
-
-upload-selection-checking-files = 正在检查文件信息
-
-upload-selection-finished = 处理已结束
-
-upload-selection-history-entry = { $time }：{ $phase }
-
-upload-selection-inspecting = 已检查 { $inspected } / { $total } 个所选路径。
-
-upload-selection-queued = 等待选择文件或上传任务开始
-
-upload-selection-retention = 详细记录保留最近的处理批次；这里的总计包含全部所选文件。
-
-upload-selection-timing = 当前阶段已用时 { $elapsed } · 距上次活动 { $idle }
-
-upload-selection-uploading = 正在上传文件
+native-cleanup-waiting = 等待下载停止
+native-cleanup-removing = 正在清理临时文件
+native-cleanup-failed = 临时文件需要处理
+native-cleanup-explanation = 取消请求已保存。清理会等待旧下载释放文件，已完成的文件会保留。
+native-cleanup-retry-waiting = 重试请求已保存，临时文件安全清理后将开始重试。
+native-cleanup-detail = { $reason } · 等待：{ $elapsed } · 最后活动：{ $last }
+native-cleanup-finished = 临时文件清理完成
+native-cleanup-unsupported = 应用无法安全完成此次清理，临时文件已保留。请更新应用后再尝试。
+native-cleanup-error-guidance = { $error } 临时文件已保留。解决问题后可重试，清理成功后才会开始下载。
 
 settings-upload-tasks = 同时上传任务数
 settings-upload-parts = 每个上传任务并行的 512 KiB part 数

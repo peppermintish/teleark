@@ -294,6 +294,7 @@ mod tests {
                                 cx,
                             );
                             app.preferences.sidebar_collapsed = collapsed;
+                            app.selected_channel_message_ids.insert(5000);
                             cx.notify();
                         })
                     });
@@ -312,8 +313,8 @@ mod tests {
                     assert_eq!(panel.size.width, px(if collapsed { 336.0 } else { 216.0 }));
                     assert!(content.size.width >= px(crate::layout::CHANNEL_CONTENT_MIN_WIDTH));
                     assert!(content.right() <= px(900.0) && content.bottom() <= px(600.0));
+                    assert!(cx.debug_bounds("channel-files-refresh").is_none());
                     for selector in [
-                        "channel-files-refresh",
                         "channel-filter-toggle",
                         "channel-files-download",
                         "channel-list-width-feedback",

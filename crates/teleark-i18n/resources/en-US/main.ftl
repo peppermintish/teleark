@@ -432,8 +432,7 @@ detail-message-id = Message ID
 detail-local-path = Local Path
 detail-speed = Transfer speed
 detail-downloaded = Downloaded
-
-
+detail-concurrency-limits = Concurrency limits
 detail-retries = Retries
 detail-created = Created
 detail-started = Started
@@ -1139,7 +1138,6 @@ local-file-status = Local file
 transfer-download-again = Download again
 
 upload-selection-summary = { $count } files · { $size }
-upload-batch-limit = Choose up to 128 files. Each file remains an independent TeleArk file.
 upload-remove-file = Remove file from selection
 upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
@@ -1265,12 +1263,7 @@ channel-sync-waiting = Waiting to retry
 channel-sync-idle = Listening for updates
 channel-sync-failed = Sync needs attention
 channel-sync-cancelled = Sync paused
-channel-sync-status = { $phase } · { $queued } queued
 channel-sync-history = Earlier history
-channel-sync-timing = Phase: { $duration } · Last activity: { $activity } ago
-channel-sync-retry-after = Retry in { $duration }
-channel-sync-event = { $age } ago · { $phase }
-channel-sync-retention = Older timeline events omitted: { $dropped } · Overflow signals requiring reconciliation: { $overflow }
 channel-sync-empty = No files in the local cache yet. Background synchronization will update this view.
 channel-sync-seeding = Preparing the initial local cache
 channel-sync-history-loading = Receiving requested earlier history
@@ -1308,8 +1301,6 @@ managed-scan-failed = Manifest verification failed
 managed-scan-cancelled = Manifest verification cancelled
 managed-sync-retry = File sync will retry automatically after a { $seconds }-second wait. You can keep using TeleArk.
 managed-scan-unknown = unknown
-managed-scan-progress = { $phase } · { $done } / { $total }
-managed-scan-detail = { $phase } · { $done } / { $total } records · { $cached } unchanged · { $rejected } rejected · phase { $duration } · last activity { $activity } ago
 
 transfer-session-log-omitted-label = Log gaps
 transfer-session-log-omitted-count = All transfers this run: { $count } log records omitted
@@ -1320,15 +1311,13 @@ transfer-lifecycle-history-omitted = { $count } earlier state events omitted.
 transfer-footer-total-retained = Shown: { $count }
 
 telegram-error-server = Telegram's server could not process this request. Your login is still valid. Retry shortly.
-dialogs-reading = Loading channel list · waiting for Telegram
-dialogs-waiting = Channel list · retrying shortly (up to 3 attempts)
-dialogs-saving = Channel list · saving verified results
-dialogs-complete = Channel list updated
-dialogs-failed = Channel list unavailable · local data retained
-dialogs-cancelled = Channel list loading cancelled
-dialogs-timing = Current phase / last activity: { $elapsed }
-dialogs-details = Channel list activity
-dialogs-attempt = Attempt { $attempt } of 3
+dialogs-reading = Preparing workspace
+dialogs-waiting = Workspace preparation · retrying shortly
+dialogs-saving = Activating saved transfers
+dialogs-complete = Workspace ready
+dialogs-failed = Workspace needs attention · local data retained
+dialogs-cancelled = Workspace preparation cancelled
+dialogs-details = Workspace preparation
 
 activity-state-queued = Queued
 activity-state-running = In progress
@@ -1338,7 +1327,7 @@ activity-state-complete = Complete
 activity-state-failed = Needs attention
 activity-state-cancelled = Cancelled
 activity-last-response = Last response
-dialogs-task-title = Channel directory
+dialogs-task-title = Workspace preparation
 activity-history-title = State changes
 activity-history-time-origin = Time since this run started · newest first
 activity-history-show-all = Show all { $count } changes
@@ -1415,15 +1404,12 @@ storage-health-access = The bound channel is inaccessible or you no longer own i
 storage-health-unsafe = This channel must be private and have no other members. Correct its settings in Telegram, then recheck.
 storage-health-unsupported = This channel uses a newer identity format. Update TeleArk; its data has been preserved.
 storage-repair-action = Review channel changes
-storage-archive-action = Mute and archive channel
-storage-repair-confirm = Apply the changes listed above to this same channel? Its current description will be replaced with TeleArk’s description and a reference to the identification message.
-storage-archive-confirm = Mute this channel’s message notifications and move it to Telegram’s Archived Chats now? Stored files stay in this channel. This runs once; later changes you make in Telegram will be respected.
+storage-repair-confirm = Repair this channel using the steps above? TeleArk will restore its identification message and description reference, then mute and archive the channel. All steps are required.
 storage-maintenance-confirm = Confirm
 storage-maintenance-time = Phase: { $seconds } s · Last activity: { $idle } s ago
 storage-maintenance-omitted = { $count } earlier timeline events omitted
 storage-maintenance-preview = Preview only — no Telegram changes made.
-storage-repair-completed = The TeleArk identification message is available and pinned, and the channel description references it. These checks passed. Missing file data has not been restored.
-storage-archive-completed = Channel muted and archived.
+storage-repair-completed = Channel identification, pin and description reference are verified. The channel is muted and archived. Missing file data has not been restored.
 storage-phase-checking = Checking account, binding and privacy
 storage-phase-finding = Finding existing identity record
 storage-phase-repairing = Restoring identity record
@@ -1471,17 +1457,17 @@ vault-session-unlock-policy = Unlock once per account session. Switching pages o
 vault-locked-file = Encrypted file — locked
 vault-locked-detail = Unlock to view
 upload-batch-still-running = The current batch is uploading. You can prepare the next batch and submit it when this one finishes.
-storage-repair-title = Restore this channel’s TeleArk identification
+storage-repair-title = Repair this TeleArk channel
 storage-connected-title = Private channel connected
 storage-repair-reason-missing = The TeleArk identification message or its reference in the channel description is missing.
 storage-repair-reason-invalid = The referenced identification message does not match this account and channel.
 storage-repair-reason-unpinned = The TeleArk identification message is no longer pinned.
-storage-repair-explanation = TeleArk uses this message and the channel description to recognize your storage channel. Restoring identification will:
+storage-repair-explanation = TeleArk repairs this storage channel by applying all of these steps:
 storage-repair-step-message = Reuse a valid TeleArk identification message, or post one if none is found.
 storage-repair-step-pin = Pin that identification message in this channel.
 storage-repair-step-description = Replace the channel description with TeleArk’s description and a reference to that message, then verify the result.
 storage-repair-scope = File messages, the channel title, members and privacy settings stay unchanged. This does not restore missing file data.
-storage-repair-confirm-action = Restore channel identification
+storage-repair-confirm-action = Repair channel
 storage-channel-options = Other channel actions
 storage-recheck-action = Check channel again
 storage-location-title = How TeleArk locates this channel
@@ -1489,18 +1475,33 @@ storage-location-target = Channel: { $title } · ID { $id }
 storage-location-bound = This channel was found using the channel ID saved on this device for your current Telegram account. TeleArk then checked your ownership and the channel’s private configuration. A renamed channel or missing identification message does not change that saved destination; TeleArk does not choose a replacement by its name.
 storage-location-method = TeleArk saves this channel’s ID separately for your Telegram account and uses it on later visits. Without a saved binding, it checks TeleArk identification in private channels you own; it connects only to a single verified match, or creates a private channel if none exists. Multiple matches require a choice. The channel name alone is not identification.
 storage-notifications-title = Notifications and archived chats
-storage-notifications-explanation = After you choose and confirm “Mute and archive channel”, TeleArk will mute this channel’s message notifications and move it to Telegram’s Archived Chats. This runs once; you can unmute or unarchive it later in Telegram, and TeleArk will respect that choice. Restoring identification does not do this automatically. Archiving does not move or delete the stored files.
+storage-notifications-explanation = TeleArk mutes this channel’s notifications and moves it to Telegram’s Archived Chats as part of every channel repair. These are required defaults, with no separate switches. You can review the steps and choose whether to repair the channel. Archiving does not move or delete stored files.
+storage-repair-step-archive = Mute channel notifications, move the channel to Archived Chats, and verify both settings.
+upload-drop-files = Drop files anywhere in this upload window to add them, or choose files.
+upload-files-independent = Each file is stored independently.
+upload-folders-unsupported = Folders are not supported yet.
+upload-selection-queued = Waiting for selection or the upload worker
+upload-selection-checking-files = Checking file metadata
+upload-selection-checking-channel = Checking the private channel
+upload-selection-uploading = Uploading files
+upload-selection-finished = Finished processing
+upload-selection-cancelling = Stopping after the current operation finishes…
+upload-selection-inspecting = Checked { $inspected } of { $total } selected paths.
+upload-selection-counts = { $total } files · { $completed } uploaded · { $paused } paused · { $failed } failed · { $cancelled } cancelled · { $pending } not processed
+upload-selection-timing = Current phase: { $elapsed } · Last activity: { $idle } ago
+upload-selection-retention = Detailed history shows recent processing batches. These totals include the whole selection.
+upload-selection-history-entry = { $time }: { $phase }
+
+transfer-batch-open-window = Open batch in a separate window
+transfer-batch-window-title = Batch files
+transfer-batch-unavailable = This batch is no longer available in the current task history.
+transfer-batch-window-live = Live progress · Closing this window keeps transfers running
 
 transfer-history-restoring = Restoring upload history
-
 transfer-upload-interrupted = Interrupted
-
 transfer-upload-interrupted-reason = The app closed before this upload was confirmed complete.
-
 transfer-upload-interrupted-action = Select the source file on the Upload page to start a new upload. Check Storage first if the interruption happened during publication.
-
 transfer-history-restored-label = Restored history
-
 transfer-history-restored-detail = Saved task totals are available. Live charts and detailed activity were not restored.
 
 detail-vault-lifecycle-durable-upload = Task summary saved locally. Unfinished uploads are marked interrupted after restart; select the source file to start a new upload.
@@ -1527,101 +1528,77 @@ speed-limits-event = { $event } · { $seconds } s ago
 speed-limits-omitted = { $count } older events omitted; latest 16 retained per direction.
 speed-limits-close = Close
 
-channel-sync-event-at = { $time } · { $phase }
+global-sync-connecting = Waiting for account connection
+global-sync-discovering = Updating channel directory
+global-sync-account = Account
 
-transfer-upload-pausing = Pausing — saving confirmed work
+global-sync-library = Updating file library
+global-sync-library-failed = File library update needs attention
 
-native-cleanup-unsupported = The app cannot safely finish this cleanup. Temporary files are kept. Update the app before trying again.
 
-transfer-recovery-unavailable-detail = The saved recovery information is damaged or uses an unsupported version. The original record and files have been preserved.
+# Fixed synchronization event timestamps
+sync-last-completed = Last completed
+sync-no-completion = No completed sync yet
+sync-event-time = Event time: { $time }
+sync-event-completed = Synchronization complete
+sync-file-verification = File verification
+sync-recent-events = Recent activity
+sync-no-events = No events yet
+sync-older-events = Some older activity is no longer shown.
+sync-event-times-local = Event times · local time
 
-upload-selection-counts = { $total } files · { $completed } uploaded · { $paused } paused · { $failed } failed · { $cancelled } cancelled · { $pending } not processed
+sync-silence-policy = Recovery check after { $minutes } minutes without channel updates.
+channel-file-count = { $count } files
+channel-select-all-compact = Select all
+channel-download-compact = Download
+shell-sync-complete = Synced
+shell-sync-ready = Ready
+shell-sync-active = Syncing
+shell-sync-active-channel = Syncing 1 channel
+shell-sync-active-channels = Syncing { $count } channels
+shell-sync-active-attention = Syncing { $count } · needs attention
+shell-sync-connecting = Connecting
+shell-sync-waiting = Waiting to sync
+shell-sync-paused = Sync paused
+shell-sync-attention = Sync needs attention
+shell-sync-details = View synchronization activity
+shell-vault-locked = Locked · background work continues
 
-native-cleanup-failed = Temporary files need attention
-
-transfer-recovery-legacy-guidance = This saved task has no usable recovery action. Keep its record and files. A compatible app version may be needed for newer recovery data; otherwise start a new transfer. History alone does not guarantee resumable data.
-
-transfer-recovery-source-guidance = This upload cannot continue with the current source. Keep the original file and restore access if possible. When the file is ready, start a new upload from Upload; this stopped task remains in history.
-
-transfer-recovery-unavailable = Recovery unavailable
-
-storage-guide-transfers-title = 5. Pause and resume transfers
-
-transfer-recovery-verification-pending = Saved progress will be checked locally before reuse.
-
-storage-guide-resume-title = 6. Understand recovery limits
-
-transfer-recovery-retry-guidance = This task can be retried. Resolve the cause above, then choose Retry on its row. TeleArk checks saved work before reusing it; failed tasks do not retry automatically.
-
-native-cleanup-waiting = Waiting for download to stop
-
-native-cleanup-finished = Temporary-file cleanup completed
-
-native-cleanup-error-guidance = { $error } Temporary files are kept. Retry after resolving this issue; downloading starts only after cleanup succeeds.
-
-transfer-upload-saving-recovery = Saving recovery information
-
-upload-selection-saving-queue = Saving the upload queue
-
-transfer-recovery-key-guidance = Open Settings → Key Vault and unlock the key needed by this file. If this task has no Resume or Retry action, start a new transfer after unlocking. Keep the original source and any partial download.
-
-detail-concurrency-limits = Concurrency limits
-
-transfer-recovery-saved-download = Saved download
-
-native-cleanup-explanation = Cancellation is saved. Cleanup waits until the old download releases its files; completed files are kept.
-
-native-cleanup-removing = Cleaning temporary files
-
-transfer-upload-cancelling = Cancelling — stopping active work
-
-storage-guide-transfers-body = In Transfers, each task shows the actions it supports. Pause waits for active work to stop safely; Resume checks saved data before continuing. Keep upload sources unchanged and partial downloads in place. Cancel stops the task; it does not undo data already sent.
-
-transfer-recovery-blocked-guidance = This task cannot resume in its current state. Resolve the cause above before starting a new transfer. Keep the original source and any partial download; a new task may need to transfer the data again.
+shell-sync-queued = Sync queued
 
 transfer-upload-checking-source = Checking source for safe resume
+transfer-upload-saving-recovery = Saving recovery information
 
-native-cleanup-retry-waiting = Retry is saved and will start after temporary files are safely cleared.
+transfer-upload-pausing = Pausing — saving confirmed work
+transfer-upload-cancelling = Cancelling — stopping active work
 
-upload-selection-saved-count = Saved { $saved } of { $total } files to the upload queue.
+transfer-recovery-unavailable = Recovery unavailable
+transfer-recovery-unavailable-detail = The saved recovery information is damaged or uses an unsupported version. The original record and files have been preserved.
+transfer-recovery-verification-pending = Saved progress will be checked locally before reuse.
+transfer-recovery-saved-download = Saved download
 
-native-cleanup-detail = { $reason } · Waiting: { $elapsed } · Last activity: { $last }
-
+transfer-recovery-retry-guidance = This task can be retried. Resolve the cause above, then choose Retry on its row. TeleArk checks saved work before reusing it; failed tasks do not retry automatically.
+transfer-recovery-source-guidance = This upload cannot continue with the current source. Keep the original file and restore access if possible. When the file is ready, start a new upload from Upload; this stopped task remains in history.
+transfer-recovery-key-guidance = Open Settings → Key Vault and unlock the key needed by this file. If this task has no Resume or Retry action, start a new transfer after unlocking. Keep the original source and any partial download.
+transfer-recovery-blocked-guidance = This task cannot resume in its current state. Resolve the cause above before starting a new transfer. Keep the original source and any partial download; a new task may need to transfer the data again.
+transfer-recovery-legacy-guidance = This saved task has no usable recovery action. Keep its record and files. A compatible app version may be needed for newer recovery data; otherwise start a new transfer. History alone does not guarantee resumable data.
+storage-guide-transfers-title = 5. Pause and resume transfers
+storage-guide-transfers-body = In Transfers, each task shows the actions it supports. Pause waits for active work to stop safely; Resume checks saved data before continuing. Keep upload sources unchanged and partial downloads in place. Cancel stops the task; it does not undo data already sent.
+storage-guide-resume-title = 6. Understand recovery limits
 storage-guide-resume-body = After restart and unlock, eligible queued transfers can continue. Paused tasks wait for Resume; failed tasks need attention. Open a task for its reason and next step. Older history or damaged recovery data may require a new transfer, and changes to sources, keys or Telegram files can prevent recovery.
 
-transfer-batch-open-window = Open batch in a separate window
+upload-selection-saving-queue = Saving the upload queue
+upload-selection-saved-count = Saved { $saved } of { $total } files to the upload queue.
 
-transfer-batch-unavailable = This batch is no longer available in the current task history.
-
-transfer-batch-window-live = Live progress · Closing this window keeps transfers running
-
-transfer-batch-window-title = Batch files
-
-upload-drop-files = Drop files anywhere in this upload window to add them, or choose files.
-
-upload-files-independent = Each file is stored independently.
-
-upload-folders-unsupported = Folders are not supported yet.
-
-upload-selection-cancelling = Stopping after the current operation finishes…
-
-upload-selection-checking-channel = Checking the private channel
-
-upload-selection-checking-files = Checking file metadata
-
-upload-selection-finished = Finished processing
-
-upload-selection-history-entry = { $time }: { $phase }
-
-upload-selection-inspecting = Checked { $inspected } of { $total } selected paths.
-
-upload-selection-queued = Waiting for selection or the upload worker
-
-upload-selection-retention = Detailed history shows recent processing batches. These totals include the whole selection.
-
-upload-selection-timing = Current phase: { $elapsed } · Last activity: { $idle } ago
-
-upload-selection-uploading = Uploading files
+native-cleanup-waiting = Waiting for download to stop
+native-cleanup-removing = Cleaning temporary files
+native-cleanup-failed = Temporary files need attention
+native-cleanup-explanation = Cancellation is saved. Cleanup waits until the old download releases its files; completed files are kept.
+native-cleanup-retry-waiting = Retry is saved and will start after temporary files are safely cleared.
+native-cleanup-detail = { $reason } · Waiting: { $elapsed } · Last activity: { $last }
+native-cleanup-finished = Temporary-file cleanup completed
+native-cleanup-unsupported = The app cannot safely finish this cleanup. Temporary files are kept. Update the app before trying again.
+native-cleanup-error-guidance = { $error } Temporary files are kept. Retry after resolving this issue; downloading starts only after cleanup succeeds.
 
 settings-upload-tasks = Concurrent upload tasks
 settings-upload-parts = Parallel 512 KiB parts per upload

@@ -19,7 +19,11 @@ use crate::{
     TelegramChatSummary, TelegramFileSummary, TelegramScanCancellation,
 };
 
+pub(crate) mod directory;
+mod execution;
 mod feed;
+mod history;
+pub use history::HistoryStatus;
 mod manifest_activity;
 pub use feed::{ChannelChanges, ChannelDelta, ChannelSyncSubscription};
 pub use manifest_activity::{ManagedScanObserver, ManagedScanStatus};
@@ -27,7 +31,10 @@ pub use manifest_activity::{ManagedScanObserver, ManagedScanStatus};
 const MAX_SOURCES: usize = 10_000;
 const EVENT_CAPACITY: usize = 128;
 const COMMAND_CAPACITY: usize = 64;
-const IDLE_RECONCILE: Duration = Duration::from_secs(15 * 60);
+/// Delivery-silence policy shared with frontend explanations; this is not a UI timer.
+pub const CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES: u64 = 7;
+const UPDATE_SILENCE_RECOVERY: Duration =
+    Duration::from_secs(CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES * 60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelSyncPhase {
@@ -40,6 +47,8 @@ pub enum ChannelSyncPhase {
     ManifestCancelled,
     Queued,
     ReadingLocal,
+    Connecting,
+    Discovering,
     Seeding,
     History,
     Receiving,
@@ -67,6 +76,8 @@ pub struct ChannelSyncSnapshot {
     pub chat_id: Option<i64>,
     pub phase_started: Instant,
     pub last_activity: Instant,
+    /// Most recent successful synchronization event, retained beyond timeline eviction.
+    pub last_completed_at: Option<Instant>,
     pub retry_at: Option<Instant>,
     pub failure: Option<ApplicationErrorKind>,
     pub queued: usize,
@@ -74,6 +85,7 @@ pub struct ChannelSyncSnapshot {
     pub committed_pages: u64,
     pub data_revision: u64,
     pub events: VecDeque<ChannelSyncEvent>,
+    pub active: Vec<ChannelSyncEvent>,
     pub dropped_events: u64,
     pub overflow_signals: u64,
     pub managed_chat_id: Option<i64>,
@@ -91,12 +103,14 @@ impl ChannelSyncSnapshot {
             chat_id: None,
             phase_started: now,
             last_activity: now,
+            last_completed_at: None,
             retry_at: None,
             failure: None,
             queued,
             failed_channels: 0,
             committed_pages: 0,
             data_revision: 0,
+            active: Vec::new(),
             events: VecDeque::from([ChannelSyncEvent {
                 phase: ChannelSyncPhase::Queued,
                 chat_id: None,
@@ -153,12 +167,14 @@ pub struct ChannelSync {
 struct Shared {
     changes: tokio::sync::watch::Sender<()>,
     deltas: Mutex<feed::DeltaJournal>,
+    sources: Mutex<(u64, Arc<Vec<TelegramChatSummary>>)>,
+    history: Mutex<history::Requests>,
     managed_id: AtomicI64,
     observation: AtomicU64,
     manifest_generation: AtomicU64,
     snapshot: Mutex<ChannelSyncSnapshot>,
     stop: AtomicBool,
-    active: Mutex<Option<(i64, TelegramScanCancellation)>>,
+    active: Mutex<BTreeMap<i64, TelegramScanCancellation>>,
 }
 
 struct Owner {
@@ -172,7 +188,6 @@ struct Owner {
 enum Command {
     Sources(Vec<TelegramChatSummary>),
     Prioritize(i64),
-    Observe(Option<i64>),
     Watch(i64),
     Acknowledge(i64, u64),
     History(i64),
@@ -187,6 +202,15 @@ impl ChannelSync {
         account: TelegramAccount,
         chats: Vec<TelegramChatSummary>,
     ) -> Result<Self, ApplicationError> {
+        Self::start_with(telegram, library, account, chats)
+    }
+
+    fn start_with<T: AccountSource>(
+        telegram: T,
+        library: DesktopLibrary,
+        account: TelegramAccount,
+        chats: Vec<TelegramChatSummary>,
+    ) -> Result<Self, ApplicationError> {
         if chats.len() > MAX_SOURCES {
             return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
         }
@@ -195,11 +219,13 @@ impl ChannelSync {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(account.id, scheduler.queue.len())),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
+            sources: Mutex::new((0, Arc::new(Vec::new()))),
+            history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(0),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
-            active: Mutex::new(None),
+            active: Mutex::new(BTreeMap::new()),
         });
         let (sender, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let worker_shared = Arc::clone(&shared);
@@ -233,6 +259,13 @@ impl ChannelSync {
         self.command(Command::Sources(chats))
     }
 
+    /// Coherent latest committed metadata; coalesced notifications cannot lose a rename or departure.
+    pub fn sources_since(&self, revision: u64) -> Option<(u64, Arc<Vec<TelegramChatSummary>>)> {
+        self.inner.shared.sources.lock().ok().and_then(|sources| {
+            (sources.0 != revision).then(|| (sources.0, Arc::clone(&sources.1)))
+        })
+    }
+
     pub fn snapshot(&self) -> Result<ChannelSyncSnapshot, ApplicationError> {
         self.inner
             .shared
@@ -258,10 +291,6 @@ impl ChannelSync {
             .lock()
             .map(|journal| journal.changes(chat, revision))
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Conflict))
-    }
-    /// Maintain the protocol's short-lived subscription for the visible channel.
-    pub fn observe(&self, chat: Option<i64>) -> Result<(), ApplicationError> {
-        self.command(Command::Observe(chat))
     }
     /// Observation only. Upload authorization still requires remote identity validation.
     pub fn watch_managed_channel(&self, chat: i64) -> Result<(), ApplicationError> {
@@ -291,16 +320,12 @@ impl ChannelSync {
     pub fn prioritize(&self, chat: i64) -> Result<(), ApplicationError> {
         self.command(Command::Prioritize(chat))
     }
-    pub fn request_history(&self, chat: i64) -> Result<(), ApplicationError> {
-        self.command(Command::History(chat))
-    }
     pub fn refresh(&self, chat: i64) -> Result<(), ApplicationError> {
         self.command(Command::Refresh(chat))
     }
     pub fn cancel(&self, chat: i64) -> Result<(), ApplicationError> {
         if let Ok(active) = self.inner.shared.active.lock()
-            && let Some((id, token)) = &*active
-            && (*id == chat || *id == 0)
+            && let Some(token) = active.get(&chat)
         {
             token.cancel();
         }
@@ -357,10 +382,10 @@ impl ChannelSync {
 }
 
 fn cancel_active(shared: &Shared) {
-    if let Ok(active) = shared.active.lock()
-        && let Some((_, token)) = &*active
-    {
-        token.cancel();
+    if let Ok(active) = shared.active.lock() {
+        for token in active.values() {
+            token.cancel();
+        }
     }
 }
 
@@ -401,7 +426,6 @@ pub(crate) struct ChannelReadPage {
     pub history_gap: bool,
     pub before: Option<i64>,
     pub edited: Vec<i64>,
-    pub timeout_seconds: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -418,30 +442,78 @@ impl From<ApplicationError> for ChannelSyncFailure {
     }
 }
 
+#[derive(Clone)]
 struct Job {
     pushes: VecDeque<teleark_telegram::ChannelPush>,
-    followed: bool,
-    next_check: Option<Instant>,
     catalog_ready: Option<bool>,
     watch_loaded: bool,
     head: Option<i32>,
     state: Option<ChannelSyncState>,
     force: bool,
     history: bool,
+    history_request: Option<u64>,
     paused: bool,
     failure: Option<ApplicationErrorKind>,
     retries: u32,
     retry_at: Option<Instant>,
 }
 
+// Retry policy is independent of wall-clock time. The owner supplies an entropy
+// sample; tests supply fixed samples and advance Instant without sleeping.
+fn recovery_delay(kind: ApplicationErrorKind, attempt: u32, entropy: u64) -> Option<Duration> {
+    if !matches!(
+        kind,
+        ApplicationErrorKind::Network
+            | ApplicationErrorKind::Server
+            | ApplicationErrorKind::Conflict
+    ) {
+        return None;
+    }
+    let ceiling_ms = (1_u64 << attempt.min(6)).min(60) * 1_000;
+    // Equal jitter avoids synchronized clients while retaining a nonzero floor.
+    Some(Duration::from_millis(
+        ceiling_ms / 2 + entropy % (ceiling_ms / 2 + 1),
+    ))
+}
+
+fn recovery_entropy(chat: i64, attempt: u32) -> u64 {
+    use std::hash::BuildHasher;
+    std::collections::hash_map::RandomState::new().hash_one((chat, attempt))
+}
+
+impl Job {
+    fn fail(&mut self, error: &ChannelSyncFailure, now: Instant, entropy: u64) -> ChannelSyncPhase {
+        self.failure = Some(error.kind);
+        if error.kind == ApplicationErrorKind::Conflict {
+            // Reload the committed winner before retrying a failed CAS.
+            self.state = None;
+        }
+        let delay = error
+            .retry_after
+            .or_else(|| recovery_delay(error.kind, self.retries, entropy));
+        self.retry_at = delay.and_then(|delay| now.checked_add(delay));
+        self.paused = self.retry_at.is_none();
+        if error.retry_after.is_some() {
+            ChannelSyncPhase::RateLimited
+        } else if self.retry_at.is_some() {
+            self.retries = self.retries.saturating_add(1);
+            ChannelSyncPhase::Waiting
+        } else if error.kind == ApplicationErrorKind::Cancelled {
+            ChannelSyncPhase::Cancelled
+        } else {
+            ChannelSyncPhase::Failed
+        }
+    }
+}
+
 struct Scheduler {
     jobs: BTreeMap<i64, Job>,
     queue: VecDeque<i64>,
     preferred: Option<i64>,
-    observed: Option<i64>,
     preferred_turns: u8,
     source_failure: Option<ApplicationErrorKind>,
     overflow_count: u64,
+    in_flight: std::collections::BTreeSet<i64>,
 }
 
 impl Scheduler {
@@ -454,14 +526,13 @@ impl Scheduler {
                     c.id,
                     Job {
                         pushes: VecDeque::new(),
-                        followed: false,
-                        next_check: None,
                         catalog_ready: None,
                         watch_loaded: false,
                         head: c.sync_pts,
                         state: None,
                         force: false,
                         history: false,
+                        history_request: None,
                         paused: false,
                         failure: None,
                         retries: 0,
@@ -474,10 +545,10 @@ impl Scheduler {
             queue: jobs.keys().copied().collect(),
             jobs,
             preferred: None,
-            observed: None,
             preferred_turns: 0,
             source_failure: None,
             overflow_count: 0,
+            in_flight: Default::default(),
         }
     }
     fn update_sources(&mut self, chats: Vec<TelegramChatSummary>) {
@@ -504,14 +575,13 @@ impl Scheduler {
                     chat.id,
                     Job {
                         pushes: VecDeque::new(),
-                        followed: false,
-                        next_check: None,
                         catalog_ready: None,
                         watch_loaded: false,
                         head: chat.sync_pts,
                         state: None,
                         force: false,
                         history: false,
+                        history_request: None,
                         paused: false,
                         failure: None,
                         retries: 0,
@@ -544,20 +614,6 @@ impl Scheduler {
     }
     fn command(&mut self, command: Command) {
         let id = match command {
-            Command::Observe(chat) => {
-                self.observed = chat;
-                for (id, job) in &mut self.jobs {
-                    let followed = Some(*id) == chat || job.catalog_ready.is_some();
-                    if followed && !job.followed {
-                        job.next_check = Some(Instant::now());
-                    }
-                    if !followed {
-                        job.next_check = None;
-                    }
-                    job.followed = followed;
-                }
-                return;
-            }
             Command::Watch(_) | Command::Acknowledge(_, _) => return,
             Command::Sources(chats) => {
                 self.update_sources(chats);
@@ -595,11 +651,26 @@ impl Scheduler {
             }
             Command::Prioritize(_)
             | Command::Sources(_)
-            | Command::Observe(_)
             | Command::Watch(_)
             | Command::Acknowledge(_, _) => {}
         }
     }
+    fn transport_available(&mut self, now: Instant, flood_until: Option<Instant>) {
+        if flood_until.is_some_and(|at| at > now) {
+            return;
+        }
+        // Actual pushed data proves delivery resumed. A close/gap hint alone
+        // does not. Recover network waits early, preserving non-network errors.
+        for id in &self.queue {
+            if let Some(job) = self.jobs.get_mut(id)
+                && !job.paused
+                && job.failure == Some(ApplicationErrorKind::Network)
+            {
+                job.retry_at = None;
+            }
+        }
+    }
+
     fn receive_push(&mut self, push: teleark_telegram::ChannelPush) {
         let id = push.channel_id;
         let count: usize = self.jobs.values().map(|job| job.pushes.len()).sum();
@@ -626,29 +697,13 @@ impl Scheduler {
             }
         }
     }
-    fn due_subscriptions(&mut self, now: Instant) {
-        let due: Vec<_> = self
-            .jobs
-            .iter_mut()
-            .filter_map(|(id, job)| {
-                if job.followed && !job.paused && job.next_check.is_some_and(|at| at <= now) {
-                    job.force = true;
-                    job.next_check = None;
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for id in due {
-            self.enqueue(id);
-        }
-    }
     fn pop(&mut self, now: Instant) -> Option<i64> {
         let ready = |id: &i64| {
-            self.jobs
-                .get(id)
-                .is_some_and(|job| !job.paused && job.retry_at.is_none_or(|at| at <= now))
+            !self.in_flight.contains(id)
+                && self
+                    .jobs
+                    .get(id)
+                    .is_some_and(|job| !job.paused && job.retry_at.is_none_or(|at| at <= now))
         };
         let priority = |id: &i64| {
             Some(*id) == self.preferred
@@ -697,10 +752,6 @@ fn handle_command(
             for (id, job) in &mut scheduler.jobs {
                 if *id != chat && job.catalog_ready.is_some() {
                     job.catalog_ready = None;
-                    job.followed = Some(*id) == scheduler.observed;
-                    if !job.followed {
-                        job.next_check = None;
-                    }
                 }
             }
             let job = scheduler.jobs.entry(chat).or_insert_with(|| Job {
@@ -708,13 +759,12 @@ fn handle_command(
                 state: None,
                 force: true,
                 history: false,
+                history_request: None,
                 paused: false,
                 failure: None,
                 retries: 0,
                 retry_at: None,
                 pushes: VecDeque::new(),
-                followed: true,
-                next_check: None,
                 catalog_ready: Some(false),
                 watch_loaded: false,
             });
@@ -722,10 +772,8 @@ fn handle_command(
             // failure cannot silently disable protection or advance its PTS.
             job.catalog_ready = Some(false);
             job.watch_loaded = false;
-            job.followed = true;
             job.paused = false;
             job.failure = None;
-            job.next_check = Some(Instant::now());
             shared.managed_id.store(chat, Ordering::Release);
             if let Ok(mut snapshot) = shared.snapshot.lock() {
                 if snapshot.managed_chat_id != Some(chat) {
@@ -747,7 +795,7 @@ fn handle_command(
                     {
                         snapshot.managed_watch = Some(watch);
                     }
-                    publish(shared, ChannelSyncPhase::Idle, Some(chat), None, None);
+                    publish_completed(shared, Some(chat));
                 })
         }
         command => {
@@ -779,6 +827,13 @@ fn needed(job: &Job) -> bool {
     })
 }
 
+fn publish_completed(shared: &Shared, chat: Option<i64>) {
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        snapshot.last_completed_at = Some(Instant::now());
+    }
+    publish(shared, ChannelSyncPhase::Idle, chat, None, None);
+}
+
 fn publish(
     shared: &Shared,
     phase: ChannelSyncPhase,
@@ -786,10 +841,43 @@ fn publish(
     failure: Option<ApplicationErrorKind>,
     retry_at: Option<Instant>,
 ) {
-    if let Ok(mut snapshot) = shared.snapshot.lock()
-        && snapshot.transition(phase, chat, failure, retry_at)
-    {
-        shared.changes.send_replace(());
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        let running = matches!(
+            phase,
+            ChannelSyncPhase::ReadingLocal
+                | ChannelSyncPhase::Discovering
+                | ChannelSyncPhase::Seeding
+                | ChannelSyncPhase::History
+                | ChannelSyncPhase::Receiving
+                | ChannelSyncPhase::Persisting
+                | ChannelSyncPhase::Verifying
+        );
+        snapshot
+            .active
+            .retain(|activity| activity.chat_id != chat || activity.phase == phase && running);
+        if running
+            && !snapshot
+                .active
+                .iter()
+                .any(|activity| activity.chat_id == chat)
+            && snapshot.active.len() < 5
+        {
+            snapshot.active.push(ChannelSyncEvent {
+                phase,
+                chat_id: chat,
+                at: Instant::now(),
+                failure,
+            });
+        }
+        let changed = snapshot.transition(phase, chat, failure, retry_at);
+        if let Some(activity) = snapshot.active.first().cloned() {
+            snapshot.phase = activity.phase;
+            snapshot.chat_id = activity.chat_id;
+            snapshot.phase_started = activity.at;
+        }
+        if changed {
+            shared.changes.send_replace(());
+        }
     }
 }
 
@@ -812,8 +900,47 @@ fn transport_waker(shared: &Arc<Shared>, worker: thread::Thread) -> teleark_tele
     })
 }
 
-fn run(
-    telegram: DesktopTelegram,
+fn same_source_metadata(left: &[TelegramChatSummary], right: &[TelegramChatSummary]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.id == right.id
+                && left.name == right.name
+                && left.username == right.username
+                && left.kind == right.kind
+        })
+}
+
+fn source_reconciliation_deadline(
+    last_check: Instant,
+    last_delivery: Instant,
+    pending: bool,
+) -> Instant {
+    if pending {
+        last_check + Duration::from_secs(1)
+    } else {
+        last_check.max(last_delivery) + UPDATE_SILENCE_RECOVERY
+    }
+}
+
+fn publish_sources(shared: &Shared, chats: &[TelegramChatSummary]) {
+    let changed = if let Ok(mut sources) = shared.sources.lock() {
+        if sources.0 != 0 && same_source_metadata(sources.1.as_slice(), chats) {
+            false
+        } else {
+            sources.0 = sources.0.wrapping_add(1).max(1);
+            sources.1 = Arc::new(chats.to_vec());
+            true
+        }
+    } else {
+        false
+    };
+    if changed {
+        shared.changes.send_replace(());
+    }
+}
+
+fn run<T: AccountSource>(
+    telegram: T,
     library: DesktopLibrary,
     account: TelegramAccount,
     mut scheduler: Scheduler,
@@ -821,8 +948,30 @@ fn run(
     shared: Arc<Shared>,
 ) {
     publish(&shared, ChannelSyncPhase::ReadingLocal, None, None, None);
-    let signals = match telegram.channel_signals() {
-        Ok(signals) => signals,
+    match library.cached_channel_directory(account.id) {
+        Ok(chats) if !chats.is_empty() => {
+            publish_sources(&shared, &chats);
+            scheduler.update_sources(chats);
+        }
+        Ok(_) => {}
+        Err(error) => publish(
+            &shared,
+            ChannelSyncPhase::Failed,
+            None,
+            Some(error.kind()),
+            None,
+        ),
+    }
+    let lifecycle = telegram.lifecycle();
+    let weak = Arc::downgrade(&shared);
+    let owner_thread = thread::current();
+    let _lifecycle_subscription = match lifecycle.subscribe(Arc::new(move || {
+        if let Some(shared) = weak.upgrade() {
+            cancel_active(&shared);
+        }
+        owner_thread.unpark();
+    })) {
+        Ok(subscription) => subscription,
         Err(error) => {
             publish(
                 &shared,
@@ -835,7 +984,9 @@ fn run(
             return;
         }
     };
-    signals.set_waker(Some(transport_waker(&shared, thread::current())));
+    let mut connection_revision = u64::MAX;
+    let mut signals: Option<teleark_telegram::ChannelUpdateSignals> = None;
+    let mut bound_waker = None;
     match library.storage_channel_id(account.id) {
         Ok(Some(chat)) => handle_command(
             Command::Watch(chat),
@@ -854,23 +1005,280 @@ fn run(
         ),
     }
     let mut last_check = Instant::now();
+    let mut last_delivery = last_check;
+    let mut source_probe = false;
+    let mut source_probe_started: Option<Instant> = None;
+    let mut source_retry_at = Some(Instant::now());
+    let mut source_attempt = 0_u32;
     let mut flood_until = None;
     let mut source_refresh_pending = false;
+    let mut executions = execution::Executions::new();
+    let mut metadata_ready = false;
     while !shared.stop.load(Ordering::Acquire) {
+        while let Some(completion) = executions.take() {
+            if let Ok(mut active) = shared.active.lock() {
+                active.remove(&completion.id);
+            }
+            scheduler.in_flight.remove(&completion.id);
+            if completion.id == 0 {
+                source_probe_started = None;
+            }
+            let current_revision = lifecycle.snapshot().0;
+            match completion.outcome {
+                execution::Outcome::Failed(error) => {
+                    if completion.id == 0 {
+                        scheduler.source_failure = Some(error);
+                        source_retry_at = None;
+                    } else if let Some(job) = scheduler.jobs.get_mut(&completion.id) {
+                        job.paused = true;
+                        job.failure = Some(error);
+                        job.state = None;
+                        job.force = true;
+                        if let Ok(mut history) = shared.history.lock() {
+                            history.fail(completion.id, error);
+                        }
+                    }
+                    publish(
+                        &shared,
+                        ChannelSyncPhase::Failed,
+                        (completion.id != 0).then_some(completion.id),
+                        Some(error),
+                        None,
+                    );
+                }
+                execution::Outcome::Sources(result) => {
+                    if completion.revision != current_revision {
+                        continue;
+                    }
+                    match result {
+                        Ok(chats) => {
+                            metadata_ready = true;
+                            let changed = shared.sources.lock().is_ok_and(|sources| {
+                                !same_source_metadata(sources.1.as_slice(), chats.as_slice())
+                            });
+                            if !source_probe || changed {
+                                publish_completed(&shared, None);
+                            }
+                            publish_sources(&shared, &chats);
+                            scheduler.update_sources(chats);
+                            source_attempt = 0;
+                            source_retry_at = None;
+                        }
+                        Err(error) => {
+                            scheduler.source_failure = Some(error.kind);
+                            let delay = error.retry_after.or_else(|| {
+                                recovery_delay(
+                                    error.kind,
+                                    source_attempt,
+                                    recovery_entropy(account.id, source_attempt),
+                                )
+                            });
+                            source_retry_at =
+                                delay.and_then(|delay| Instant::now().checked_add(delay));
+                            source_attempt = source_attempt.saturating_add(1);
+                            if error.retry_after.is_some() {
+                                flood_until = source_retry_at;
+                            }
+                            publish(
+                                &shared,
+                                if error.retry_after.is_some() {
+                                    ChannelSyncPhase::RateLimited
+                                } else if source_retry_at.is_some() {
+                                    ChannelSyncPhase::Waiting
+                                } else {
+                                    ChannelSyncPhase::Failed
+                                },
+                                None,
+                                Some(error.kind),
+                                source_retry_at,
+                            );
+                        }
+                    }
+                    last_check = Instant::now();
+                }
+                execution::Outcome::Channel(mut completed, result) => {
+                    let id = completion.id;
+                    // A failed or stale worker is never reported as a successful completion.
+                    if let Ok(mut snapshot) = shared.snapshot.lock() {
+                        snapshot
+                            .active
+                            .retain(|activity| activity.chat_id != Some(id));
+                    }
+                    if let Some(pending) = scheduler.jobs.get_mut(&id) {
+                        if completion.revision == current_revision {
+                            completed.pushes.append(&mut pending.pushes);
+                            if completed.pushes.len() > 512
+                                || completed
+                                    .pushes
+                                    .iter()
+                                    .map(|push| push.estimated_bytes())
+                                    .sum::<usize>()
+                                    > 4 * 1024 * 1024
+                            {
+                                completed.pushes.clear();
+                                completed.force = true;
+                                scheduler.overflow_count =
+                                    scheduler.overflow_count.saturating_add(1);
+                            }
+                            completed.head = completed.head.max(pending.head);
+                            completed.force |= pending.force;
+                            completed.history |= pending.history;
+                            if pending.catalog_ready.is_some() && completed.catalog_ready.is_none()
+                            {
+                                completed.catalog_ready = pending.catalog_ready;
+                            }
+                            completed.paused = pending.paused;
+                            if pending.paused {
+                                completed.failure = pending.failure;
+                            } else {
+                                match result {
+                                    Ok(()) => {
+                                        completed.retries = 0;
+                                        completed.failure = None;
+                                        completed.retry_at = None;
+                                    }
+                                    Err(error) if error.kind == ApplicationErrorKind::Cancelled => {
+                                        completed.history = shared
+                                            .history
+                                            .lock()
+                                            .is_ok_and(|history| history.pending(id));
+                                        completed.failure = None;
+                                        completed.retry_at = None;
+                                    }
+                                    Err(error) => {
+                                        let phase = completed.fail(
+                                            &error,
+                                            Instant::now(),
+                                            recovery_entropy(id, completed.retries),
+                                        );
+                                        if error.retry_after.is_some() {
+                                            flood_until = completed.retry_at;
+                                        }
+                                        if completed.paused
+                                            && let Ok(mut history) = shared.history.lock()
+                                        {
+                                            if let Some(request) = completed.history_request {
+                                                history.finish(
+                                                    id,
+                                                    request,
+                                                    HistoryStatus::Failed(error.kind),
+                                                );
+                                            } else {
+                                                history.fail(id, error.kind);
+                                            }
+                                        }
+                                        publish(
+                                            &shared,
+                                            phase,
+                                            Some(id),
+                                            Some(error.kind),
+                                            completed.retry_at,
+                                        );
+                                    }
+                                }
+                            }
+                            *pending = *completed;
+                        } else {
+                            pending.state = None;
+                            pending.force = true;
+                        }
+                        if !pending.paused && needed(pending) {
+                            scheduler.enqueue(id);
+                        }
+                    }
+                }
+            }
+        }
+        if source_probe_started.is_some_and(|at| at.elapsed() >= Duration::from_secs(1)) {
+            // An ordinary empty liveness response is silent; a slow request is visible once.
+            source_probe = false;
+            source_probe_started = None;
+            publish(&shared, ChannelSyncPhase::Discovering, None, None, None);
+        }
         while let Ok(command) = receiver.try_recv() {
-            if matches!(command, Command::Refresh(_)) && scheduler.source_failure.is_some() {
+            if matches!(command, Command::Refresh(0))
+                || matches!(command, Command::Refresh(_)) && scheduler.source_failure.is_some()
+            {
                 source_refresh_pending = true;
+                source_retry_at = Some(Instant::now());
                 last_check = Instant::now() - Duration::from_secs(30);
             }
             handle_command(command, &library, account.id, &mut scheduler, &shared);
         }
-        let hints = signals.take();
+        let (revision, ready_account, next_signals) = lifecycle.snapshot();
+        if revision != connection_revision {
+            if let Some(old) = signals.take()
+                && let Some(wake) = bound_waker.take()
+            {
+                old.clear_waker(&wake);
+            }
+            connection_revision = revision;
+            metadata_ready = false;
+            if ready_account == Some(account.id) {
+                signals = next_signals;
+                if let Some(signals) = &signals {
+                    let wake = transport_waker(&shared, thread::current());
+                    signals.set_waker(Some(wake.clone()));
+                    bound_waker = Some(wake);
+                }
+                // A new reactor has its own peer cache and push coverage. Discover
+                // metadata again, then recover from durable cursors, never reset them.
+                scheduler.source_failure = None;
+                source_retry_at = Some(Instant::now());
+                source_attempt = 0;
+                for job in scheduler.jobs.values_mut() {
+                    job.state = None;
+                    job.pushes.clear();
+                    job.force = true;
+                    if matches!(
+                        job.failure,
+                        Some(
+                            ApplicationErrorKind::Network
+                                | ApplicationErrorKind::Server
+                                | ApplicationErrorKind::Authorization
+                        )
+                    ) {
+                        job.paused = false;
+                        job.failure = None;
+                        job.retry_at = None;
+                    }
+                }
+                for id in scheduler.jobs.keys().copied().collect::<Vec<_>>() {
+                    scheduler.enqueue(id);
+                }
+            }
+        }
+        let Some(bound_signals) = &signals else {
+            publish(
+                &shared,
+                ChannelSyncPhase::Connecting,
+                None,
+                Some(ApplicationErrorKind::Authorization),
+                None,
+            );
+            thread::park();
+            continue;
+        };
+        let hints = bound_signals.take();
+
         if let Ok(mut snapshot) = shared.snapshot.lock() {
             snapshot.overflow_signals = snapshot
                 .overflow_signals
                 .saturating_add(hints.overflow_count);
         }
+        if !hints.pushes.is_empty() || !hints.channels.is_empty() {
+            let now = Instant::now();
+            scheduler.transport_available(now, flood_until);
+            if scheduler.source_failure == Some(ApplicationErrorKind::Network)
+                && flood_until.is_none_or(|at| at <= now)
+            {
+                source_retry_at = Some(now);
+            }
+        }
         for push in hints.pushes {
+            if let Ok(history) = shared.history.lock() {
+                history.yield_to_live(push.channel_id);
+            }
             scheduler.receive_push(push);
         }
         if scheduler.overflow_count > 0 {
@@ -881,70 +1289,119 @@ fn run(
             }
             shared.changes.send_replace(());
         }
+        if !hints.channels.is_empty() || hints.metadata_changed || hints.reconcile_all {
+            last_delivery = Instant::now();
+        }
         for (id, pts) in hints.channels {
             source_refresh_pending |= !scheduler.jobs.contains_key(&id);
             scheduler.hint(id, pts);
         }
+        source_refresh_pending |= hints.metadata_changed;
         if hints.reconcile_all {
+            source_refresh_pending = true;
             // A broken transport/overflow may have lost which channel changed.
             // Keep local rows and recover from each committed PTS in the background.
             for id in scheduler.jobs.keys().copied().collect::<Vec<_>>() {
                 scheduler.hint(id, 0);
             }
         }
-        if (last_check.elapsed() >= IDLE_RECONCILE
-            || (source_refresh_pending && last_check.elapsed() >= Duration::from_secs(30)))
+        if executions.available(0)
+            && (source_retry_at.is_some_and(|at| at <= Instant::now())
+                || (source_retry_at.is_none()
+                    && scheduler.source_failure.is_none()
+                    && (last_check.max(last_delivery).elapsed() >= UPDATE_SILENCE_RECOVERY
+                        || (source_refresh_pending
+                            && last_check.elapsed() >= Duration::from_secs(1)))))
             && flood_until.is_none_or(|at| at <= Instant::now())
         {
-            // Refresh metadata after a passive subscription went quiet or a
-            // previously unknown source pushed an update; never scan history.
-            publish(&shared, ChannelSyncPhase::Receiving, None, None, None);
+            source_probe = metadata_ready && !source_refresh_pending && source_retry_at.is_none();
+            source_probe_started = source_probe.then(Instant::now);
+            if !source_probe {
+                publish(&shared, ChannelSyncPhase::Discovering, None, None, None);
+            }
             let cancellation = TelegramScanCancellation::new();
             if let Ok(mut active) = shared.active.lock() {
-                *active = Some((0, cancellation.clone()));
+                active.insert(0, cancellation.clone());
             }
-            match telegram.sync_sources(account.id, cancellation) {
-                Ok(chats) => {
-                    publish(&shared, ChannelSyncPhase::Persisting, None, None, None);
-                    match library.save_telegram_sources(&account, &chats) {
-                        Ok(()) => {
-                            scheduler.update_sources(chats);
-                            source_refresh_pending = false;
+            if lifecycle.snapshot().0 != connection_revision {
+                cancellation.cancel();
+            }
+            let remote = telegram.clone();
+            let storage = library.clone();
+            let source_account = account.clone();
+            let worker_shared = shared.clone();
+            let probe = source_probe;
+            let persist_baseline = !metadata_ready;
+            let result = executions.spawn(0, connection_revision, move || {
+                let result = remote
+                    .sync_sources(source_account.id, cancellation.clone())
+                    .and_then(|chats| {
+                        if cancellation.is_cancelled() {
+                            return Err(
+                                ApplicationError::new(ApplicationErrorKind::Cancelled).into()
+                            );
                         }
-                        Err(error) => {
-                            scheduler.source_failure = Some(error.kind());
+                        if chats.len() > MAX_SOURCES {
+                            return Err(
+                                ApplicationError::new(ApplicationErrorKind::Capacity).into()
+                            );
+                        }
+                        let changed = {
+                            let sources = worker_shared.sources.lock().map_err(|_| {
+                                ApplicationError::new(ApplicationErrorKind::Conflict)
+                            })?;
+                            sources.0 == 0 || !same_source_metadata(sources.1.as_slice(), &chats)
+                        };
+                        if !changed && !persist_baseline {
+                            return Ok(chats);
+                        }
+                        if probe {
                             publish(
-                                &shared,
-                                ChannelSyncPhase::Failed,
+                                &worker_shared,
+                                ChannelSyncPhase::Discovering,
                                 None,
-                                Some(error.kind()),
+                                None,
                                 None,
                             );
                         }
-                    }
+                        publish(
+                            &worker_shared,
+                            ChannelSyncPhase::Persisting,
+                            None,
+                            None,
+                            None,
+                        );
+                        storage.save_channel_directory(
+                            source_account,
+                            chats.clone(),
+                            cancellation.clone(),
+                        )?;
+                        Ok(chats)
+                    });
+                execution::Outcome::Sources(result)
+            });
+            match result {
+                Ok(()) => {
+                    source_refresh_pending = false;
+                    source_retry_at = None;
+                    last_check = Instant::now();
                 }
                 Err(error) => {
-                    scheduler.source_failure = Some(error.kind);
-                    if let Some(delay) = error.retry_after {
-                        flood_until = Instant::now().checked_add(delay);
+                    source_probe_started = None;
+                    if let Ok(mut active) = shared.active.lock() {
+                        active.remove(&0);
                     }
+                    scheduler.source_failure = Some(error.kind());
+                    source_retry_at = None;
                     publish(
                         &shared,
-                        if flood_until.is_some() {
-                            ChannelSyncPhase::RateLimited
-                        } else {
-                            ChannelSyncPhase::Failed
-                        },
+                        ChannelSyncPhase::Failed,
                         None,
-                        Some(error.kind),
-                        flood_until,
+                        Some(error.kind()),
+                        None,
                     );
                 }
             }
-            if let Ok(mut active) = shared.active.lock() {
-                *active = None;
-            }
-            last_check = Instant::now();
         }
         if let Ok(mut snapshot) = shared.snapshot.lock() {
             snapshot.queued = scheduler.queue.len();
@@ -955,92 +1412,72 @@ fn run(
                 .count();
         }
         let now = Instant::now();
-        scheduler.due_subscriptions(now);
         if let Ok(mut journal) = shared.deltas.lock() {
             journal.retain_sources(&scheduler.jobs);
         }
-        let next = if flood_until.is_some_and(|at| at > now) {
+        let next = if !metadata_ready
+            || !executions.channel_slot_available()
+            || flood_until.is_some_and(|at| at > now)
+        {
             None
         } else {
             scheduler.pop(now)
         };
         if let Some(id) = next {
-            if let Ok(mut snapshot) = shared.snapshot.lock() {
-                snapshot.queued = scheduler.queue.len();
-            }
             let token = TelegramScanCancellation::new();
             if let Ok(mut active) = shared.active.lock() {
-                *active = Some((id, token.clone()));
+                active.insert(id, token.clone());
             }
-            let result = match scheduler.jobs.get_mut(&id) {
-                Some(job) => step(&telegram, &library, account.id, id, job, &shared, token),
-                None => continue,
+            if lifecycle.snapshot().0 != connection_revision {
+                token.cancel();
+            }
+            let Some(pending) = scheduler.jobs.get_mut(&id) else {
+                continue;
             };
-            if let Ok(mut active) = shared.active.lock() {
-                *active = None;
-            }
-            if let Some(job) = scheduler.jobs.get_mut(&id) {
-                match result {
-                    Ok(()) => {
-                        job.retries = 0;
-                        job.failure = None;
-                        job.retry_at = None;
-                    }
-                    Err(error) => {
-                        job.failure = Some(error.kind);
-                        if error.kind == ApplicationErrorKind::Conflict {
-                            // A retry must reload the winning committed state,
-                            // not repeatedly submit the same stale CAS revision.
-                            job.state = None;
-                        }
-                        if let Some(delay) = error.retry_after {
-                            let deadline = Instant::now()
-                                .checked_add(delay)
-                                .unwrap_or_else(Instant::now);
-                            flood_until = Some(deadline);
-                            job.retry_at = Some(deadline);
-                            publish(
-                                &shared,
-                                ChannelSyncPhase::RateLimited,
-                                Some(id),
-                                Some(error.kind),
-                                job.retry_at,
-                            );
-                        } else if matches!(
-                            error.kind,
-                            ApplicationErrorKind::Network
-                                | ApplicationErrorKind::Server
-                                | ApplicationErrorKind::Persistence
-                        ) && job.retries < 3
-                        {
-                            job.retry_at =
-                                Some(Instant::now() + Duration::from_secs(1 << job.retries));
-                            job.retries += 1;
-                            publish(
-                                &shared,
-                                ChannelSyncPhase::Waiting,
-                                Some(id),
-                                Some(error.kind),
-                                job.retry_at,
-                            );
-                        } else {
-                            job.paused = true;
-                            publish(
-                                &shared,
-                                if error.kind == ApplicationErrorKind::Cancelled {
-                                    ChannelSyncPhase::Cancelled
-                                } else {
-                                    ChannelSyncPhase::Failed
-                                },
-                                Some(id),
-                                Some(error.kind),
-                                None,
-                            );
-                        }
-                    }
+            let pushes = std::mem::take(&mut pending.pushes);
+            let mut job = pending.clone();
+            job.pushes = pushes;
+            let remote = telegram.clone();
+            let storage = library.clone();
+            let worker_shared = shared.clone();
+            let account_id = account.id;
+            match executions.spawn(id, connection_revision, move || {
+                let result = step(
+                    &remote,
+                    &storage,
+                    account_id,
+                    id,
+                    &mut job,
+                    &worker_shared,
+                    token,
+                );
+                execution::Outcome::Channel(Box::new(job), result)
+            }) {
+                Ok(()) => {
+                    pending.pushes.clear();
+                    pending.force = false;
+                    pending.history = false;
+                    pending.history_request = None;
+                    scheduler.in_flight.insert(id);
                 }
-                if !job.paused && needed(job) {
-                    scheduler.enqueue(id);
+                Err(error) => {
+                    if let Ok(mut active) = shared.active.lock() {
+                        active.remove(&id);
+                    }
+                    pending.paused = true;
+                    pending.force = true;
+                    pending.failure = Some(error.kind());
+                    scheduler.overflow_count = scheduler.overflow_count.saturating_add(1);
+                    if let Ok(mut history) = shared.history.lock() {
+                        history.fail(id, error.kind());
+                    }
+                    publish(
+                        &shared,
+                        ChannelSyncPhase::Failed,
+                        Some(id),
+                        Some(error.kind()),
+                        None,
+                    );
                 }
             }
         } else {
@@ -1048,54 +1485,101 @@ fn run(
                 scheduler
                     .queue
                     .iter()
+                    .filter(|id| !scheduler.in_flight.contains(id))
                     .filter_map(|id| scheduler.jobs.get(id)?.retry_at)
+                    .filter(|at| *at > now)
+                    .chain(source_retry_at)
                     .min()
             });
-            let failure = scheduler
+            let (failure_chat, failure) = scheduler
                 .source_failure
-                .or_else(|| scheduler.jobs.values().find_map(|job| job.failure));
-            publish(
-                &shared,
-                if flood_until.is_some_and(|at| at > now) {
-                    ChannelSyncPhase::RateLimited
-                } else if retry_at.is_some() {
-                    ChannelSyncPhase::Waiting
-                } else if failure == Some(ApplicationErrorKind::Cancelled) {
-                    ChannelSyncPhase::Cancelled
-                } else if failure.is_some() {
-                    ChannelSyncPhase::Failed
-                } else {
-                    ChannelSyncPhase::Idle
-                },
-                None,
-                failure,
-                retry_at,
-            );
-            let metadata_deadline = last_check
-                + if source_refresh_pending {
-                    Duration::from_secs(30)
-                } else {
-                    IDLE_RECONCILE
-                };
-            let mut deadline = retry_at.unwrap_or(metadata_deadline).min(metadata_deadline);
-            if let Some(subscription) = scheduler
-                .jobs
-                .values()
-                .filter(|job| !job.paused)
-                .filter_map(|job| job.next_check)
+                .map(|error| (None, Some(error)))
+                .or_else(|| {
+                    scheduler
+                        .jobs
+                        .iter()
+                        .find_map(|(id, job)| job.failure.map(|error| (Some(*id), Some(error))))
+                })
+                .unwrap_or((None, None));
+            if !executions.any() {
+                publish(
+                    &shared,
+                    if flood_until.is_some_and(|at| at > now) {
+                        ChannelSyncPhase::RateLimited
+                    } else if retry_at.is_some() {
+                        ChannelSyncPhase::Waiting
+                    } else if failure == Some(ApplicationErrorKind::Cancelled) {
+                        ChannelSyncPhase::Cancelled
+                    } else if failure.is_some() {
+                        ChannelSyncPhase::Failed
+                    } else {
+                        ChannelSyncPhase::Idle
+                    },
+                    failure_chat,
+                    failure,
+                    retry_at,
+                );
+            }
+            let metadata_deadline = source_retry_at.or_else(|| {
+                (scheduler.source_failure.is_none() && executions.available(0)).then(|| {
+                    source_reconciliation_deadline(
+                        last_check,
+                        last_delivery,
+                        source_refresh_pending,
+                    )
+                })
+            });
+            let deadline = retry_at
+                .into_iter()
+                .chain(metadata_deadline)
+                .chain(source_probe_started.map(|at| at + Duration::from_secs(1)))
                 .min()
-            {
-                deadline = deadline.min(subscription);
+                .map(|deadline| {
+                    flood_until
+                        .filter(|at| *at > now)
+                        .map_or(deadline, |flood| deadline.max(flood))
+                });
+            // Only actual recovery/coalescing deadlines wake an otherwise idle owner.
+            // Permanent failures and occupied workers wait for a command or completion.
+            if let Some(deadline) = deadline {
+                thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+            } else {
+                thread::park();
             }
-            if let Some(flood) = flood_until.filter(|at| *at > now) {
-                deadline = deadline.max(flood);
-            }
-            // Commands, transport pushes and cancellation unpark this owner. A timer
-            // exists only for a real retry, protocol deadline or metadata fallback.
-            thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
         }
     }
+    cancel_active(&shared);
+    drop(executions);
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        snapshot.active.clear();
+    }
+    if let Some(signals) = signals
+        && let Some(wake) = bound_waker
+    {
+        signals.clear_waker(&wake);
+    }
     publish(&shared, ChannelSyncPhase::Cancelled, None, None, None);
+}
+
+trait AccountSource: ChannelSource + Clone + Send + Sync + 'static {
+    fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle;
+    fn sync_sources(
+        &self,
+        account: i64,
+        cancellation: TelegramScanCancellation,
+    ) -> Result<Vec<TelegramChatSummary>, ChannelSyncFailure>;
+}
+impl AccountSource for DesktopTelegram {
+    fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle {
+        self.lifecycle()
+    }
+    fn sync_sources(
+        &self,
+        account: i64,
+        cancellation: TelegramScanCancellation,
+    ) -> Result<Vec<TelegramChatSummary>, ChannelSyncFailure> {
+        self.sync_sources(account, cancellation)
+    }
 }
 
 trait ChannelSource {
@@ -1161,6 +1645,20 @@ fn step(
             }
         })?);
     }
+    if job.history
+        && job
+            .state
+            .as_ref()
+            .is_some_and(|state| state.history_exhausted)
+    {
+        if let Ok(mut history) = shared.history.lock()
+            && let Some(id) = history.attach(chat, cancellation.clone())
+        {
+            history.finish(chat, id, HistoryStatus::Complete);
+        }
+        job.history = false;
+        shared.changes.send_replace(());
+    }
     if !needed(job) {
         return Ok(());
     }
@@ -1224,6 +1722,21 @@ fn step(
     } else {
         ChannelRead::History(state.history_before)
     };
+    let history_id = if !bootstrap && matches!(read, ChannelRead::History(_)) {
+        let id = shared
+            .history
+            .lock()
+            .ok()
+            .and_then(|mut history| history.attach(chat, cancellation.clone()));
+        if id.is_none() {
+            job.history = false;
+            return Ok(());
+        }
+        job.history_request = id;
+        id
+    } else {
+        None
+    };
     publish(
         shared,
         if bootstrap {
@@ -1253,7 +1766,6 @@ fn step(
             complete: true,
             history_gap: false,
             before: None,
-            timeout_seconds: None,
         }
     } else if matches!(&read, ChannelRead::Verify(ids) if ids.is_empty()) {
         ChannelReadPage {
@@ -1264,7 +1776,6 @@ fn step(
             history_gap: false,
             before: None,
             edited: Vec::new(),
-            timeout_seconds: None,
         }
     } else {
         telegram.read(account, chat, read.clone(), cancellation.clone())?
@@ -1279,12 +1790,6 @@ fn step(
                 .pts
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Network))?;
             next_force = !page.complete;
-            if matches!(read, ChannelRead::Difference(_)) && page.complete && job.followed {
-                job.next_check = Some(
-                    Instant::now()
-                        + Duration::from_secs(u64::from(page.timeout_seconds.unwrap_or(1).max(1))),
-                );
-            }
             if page.history_gap {
                 state.repair_pending = true;
                 state.repair_before = None;
@@ -1347,6 +1852,12 @@ fn step(
         && !matches!(read, ChannelRead::ManagedManifests)
     {
         job.force = next_force;
+        if let Some(id) = history_id {
+            job.history = false;
+            if let Ok(mut history) = shared.history.lock() {
+                history.finish(chat, id, HistoryStatus::Complete);
+            }
+        }
         if let Ok(mut snapshot) = shared.snapshot.lock() {
             snapshot.last_activity = Instant::now();
             if shared.managed_id.load(Ordering::Acquire) == chat
@@ -1357,7 +1868,7 @@ fn step(
                 snapshot.managed_review_pending = false;
             }
         }
-        publish(shared, ChannelSyncPhase::Idle, Some(chat), None, None);
+        publish_completed(shared, Some(chat));
         shared.changes.send_replace(());
         return Ok(());
     }
@@ -1401,6 +1912,8 @@ fn step(
     let outcome = library.worker.request("commit_channel_sync", |reply| {
         StorageRequest::CommitChannelSync { batch, reply }
     })?;
+    let material =
+        !outcome.upserted.is_empty() || !outcome.removed.is_empty() || managed_files_changed;
     if let Ok(mut journal) = shared.deltas.lock() {
         journal.append(ChannelDelta {
             chat_id: chat,
@@ -1426,9 +1939,16 @@ fn step(
     job.force = next_force;
     if !bootstrap && matches!(read, ChannelRead::History(_)) {
         job.history = false;
+        if let Some(id) = history_id
+            && let Ok(mut history) = shared.history.lock()
+        {
+            history.finish(chat, id, HistoryStatus::Complete);
+        }
     }
     if let Ok(mut snapshot) = shared.snapshot.lock() {
-        snapshot.data_revision = snapshot.data_revision.saturating_add(1);
+        if material {
+            snapshot.data_revision = snapshot.data_revision.saturating_add(1);
+        }
         snapshot.committed_pages = snapshot.committed_pages.saturating_add(1);
         snapshot.last_activity = Instant::now();
         if shared.managed_id.load(Ordering::Acquire) == chat {
@@ -1441,7 +1961,7 @@ fn step(
         }
     }
     shared.changes.send_replace(());
-    publish(shared, ChannelSyncPhase::Idle, Some(chat), None, None);
+    publish_completed(shared, Some(chat));
     Ok(())
 }
 
@@ -1475,11 +1995,13 @@ mod tests {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 1)),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
+            sources: Mutex::new((0, Arc::new(Vec::new()))),
+            history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(0),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
-            active: Mutex::new(None),
+            active: Mutex::new(BTreeMap::new()),
         }
     }
     fn setup() -> (tempfile::TempDir, DesktopLibrary, Scheduler) {
@@ -1533,7 +2055,6 @@ mod tests {
             history_gap: false,
             before: None,
             edited: Vec::new(),
-            timeout_seconds: None,
         }
     }
 
@@ -1637,6 +2158,7 @@ mod tests {
         assert!(matches!(source.calls.borrow()[2], ChannelRead::Verify(_)));
         assert!(!needed(job));
         job.history = true;
+        shared.history.lock().expect("history").begin(2);
         step(
             &source,
             &library,
@@ -1908,3 +2430,6 @@ mod tests {
 
 #[cfg(test)]
 mod event_tests;
+
+#[cfg(test)]
+mod acceptance_tests;
