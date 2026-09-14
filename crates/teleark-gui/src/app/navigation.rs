@@ -480,10 +480,7 @@ impl TeleArkApp {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .id("shell-channel-sync")
-                            .flex()
-                            .items_center()
+                        components::compact_button("shell-channel-sync", "", None, false)
                             .child(
                                 div()
                                     .flex()
@@ -502,11 +499,14 @@ impl TeleArkApp {
                                     })
                                     .child(div().truncate().child(status.label.clone())),
                             )
+                            .ghost()
                             .h(px(24.0))
                             .px_1()
                             .max_w(px(240.0))
                             .flex_none()
                             .overflow_hidden()
+                            .accessibility_label(status.label)
+                            .tooltip(self.tr("shell-sync-details"))
                             .debug_selector(move || {
                                 if preparation {
                                     "dialogs-status"
@@ -514,7 +514,8 @@ impl TeleArkApp {
                                     "global-sync-details"
                                 }
                                 .into()
-                            }),
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| app.toggle_sync_details(cx))),
                     )
                     .when_some(rates.cleanup, |left, (id, phase)| {
                         let label = self.tr(match phase {

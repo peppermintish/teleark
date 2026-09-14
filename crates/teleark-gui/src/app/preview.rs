@@ -291,7 +291,11 @@ impl TeleArkApp {
             use teleark_runtime::{ChannelSyncEvent, ChannelSyncPhase, ChannelSyncSnapshot};
             let now = std::time::Instant::now();
             let waiting = state == "channel-sync-wait";
-            let synced = state == "channel-sync-synced";
+            let synced = matches!(
+                state.as_str(),
+                "channel-sync-synced" | "channel-sync-synced-locked" | "channel-sync-private"
+            );
+            self.app_lock.locked = state == "channel-sync-synced-locked";
             let failed = state == "channel-sync-failed";
             let phase = if waiting {
                 ChannelSyncPhase::RateLimited
@@ -361,6 +365,34 @@ impl TeleArkApp {
                 managed_review_pending: !waiting && !synced && !failed,
                 managed_scan: None,
             });
+            if state == "channel-sync-private" {
+                use teleark_runtime::{ManagedChannelChange, ManagedChannelChangeKind};
+                let changes: Vec<_> = [
+                    (ManagedChannelChangeKind::Edited, 41),
+                    (ManagedChannelChangeKind::Deleted, 42),
+                    (ManagedChannelChangeKind::Gap, 0),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (kind, message_id))| ManagedChannelChange {
+                    sequence: index as u64 + 1,
+                    message_id,
+                    kind,
+                    observed_at_unix_ms: self
+                        .sync_time_anchor
+                        .unix_millis(now - Duration::from_secs(9 - index as u64 * 3)),
+                })
+                .collect();
+                if let Some(snapshot) = &mut self.channel_sync_snapshot {
+                    snapshot.managed_watch = Some(teleark_runtime::ManagedChannelWatch {
+                        catalog_ready: true,
+                        change_count: 3,
+                        acknowledged_count: 0,
+                        last_changed_at_unix_ms: changes.last().map(|c| c.observed_at_unix_ms),
+                        changes,
+                    });
+                }
+            }
             if state == "channel-sync-vault-retry" {
                 self.page = Page::Storage;
                 self.storage_view = StorageView::Files;

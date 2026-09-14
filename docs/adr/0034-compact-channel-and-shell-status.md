@@ -18,4 +18,4 @@ Reviewed MIT-licensed [shadcn/ui data-table guidance](https://ui.shadcn.com/docs
 
 Deterministic tests cover status truth and distinct-channel counts, queued/failed/account activity, rate-cache operation counts and account replacement, compact footer geometry, and a stable table position across selection. Runtime tests exercise the seven-minute deadline and its postponement by actual delivery. Native English review covers 900×600 and actual full-screen mode in light/dark themes, with reachable selection/history controls and independent inspector scrolling. Executed results are recorded in Implementation Status.
 
-[ADR 0037](0037-application-pin-and-transfer-drain.md) supersedes the clickable sync status and application lock indicator: sync status is display-only, and an independent optional PIN gates the whole application.
+[ADR 0037](0037-application-pin-and-transfer-drain.md), corrected on 2026-09-15, gates the whole application with an independent optional PIN. Sync status is display-only while the application is locked and opens the inspector in the authorized, unlocked workspace.

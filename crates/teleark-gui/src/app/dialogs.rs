@@ -333,6 +333,7 @@ impl TeleArkApp {
                     None,
                     false,
                 )
+                .debug_selector(|| "sync-dialogs-action".into())
                 .on_click(cx.listener(|app, _, _, cx| {
                     if app.dialogs.active() {
                         app.cancel_dialog_load(cx);
@@ -699,17 +700,11 @@ mod tests {
             cx.simulate_click(status.center(), gpui::Modifiers::default());
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds("dialogs-inspector").is_none(),
-                "status is display-only"
+                cx.debug_bounds("channel-sync-inspector").is_some(),
+                "unlocked status opens the merged inspector"
             );
-            app.update(cx, |app, cx| {
-                app.dialogs.details = true;
-                cx.notify();
-            });
-            cx.run_until_parked();
-            assert!(cx.debug_bounds("dialogs-inspector").is_some());
             let action = cx
-                .debug_bounds("dialogs-action")
+                .debug_bounds("sync-dialogs-action")
                 .expect("visible cancel")
                 .center();
             assert!(action.x < px(900.0) && action.y < px(600.0));

@@ -70,13 +70,21 @@ gate; existing durable recovery remains responsible for those interruptions.
 
 ## Synchronization presentation
 
-The bottom synchronization status and private-channel warning are display-only.
-Settings → Network proxy → Sync activity and logs opens the inspector. Its bounded
-merged timeline includes directory loading, channel/manifest activity and private
-edit/delete/gap observations, regardless of application lock state or private
-section expansion. Stored timestamps and an application monotonic-to-wall-clock
-anchor produce fixed event times. Proxy history uses the same fixed timestamps;
-no history row shows an advancing age. A revision key prevents unrelated owner
+Updated 2026-09-15: the earlier globally display-only synchronization status is
+superseded. The bottom synchronization status opens or closes the merged inspector
+in an authorized, unlocked application. The application-locked screen keeps its
+status display-only; locking closes open details, and click handlers recheck current
+lock/authorization state so stale callbacks cannot reopen them. The private-channel
+warning remains display-only. Settings → Network proxy → Sync activity and logs
+continues to provide another inspector entry point. Its bounded merged timeline
+retains directory loading, channel/manifest activity and private edit/delete/gap
+observations while the application is locked; the inspector is accessible after
+unlocking the application PIN. Private-channel events appear once in Recent activity,
+merged chronologically with other messages, without a separate disclosure or an
+encryption-key unlock requirement. The review action remains available above the
+timeline, and the empty state considers all event sources. Stored timestamps and an
+application monotonic-to-wall-clock anchor produce fixed event times. Proxy history
+uses the same fixed timestamps; no history row shows an advancing age. A revision key prevents unrelated owner
 notifications from rebuilding the timeline; the list materializes visible rows.
 Retention omissions remain visible. Active catalog/library work cannot suppress
 private/channel failures in the shell summary.

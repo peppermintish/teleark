@@ -156,6 +156,116 @@ impl Render for SyncHistory {
 mod tests {
     use super::*;
     #[gpui_kit::test]
+    fn private_events_merge_once_in_time_order_and_refresh_without_unlocking(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use teleark_runtime::{ManagedChannelChange, ManagedChannelChangeKind};
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            let mut snapshot = super::super::channel_sync::tests::fixture_snapshot();
+            snapshot.events.truncate(1);
+            let at = snapshot.events[0].at;
+            let unix_ms = app.sync_time_anchor.unix_millis(at);
+            let watch = snapshot.managed_watch.as_mut().expect("watch");
+            watch.change_count = 3;
+            watch.last_changed_at_unix_ms = Some(unix_ms + 4_000);
+            watch.changes = vec![
+                ManagedChannelChange {
+                    sequence: 1,
+                    message_id: 10,
+                    kind: ManagedChannelChangeKind::Edited,
+                    observed_at_unix_ms: unix_ms - 2_000,
+                },
+                ManagedChannelChange {
+                    sequence: 2,
+                    message_id: 11,
+                    kind: ManagedChannelChangeKind::Deleted,
+                    observed_at_unix_ms: unix_ms + 2_000,
+                },
+                ManagedChannelChange {
+                    sequence: 3,
+                    message_id: 0,
+                    kind: ManagedChannelChangeKind::Gap,
+                    observed_at_unix_ms: unix_ms + 4_000,
+                },
+            ];
+            app.dialogs.history = [(dialogs::Phase::Saving, None, at - Duration::from_secs(4))]
+                .into_iter()
+                .collect();
+            app.vault_locked = true;
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let history = app.read_with(cx, |app, _| app.sync_history.clone().expect("timeline"));
+        app.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let original = history.read_with(cx, |history, _| history.rows.clone());
+        app.read_with(cx, |app, _| {
+            let private_title = |kind, message| {
+                app.tr_with(
+                    "sync-private-event",
+                    MessageArgs::new()
+                        .with("kind", app.tr(kind).to_string())
+                        .with("message", message),
+                )
+            };
+            assert_eq!(original.len(), 5, "each source event appears exactly once");
+            assert_eq!(original[0].title, app.tr("managed-watch-gap"));
+            assert_eq!(
+                original[1].title,
+                private_title("managed-watch-deleted", "11")
+            );
+            assert_eq!(original[2].title, app.tr("channel-sync-receiving"));
+            assert_eq!(
+                original[3].title,
+                private_title("managed-watch-edited", "10")
+            );
+            assert_eq!(original[4].title, app.tr("dialogs-saving"));
+            for index in [0, 1, 3] {
+                assert_eq!(
+                    original[index].source.as_ref(),
+                    app.storage_status.channel().expect("storage").name
+                );
+            }
+        });
+        app.update(cx, |app, cx| {
+            app.vault_locked = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        history.read_with(cx, |history, _| {
+            assert!(Arc::ptr_eq(&original, &history.rows))
+        });
+        app.update(cx, |app, cx| {
+            app.vault_locked = true;
+            let watch = app
+                .channel_sync_snapshot
+                .as_mut()
+                .expect("snapshot")
+                .managed_watch
+                .as_mut()
+                .expect("watch");
+            let at = watch.last_changed_at_unix_ms.expect("time") + 2_000;
+            watch.change_count += 1;
+            watch.last_changed_at_unix_ms = Some(at);
+            watch.changes.push(ManagedChannelChange {
+                sequence: 4,
+                message_id: 12,
+                kind: ManagedChannelChangeKind::Deleted,
+                observed_at_unix_ms: at,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.rows.len(), 6);
+            assert!(&history.rows[1..] == original.as_slice());
+        });
+    }
+
+    #[gpui_kit::test]
     fn unrelated_notifications_reuse_history_and_all_sources_survive_pin_lock(
         cx: &mut gpui_kit::TestAppContext,
     ) {

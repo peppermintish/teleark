@@ -878,32 +878,10 @@ impl TeleArkApp {
                 .managed_chat_id
                 .filter(|id| Some(*id) == self.storage_channel_id())
             {
-                body = body.child(
-                    components::button(
-                        "sync-private-disclosure",
-                        self.tr("managed-watch-title"),
-                        Some(if self.channel_sync_private_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        }),
-                        false,
-                    )
-                    .ghost()
-                    .justify_start()
-                    .text_color(theme::text_secondary())
-                    .debug_selector(|| "sync-private-disclosure".into())
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.channel_sync_private_expanded = !app.channel_sync_private_expanded;
-                        cx.notify();
-                    })),
-                );
                 if snapshot.managed_review_pending {
                     body = body.child(self.tr("managed-watch-pending"));
                 }
-                if let Some(watch) = &snapshot.managed_watch
-                    && self.channel_sync_private_expanded
-                {
+                if let Some(watch) = &snapshot.managed_watch {
                     let through = watch.change_count;
                     if watch.unacknowledged() > 0 {
                         body = body.child(
@@ -928,46 +906,7 @@ impl TeleArkApp {
                             )),
                         );
                     }
-                    if watch.omitted_changes() > 0 {
-                        body = body.child(self.tr("sync-older-events"));
-                    }
-                    for change in &watch.changes {
-                        let kind = match change.kind {
-                            teleark_runtime::ManagedChannelChangeKind::Edited => {
-                                "managed-watch-edited"
-                            }
-                            teleark_runtime::ManagedChannelChangeKind::Deleted => {
-                                "managed-watch-deleted"
-                            }
-                            teleark_runtime::ManagedChannelChangeKind::Gap => "managed-watch-gap",
-                        };
-                        body = body.child(
-                            self.tr_with(
-                                if change.message_id > 0 {
-                                    "managed-watch-event"
-                                } else {
-                                    "managed-watch-gap-event"
-                                },
-                                MessageArgs::new()
-                                    .with("kind", self.tr(kind).to_string())
-                                    .with(
-                                        "message",
-                                        format_integer(self.locale(), change.message_id as u64),
-                                    )
-                                    .with(
-                                        "time",
-                                        teleark_i18n::format::format_unix_millis(
-                                            self.locale(),
-                                            change.observed_at_unix_ms,
-                                        ),
-                                    ),
-                            ),
-                        );
-                    }
                 }
-            }
-            if snapshot.events.is_empty() {
-                body = body.child(self.tr("sync-no-events"));
             }
             if snapshot.dropped_events > 0
                 || snapshot.overflow_signals > 0
@@ -979,8 +918,23 @@ impl TeleArkApp {
                 body = body.child(self.tr("sync-older-events"));
             }
         }
+        let history_empty = self.dialogs.history.is_empty()
+            && self.channel_sync_snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.events.is_empty()
+                    && snapshot
+                        .managed_watch
+                        .as_ref()
+                        .is_none_or(|watch| watch.changes.is_empty())
+            });
         body = body
             .child(sync_section_title(self.tr("sync-recent-events")))
+            .when(history_empty, |body| {
+                body.child(
+                    div()
+                        .debug_selector(|| "sync-history-empty".into())
+                        .child(self.tr("sync-no-events")),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1517,14 +1471,9 @@ pub(super) mod tests {
             cx.simulate_click(details, gpui::Modifiers::default());
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds("channel-sync-inspector").is_none(),
-                "status is display-only"
+                cx.debug_bounds("channel-sync-inspector").is_some(),
+                "unlocked status opens synchronization details"
             );
-            app.update(cx, |app, cx| {
-                app.channel_sync_details = true;
-                cx.notify();
-            });
-            cx.run_until_parked();
             let inspector = cx
                 .debug_bounds("channel-sync-inspector")
                 .expect("separate inspector");
@@ -1706,6 +1655,77 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
+    fn private_changes_are_visible_in_global_history_without_a_key_unlock(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), full);
+            });
+            app.update(cx, |app, cx| {
+                app.vault_locked = true;
+                app.channel_sync_details = true;
+                app.dialogs.history.clear();
+                let mut snapshot = fixture_snapshot();
+                snapshot.events.clear();
+                app.channel_sync_snapshot = Some(snapshot);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("sync-private-disclosure").is_none());
+            assert!(cx.debug_bounds("sync-history-empty").is_none());
+            assert!(cx.debug_bounds("managed-watch-acknowledge").is_some());
+            let inspector = cx
+                .debug_bounds("channel-sync-inspector")
+                .expect("inspector");
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: inspector.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-240.0))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("sync-history-row-0").is_some());
+            assert!(cx.debug_bounds("sync-history-row-1").is_none());
+            app.update(cx, |app, cx| {
+                app.channel_sync_snapshot
+                    .as_mut()
+                    .expect("snapshot")
+                    .managed_watch = None;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("managed-watch-acknowledge").is_none());
+            assert!(cx.debug_bounds("sync-history-row-0").is_none());
+            assert!(cx.debug_bounds("sync-history-empty").is_some());
+            app.update(cx, |app, cx| {
+                app.channel_sync_snapshot
+                    .as_mut()
+                    .expect("snapshot")
+                    .managed_watch = fixture_snapshot().managed_watch;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("sync-history-empty").is_none());
+            assert!(cx.debug_bounds("sync-history-row-0").is_some());
+            assert!(cx.debug_bounds("managed-watch-acknowledge").is_some());
+            app.read_with(cx, |app, _| {
+                assert!(
+                    app.channel_sync_details,
+                    "live updates keep the inspector open"
+                );
+                assert!(
+                    app.vault_locked,
+                    "viewing events requires no encryption key"
+                );
+                assert!(app.channel_sync.is_none(), "viewing starts no network work");
+            });
+        }
+    }
+
+    #[gpui::test]
     fn global_status_and_locked_private_warning_stay_at_window_bottom_on_every_page(
         cx: &mut TestAppContext,
     ) {
@@ -1762,7 +1782,6 @@ pub(super) mod tests {
                     );
                     app.update(cx, |app, cx| {
                         app.channel_sync_details = true;
-                        app.channel_sync_private_expanded = true;
                         cx.notify();
                     });
                     cx.run_until_parked();

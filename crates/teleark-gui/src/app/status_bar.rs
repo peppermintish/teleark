@@ -218,6 +218,17 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
 }
 
 impl TeleArkApp {
+    pub(super) fn toggle_sync_details(&mut self, cx: &mut Context<Self>) {
+        // Recheck access when handling the event: a rendered button may outlive
+        // application locking or a Telegram session-loss notification.
+        if self.app_is_locked() || !self.telegram_is_authorized() {
+            return;
+        }
+        self.channel_sync_details = !self.channel_sync_details;
+        self.dialogs.details = false;
+        cx.notify();
+    }
+
     pub(super) fn shell_sync_status(&self) -> ShellSyncStatus {
         if self.authorization_snapshot.is_some_and(|snapshot| {
             snapshot.account_id == self.telegram_account.as_ref().map(|account| account.id)
@@ -292,6 +303,118 @@ impl TeleArkApp {
 mod tests {
     use super::*;
     use gpui_kit::{TestAppContext, size};
+
+    #[gpui_kit::test]
+    fn synced_click_opens_and_closes_details_only_while_the_application_is_unlocked(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        let pin = teleark_runtime::AppPinRecord::create("123456".into()).expect("synthetic PIN");
+        app.update(cx, |app, cx| {
+            let mut snapshot = channel_sync::tests::fixture_snapshot();
+            snapshot.phase = Phase::Idle;
+            snapshot.managed_watch = None;
+            snapshot.managed_review_pending = false;
+            snapshot.queued = 0;
+            app.channel_sync_snapshot = Some(snapshot);
+            app.app_lock.record = Some(pin);
+            cx.notify();
+        });
+        for full in [false, true] {
+            cx.simulate_resize(size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+            });
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.shell_sync_status().label.as_ref(), "Synced")
+            });
+            let status = cx
+                .debug_bounds("global-sync-details")
+                .expect("unlocked sync button");
+            cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("channel-sync-inspector").is_some());
+            let close = cx
+                .debug_bounds("channel-sync-close-details")
+                .expect("close button");
+            cx.update(|window, _| {
+                assert!(close.right() <= window.viewport_size().width);
+                assert!(close.bottom() <= window.viewport_size().height);
+            });
+            cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("channel-sync-inspector").is_none());
+            cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| app.update(cx, |app, cx| app.lock_application(window, cx)));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("channel-sync-inspector").is_none());
+            assert!(cx.debug_bounds("global-sync-details").is_none());
+            let locked = cx
+                .debug_bounds("locked-background-status")
+                .expect("locked status");
+            cx.simulate_click(
+                gpui_kit::point(locked.left() + px(35.0), locked.center().y),
+                gpui_kit::Modifiers::default(),
+            );
+            cx.run_until_parked();
+            app.update(cx, |app, cx| {
+                app.toggle_sync_details(cx); // Late callback from the previously visible button.
+                assert!(!app.channel_sync_details);
+                assert_eq!(app.shell_sync_status().label.as_ref(), "Synced");
+                app.app_lock.locked = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let status = cx
+                .debug_bounds("global-sync-details")
+                .expect("restored unlocked button");
+            cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("channel-sync-inspector").is_some());
+            let close = cx
+                .debug_bounds("channel-sync-close-details")
+                .expect("close button");
+            cx.simulate_click(close.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+        }
+        app.update(cx, |app, cx| {
+            app.telegram_auth = TelegramAuthState::Unauthorized;
+            app.toggle_sync_details(cx);
+            assert!(
+                !app.channel_sync_details,
+                "signed-out callbacks are also fenced"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn preparation_status_opens_the_merged_inspector_without_starting_work(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            app.channel_sync_snapshot = None;
+            app.dialogs.transition(dialogs::Phase::Saving, None);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let status = cx
+            .debug_bounds("dialogs-status")
+            .expect("preparation status");
+        cx.simulate_click(status.center(), gpui_kit::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("channel-sync-inspector").is_some());
+        app.read_with(cx, |app, _| {
+            assert!(!app.dialogs.details, "one merged inspector");
+            assert_eq!(app.dialogs.phase(), dialogs::Phase::Saving);
+            assert!(app.telegram_task.is_none());
+            assert!(app.channel_sync_task.is_none());
+        });
+    }
 
     #[gpui_kit::test]
     fn cleanup_stays_visible_after_navigation_without_inventing_throughput(

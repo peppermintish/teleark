@@ -1,5 +1,28 @@
 # Implementation status — v0.4.4
 
+## Sync-status and unified activity history (2026-09-15)
+
+The lower-left synchronization status is clickable again in the authorized, unlocked
+workspace, including Synced and preparation states. It opens the existing merged
+activity inspector without starting synchronization work. The application-locked
+status remains display-only, locking closes open details, and handlers recheck
+current authorization/lock state to reject stale clicks. Background activity and
+history continue across locking. Private-channel edit/delete/gap events appear once
+in the global Recent activity timeline, ordered together with other messages. The
+separate Private channel changes disclosure is removed; viewing events requires no
+encryption-key unlock. Review remains available above the timeline, new events
+appear without reopening it, and the empty state considers all sources. No
+persistence or runtime contract changes.
+
+Validation: 163 GUI tests and 21 i18n/catalog tests passed; three existing manual
+GUI performance probes were ignored. Formatting, affected-crate strict Clippy and
+the debug build passed. English/light synthetic native previews covered 900×600
+and actual full-screen mode: Synced opens/closes details while the application is
+unlocked and remains read-only while locked. Private events are visible with an
+unavailable encryption key, and the compact inspector scrolls independently. The
+`channel-sync-private` and `channel-sync-synced-locked` preview states reproduce
+these cases without opening real account data or contacting Telegram.
+
 ## Event-driven session revocation (2026-09-15)
 
 Connection/authentication-error events now request one home-DC confirmation; idle
