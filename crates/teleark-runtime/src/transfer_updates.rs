@@ -310,10 +310,13 @@ impl<T: TransferRecord> TransferSnapshots<T> {
         };
         let mut previous = std::mem::take(&mut records.entries);
         for value in values {
-            let entry = previous.remove(&value.id()).unwrap_or(Entry {
-                value,
-                cached: None,
-            });
+            let entry = previous
+                .remove(&value.id())
+                .filter(|entry| retain(&entry.value))
+                .unwrap_or(Entry {
+                    value,
+                    cached: None,
+                });
             records.entries.insert(entry.value.id(), entry);
         }
         records.entries.extend(

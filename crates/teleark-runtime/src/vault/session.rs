@@ -50,7 +50,12 @@ impl VaultSession {
 
     pub fn admit(&self, command: VaultCommand) -> Result<VaultEnvelope, ApplicationError> {
         let needs_active = (command.is_transfer()
-            && !matches!(command, VaultCommand::Download { .. }))
+            && !matches!(
+                command,
+                VaultCommand::Download { .. }
+                    | VaultCommand::ResumeDownload { .. }
+                    | VaultCommand::ResumeQueuedTransfers { .. }
+            ))
             || matches!(
                 command,
                 VaultCommand::Upload { .. }
@@ -58,7 +63,13 @@ impl VaultSession {
                     | VaultCommand::ChangePassword { .. }
                     | VaultCommand::RotateRecovery { .. }
             );
-        let needs_any = command.is_scan() || matches!(command, VaultCommand::Download { .. });
+        let needs_any = command.is_scan()
+            || matches!(
+                command,
+                VaultCommand::Download { .. }
+                    | VaultCommand::ResumeDownload { .. }
+                    | VaultCommand::ResumeQueuedTransfers { .. }
+            );
         if (needs_active && self.keys.active.is_none())
             || (needs_any && self.keys.active.is_none() && self.keys.historical.is_none())
         {
@@ -120,12 +131,21 @@ impl VaultEnvelope {
 impl VaultCommand {
     pub fn is_transfer(&self) -> bool {
         #[cfg(test)]
-        if matches!(self, Self::TestTransfer { .. }) {
+        if matches!(
+            self,
+            Self::TestTransfer { .. } | Self::TestControlledUpload { .. }
+        ) {
             return true;
         }
         matches!(
             self,
-            Self::Upload { .. } | Self::UploadBatch { .. } | Self::Download { .. }
+            Self::Upload { .. }
+                | Self::ResumeUpload { .. }
+                | Self::ResumeQueuedUploads { .. }
+                | Self::ResumeQueuedTransfers { .. }
+                | Self::UploadBatch { .. }
+                | Self::Download { .. }
+                | Self::ResumeDownload { .. }
         )
     }
 
@@ -240,12 +260,51 @@ mod tests {
             None,
             Some(([2; 16], Arc::new(VaultMasterKey::from_bytes([8; 32])))),
         );
+        assert!(
+            session
+                .admit(VaultCommand::ResumeQueuedTransfers {
+                    account_id: 7,
+                    reply: mpsc::sync_channel(1).0,
+                })
+                .is_ok(),
+            "mixed recovery can use historical download keys"
+        );
         assert!(!session.status.locked);
         assert!(session.status.active_key_locked);
         assert!(session.admit(download()).is_ok());
         assert!(
             session
+                .admit(VaultCommand::ResumeDownload {
+                    account_id: 7,
+                    task_id: 9,
+                    reply: mpsc::sync_channel(1).0,
+                })
+                .is_ok(),
+            "historical keys may admit download recovery"
+        );
+
+        assert!(
+            session
+                .admit(VaultCommand::ResumeUpload {
+                    account_id: 7,
+                    task_id: 9,
+                    reply: mpsc::sync_channel(1).0
+                })
+                .is_err()
+        );
+
+        assert!(
+            session
+                .admit(VaultCommand::ResumeQueuedUploads {
+                    account_id: 7,
+                    reply: mpsc::sync_channel(1).0
+                })
+                .is_err()
+        );
+        assert!(
+            session
                 .admit(VaultCommand::UploadBatch {
+                    progress: VaultUploadSelectionProgress::new(1),
                     account_id: 7,
                     chat_id: 9,
                     sources: vec![],

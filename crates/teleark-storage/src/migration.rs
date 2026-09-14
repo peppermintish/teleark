@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 16;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 22;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -593,6 +593,94 @@ CREATE TABLE vault_upload_history (
 CREATE INDEX vault_upload_history_account ON vault_upload_history(account_id, sequence DESC);
 CREATE INDEX vault_upload_history_batch ON vault_upload_history(account_id, batch_id, sequence DESC);
 "#,
+    },
+    Migration {
+        version: 17,
+        sql: r#"
+CREATE TABLE vault_transfer_jobs (
+    account_id INTEGER NOT NULL CHECK (account_id > 0),
+    id INTEGER NOT NULL CHECK (id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    direction TEXT NOT NULL CHECK (direction IN ('upload','download')),
+    package_id BLOB NOT NULL CHECK (length(package_id) = 16),
+    context_version INTEGER NOT NULL CHECK (context_version > 0),
+    context BLOB NOT NULL CHECK (length(context) BETWEEN 1 AND 2097152),
+    state TEXT NOT NULL CHECK (state IN ('queued','running','pausing','paused','cancelling','cancelled','retryable','blocked','completed')),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    failure_code TEXT CHECK (length(failure_code) BETWEEN 1 AND 64),
+    CHECK ((state IN ('retryable','blocked')) = (failure_code IS NOT NULL)),
+    PRIMARY KEY (account_id,id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX vault_transfer_jobs_schedule ON vault_transfer_jobs(account_id,state,id);
+CREATE TABLE vault_transfer_parts (
+    account_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    part_index INTEGER NOT NULL CHECK (part_index >= 0),
+    identity BLOB NOT NULL CHECK (length(identity) BETWEEN 1 AND 16384),
+    receipt BLOB CHECK (length(receipt) BETWEEN 1 AND 16384),
+    PRIMARY KEY (account_id,task_id,part_index),
+    FOREIGN KEY (account_id,task_id) REFERENCES vault_transfer_jobs(account_id,id)
+) STRICT, WITHOUT ROWID;
+"#,
+    },
+    Migration {
+        version: 18,
+        sql: r#"
+CREATE TABLE vault_manifest_outbox (
+    account_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+    commitment BLOB NOT NULL CHECK (length(commitment) = 32),
+    random_id INTEGER NOT NULL CHECK (random_id != 0),
+    envelope BLOB CHECK (length(envelope) BETWEEN 1 AND 67239936),
+    message_id INTEGER CHECK (message_id > 0),
+    CHECK (message_id IS NULL OR envelope IS NOT NULL),
+    PRIMARY KEY (account_id,task_id),
+    FOREIGN KEY (account_id,task_id) REFERENCES vault_transfer_jobs(account_id,id)
+) STRICT, WITHOUT ROWID;
+"#,
+    },
+    Migration {
+        version: 19,
+        sql: "CREATE INDEX vault_transfer_jobs_direction ON vault_transfer_jobs(account_id,direction,id);",
+    },
+    Migration {
+        version: 20,
+        sql: r#"
+CREATE TABLE vault_pending_uploads (
+    account_id INTEGER NOT NULL CHECK (account_id > 0),
+    id INTEGER NOT NULL CHECK (id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    batch_id INTEGER NOT NULL CHECK (batch_id > 0),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+    context BLOB NOT NULL CHECK (length(context) BETWEEN 1 AND 131072),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    state TEXT NOT NULL CHECK (state IN ('queued','paused','cancelled','retryable','blocked','promoted')),
+    failure_code TEXT CHECK (length(failure_code) BETWEEN 1 AND 64),
+    CHECK ((state IN ('retryable','blocked')) = (failure_code IS NOT NULL)),
+    PRIMARY KEY (account_id,id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX vault_pending_uploads_schedule ON vault_pending_uploads(account_id,state,id);
+"#,
+    },
+    Migration {
+        version: 21,
+        sql: r#"
+CREATE TABLE native_download_cleanup (
+    task_id INTEGER PRIMARY KEY REFERENCES native_download_tasks(id) ON DELETE RESTRICT,
+    codec_version INTEGER NOT NULL DEFAULT 1 CHECK (codec_version > 0),
+    attempt INTEGER NOT NULL CHECK (attempt >= 0),
+    requested_at INTEGER NOT NULL CHECK (requested_at >= 0),
+    retry_requested INTEGER NOT NULL DEFAULT 0 CHECK (retry_requested IN (0,1))
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 22,
+        sql: "CREATE INDEX vault_pending_uploads_batch ON vault_pending_uploads(account_id,batch_id,state,id); CREATE INDEX vault_transfer_jobs_history ON vault_transfer_jobs(account_id,direction,CASE WHEN state IN ('queued','running','pausing','cancelling') THEN 0 WHEN state IN ('paused','retryable','blocked') THEN 1 ELSE 2 END,id DESC);",
     },
 ];
 

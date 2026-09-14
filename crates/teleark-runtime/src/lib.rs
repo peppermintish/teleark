@@ -4,6 +4,11 @@
 //! other blocking infrastructure work directly.
 
 pub use teleark_storage::VaultFileHealth;
+pub use teleark_storage::VaultJobState as VaultRecoveryState;
+mod durable_download;
+mod durable_upload;
+pub use durable_upload::{DurablePreparedUpload, DurableUploadEncryption, DurableUploadParts};
+
 mod local_library;
 mod session_log_writer;
 pub use local_library::{
@@ -59,14 +64,20 @@ mod diagnostics;
 mod telegram;
 mod transfer;
 mod vault;
+mod vault_recovery;
+pub use vault_recovery::{
+    RecoveryContextError, VaultPartRecovery, VaultPendingUploadContext, VaultRecoveryContext,
+    VaultRecoveryDirection,
+};
 mod vault_progress;
 pub use vault_progress::{VaultUploadActivity, VaultUploadPhase};
 
 pub use channel_transfer::{
-    ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
-    ChannelDownloadFailureStage, ChannelDownloadPartEvent, ChannelDownloadRequest,
-    ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers,
-    PartEventHistory, TransferRates, available_download_destination,
+    ChannelDownloadCleanup, ChannelDownloadCleanupPhase, ChannelDownloadEvent,
+    ChannelDownloadEventKind, ChannelDownloadFailure, ChannelDownloadFailureStage,
+    ChannelDownloadPartEvent, ChannelDownloadRequest, ChannelDownloadSnapshot,
+    ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers, PartEventHistory,
+    TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
@@ -89,14 +100,16 @@ pub use telegram::{
 pub use transfer::{
     EncryptedRemoteTransport, ManifestPublishRequest, ManifestRecoveryReport, ProductionTransferIo,
     RecoveredManifest, RejectedManifest, RemoteByteObject, RemoteObjectStore,
-    SqliteCheckpointStore, TelegramObjectStore, encrypted_part_plaintext_limit,
-    encrypted_part_sizes, recover_remote_manifests,
+    ReservedPublicationStore, SqliteCheckpointStore, TelegramObjectStore,
+    encrypted_part_plaintext_limit, encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, MAX_VAULT_UPLOAD_BATCH, ManagedScanMode, ManagedVaultFile, ManagedVaultScan,
-    VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySnapshot, VaultStatus,
-    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadFailure,
-    VaultUploadReport, VaultUploadSource, inspect_upload_sources,
+    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultJob, VaultKeyPhase,
+    VaultKeyProgress, VaultKeySnapshot, VaultStatus, VaultTransferControl, VaultTransferDirection,
+    VaultTransferSnapshot, VaultTransferState, VaultUploadControl, VaultUploadFailure,
+    VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
+    VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
+    inspect_upload_sources, inspect_upload_sources_observed,
 };
 
 pub use teleark_telegram::{
@@ -554,12 +567,33 @@ impl DesktopLibrary {
         suggested_file_name: &str,
     ) -> Result<PathBuf, ApplicationError> {
         let directories = self.managed_directories()?;
-        channel_transfer::available_download_destination_with_reservations(
+        channel_transfer::available_download_destination_with_claim(
             &directories.downloads,
             suggested_file_name,
             |candidate| {
                 self.worker
                     .native_download_destination_in_use(candidate.to_owned())
+            },
+            |candidate| {
+                let mut partial = candidate.as_os_str().to_os_string();
+                partial.push(".partial");
+                // Exclusive filesystem admission is shared by native and encrypted
+                // owners, including separate processes using the same directory.
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(PathBuf::from(partial))
+                {
+                    Ok(file) => file
+                        .sync_all()
+                        .map(|()| true)
+                        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence)),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(
+                        ApplicationError::new(ApplicationErrorKind::PermissionDenied),
+                    ),
+                    Err(_) => Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+                }
             },
         )
     }
@@ -1897,11 +1931,18 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 );
             }
             StorageRequest::InterruptVaultUploads { reply } => {
-                let _ = reply.send(
-                    database
-                        .interrupt_previous_vault_uploads()
-                        .map_err(map_storage_error),
-                );
+                let result = system_time_unix_ms(SystemTime::now())
+                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))
+                    .and_then(|at| {
+                        database
+                            .interrupt_previous_vault_uploads()
+                            .map_err(map_storage_error)?;
+                        database
+                            .recover_all_vault_jobs(at)
+                            .map(|_| ())
+                            .map_err(map_storage_error)
+                    });
+                let _ = reply.send(result);
             }
             StorageRequest::VaultUploadHistory { account, reply } => {
                 let _ = reply.send(
@@ -2939,6 +2980,42 @@ mod tests {
             .next_download_destination("report.pdf")
             .expect("collision-safe destination");
         assert_eq!(second, directories.downloads.join("report (1).pdf"));
+    }
+
+    #[test]
+    fn concurrent_download_allocations_claim_distinct_partial_names() {
+        let directory = tempfile::tempdir().expect("directory");
+        let library =
+            DesktopLibrary::open(directory.path().join("catalog.sqlite")).expect("library");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let owners = (0..8)
+            .map(|_| {
+                let library = library.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    library
+                        .next_download_destination("shared.bin")
+                        .expect("claim")
+                })
+            })
+            .collect::<Vec<_>>();
+        let paths = owners
+            .into_iter()
+            .map(|owner| owner.join().expect("owner"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 8);
+        for path in paths {
+            assert!(!path.exists());
+            let mut partial = path.into_os_string();
+            partial.push(".partial");
+            assert_eq!(
+                std::fs::metadata(PathBuf::from(partial))
+                    .expect("reservation")
+                    .len(),
+                0
+            );
+        }
     }
 
     #[test]

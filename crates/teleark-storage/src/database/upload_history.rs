@@ -367,7 +367,7 @@ mod tests {
         connection.execute_batch("DROP TABLE vault_upload_history")?;
         drop(connection);
         let db = Database::open(&path)?;
-        assert_eq!(db.schema_version()?, 16);
+        assert_eq!(db.schema_version()?, crate::LATEST_SCHEMA_VERSION);
         assert_eq!(
             db.connection
                 .query_row("SELECT recovery_wrap FROM vault_key_epochs", [], |r| r

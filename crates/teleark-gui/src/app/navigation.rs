@@ -453,36 +453,11 @@ impl TeleArkApp {
     }
 
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut rates = teleark_runtime::TransferRates::default();
-        for item in self
-            .native_transfer_view
-            .items
-            .iter()
-            .filter(|item| item.state == teleark_runtime::ChannelDownloadState::Running)
-        {
-            rates.download_bytes_per_second = rates
-                .download_bytes_per_second
-                .saturating_add(item.current_bytes_per_second.unwrap_or(0));
-        }
-        for item in self
-            .vault_transfer_view
-            .items
-            .iter()
-            .filter(|item| item.state == teleark_runtime::VaultTransferState::Running)
-        {
-            match item.direction {
-                teleark_runtime::VaultTransferDirection::Upload => {
-                    rates.upload_bytes_per_second = rates
-                        .upload_bytes_per_second
-                        .saturating_add(item.telemetry.goodput_bytes_per_second)
-                }
-                teleark_runtime::VaultTransferDirection::Download => {
-                    rates.download_bytes_per_second = rates
-                        .download_bytes_per_second
-                        .saturating_add(item.telemetry.goodput_bytes_per_second)
-                }
-            }
-        }
+        let rates = self.status_rate_cache.borrow_mut().read(
+            self.telegram_account.as_ref().map(|account| account.id),
+            &self.native_transfer_view,
+            &self.vault_transfer_view,
+        );
         div()
             .debug_selector(|| "global-background-status".into())
             .h(px(28.0))
@@ -577,6 +552,50 @@ impl TeleArkApp {
                         })),
                 )
             })
+            .when_some(rates.cleanup, |bar, (id, phase)| {
+                let label = self.tr(match phase {
+                    teleark_runtime::ChannelDownloadCleanupPhase::WaitingForWriter => {
+                        "native-cleanup-waiting"
+                    }
+                    teleark_runtime::ChannelDownloadCleanupPhase::RemovingPartial => {
+                        "native-cleanup-removing"
+                    }
+                    teleark_runtime::ChannelDownloadCleanupPhase::Failed(_) => {
+                        "native-cleanup-failed"
+                    }
+                });
+                bar.child(
+                    components::compact_button("shell-download-cleanup", "", None, false)
+                        .child(div().truncate().child(label.clone()))
+                        .ghost()
+                        .h(px(24.0))
+                        .px_1()
+                        .min_w_0()
+                        .max_w(px(170.0))
+                        .overflow_hidden()
+                        .accessibility_label(label.clone())
+                        .tooltip(label)
+                        .debug_selector(|| "shell-download-cleanup".into())
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.nav_selection = "nav-downloads";
+                            app.focused_transfer_key = Some(id);
+                            app.set_page(Page::Transfers, cx);
+                            app.show_transfer_detail = true;
+                            if let Some(batch) = app
+                                .native_transfer_view
+                                .items
+                                .iter()
+                                .find(|item| item.id == id)
+                                .and_then(|item| item.batch_id)
+                            {
+                                app.expanded_transfer_batches.insert(batch);
+                            }
+                            app.search_input.update(cx, |input, cx| {
+                                input.set_value("", window, cx);
+                            });
+                        })),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -584,7 +603,11 @@ impl TeleArkApp {
                     .items_center()
                     .gap_1()
                     .child(Icon::new(IconName::ArrowDown).size(px(12.0)))
-                    .child(format_speed(self.locale(), rates.download_bytes_per_second)),
+                    .child(
+                        rates
+                            .download
+                            .map_or_else(|| "—".into(), |rate| format_speed(self.locale(), rate)),
+                    ),
             )
             .child(
                 div()
@@ -592,7 +615,11 @@ impl TeleArkApp {
                     .items_center()
                     .gap_1()
                     .child(Icon::new(IconName::ArrowUp).size(px(12.0)))
-                    .child(format_speed(self.locale(), rates.upload_bytes_per_second)),
+                    .child(
+                        rates
+                            .upload
+                            .map_or_else(|| "—".into(), |rate| format_speed(self.locale(), rate)),
+                    ),
             )
             .into_any_element()
     }

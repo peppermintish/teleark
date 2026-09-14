@@ -226,22 +226,43 @@ pub(super) fn recover_target(
     store: &mut TelegramObjectStore,
     scope: (i64, i64),
     package: PackageId,
+    expected: Option<(i64, [u8; 32])>,
     active: Option<([u8; 16], &VaultMasterKey)>,
     historical: Option<&([u8; 16], Arc<VaultMasterKey>)>,
-) -> Result<crate::RecoveredManifest, ApplicationError> {
+) -> Result<(crate::RecoveredManifest, [u8; 32]), ApplicationError> {
     let name = teleark_crypto::remote_manifest_name(&package_bytes(package.get()));
-    let object = store
-        .search_exact_caption(crate::transfer::MANIFEST_CAPTION, MAX_MANIFEST_SCAN)
-        .map_err(map_transfer_error)?
-        .into_iter()
-        .find(|object| object.name == name)
-        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-    let bytes = store
-        .download(object.object_id)
-        .map_err(map_transfer_error)?;
-    if bytes.len() as u64 != object.encoded_size {
-        return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
-    }
+    let (object, bytes) = if let Some((message_id, digest)) = expected {
+        let id = u64::try_from(message_id)
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+        let bytes = store.download(id).map_err(map_transfer_error)?;
+        if blake3::hash(&bytes).as_bytes() != &digest {
+            return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+        }
+        (
+            crate::RemoteByteObject {
+                object_id: id,
+                name: name.clone(),
+                encoded_size: bytes.len() as u64,
+            },
+            bytes,
+        )
+    } else {
+        let object = store
+            .search_exact_caption(crate::transfer::MANIFEST_CAPTION, MAX_MANIFEST_SCAN)
+            .map_err(map_transfer_error)?
+            .into_iter()
+            .find(|object| object.name == name)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        let bytes = store
+            .download(object.object_id)
+            .map_err(map_transfer_error)?;
+        if bytes.len() as u64 != object.encoded_size {
+            return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+        }
+        (object, bytes)
+    };
     let manifest = open_with_keys(&bytes, active, historical)?;
     if teleark_crypto::remote_manifest_name(&manifest.public_header.package_id) != name
         || manifest
@@ -252,7 +273,10 @@ pub(super) fn recover_target(
     {
         return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
     }
-    Ok(crate::RecoveredManifest { object, manifest })
+    Ok((
+        crate::RecoveredManifest { object, manifest },
+        *blake3::hash(&bytes).as_bytes(),
+    ))
 }
 
 fn aggregate_presence(manifest: bool, missing: bool, unknown: bool) -> VaultFileHealth {

@@ -116,9 +116,9 @@ impl TransferItem {
     pub(super) fn state(&self) -> TransferState {
         match self {
             Self::Preview(row) => row.state,
-            Self::Native(row, _) => transfer_state(row.state),
+            Self::Native(row, _) => transfer_state(native_display_state(row)),
             Self::NativeBatch(_, rows) => {
-                aggregate_download_states(rows.iter().map(|row| row.state))
+                aggregate_download_states(rows.iter().map(|row| native_display_state(row)))
             }
             Self::Vault(row, _) => vault_transfer_state(row),
             Self::VaultBatch(_, _, rows) => aggregate_transfer_states(
@@ -146,6 +146,20 @@ impl TransferItem {
             Self::Preview(row) => row.batch_child,
             Self::Native(_, child) | Self::Vault(_, child) => *child,
             _ => false,
+        }
+    }
+
+    pub(super) fn parent_key(&self) -> Option<u64> {
+        self.native_batch()
+            .or_else(|| self.vault_batch().map(vault_batch_key))
+    }
+
+    pub(super) fn batch_count(&self) -> usize {
+        match self {
+            Self::NativeBatch(_, rows) => rows.len(),
+            Self::VaultBatch(_, _, rows) => rows.len(),
+            Self::Preview(row) => row.batch_summary.as_ref().map_or(0, |batch| batch.total),
+            _ => 0,
         }
     }
 
@@ -184,6 +198,13 @@ impl TransferItem {
         };
         match self {
             Self::Preview(row) => row.activity_detail.clone(),
+            Self::Native(row, _) => row
+                .cleanup
+                .map(|cleanup| app.native_cleanup_detail(cleanup)),
+            Self::NativeBatch(_, rows) => rows
+                .iter()
+                .find_map(|row| row.cleanup)
+                .map(|cleanup| app.native_cleanup_detail(cleanup)),
             Self::Vault(row, _) if active(row) => row
                 .upload_activity
                 .as_ref()
@@ -252,7 +273,10 @@ impl TransferItem {
 
 pub(super) fn vault_transfer_state(snapshot: &VaultTransferSnapshot) -> TransferState {
     match snapshot.state {
-        VaultTransferState::Queued => TransferState::Waiting,
+        VaultTransferState::Queued
+        | VaultTransferState::Pausing
+        | VaultTransferState::Cancelling => TransferState::Waiting,
+        VaultTransferState::Paused => TransferState::Paused,
         VaultTransferState::Cancelled => TransferState::Cancelled,
         VaultTransferState::Running => match snapshot.direction {
             VaultTransferDirection::Upload => TransferState::Uploading,

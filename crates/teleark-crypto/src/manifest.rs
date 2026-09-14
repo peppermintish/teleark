@@ -352,14 +352,29 @@ fn hex_id(bytes: &[u8; 16]) -> String {
     value
 }
 
-/// Encrypt one canonical metadata payload for an immutable manifest generation.
-pub fn seal_manifest(
+/// BLAKE3 commitment to the exact version-1 manifest input before AEAD use.
+/// Persist this commitment before sealing an immutable generation. It is not
+/// an authentication result; remote envelopes still require open_manifest.
+pub fn manifest_content_commitment(
     public_header: &ManifestPublicHeader,
     metadata: &ManifestMetadata,
-    file_key: &FileKey,
     limits: ManifestLimits,
-    usage: &mut AeadUsageRegistry,
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<[u8; 32], CryptoError> {
+    let (public_bytes, plaintext) = manifest_payload(public_header, metadata, limits)?;
+    let prefix = encode_envelope_prefix(public_bytes.len(), plaintext.len())?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"TARK manifest commitment v1\0");
+    hash.update(&prefix);
+    hash.update(&public_bytes);
+    hash.update(&plaintext);
+    Ok(*hash.finalize().as_bytes())
+}
+
+fn manifest_payload(
+    public_header: &ManifestPublicHeader,
+    metadata: &ManifestMetadata,
+    limits: ManifestLimits,
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CryptoError> {
     public_header.validate(limits)?;
     metadata.validate(public_header, limits)?;
     let public_bytes = encode_public_header(public_header)?;
@@ -370,7 +385,7 @@ pub fn seal_manifest(
             actual: public_bytes.len() as u64,
         });
     }
-    let mut encrypted_metadata = Zeroizing::new(encode_metadata(metadata)?);
+    let encrypted_metadata = Zeroizing::new(encode_metadata(metadata)?);
     if encrypted_metadata.len() > limits.max_encrypted_metadata_bytes {
         return Err(CryptoError::LimitExceeded {
             field: "manifest encrypted metadata",
@@ -378,6 +393,18 @@ pub fn seal_manifest(
             actual: encrypted_metadata.len() as u64,
         });
     }
+    Ok((public_bytes, encrypted_metadata))
+}
+
+/// Encrypt one canonical metadata payload for an immutable manifest generation.
+pub fn seal_manifest(
+    public_header: &ManifestPublicHeader,
+    metadata: &ManifestMetadata,
+    file_key: &FileKey,
+    limits: ManifestLimits,
+    usage: &mut AeadUsageRegistry,
+) -> Result<Vec<u8>, CryptoError> {
+    let (public_bytes, mut encrypted_metadata) = manifest_payload(public_header, metadata, limits)?;
     let prefix = encode_envelope_prefix(public_bytes.len(), encrypted_metadata.len())?;
     let mut aad = Vec::with_capacity(prefix.len() + public_bytes.len());
     aad.extend_from_slice(&prefix);
@@ -1573,6 +1600,38 @@ mod tests {
             Err(error) => panic!("sample manifest seal failed: {error}"),
         };
         (master, bytes)
+    }
+
+    #[test]
+    fn content_commitment_binds_canonical_header_and_metadata_before_sealing() {
+        let (_, _, public, metadata) = sample();
+        let limits = ManifestLimits::default();
+        let original = manifest_content_commitment(&public, &metadata, limits).expect("commitment");
+        assert_eq!(
+            original,
+            manifest_content_commitment(&public, &metadata, limits).expect("same content")
+        );
+        let mut changed = metadata.clone();
+        changed.logical_name.push('x');
+        assert_ne!(
+            original,
+            manifest_content_commitment(&public, &changed, limits).expect("changed name")
+        );
+        changed = metadata.clone();
+        changed.whole_plaintext_blake3[0] ^= 1;
+        assert_ne!(
+            original,
+            manifest_content_commitment(&public, &changed, limits).expect("changed digest")
+        );
+        let mut header = public.clone();
+        header.created_at_unix_ms += 1;
+        assert_ne!(
+            original,
+            manifest_content_commitment(&header, &metadata, limits).expect("changed header")
+        );
+        let mut limited = limits;
+        limited.max_encrypted_metadata_bytes = 1;
+        assert!(manifest_content_commitment(&public, &metadata, limited).is_err());
     }
 
     #[test]

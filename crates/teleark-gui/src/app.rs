@@ -11,6 +11,7 @@ mod navigation;
 mod preferences;
 mod preview;
 mod speed_limits;
+mod status_bar;
 mod sync_history;
 mod sync_timing;
 mod workspace_view;
@@ -339,6 +340,15 @@ pub struct TeleArkApp {
     pub(crate) upload_body_scroll: gpui_kit::ScrollHandle,
     pub(crate) batch_detail_scroll: gpui_kit::UniformListScrollHandle,
     pub(crate) expanded_transfer_batches: BTreeSet<u64>,
+    pub(crate) transfer_batch_window_request: Option<u64>,
+    pub(crate) transfer_batch_window:
+        Option<(u64, gpui_kit::WindowHandle<gpui_kit::component::Root>)>,
+    pub(crate) upload_source_total_bytes: u64,
+    pub(crate) upload_selection_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
+    pub(crate) upload_preparation_progress: Option<teleark_runtime::VaultUploadSelectionProgress>,
+    upload_selection_presentation: Option<Task<()>>,
+    upload_preparation_presentation: Option<Task<()>>,
+
     pub(crate) transfer_inspector_replay: bool,
     pub(crate) transfer_replay_cursor: usize,
     pub(crate) vault_locked: bool,
@@ -470,6 +480,9 @@ pub struct TeleArkApp {
         teleark_runtime::TransferSnapshotView<teleark_runtime::VaultTransferSnapshot>,
     vault_task: Option<Task<()>>,
     vault_upload_task: Option<Task<()>>,
+    vault_recovery_task: Option<Task<()>>,
+    pub(crate) vault_transfer_jobs: std::collections::BTreeMap<(i64, u64, bool), Task<()>>,
+    vault_recovery_scope: Option<(u64, u64)>,
     vault_session_generation: u64,
     vault_download_in_flight: bool,
     pub(crate) managed_scan_loading: bool,
@@ -479,7 +492,8 @@ pub struct TeleArkApp {
     vault_download_task: Option<Task<()>>,
     upload_picker_task: Option<Task<()>>,
     qr_poll_task: Option<Task<()>>,
-    telegram_login_generation: u64,
+    status_rate_cache: std::cell::RefCell<status_bar::RateCache>,
+    pub(crate) telegram_login_generation: u64,
     telegram_file_generation: u64,
     telegram_file_auto_load: bool,
     _subscriptions: Vec<Subscription>,
@@ -747,6 +761,14 @@ impl TeleArkApp {
             upload_body_scroll: gpui_kit::ScrollHandle::new(),
             batch_detail_scroll: gpui_kit::UniformListScrollHandle::new(),
             expanded_transfer_batches: BTreeSet::new(),
+            transfer_batch_window_request: None,
+            transfer_batch_window: None,
+            upload_source_total_bytes: 0,
+            upload_selection_progress: None,
+            upload_preparation_progress: None,
+            upload_selection_presentation: None,
+            upload_preparation_presentation: None,
+
             transfer_inspector_replay: false,
             transfer_replay_cursor: 0,
             vault_locked: vault_status.locked,
@@ -884,6 +906,9 @@ impl TeleArkApp {
             vault_transfer_view: Default::default(),
             vault_task: None,
             vault_upload_task: None,
+            vault_recovery_task: None,
+            vault_transfer_jobs: Default::default(),
+            vault_recovery_scope: None,
             vault_session_generation: 0,
             vault_download_in_flight: false,
             managed_scan_loading: false,
@@ -893,6 +918,7 @@ impl TeleArkApp {
             vault_download_task: None,
             upload_picker_task: None,
             qr_poll_task: None,
+            status_rate_cache: Default::default(),
             telegram_login_generation: 0,
             telegram_file_generation: 0,
             telegram_file_auto_load: false,
@@ -1267,6 +1293,14 @@ impl TeleArkApp {
                         .bg(theme::blue_pale())
                         .child(self.tr("vault-session-locked-background")),
                 )
+            })
+            .when(
+                self.upload_in_flight
+                    || (self.page == Page::Transfers && self.upload_selection_progress.is_some()),
+                |root| root.child(self.render_upload_selection_progress(false, cx)),
+            )
+            .when(self.upload_preparing && !self.show_upload, |root| {
+                root.child(self.render_upload_selection_progress(true, cx))
             })
             .child(self.render_bandwidth_status(cx))
             .child(self.render_status_bar(cx))

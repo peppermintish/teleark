@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current schema is version **16**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **22**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -132,3 +132,119 @@ Current SQLite read/write version is **16**; automatic supported upgrades are **
 Upload summaries use explicit SQL columns and independent state/error codec v1. The globally unique random task ID is scoped with its account; batch/channel identity, original filename, package ID, bytes/parts, queue/start times, duration and average throughput are durable. `sequence` is local insertion order, so tied timestamps and random IDs do not reorder history. Updates preserve this sequence. States are `queued`, `running`, `completed`, `failed`, `cancelled`, `interrupted`; failure codes are the explicit snake-case ApplicationErrorKind mappings in Runtime's upload history codec, with unknown codes rejected. Completed rows require a package ID and full confirmed byte/part counts. No source paths, content or keys are added.
 
 At service startup, queued/running rows become interrupted without changing their saved totals. Account-scoped reads retain the latest 256 rows plus the complete boundary batch (up to 128 members); omitted older rows remain stored. There is no automatic resend or old-page browser. Runtime writes acknowledged admission/start/terminal summaries outside UI and network reactors; samples remain in memory. See [ADR 0029](adr/0029-durable-upload-history.md) for publication ambiguity, local privacy and legacy-history limits.
+
+
+## Durable encrypted transfer ledger (schema 17, integration in progress)
+
+Migration 17 is additive. Databases at versions 0–16 automatically reach read/write 17 through the existing ordered, verified transactions. Existing schema-16 upload receipts remain unchanged: they do not contain source/key/part recovery context and must not be promoted into resumable jobs. A failed migration leaves the prior version and original rows intact; restart retries the missing step. Readers supporting only schema 16 reject schema 17, and newer unknown schemas remain intact.
+
+`vault_transfer_jobs` owns account-scoped stable task and package identities, direction, immutable versioned recovery context, persisted control state and an execution generation. Context version 1 is bounded to 2 MiB; raw file/master keys and sessions are forbidden. The runtime context and part reservation codecs are specified in [recovery records](VAULT_TRANSFER_RECOVERY.md); production execution wiring is not yet complete. `vault_transfer_parts` stores immutable, bounded part identity reservations and optional immutable verification receipts. These bytes are interpreted by the runtime's independently versioned codecs, not Rust layout or SQL. Reservations precede encryption; receipts follow authenticated remote verification or fsynced local writes. This storage layer does not itself authenticate cryptographic receipts.
+
+State transitions compare account, task, generation and expected state. Claiming queued work increments its execution generation. Pause/cancel intent is committed before signalling the worker. A worker can receipt an in-flight success while pausing/cancelling, but cannot overwrite control intent with completion. After stop acknowledgement or a new execution generation, late receipts are rejected. Retryable failures require an explicit retry; blocked failures cannot be resumed blindly. Cold-start recovery changes running→queued, pausing→paused and cancelling→cancelled, incrementing generations; this runs before any new execution owner, never on ordinary navigation. Queued recovery still requires runtime source/key/remote validation and ambiguous-publication reconciliation.
+
+Critical ledger transactions use `synchronous=FULL` and `fullfsync=ON`, restoring the connection's prior policy afterward. In WAL mode FULL commits add the durability sync that NORMAL omits; fullfsync requests the stronger macOS sync where supported. See [SQLite synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous) and [fullfsync](https://www.sqlite.org/pragma.html#pragma_fullfsync). Actual storage hardware must honor synchronization; tests verify policy, rollback and file reopen, not physical power-loss qualification. Account/state/id keyset pages use `vault_transfer_jobs_schedule`, verified with the actual filtered deep-cursor query plan, and return at most 256 identities per page. Part pages are also bounded to 256.
+
+## Manifest publication outbox (schema 18, integration in progress)
+
+Migration 18 adds `vault_manifest_outbox` without rewriting schema-17 jobs or part receipts. Supported databases 0–17 automatically reach read/write 18 through ordered transactions; a failed step retains its prior version and existing rows. Readers supporting only earlier schemas reject version 18; unknown newer versions are never reset. The recovery context and part codecs remain version 1 with unchanged meanings.
+
+Each `(account_id, task_id)` has one immutable versioned content commitment and nonzero signed Telegram `random_id`. Version 1 commits the exact canonical manifest header and metadata before encryption. An optional immutable encrypted envelope (at most 67,239,936 bytes) is saved before remote send; an optional positive message ID is saved only after reading back and comparing the entire envelope. The foreign key preserves job scope. No plaintext manifest or unwrapped key is stored in this outbox.
+
+All reservation/envelope/receipt writes use the same full-sync transactions and generation fencing as the job ledger. Reservations and envelopes require Running; late verified receipts may be saved during Pausing/Cancelling, never after acknowledgment or a newer owner. Retry cannot replace the commitment, sending ID, ciphertext or receipt. The runtime authenticates saved ciphertext and compares its decoded public header and metadata before using it. Future outbox codecs are retained but cannot publish through the version-1 writer.
+
+## Recovery history index (schema 19)
+
+Migration 19 adds `(account_id, direction, id)` on encrypted transfer jobs. It changes no context, extent or outbox bytes. Supported versions 0–18 upgrade automatically through the ordered transactions to read/write 19; older binaries reject this newer schema and preserve it. Download history uses this index for account-scoped descending ID pages, a strict cursor after the first page and a limit of at most 256. The first page includes the maximum supported task ID. Tests check the actual deep-cursor query plan and absence of a temporary sort.
+
+## Pending upload admission (schema 20)
+
+`vault_pending_uploads` stores account/task/chat/batch identifiers, creation time,
+independently versioned opaque source metadata (1–131072 bytes), generation,
+state and an optional semantic failure code. States are queued, paused, cancelled,
+retryable, blocked and promoted; only retryable/blocked carry a failure code.
+This additive migration preserves existing job contexts, part receipts and
+manifest outboxes unchanged, including upgrades skipping earlier releases.
+Migration failure rolls back the current step and a later open retries it.
+
+Complete-selection admission commits all metadata in one fully durable transaction,
+encoding one bounded record at a time. The older bounded-group entry remains for
+individually admitted groups; the actual upload selection uses the atomic iterator.
+Duplicate admission must match immutable metadata and cannot rewind state.
+Iterator failure or process death cannot expose a runnable prefix. Saving is
+presented before work; its committed-file counter advances only after commit. The indexed account/state/id
+cursor returns at most 128 queued entries, including unknown codec versions so
+unsupported work remains available for explanation rather than being discarded.
+
+Promotion compares the queued generation and full pending identity, inserts the
+separate immutable v1 executable job, and marks the queue entry promoted in one
+transaction. Failure leaves the original entry queued. Paused/cancelled entries,
+stale generations, future codecs and conflicting executable jobs cannot promote.
+The pending record remains as an idempotency receipt; retention qualification is still in progress. Runtime queue/control/startup/history integration is connected. The source
+codec is specified in [transfer recovery](VAULT_TRANSFER_RECOVERY.md#pending-source-codec-v1).
+Pending pause/resume/retry/cancel/failure transitions compare the expected state
+and generation, increment generation and retain immutable metadata. Future
+codecs cannot transition. No upload parts, key wraps
+or file contents are generated by this storage admission API.
+
+Pending history candidates use bounded descending-ID pages through each state
+prefix of the schedule index, with Queued candidates prioritized over terminal
+history. Combined encrypted-history totals count the ID union of compatibility
+upload rows, non-promoted pending entries and executable jobs; one task is counted
+once even while its durable representations overlap. These queries run during
+history hydration, never on an idle presentation timer.
+
+
+## Native cancellation cleanup (schema 21)
+
+Migration 21 adds `native_download_cleanup` without modifying native task rows,
+Vault contexts, keys or existing receipts. Supported schemas 0–20 upgrade through
+ordered transactional steps to read/write 21; applications supporting only older
+schemas reject this database version. A conflicting schema object leaves the old
+version and bytes intact. Existing cancelled tasks are not automatically assigned
+cleanup obligations whose ownership was never recorded.
+
+Each cleanup record references a native task with `ON DELETE RESTRICT` and stores
+codec version 1, the owning attempt, request timestamp and a durable retry flag.
+Beginning cleanup atomically records cancellation and the obligation under FULL
+synchronous/fullfsync policy. Completed tasks, foreign accounts and stale attempts
+cannot acquire the obligation. While it exists, sampled progress cannot revive
+Cancelled and ordinary task saves cannot queue another attempt or overwrite an
+unknown future codec. History includes outstanding cleanup even outside ordinary
+terminal retention; deleting the row cannot orphan required cleanup.
+
+Retry only records intent. After the execution owner drains and the backend
+exclusively removes and synchronizes TeleArk-owned partial artifacts, acknowledgment
+removes the cleanup obligation and queues an accepted retry in the same transaction.
+A failed or unacknowledged cleanup remains discoverable in indexed pages of at most
+128 records. Future codecs remain intact and cannot be retried or acknowledged.
+These Storage APIs do not perform filesystem work or establish that cleanup has
+happened. DesktopTransfers now calls them from an independent bounded control
+owner; a separate retained worker waits for the old writer, removes partials and
+synchronizes the parent before acknowledgment. Startup hydrates pending records
+before downloads can be scheduled, preserves retry intent, and attempts supported
+cleanup once. A failed cleanup stays visible until retry or another application
+start. Future/unsupported cleanup is not executed. Runtime and UI retention protect
+these tasks, including when the underlying download state is Cancelled.
+
+Deterministic runtime tests cover blocked cleanup alongside a completing unrelated
+download, restart with a previously accepted retry, no-retry cleanup preserving a
+final file, and nonblocking frontend destruction with the durable record retained.
+Native filesystem substitution and platform-specific directory-sync qualification
+remain separate delivery checks.
+
+## Pending upload batch lookup (schema 22)
+
+Version 22 adds `vault_pending_uploads_batch(account_id,batch_id,state,id)`.
+The normal transactional migration from every supported earlier version preserves
+all task/context bytes and builds this index automatically. No codec changes.
+Batch stop constrains account, batch and state through this index, including
+promoted receipts; unrelated promoted history is not scanned. A regression checks
+the actual filtered update query plan, alongside atomic cancellation and reopen tests.
+
+The same migration adds the direction-scoped `vault_transfer_jobs_history`
+expression index: live states sort first, paused/retryable/blocked states second,
+terminal states last, with descending task ID within each group. The initial
+bounded history projection uses this ordering before applying its 256-row cap.
+Existing direction/cursor reads remain available for deeper history consumers.
+The regression includes 300 terminal receipts following an older queued job and
+checks that no temporary sorting tree appears in the filtered query plan.

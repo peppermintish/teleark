@@ -14,6 +14,7 @@ use teleark_runtime::AppearancePreference;
 thread_local! { static DARK_PALETTE: Cell<bool> = const { Cell::new(false) }; }
 
 pub const HEADER_HEIGHT: Pixels = px(58.0);
+pub const COMPACT_CONTROL_HEIGHT: f32 = 26.0;
 // One desktop list density; batch summaries have room for a second text line.
 pub const ROW_HEIGHT: Pixels = px(24.0);
 pub const LIST_TEXT_SIZE: Pixels = px(12.0);
@@ -24,6 +25,10 @@ pub const LIST_CONTROL_SIZE: Pixels = px(22.0);
 pub const LIST_BADGE_HEIGHT: Pixels = px(18.0);
 pub const LIST_FOOTER_HEIGHT: Pixels = ROW_HEIGHT;
 pub const BATCH_ROW_HEIGHT: Pixels = px(34.0);
+pub const BATCH_GROUP_GAP: Pixels = px(6.0);
+pub const BATCH_GROUP_INSET: Pixels = px(8.0);
+pub const BATCH_RAIL_WIDTH: Pixels = px(3.0);
+pub const BATCH_MEMBER_INDENT: Pixels = px(40.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);
 pub const RADIUS_MEDIUM: Pixels = px(8.0);
 pub const RADIUS_LARGE: Pixels = px(12.0);
@@ -77,7 +82,9 @@ pub fn apply_appearance<T>(
     theme.colors.table = surface().into();
     theme.colors.table_head = sidebar().into();
     theme.colors.table_head_foreground = text_secondary().into();
-    theme.colors.table_active = blue_soft().into();
+    // GPUI Kit paints table selection over the cells. An opaque soft color
+    // hides their text, icons and checkboxes instead of tinting the row.
+    theme.colors.table_active = blue().alpha(if dark { 0.20 } else { 0.12 }).into();
     theme.colors.table_hover = blue_pale().into();
     theme.colors.table_active_border = blue_soft().into();
     theme.colors.table_row_border = border_subtle().into();
@@ -125,6 +132,29 @@ pub fn border() -> Rgba {
 
 pub fn border_subtle() -> Rgba {
     color(0xf0f1f4, 0x303034)
+}
+
+#[derive(Clone, Copy)]
+pub struct BatchPalette {
+    pub header: Rgba,
+    pub body: Rgba,
+    pub border: Rgba,
+    pub rail: Rgba,
+    pub accent: Rgba,
+}
+
+pub fn batch_palette(cx: &gpui_kit::App) -> BatchPalette {
+    // Resolve the whole group from this app's theme snapshot, including when
+    // multiple isolated preview/test applications render different appearances.
+    let dark = ComponentTheme::global(cx).is_dark();
+    let color = |light, dark_color| rgb(if dark { dark_color } else { light });
+    BatchPalette {
+        header: color(0xe9edf3, 0x343a45),
+        body: color(0xf5f7fa, 0x292e36),
+        border: color(0xd4dbe5, 0x475160),
+        rail: color(0x8798af, 0x879bb8),
+        accent: color(0x007aff, 0x0a84ff),
+    }
 }
 
 pub fn blue() -> Rgba {

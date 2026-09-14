@@ -402,10 +402,10 @@ connection-latency = レイテンシ
 detail-source-channel = 保存元チャンネル
 detail-message-id = メッセージ ID
 detail-local-path = ローカルパス
-detail-speed = ダウンロード速度
+detail-speed = 転送速度
 detail-downloaded = ダウンロード済み
-detail-active-connections = 有効な接続
-detail-workers = ワーカー数
+
+
 detail-retries = 再試行回数
 detail-created = 作成日時
 detail-started = 開始日時
@@ -717,7 +717,7 @@ detail-failure-reason = 失敗理由
 detail-failure-retryable = 一時的な失敗の可能性があります。上記の状態を確認して再試行してください。
 detail-failure-user-action = 再試行する前に、設定、アカウント、ソース、またはファイルシステムの変更が必要です。
 detail-failure-terminal = このタスクは停止し、自動的には再試行されません。
-detail-verification-not-reached = 転送が先に失敗したため、検証は開始されませんでした
+detail-verification-not-reached = 検証はまだ実行されていません
 detail-trace-timeline = 診断タイムライン
 trace-event-queued = キュー済み
 trace-event-started = 開始
@@ -1500,3 +1500,97 @@ speed-limits-omitted = 過去の { $count } 件を省略。方向ごとに最新
 speed-limits-close = 閉じる
 
 channel-sync-event-at = { $time } · { $phase }
+
+transfer-upload-pausing = 一時停止中：確認済みの進捗を保存
+
+native-cleanup-unsupported = この削除を安全に完了できません。一時ファイルは保持しています。アプリを更新してから再試行してください。
+
+transfer-recovery-unavailable-detail = 保存された復元情報が破損しているか、未対応のバージョンです。元の記録とファイルは保持されています。
+
+upload-selection-counts = { $total } ファイル · { $completed } アップロード済み · { $paused } 一時停止 · { $failed } 失敗 · { $cancelled } キャンセル · { $pending } 未処理
+
+native-cleanup-failed = 一時ファイルの確認が必要です
+
+transfer-recovery-legacy-guidance = この保存済みタスクには利用可能な復旧操作がありません。記録とファイルを保持してください。新しい復旧データには対応するアプリのバージョンが必要な場合があります。それ以外は新しい転送を開始してください。履歴があっても再開できるとは限りません。
+
+transfer-recovery-source-guidance = 現在の元ファイルではアップロードを続行できません。元ファイルを保持し、可能であればアクセスを復旧してください。準備ができたら「アップロード」から新しいタスクを開始してください。停止したタスクは履歴に残ります。
+
+transfer-recovery-unavailable = 復元できません
+
+storage-guide-transfers-title = 5. 転送の一時停止と再開
+
+transfer-recovery-verification-pending = 保存済みの進捗は再利用前にローカルで検証されます。
+
+storage-guide-resume-title = 6. 復旧の制限を理解する
+
+transfer-recovery-retry-guidance = このタスクは再試行できます。上記の原因を解消してから、タスク行で再試行を選択してください。保存済みの進捗は検証後に再利用されます。失敗したタスクは自動では再試行されません。
+
+native-cleanup-waiting = ダウンロードの停止を待機中
+
+native-cleanup-finished = 一時ファイルの削除が完了しました
+
+native-cleanup-error-guidance = { $error } 一時ファイルは保持しています。問題を解決してから再試行してください。削除に成功してからダウンロードを開始します。
+
+transfer-upload-saving-recovery = 再開情報を保存中
+
+upload-selection-saving-queue = アップロード待ちの一覧を保存中
+
+transfer-recovery-key-guidance = 「設定 → キー保管庫」で、このファイルに必要なキーを解除してください。再開や再試行の操作がない場合は、解除後に新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。
+
+detail-concurrency-limits = 設定された同時実行上限
+
+transfer-recovery-saved-download = 保存済みのダウンロード
+
+native-cleanup-explanation = キャンセルを保存しました。前のダウンロードがファイルを解放してから削除します。完了済みのファイルは保持します。
+
+native-cleanup-removing = 一時ファイルを削除中
+
+transfer-upload-cancelling = キャンセル中：実行中の処理を停止
+
+storage-guide-transfers-body = 「転送」の各タスクには対応する操作が表示されます。一時停止は実行中の処理が安全に止まるまで待機し、再開は保存済みデータを検証します。アップロード元を変更したり未完了のダウンロードを移動したりしないでください。キャンセルしても送信済みデータは取り消されません。
+
+transfer-recovery-blocked-guidance = このタスクは現在の状態では再開できません。上記の原因を解消してから新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。新しいタスクでは再転送が必要になる場合があります。
+
+transfer-upload-checking-source = 安全な再開のために元ファイルを確認中
+
+native-cleanup-retry-waiting = 再試行を保存しました。一時ファイルを安全に削除してから開始します。
+
+upload-selection-saved-count = { $total } 件中 { $saved } 件をアップロード待ちの一覧に保存しました。
+
+native-cleanup-detail = { $reason } · 待機：{ $elapsed } · 最終更新：{ $last }
+
+storage-guide-resume-body = 再起動とロック解除後、条件を満たす待機中の転送は続行できます。一時停止したタスクは再開操作を待ち、失敗したタスクは対処が必要です。タスクを開くと原因と次の手順を確認できます。古い履歴や破損した復旧データでは新しい転送が必要になる場合があります。元ファイル、キー、Telegramのファイルの変更によっても復旧できなくなる場合があります。
+
+transfer-batch-open-window = 別ウィンドウでバッチを表示
+
+transfer-batch-unavailable = 現在のタスク履歴にこのバッチはありません。
+
+transfer-batch-window-live = 進捗を随時更新 · このウィンドウを閉じても転送は続きます
+
+transfer-batch-window-title = バッチ内のファイル
+
+upload-drop-files = このアップロード画面にファイルをドロップして追加するか、ファイルを選択してください。
+
+upload-files-independent = 各ファイルは個別に保存されます。
+
+upload-folders-unsupported = フォルダにはまだ対応していません。
+
+upload-selection-cancelling = 現在の処理が安全に終わるのを待って停止します…
+
+upload-selection-checking-channel = プライベートチャンネルを確認中
+
+upload-selection-checking-files = ファイル情報を確認中
+
+upload-selection-finished = 処理が終了しました
+
+upload-selection-history-entry = { $time }：{ $phase }
+
+upload-selection-inspecting = 選択した { $total } 件のパスのうち { $inspected } 件を確認しました。
+
+upload-selection-queued = ファイル選択または処理の開始を待っています
+
+upload-selection-retention = 詳細履歴には最近の処理バッチを表示します。この合計には選択した全ファイルが含まれます。
+
+upload-selection-timing = 現在の処理時間：{ $elapsed } · 最後の更新から：{ $idle }
+
+upload-selection-uploading = ファイルをアップロード中

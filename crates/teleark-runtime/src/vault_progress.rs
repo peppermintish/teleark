@@ -7,6 +7,8 @@ use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
 pub enum VaultUploadPhase {
     CheckingStorage,
     CheckingTarget,
+    CheckingSource,
+    SavingRecovery,
     Preparing,
     WaitingForTelegram,
     Uploading,
@@ -79,6 +81,17 @@ impl VaultUploadObserver {
                 .upload_activity
                 .get_or_insert_with(|| VaultUploadActivity::new(phase))
                 .set_phase(phase);
+        });
+    }
+
+    pub(crate) fn source_progress(&self, bytes: u64, total: u64) {
+        self.update(|snapshot| {
+            let activity = snapshot
+                .upload_activity
+                .get_or_insert_with(|| VaultUploadActivity::new(VaultUploadPhase::CheckingSource));
+            activity.set_phase(VaultUploadPhase::CheckingSource);
+            activity.bytes = bytes.min(total);
+            activity.total = total;
         });
     }
 

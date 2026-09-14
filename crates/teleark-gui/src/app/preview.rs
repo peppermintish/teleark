@@ -2,6 +2,47 @@
 use super::*;
 
 impl TeleArkApp {
+    pub(crate) fn preview_batch_groups(&mut self) {
+        // Short adjacent groups expose both ends alongside ordinary tasks.
+        self.preview_transfer_rows.retain(|row| {
+            !row.batch_child
+                || row.runtime_task_id.is_some_and(|id| id < 202)
+                || row.vault_transfer_id.is_some_and(|id| id < 302)
+        });
+        let upload_name = self.tr_with(
+            "transfer-batch-upload-name",
+            MessageArgs::new().with("count", "2"),
+        );
+        let download_name = self.tr_with(
+            "transfer-batch-name",
+            MessageArgs::new()
+                .with("count", "2")
+                .with("source", "Kyoto · September"),
+        );
+        for row in &mut self.preview_transfer_rows {
+            if let Some(summary) = row.batch_summary.as_mut() {
+                summary.total = 2;
+                summary.completed = 2;
+                summary.file_names.truncate(2);
+                row.name = if row.direction == crate::mock::TransferDirection::Upload {
+                    upload_name.clone()
+                } else {
+                    download_name.clone()
+                };
+                row.size = format_bytes(self.localizer.locale(), 3 * 123 * 1024 * 1024).into();
+                row.transferred = row.size.clone();
+                row.progress = 100.0;
+                row.state = crate::mock::TransferState::Completed;
+            }
+        }
+        self.preview_transfer_rows
+            .insert(0, crate::mock::transfers(false)[0].clone());
+        self.expanded_transfer_batches.insert(42);
+        self.expanded_transfer_batches
+            .insert(0x6000_0000_0000_0000 | 17);
+        self.page = Page::Transfers;
+    }
+
     pub(super) fn refresh_preview_library(&mut self, cx: &mut Context<Self>) {
         let local = self.library_view == LibraryView::Local;
         let names = [
@@ -73,10 +114,13 @@ impl TeleArkApp {
         let state = std::env::args()
             .find_map(|arg| arg.strip_prefix("--preview-state=").map(str::to_owned))
             .unwrap_or_default();
-        if std::env::args().any(|arg| arg == "--preview-dark") {
-            self.preferences.appearance = AppearancePreference::Dark;
-            theme::apply_appearance(AppearancePreference::Dark, window, cx);
-        }
+        let appearance = if std::env::args().any(|arg| arg == "--preview-dark") {
+            AppearancePreference::Dark
+        } else {
+            AppearancePreference::Light
+        };
+        self.preferences.appearance = appearance;
+        theme::apply_appearance(appearance, window, cx);
         self.preferences.lock_vault_when_hidden = false;
         self.volume_space = Some(teleark_runtime::VolumeSpace {
             available_bytes: 248 * 1024 * 1024 * 1024,
@@ -428,6 +472,14 @@ impl TeleArkApp {
             self.preview_upload_history();
         }
         match state.as_str() {
+            "batch-groups" => self.preview_batch_groups(),
+            "recovery-guidance" => self.preview_recovery_failure(),
+            "native-cleanup" => self.preview_native_cleanup(false),
+            "native-cleanup-failed" => self.preview_native_cleanup(true),
+            "recovery-guide" => {
+                self.page = Page::Storage;
+                self.show_storage_guide = true;
+            }
             "speed-limits" => self.preview_speed_limits(window, cx),
             "returning" => self.page = Page::Account,
             "upload-progress" | "session-active" => {

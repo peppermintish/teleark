@@ -430,10 +430,10 @@ connection-latency = Latency
 detail-source-channel = Source Channel
 detail-message-id = Message ID
 detail-local-path = Local Path
-detail-speed = Download Speed
+detail-speed = Transfer speed
 detail-downloaded = Downloaded
-detail-active-connections = Active Connections
-detail-workers = Workers
+
+
 detail-retries = Retries
 detail-created = Created
 detail-started = Started
@@ -745,7 +745,7 @@ detail-failure-reason = Failure reason
 detail-failure-retryable = This failure may be temporary. Check the conditions above and retry.
 detail-failure-user-action = This failure needs a settings, account, source, or filesystem change before retrying.
 detail-failure-terminal = This task stopped and will not retry automatically.
-detail-verification-not-reached = Verification was not reached because the transfer failed first
+detail-verification-not-reached = Verification has not been performed
 detail-trace-timeline = Diagnostic timeline
 trace-event-queued = Queued
 trace-event-started = Started
@@ -1527,3 +1527,97 @@ speed-limits-omitted = { $count } older events omitted; latest 16 retained per d
 speed-limits-close = Close
 
 channel-sync-event-at = { $time } · { $phase }
+
+transfer-upload-pausing = Pausing — saving confirmed work
+
+native-cleanup-unsupported = The app cannot safely finish this cleanup. Temporary files are kept. Update the app before trying again.
+
+transfer-recovery-unavailable-detail = The saved recovery information is damaged or uses an unsupported version. The original record and files have been preserved.
+
+upload-selection-counts = { $total } files · { $completed } uploaded · { $paused } paused · { $failed } failed · { $cancelled } cancelled · { $pending } not processed
+
+native-cleanup-failed = Temporary files need attention
+
+transfer-recovery-legacy-guidance = This saved task has no usable recovery action. Keep its record and files. A compatible app version may be needed for newer recovery data; otherwise start a new transfer. History alone does not guarantee resumable data.
+
+transfer-recovery-source-guidance = This upload cannot continue with the current source. Keep the original file and restore access if possible. When the file is ready, start a new upload from Upload; this stopped task remains in history.
+
+transfer-recovery-unavailable = Recovery unavailable
+
+storage-guide-transfers-title = 5. Pause and resume transfers
+
+transfer-recovery-verification-pending = Saved progress will be checked locally before reuse.
+
+storage-guide-resume-title = 6. Understand recovery limits
+
+transfer-recovery-retry-guidance = This task can be retried. Resolve the cause above, then choose Retry on its row. TeleArk checks saved work before reusing it; failed tasks do not retry automatically.
+
+native-cleanup-waiting = Waiting for download to stop
+
+native-cleanup-finished = Temporary-file cleanup completed
+
+native-cleanup-error-guidance = { $error } Temporary files are kept. Retry after resolving this issue; downloading starts only after cleanup succeeds.
+
+transfer-upload-saving-recovery = Saving recovery information
+
+upload-selection-saving-queue = Saving the upload queue
+
+transfer-recovery-key-guidance = Open Settings → Key Vault and unlock the key needed by this file. If this task has no Resume or Retry action, start a new transfer after unlocking. Keep the original source and any partial download.
+
+detail-concurrency-limits = Concurrency limits
+
+transfer-recovery-saved-download = Saved download
+
+native-cleanup-explanation = Cancellation is saved. Cleanup waits until the old download releases its files; completed files are kept.
+
+native-cleanup-removing = Cleaning temporary files
+
+transfer-upload-cancelling = Cancelling — stopping active work
+
+storage-guide-transfers-body = In Transfers, each task shows the actions it supports. Pause waits for active work to stop safely; Resume checks saved data before continuing. Keep upload sources unchanged and partial downloads in place. Cancel stops the task; it does not undo data already sent.
+
+transfer-recovery-blocked-guidance = This task cannot resume in its current state. Resolve the cause above before starting a new transfer. Keep the original source and any partial download; a new task may need to transfer the data again.
+
+transfer-upload-checking-source = Checking source for safe resume
+
+native-cleanup-retry-waiting = Retry is saved and will start after temporary files are safely cleared.
+
+upload-selection-saved-count = Saved { $saved } of { $total } files to the upload queue.
+
+native-cleanup-detail = { $reason } · Waiting: { $elapsed } · Last activity: { $last }
+
+storage-guide-resume-body = After restart and unlock, eligible queued transfers can continue. Paused tasks wait for Resume; failed tasks need attention. Open a task for its reason and next step. Older history or damaged recovery data may require a new transfer, and changes to sources, keys or Telegram files can prevent recovery.
+
+transfer-batch-open-window = Open batch in a separate window
+
+transfer-batch-unavailable = This batch is no longer available in the current task history.
+
+transfer-batch-window-live = Live progress · Closing this window keeps transfers running
+
+transfer-batch-window-title = Batch files
+
+upload-drop-files = Drop files anywhere in this upload window to add them, or choose files.
+
+upload-files-independent = Each file is stored independently.
+
+upload-folders-unsupported = Folders are not supported yet.
+
+upload-selection-cancelling = Stopping after the current operation finishes…
+
+upload-selection-checking-channel = Checking the private channel
+
+upload-selection-checking-files = Checking file metadata
+
+upload-selection-finished = Finished processing
+
+upload-selection-history-entry = { $time }: { $phase }
+
+upload-selection-inspecting = Checked { $inspected } of { $total } selected paths.
+
+upload-selection-queued = Waiting for selection or the upload worker
+
+upload-selection-retention = Detailed history shows recent processing batches. These totals include the whole selection.
+
+upload-selection-timing = Current phase: { $elapsed } · Last activity: { $idle } ago
+
+upload-selection-uploading = Uploading files

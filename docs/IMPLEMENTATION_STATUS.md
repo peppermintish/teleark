@@ -1,5 +1,39 @@
 # Implementation status — v0.4.4
 
+## Durable transfer recovery delivery (2026-09-14)
+
+Uploads and encrypted downloads now retain account-scoped recovery context, verified
+part/extent checkpoints and generation-fenced pause/cancel/retry state. Eligible
+queued work resumes after restart and unlock; explicit pause, cancellation and
+failures retain their intent. Upload selections are admitted atomically before
+execution. Native cancellation persists cleanup and retry obligations, with a
+navigation-independent waiting/failure entry and retained background owners.
+
+Finalization reuses verified published output, reconciles ambiguous upload receipts
+and permits a saved manifest to finish without reopening the original source.
+Connection replacement cancels retained work; final hashing checks cancellation
+between reads. Native and encrypted downloads claim distinct partial names during
+allocation. Schema 22 indexes batch stop and prioritizes active/recoverable history
+before the bounded visible limit. Unknown metrics stay unavailable, and concurrency
+settings are labeled as limits. First-use and task-specific guidance explain what
+can resume and when a new upload is necessary.
+
+Delivery checks: the isolated task snapshot passed all eight source gates with
+645 workspace tests; 10 pre-existing manual performance probes were not executed
+and are not counted as passes. Its native English/light previews covered 900×600
+and actual macOS full-screen for cleanup status, independently scrolling recovery
+guidance and batch/list geometry. The cleanup entry remained reachable after
+navigation. Synthetic blocked-transport, account-replacement, concurrent output
+allocation and abrupt-child-process recovery tests passed.
+
+This entry supersedes the earlier incremental “incomplete” notes for these paths.
+The implementation and validation scope are documented in
+[transfer recovery](VAULT_TRANSFER_RECOVERY.md). Product artifacts remain macOS-only;
+ordinary verification uses temporary files and synthetic transport, not private
+Telegram sessions. Blocking individual OS calls, hostile concurrent filesystem
+replacement and hardware power-loss behavior are not claimed by the automated
+process-restart evidence.
+
 ## Event-driven status presentation (2026-09-13)
 
 The status inspector no longer uses a one-second application-level notification. Visible live timing has a retained independent owner, pauses on window deactivation, stops on completion/close, and recalculates on reactivation. History records show fixed timestamps and only visible history rows are built; main page/source projections have separate cache boundaries. Accessibility uses normal rendering because the locked GPUI cache does not replay accessibility nodes. See [ADR 0032](adr/0032-event-driven-status-presentation.md) for guarantees and the compatibility-path limitation.
@@ -323,3 +357,74 @@ All data lists now share 24-point rows: Library, raw Channel files, managed Stor
 Visual reviews continue in English/light only at 900×600 and actual native full-screen. Each completed repository task is now committed with an annotated local Git tag; unrelated pending changes are preserved and pushes remain explicit.
 
 Validation: all eight development gates passed (format, workspace check, strict Clippy, workspace tests: 555 passed/10 existing manual probes ignored, focused Core/i18n, warnings-denied docs and dependency policy). After final typography/metadata adjustments, the checkout GUI suite passes 134 tests (3 existing probes ignored), and the independently exported task-only commit passes 115 (3 ignored); both pass strict GUI Clippy. Four new native-layout regressions cover row continuity, text/action containment, menu geometry and metadata labels. Existing history/footer/upload/batch regressions also pass. English/light synthetic native reviews cover Library, raw Channel and managed Storage lists, Transfer groups, settings/navigation, upload selection, file metadata and sync/event history at 900×600 and actual native full-screen. The auxiliary batch window is reviewed at its smaller default size and actual full-screen. No live account or transfer data is used.
+
+
+## Durable encrypted transfers — in progress (2026-09-13)
+
+Schema 17 now provides account-scoped immutable task context, generation-fenced state transitions, durable pause/cancel intent and immutable part reservations/receipts. Tests cover real-file reopen, stale workers, pause/completion races, explicit retry versus blocked failures, future-context preservation, indexed bounded queue pages, legacy-history preservation and failed-upgrade rollback/restart. Version-1 context/part/receipt codecs preserve wrapped keys and immutable scope with frozen compatibility coverage. New DesktopVault uploads now preflight source digests, admit their recovery context and use durable reservations/verified receipts through the bounded parallel encryption pipeline. Stable Telegram publication IDs and exact-ciphertext reconciliation cover ambiguous part sends. Cold startup now recovers ledger intent before owners start; active-key unlock/history readiness dispatches queued uploads in bounded pages. Explicit resume reuses original context, validates source bytes/identity and preserves manifest identity. Schema 18 now adds immutable manifest commitments, exact encrypted envelopes, stable publication IDs and verified receipts in the actual upload path. Independent per-task upload controls are connected. New encrypted downloads also admit recovery contexts and persist fsynced verified extents, retaining failed partial output; the executor supports local reopen verification and already-published output validation. Explicit download resume and shared per-task controls are connected to the transfer list, retaining original manifest/task/destination identity. Schema 19 adds indexed locked download history, unavailable-context explanations and mixed queued dispatch after unlock. Crypto cancellation now reaches bounded frame checks, and restored history yields to live execution with fail-closed projection admission. Pending-batch admission, recovery-queue/retention qualification, source-independent upload finalization, full cancellation/finalization boundaries, explanatory UI and end-to-end qualification remain incomplete. The durable/mid-file/restart capability is not yet delivered and legacy upload history remains non-resumable.
+
+- Durable-transfer UI work in progress: task inspectors now prioritize capability-aware retry/blocked/history guidance, and the storage introduction explains pause, cancellation and restart limits. The expanded guide retains a bounded, independently scrollable area. Pending batch admission, remaining recovery races and full end-to-end qualification still prevent declaring the durable-transfer objective complete.
+
+- Upload resume now has a source-independent manifest-finalization path when a complete encrypted envelope was saved. It reuses the publication identity, verifies readback, persists inventory, respects durable stop intent and leaves part health unchecked rather than inventing a fresh verification. Missing envelopes still require the original source; full DesktopVault/Telegram restart acceptance remains pending.
+
+- Fixed a reproducible native download pause/resume race: old paused-worker retirement no longer overwrites a resume awaiting persistence, and checkpoint acknowledgment always retries deduplicated scheduling. A gated regression verifies no early restart before acknowledgment and completion without an external wake.
+
+- Native transfer workers now reject stale queued starts after pause/cancel and consume resume/retry controls atomically. Pause/resume retirement no longer replays already-persisted command state over newer controls; deterministic regressions protect newer stop/retry commands and verify that stale starts do not enter filesystem/transport work.
+
+- Native cancellation cleanup now waits for the old backend owner to exit. A per-task barrier prevents reopen/delete races while accepting a queued immediate retry; cleanup acknowledgment precedes its durable queue write and admission. Gated success/failure tests verify exclusive cleanup, retained bytes on failure, and preserved Cancelled recovery state. Interrupted-cleanup restart handling and waiting-phase presentation remain under audit.
+
+- Resumed uploads now register queued controls before source preflight and check stop signals around each bounded source read, independently of throttled progress updates. Preparation preserves newer Pause/Cancel projections. Fresh-upload pre-admission durability and the corresponding individual controls are still pending; batch stop-after-current behavior is unchanged.
+
+- Encrypted-download restart verification now retains the published file handle, rejects symlink/non-regular final entries and checks the named file around reuse and completion. Unix regression tests reject identical-byte path replacement and preserve foreign output. Cross-platform identity parity and initial-open substitution remain under qualification.
+
+- Schema 20 adds bounded metadata-only pending upload admission and atomic promotion into the executable ledger, with restart, conflict, stale/stopped owner and migration rollback coverage. Runtime batch/source-codec integration is still pending; this storage foundation alone does not make unstarted selections recoverable.
+
+- Pending-upload codec v1 now binds native source identity, task/batch and vault/key scope without reading contents or allocating encryption identities. Pending control persistence fences old preflight results across pause/resume and retry; source-codec and reopen tests preserve changed/unsupported work. Actual batch/startup/control-owner wiring remains pending.
+
+- Actual batch submission now saves every pending source before remote validation, with bounded groups and a visible committed-file counter. Queued upload preflight checks the saved generation/source and atomically promotes into the executable ledger; selection-wide failures settle durable pending entries. The 513-file selection regression verifies all windows at the validation boundary. Pending resume/control dispatch, history hydration and interrupted-prefix acceptance remain incomplete.
+
+- Pending uploads now reach independent pause/cancel controls, explicit resume, account-scoped startup dispatch and locked history hydration. Promotion races hand control to the formal ledger; startup preserves concurrent pauses. History prioritizes queued work and counts the union of durable representations. Synthetic failure-path, control-handoff and 300-row history tests pass; successful remote restart composition remains pending.
+- The native restart test’s Running/Queued failure was traced to its helper activating the account before asserting Queued. A gated backend reproduces that ordering deterministically. The corrected test checks inactive hydration first, then account activation, Running and completion without an extra scheduling call; broader shutdown/checkpoint ownership remains a separate audit.
+
+- Pending uploads preserve the admitted display filename when resuming through a canonical source path, including a selected symbolic-link alias with a different basename. Full successful pending-upload restart composition remains under qualification.
+
+- Successful synthetic DesktopVault composition now covers pending alias restart,
+  upload/download mid-transport pause, production-size multi-part local reuse,
+  network retry, terminal cancellation, source-free manifest completion and lost
+  publication replies. The wire fake preserves real owners, crypto and SQLite;
+  it does not qualify real MTProto. Resumed upload part geometry is refreshed to
+  avoid false persistence failures, and authenticated download parts are fetched
+  once instead of discovery plus a second download.
+
+- Complete upload selections now commit atomically with one encoded context in
+  memory at a time. Saved counts acknowledge commit, and cancellation/iterator
+  failure rolls back all newly admitted rows. Independent-reader and unclean
+  subprocess-exit tests prove that interruption does not expose a runnable prefix.
+  This supersedes the earlier bounded-group admission description; full feature
+  completion still requires the remaining ownership, cleanup and UI qualification.
+
+- Schema 21 adds durable native cancellation cleanup obligations and retry intent.
+  Atomic Storage operations fence old task writes and history deletion, preserve
+  future codecs, and combine cleanup acknowledgment with queued retry. Reopen,
+  transaction-failure and migration-conflict tests cover this contract. Runtime
+  cancel/retry, startup cleanup dispatch and waiting/error UI remain unconnected;
+  this storage layer alone does not resolve the native cleanup crash window.
+
+- Native cancellation cleanup now uses the schema21 obligation through retained
+  control/filesystem owners. Cancellation is saved before signalling; restart
+  restores unfinished cleanup and durable retry intent before new downloads may
+  start. Blocked cleanup does not block unrelated downloads, and frontend Drop
+  does not join it. Runtime tests verify restart, no premature retry, preserved
+  final files and shutdown; native list/batch/inspector presentation exposes
+  waiting, removal, failure, elapsed time and supported actions. Filesystem
+  substitution and cross-platform directory-sync qualification remain separate.
+
+- 2026-09-14: Upload history hydration now reflects validated terminal ledger
+  outcomes and materializes a bounded page of formal uploads missing compatibility
+  summaries while locked. Completed progress is restored without inventing speed
+  or duration; damaged contexts and unknown failure codes remain visible with
+  recovery disabled. Native cleanup waiting/failure layouts were reviewed in
+  English/light at 900×600 and actual macOS fullscreen, including the global
+  cleanup link and independent inspector scrolling. Full durable-transfer
+  delivery still requires the remaining account/filesystem/crash audits and
+  final repository gates; these checks do not establish real MTProto behavior.

@@ -319,18 +319,7 @@ impl TelegramConnection {
         Ok(())
     }
 }
-fn sent_message_id(updates: tl::enums::Updates, random_id: i64) -> Option<i32> {
-    let updates = match updates {
-        tl::enums::Updates::UpdateShortSentMessage(value) => return Some(value.id),
-        tl::enums::Updates::Updates(value) => value.updates,
-        tl::enums::Updates::Combined(value) => value.updates,
-        _ => return None,
-    };
-    updates.into_iter().find_map(|update| match update {
-        tl::enums::Update::MessageId(value) if value.random_id == random_id => Some(value.id),
-        _ => None,
-    })
-}
+use crate::publication::sent_message_id;
 
 #[cfg(test)]
 mod tests {

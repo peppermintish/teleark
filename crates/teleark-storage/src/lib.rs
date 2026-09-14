@@ -15,6 +15,7 @@ pub use database::{
     CachedManifestCandidate, ChannelSyncCommit, ChannelSyncCommitOutcome, ChannelSyncState,
     Database, LATEST_SCHEMA_VERSION, MANAGED_CHANGE_HISTORY_LIMIT, ManagedChannelChange,
     ManagedChannelChangeKind, ManagedChannelWatch, NATIVE_DOWNLOAD_HISTORY_LIMIT,
+    NativeDownloadCleanup,
 };
 pub use error::{
     CursorError, EntityKind, InputReason, InvariantViolation, StorageError, StorageResult,
@@ -34,3 +35,9 @@ pub use model::{
 pub use database::{VaultFileHealth, VaultInventoryRecord};
 
 pub use database::{StoredVaultUploadState, VaultUploadHistory, VaultUploadRecord};
+
+pub use database::{
+    PendingVaultUpload, PendingVaultUploadSnapshot, PendingVaultUploadState, VaultJobDirection,
+    VaultJobLease, VaultJobRecord, VaultJobState, VaultJobTransition, VaultManifestOutbox,
+    VaultPartRecord,
+};

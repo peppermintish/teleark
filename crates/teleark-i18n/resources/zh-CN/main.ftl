@@ -402,10 +402,10 @@ connection-latency = 延迟
 detail-source-channel = 来源频道
 detail-message-id = 消息 ID
 detail-local-path = 本地路径
-detail-speed = 下载速度
+detail-speed = 传输速度
 detail-downloaded = 已下载
-detail-active-connections = 活跃连接数
-detail-workers = 线程数
+
+
 detail-retries = 重试次数
 detail-created = 创建时间
 detail-started = 开始时间
@@ -717,7 +717,7 @@ detail-failure-reason = 失败原因
 detail-failure-retryable = 此失败可能是暂时性的。请检查上述条件后重试。
 detail-failure-user-action = 重试前需要更改设置、账号、来源或文件系统状态。
 detail-failure-terminal = 此任务已停止，不会自动重试。
-detail-verification-not-reached = 传输先发生失败，因此尚未进入校验阶段
+detail-verification-not-reached = 尚未执行验证
 detail-trace-timeline = 诊断时间线
 trace-event-queued = 已排队
 trace-event-started = 已开始
@@ -1500,3 +1500,97 @@ speed-limits-omitted = 已省略 { $count } 条较早事件；每个方向保留
 speed-limits-close = 关闭
 
 channel-sync-event-at = { $time } · { $phase }
+
+transfer-upload-pausing = 正在暂停，保留已确认的进度
+
+native-cleanup-unsupported = 应用无法安全完成此次清理，临时文件已保留。请更新应用后再尝试。
+
+transfer-recovery-unavailable-detail = 保存的恢复信息已损坏或版本暂不受支持。原始记录和文件已保留。
+
+upload-selection-counts = { $total } 个文件 · { $completed } 已上传 · { $paused } 已暂停 · { $failed } 失败 · { $cancelled } 已取消 · { $pending } 未处理
+
+native-cleanup-failed = 临时文件需要处理
+
+transfer-recovery-legacy-guidance = 此历史任务没有可用的恢复操作。请保留记录和文件。较新版本的恢复数据可能需要兼容的应用版本；否则请开始新传输。存在历史记录并不代表数据可以续传。
+
+transfer-recovery-source-guidance = 当前源文件无法用于继续此上传。请保留原文件，并尽可能恢复访问。文件准备好后，从“上传”开始新任务；此停止的任务会保留在历史记录中。
+
+transfer-recovery-unavailable = 暂时无法恢复
+
+storage-guide-transfers-title = 5. 暂停和继续传输
+
+transfer-recovery-verification-pending = 复用数据前会先校验本地保存的进度。
+
+storage-guide-resume-title = 6. 了解恢复限制
+
+transfer-recovery-retry-guidance = 此任务可以重试。处理上述原因后，在任务行选择“重试”。TeleArk 会先检查已保存的进度再复用；失败任务不会自动重试。
+
+native-cleanup-waiting = 等待下载停止
+
+native-cleanup-finished = 临时文件清理完成
+
+native-cleanup-error-guidance = { $error } 临时文件已保留。解决问题后可重试，清理成功后才会开始下载。
+
+transfer-upload-saving-recovery = 保存续传信息
+
+upload-selection-saving-queue = 正在保存上传队列
+
+transfer-recovery-key-guidance = 打开“设置 → 密钥库”，解锁此文件所需的密钥。如果任务没有“继续”或“重试”操作，请在解锁后开始新传输。保留原始源文件和任何未完成的下载文件。
+
+detail-concurrency-limits = 配置的并发上限
+
+transfer-recovery-saved-download = 已保存的下载任务
+
+native-cleanup-explanation = 取消请求已保存。清理会等待旧下载释放文件，已完成的文件会保留。
+
+native-cleanup-removing = 正在清理临时文件
+
+transfer-upload-cancelling = 正在取消，等待后台工作停止
+
+storage-guide-transfers-body = “传输”中的每个任务会显示支持的操作。暂停会等待正在执行的工作安全停止；继续前会检查已保存的数据。请勿修改上传源文件或移动未完成的下载文件。取消会停止任务，但不会撤回已经发送的数据。
+
+transfer-recovery-blocked-guidance = 此任务目前无法继续。请先处理上述原因，再开始新传输。保留原始源文件和任何未完成的下载文件；新任务可能需要重新传输数据。
+
+transfer-upload-checking-source = 校验源文件以确保安全续传
+
+native-cleanup-retry-waiting = 重试请求已保存，临时文件安全清理后将开始重试。
+
+upload-selection-saved-count = 已将 { $saved } / { $total } 个文件保存到上传队列。
+
+native-cleanup-detail = { $reason } · 等待：{ $elapsed } · 最后活动：{ $last }
+
+storage-guide-resume-body = 重启并解锁后，符合条件的排队任务可以继续。暂停任务等待手动继续；失败任务需要处理。打开任务可查看原因和下一步操作。旧历史记录或损坏的恢复数据可能需要新建任务；源文件、密钥或 Telegram 文件变化也可能导致无法恢复。
+
+transfer-batch-open-window = 在独立窗口中查看批次
+
+transfer-batch-unavailable = 当前任务历史中已没有此批次。
+
+transfer-batch-window-live = 实时进度 · 关闭此窗口不会停止传输
+
+transfer-batch-window-title = 批次文件
+
+upload-drop-files = 将文件拖入此上传窗口即可添加，也可以点击选择文件。
+
+upload-files-independent = 每个文件均独立保存。
+
+upload-folders-unsupported = 暂不支持文件夹。
+
+upload-selection-cancelling = 正在停止，等待当前操作安全结束…
+
+upload-selection-checking-channel = 正在检查私人频道
+
+upload-selection-checking-files = 正在检查文件信息
+
+upload-selection-finished = 处理已结束
+
+upload-selection-history-entry = { $time }：{ $phase }
+
+upload-selection-inspecting = 已检查 { $inspected } / { $total } 个所选路径。
+
+upload-selection-queued = 等待选择文件或上传任务开始
+
+upload-selection-retention = 详细记录保留最近的处理批次；这里的总计包含全部所选文件。
+
+upload-selection-timing = 当前阶段已用时 { $elapsed } · 距上次活动 { $idle }
+
+upload-selection-uploading = 正在上传文件

@@ -40,3 +40,13 @@ inside the injected validation boundary, validation executes once, shared errors
 and cancellation remain visible, and the GUI renders feedback before any runtime
 row exists. The existing remote codec/privacy/cross-account tests remain gates.
 No database/manifest/crypto format or dependency changes are introduced.
+
+## Durable pending admission refinement
+
+Metadata-only pending upload contexts are saved in bounded groups before remote
+validation or source-content hashing. Selection-wide saving progress is visible;
+only the active detailed window is materialized. This preserves bounded content
+preflight while making pending source identities durable. Executable encryption
+contexts remain immutable and are admitted by atomic promotion after hashing.
+See [transfer recovery](../VAULT_TRANSFER_RECOVERY.md#batch-admission-integration-in-progress)
+for current integration and remaining acceptance boundaries.

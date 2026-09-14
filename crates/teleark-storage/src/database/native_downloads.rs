@@ -10,6 +10,9 @@ use crate::model::{
 };
 use crate::{StorageError, StorageResult};
 
+mod cleanup;
+pub use cleanup::NativeDownloadCleanup;
+
 pub const NATIVE_DOWNLOAD_HISTORY_LIMIT: usize = 10_000;
 
 const COLUMNS: &str = r#"
@@ -150,51 +153,7 @@ impl Database {
     }
 
     pub fn save_native_download(&mut self, task: &NativeDownloadTaskRecord) -> StorageResult<()> {
-        validate_task(task)?;
-        let id = unsigned_to_sql("native_download.id", task.id)?;
-        let changed = self.connection.execute(
-            r#"
-UPDATE native_download_tasks SET
-    state = ?2,
-    verification = ?3,
-    transferred_bytes = ?4,
-    started_at_unix_ms = ?5,
-    finished_at_unix_ms = ?6,
-    queue_wait_ms = ?7,
-    duration_ms = ?8,
-    average_bytes_per_second = ?9,
-    attempts = ?10,
-    failure_code = ?11,
-    updated_at_unix_ms = ?12,
-    account_id = ?13
-WHERE id = ?1 AND (account_id IS NULL OR account_id = ?13)
-"#,
-            params![
-                id,
-                state_code(task.state),
-                verification_code(task.verification),
-                unsigned_to_sql("native_download.transferred_bytes", task.transferred_bytes)?,
-                task.started_at_unix_ms,
-                task.finished_at_unix_ms,
-                optional_u64("native_download.queue_wait_ms", task.queue_wait_ms)?,
-                optional_u64("native_download.duration_ms", task.duration_ms)?,
-                optional_u64(
-                    "native_download.average_bytes_per_second",
-                    task.average_bytes_per_second,
-                )?,
-                i64::from(task.attempts),
-                task.failure_code,
-                task.updated_at_unix_ms,
-                task.account_id,
-            ],
-        )?;
-        if changed == 0 {
-            return Err(StorageError::NotFound {
-                entity: EntityKind::NativeDownload,
-                id,
-            });
-        }
-        Ok(())
+        save_task(&self.connection, task)
     }
 
     pub fn native_download(&self, task_id: u64) -> StorageResult<Option<NativeDownloadTaskRecord>> {
@@ -210,7 +169,7 @@ WHERE id = ?1 AND (account_id IS NULL OR account_id = ?13)
     pub fn native_download_history(&self) -> StorageResult<(Vec<NativeDownloadTaskRecord>, u64)> {
         let sql = format!(
             "WITH recoverable AS (
-                SELECT id FROM native_download_tasks WHERE state NOT IN ('completed', 'cancelled')
+                SELECT id FROM native_download_tasks WHERE state NOT IN ('completed', 'cancelled') OR id IN (SELECT task_id FROM native_download_cleanup)
                 OR batch_id IN (SELECT batch_id FROM native_download_tasks WHERE state NOT IN ('completed', 'cancelled') AND batch_id IS NOT NULL)
              ), recent AS (
                 SELECT id FROM native_download_tasks WHERE state IN ('completed', 'cancelled') AND id NOT IN (SELECT id FROM recoverable)
@@ -509,4 +468,54 @@ fn parse_verification(value: &str) -> StorageResult<StoredNativeDownloadVerifica
         "not_reached" => Ok(StoredNativeDownloadVerification::NotReached),
         value => Err(corrupt("native_download_tasks", "verification", value)),
     }
+}
+
+fn save_task(connection: &Connection, task: &NativeDownloadTaskRecord) -> StorageResult<()> {
+    validate_task(task)?;
+    let id = unsigned_to_sql("native_download.id", task.id)?;
+    let changed = connection.execute(
+        r#"
+UPDATE native_download_tasks SET
+    state = ?2,
+    verification = ?3,
+    transferred_bytes = ?4,
+    started_at_unix_ms = ?5,
+    finished_at_unix_ms = ?6,
+    queue_wait_ms = ?7,
+    duration_ms = ?8,
+    average_bytes_per_second = ?9,
+    attempts = ?10,
+    failure_code = ?11,
+    updated_at_unix_ms = ?12,
+    account_id = ?13
+WHERE id = ?1 AND (account_id IS NULL OR account_id = ?13)
+AND NOT EXISTS (SELECT 1 FROM native_download_cleanup AS cleanup
+                WHERE cleanup.task_id=?1 AND (?2!='cancelled' OR cleanup.attempt!=?10 OR cleanup.codec_version!=1))
+"#,
+        params![
+            id,
+            state_code(task.state),
+            verification_code(task.verification),
+            unsigned_to_sql("native_download.transferred_bytes", task.transferred_bytes)?,
+            task.started_at_unix_ms,
+            task.finished_at_unix_ms,
+            optional_u64("native_download.queue_wait_ms", task.queue_wait_ms)?,
+            optional_u64("native_download.duration_ms", task.duration_ms)?,
+            optional_u64(
+                "native_download.average_bytes_per_second",
+                task.average_bytes_per_second,
+            )?,
+            i64::from(task.attempts),
+            task.failure_code,
+            task.updated_at_unix_ms,
+            task.account_id,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(StorageError::NotFound {
+            entity: EntityKind::NativeDownload,
+            id,
+        });
+    }
+    Ok(())
 }

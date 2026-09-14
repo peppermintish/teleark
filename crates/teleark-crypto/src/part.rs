@@ -223,7 +223,11 @@ impl PartHeader {
         output
     }
 
-    fn decode(bytes: &[u8; PART_HEADER_LENGTH], limits: PartLimits) -> Result<Self, CryptoError> {
+    /// Decode and validate a persisted header before restoring its encryption identity.
+    pub fn decode(
+        bytes: &[u8; PART_HEADER_LENGTH],
+        limits: PartLimits,
+    ) -> Result<Self, CryptoError> {
         if &bytes[..8] != PART_MAGIC {
             return Err(CryptoError::InvalidMagic {
                 format: FormatKind::Part,
@@ -310,6 +314,25 @@ pub fn encrypt_part(
     limits: PartLimits,
     usage: &mut AeadUsageRegistry,
 ) -> Result<EncryptedPartSummary, CryptoError> {
+    encrypt_part_cancellable(source, destination, header, file_key, limits, usage, || {
+        false
+    })
+}
+
+/// Check cancellation before allocating or processing each authenticated frame.
+/// A cancelled output is partial and must never be published as a complete part.
+pub fn encrypt_part_cancellable(
+    source: &mut impl Read,
+    destination: &mut impl Write,
+    header: &PartHeader,
+    file_key: &FileKey,
+    limits: PartLimits,
+    usage: &mut AeadUsageRegistry,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<EncryptedPartSummary, CryptoError> {
+    if cancelled() {
+        return Err(CryptoError::Cancelled);
+    }
     header.validate(limits)?;
     let header_bytes = header.encode();
     let header_digest = *blake3::hash(&header_bytes).as_bytes();
@@ -333,6 +356,9 @@ pub fn encrypt_part(
     let mut remaining = header.plaintext_length;
 
     for frame_index in 0..header.frame_count {
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         let is_final = frame_index + 1 == header.frame_count;
         let plaintext_length = expected_frame_length(header, remaining, is_final)?;
         let allocation_length =
@@ -341,6 +367,9 @@ pub fn encrypt_part(
             })?;
         let mut buffer = Zeroizing::new(vec![0_u8; allocation_length]);
         read_exact(source, &mut buffer, "part plaintext frame")?;
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         plaintext_hasher.update(&buffer);
 
         let flags = if is_final { FINAL_FRAME_FLAG } else { 0 };
@@ -349,6 +378,9 @@ pub fn encrypt_part(
         let nonce = frame_nonce(header.part_index, frame_index);
         let tag = encrypt_detached(content_key.as_ref(), &nonce, &aad, buffer.as_mut())?;
 
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         write_all(destination, &frame_header, "frame header")?;
         write_all(destination, &buffer, "frame ciphertext")?;
         write_all(destination, &tag, "frame authentication tag")?;
@@ -384,6 +416,20 @@ pub fn decrypt_part(
     file_key: &FileKey,
     limits: PartLimits,
 ) -> Result<PlaintextPartSummary, CryptoError> {
+    decrypt_part_cancellable(source, destination, file_key, limits, || false)
+}
+
+/// Cancel at frame boundaries without producing a successful integrity summary.
+pub fn decrypt_part_cancellable(
+    source: &mut impl Read,
+    destination: &mut impl Write,
+    file_key: &FileKey,
+    limits: PartLimits,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PlaintextPartSummary, CryptoError> {
+    if cancelled() {
+        return Err(CryptoError::Cancelled);
+    }
     let mut header_bytes = [0_u8; PART_HEADER_LENGTH];
     read_exact(source, &mut header_bytes, "part header")?;
     let header = PartHeader::decode(&header_bytes, limits)?;
@@ -400,6 +446,9 @@ pub fn decrypt_part(
     let mut remaining = header.plaintext_length;
 
     for expected_index in 0..header.frame_count {
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         let mut frame_header = [0_u8; FRAME_HEADER_LENGTH];
         read_exact(source, &mut frame_header, "frame header")?;
         let frame_index = u32_at(&frame_header, 0, "frame index")?;
@@ -437,6 +486,9 @@ pub fn decrypt_part(
         let mut tag = [0_u8; TAG_LENGTH];
         read_exact(source, &mut buffer, "frame ciphertext")?;
         read_exact(source, &mut tag, "frame authentication tag")?;
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         encoded_hasher.update(&frame_header);
         encoded_hasher.update(&buffer);
         encoded_hasher.update(&tag);
@@ -451,6 +503,9 @@ pub fn decrypt_part(
         let nonce = frame_nonce(header.part_index, frame_index);
         decrypt_detached(content_key.as_ref(), &nonce, &aad, buffer.as_mut(), &tag)?;
         plaintext_hasher.update(&buffer);
+        if cancelled() {
+            return Err(CryptoError::Cancelled);
+        }
         write_all(destination, &buffer, "authenticated plaintext frame")?;
         remaining = remaining.checked_sub(u64::from(plaintext_length)).ok_or(
             CryptoError::ArithmeticOverflow {
@@ -642,6 +697,94 @@ mod tests {
             panic!("test encryption failed: {error}");
         }
         encoded
+    }
+
+    #[test]
+    fn cancellation_stops_at_frame_boundary_without_a_success_summary() {
+        use std::{cell::Cell, rc::Rc};
+        struct StopWriter {
+            bytes: Vec<u8>,
+            after: usize,
+            stop: Rc<Cell<bool>>,
+        }
+        impl Write for StopWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                if self.bytes.len() >= self.after {
+                    self.stop.set(true);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let stop = Rc::new(Cell::new(false));
+        let mut plaintext = Cursor::new(b"bounded frame payload");
+        let first_frame_end = PART_HEADER_LENGTH + FRAME_HEADER_LENGTH + 8 + TAG_LENGTH;
+        let mut encoded = StopWriter {
+            bytes: Vec::new(),
+            after: first_frame_end,
+            stop: stop.clone(),
+        };
+        assert_eq!(
+            encrypt_part_cancellable(
+                &mut plaintext,
+                &mut encoded,
+                &header(),
+                &FileKey::from_bytes([3; 32]),
+                PartLimits::default(),
+                &mut AeadUsageRegistry::new(),
+                || stop.get()
+            ),
+            Err(CryptoError::Cancelled)
+        );
+        assert_eq!(
+            plaintext.position(),
+            8,
+            "no plaintext from the second frame was read"
+        );
+        assert_eq!(encoded.bytes.len(), first_frame_end);
+        stop.set(false);
+        let complete = encoded_part();
+        let mut source = Cursor::new(complete);
+        let mut decoded = StopWriter {
+            bytes: Vec::new(),
+            after: 8,
+            stop: stop.clone(),
+        };
+        assert_eq!(
+            decrypt_part_cancellable(
+                &mut source,
+                &mut decoded,
+                &FileKey::from_bytes([3; 32]),
+                PartLimits::default(),
+                || stop.get()
+            ),
+            Err(CryptoError::Cancelled)
+        );
+        assert_eq!(decoded.bytes, b"bounded ");
+        assert_eq!(
+            source.position() as usize,
+            first_frame_end,
+            "no second frame was read or authenticated"
+        );
+        let mut source = Cursor::new(b"bounded frame payload");
+        let mut output = Vec::new();
+        assert_eq!(
+            encrypt_part_cancellable(
+                &mut source,
+                &mut output,
+                &header(),
+                &FileKey::from_bytes([3; 32]),
+                PartLimits::default(),
+                &mut AeadUsageRegistry::new(),
+                || true
+            ),
+            Err(CryptoError::Cancelled)
+        );
+        assert_eq!(source.position(), 0);
+        assert!(output.is_empty());
     }
 
     #[test]

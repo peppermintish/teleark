@@ -14,8 +14,8 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use teleark_runtime::StorageMaintenancePhase;
 
@@ -96,7 +96,9 @@ impl TeleArkApp {
                 .when(self.show_storage_guide, |body| {
                     body.child(self.storage_guide(true, cx))
                 })
-                .when(!legacy, |body| body.child(self.render_storage_controls(cx)));
+                .when(!legacy && !self.show_storage_guide, |body| {
+                    body.child(self.render_storage_controls(cx))
+                });
             let content = if locked {
                 div()
                     .flex_1()
@@ -126,13 +128,17 @@ impl TeleArkApp {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_h(px(270.0))
-                            .overflow_y_scrollbar()
-                            .child(overview),
-                    )
+                    .when(self.show_storage_guide || !legacy, |body| {
+                        body.child(
+                            div()
+                                .id("storage-overview-scroll")
+                                .debug_selector(|| "storage-guide-viewport".to_owned())
+                                .flex_none()
+                                .max_h(px(220.0))
+                                .overflow_y_scroll()
+                                .child(overview),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -878,8 +884,19 @@ impl TeleArkApp {
                 "storage-guide-key-title",
                 "storage-guide-key-body",
             ),
+            (
+                Icon::new(Symbol::Layers),
+                "storage-guide-transfers-title",
+                "storage-guide-transfers-body",
+            ),
+            (
+                Icon::new(IconName::Eye),
+                "storage-guide-resume-title",
+                "storage-guide-resume-body",
+            ),
         ];
         components::card()
+            .flex_shrink_0()
             .p_4()
             .bg(theme::blue_pale())
             .child(
@@ -910,36 +927,38 @@ impl TeleArkApp {
                     }),
             )
             .child(
-                div()
-                    .mt_3()
-                    .grid()
-                    .grid_cols(if compact { 2 } else { 1 })
-                    .gap_4()
-                    .children(steps.into_iter().map(|(icon, title, body)| {
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .child(Icon::new(icon).size(px(17.0)).text_color(theme::blue()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(self.tr(title)),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .text_color(theme::text_secondary())
-                                            .child(self.tr(body)),
-                                    ),
-                            )
-                    })),
+                div().id("storage-guide-steps").mt_3().child(
+                    div()
+                        .grid()
+                        .grid_cols(if compact { 2 } else { 1 })
+                        .gap_4()
+                        .children(steps.into_iter().map(|(icon, title, body)| {
+                            div()
+                                .debug_selector(move || format!("storage-guide-step-{title}"))
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(Icon::new(icon).size(px(17.0)).text_color(theme::blue()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .child(self.tr(title)),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_xs()
+                                                .text_color(theme::text_secondary())
+                                                .child(self.tr(body)),
+                                        ),
+                                )
+                        })),
+                ),
             )
             .into_any_element()
     }
@@ -1285,6 +1304,36 @@ mod tests {
     use super::*;
     use teleark_i18n::{Localizer, SupportedLocale};
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn recovery_guide_last_step_is_reachable_in_bounded_viewport(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            app.update(cx, |app, cx| {
+                app.show_storage_guide = true;
+                app.vault_locked = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let viewport = cx
+                .debug_bounds("storage-guide-viewport")
+                .expect("guide viewport");
+            assert!(viewport.size.height <= px(220.0));
+            cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                position: viewport.center(),
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-4000.0))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            let last = cx
+                .debug_bounds("storage-guide-step-storage-guide-resume-title")
+                .expect("last step");
+            assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
+        }
+    }
 
     #[gpui_kit::test]
     fn locked_repair_cards_keep_children_inside_and_actions_reachable(

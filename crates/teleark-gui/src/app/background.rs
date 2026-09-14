@@ -154,10 +154,15 @@ impl TeleArkApp {
         let account = self.telegram_account.as_ref().map(|account| account.id);
         self.native_transfer_view.items.iter().any(|row| {
             row.account_id == account
-                && matches!(
+                && (row.cleanup.is_some_and(|cleanup| {
+                    !matches!(
+                        cleanup.phase,
+                        teleark_runtime::ChannelDownloadCleanupPhase::Failed(_)
+                    )
+                }) || matches!(
                     row.state,
                     ChannelDownloadState::Queued | ChannelDownloadState::Running
-                )
+                ))
         }) || self.vault_transfer_view.items.iter().any(|row| {
             Some(row.account_id) == account
                 && matches!(

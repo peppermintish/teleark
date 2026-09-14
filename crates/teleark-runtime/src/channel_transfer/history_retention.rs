@@ -130,10 +130,11 @@ impl HistoryRetention {
 }
 
 fn evictable(snapshot: &ChannelDownloadSnapshot) -> bool {
-    matches!(
-        snapshot.state,
-        ChannelDownloadState::Completed | ChannelDownloadState::Cancelled
-    )
+    snapshot.cleanup.is_none()
+        && matches!(
+            snapshot.state,
+            ChannelDownloadState::Completed | ChannelDownloadState::Cancelled
+        )
 }
 
 pub(super) fn bound_lifecycle(snapshot: &mut ChannelDownloadSnapshot) {

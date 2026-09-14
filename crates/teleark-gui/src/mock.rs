@@ -252,7 +252,7 @@ pub fn transfers(include_queued_upload: bool) -> Vec<TransferRow> {
             direction: TransferDirection::Download,
             size: "22.14 GB",
             transferred: "22.1 GB",
-            progress: 100.0,
+            progress: 99.0,
             speed: "—",
             eta: "—",
             connections: "—",

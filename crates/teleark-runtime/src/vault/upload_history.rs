@@ -8,8 +8,12 @@ impl VaultOwner {
         rows: Vec<VaultTransferSnapshot>,
     ) -> Result<(), ApplicationError> {
         for row in &rows {
-            self.transfers
-                .insert_pruning(row.clone(), vault_transfer_evictions);
+            if !self
+                .transfers
+                .insert_pruning(row.clone(), vault_transfer_evictions)
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
+            }
         }
         self.persist_upload_rows(&rows)
     }
@@ -103,6 +107,112 @@ impl VaultOwner {
             .into_iter()
             .map(snapshot)
             .collect::<Result<Vec<_>, _>>()?;
+        let database = teleark_storage::Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let retained: std::collections::BTreeSet<_> = rows.iter().map(|row| row.id).collect();
+        let formal_ids = database
+            .vault_job_history_ids(account, teleark_storage::VaultJobDirection::Upload, 256)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        for id in formal_ids.into_iter().filter(|id| !retained.contains(id)) {
+            let job = match database.vault_job(account, id) {
+                Ok(Some(job)) => Some(job),
+                Ok(None) => continue,
+                Err(teleark_storage::StorageError::CorruptData { .. }) => None,
+                Err(_) => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+            };
+            let mut row = orphan_upload_snapshot(account, id, job.as_ref())?;
+            let receipt = match database.pending_vault_upload(account, id) {
+                Ok(receipt) => receipt,
+                Err(teleark_storage::StorageError::CorruptData { .. }) => None,
+                Err(_) => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+            };
+            if let Some(receipt) = receipt
+                && let Ok(pending) = crate::VaultPendingUploadContext::from_record(&receipt.record)
+                && let Some(job) = job.as_ref()
+                && let Ok(context) = crate::VaultRecoveryContext::from_record(job)
+                && pending.verify_executable(&context).is_ok()
+            {
+                row.batch_id = Some(receipt.record.batch_id);
+            }
+            rows.push(row);
+        }
+        for row in &mut rows {
+            let job = match database.vault_job(account, row.id) {
+                Ok(job) => job,
+                Err(teleark_storage::StorageError::CorruptData { .. }) => None,
+                Err(_) => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+            };
+            if let Some(job) = job
+                && let Ok(context) = crate::VaultRecoveryContext::from_record(&job)
+                && matches!(
+                    context.direction,
+                    crate::VaultRecoveryDirection::Upload { .. }
+                )
+                && context.chat_id == row.chat_id
+                && context.file_name == row.file_name
+                && context.size_bytes == row.size_bytes
+            {
+                row.recovery_state = Some(job.state);
+                row.state = match job.state {
+                    teleark_storage::VaultJobState::Queued => VaultTransferState::Queued,
+                    teleark_storage::VaultJobState::Running => VaultTransferState::Running,
+                    teleark_storage::VaultJobState::Pausing => VaultTransferState::Pausing,
+                    teleark_storage::VaultJobState::Cancelling => VaultTransferState::Cancelling,
+                    teleark_storage::VaultJobState::Paused => VaultTransferState::Paused,
+                    teleark_storage::VaultJobState::Cancelled => VaultTransferState::Cancelled,
+                    teleark_storage::VaultJobState::Completed => {
+                        if row.state != VaultTransferState::Completed {
+                            row.average_bytes_per_second = None;
+                            row.duration_ms = None;
+                        }
+                        row.transferred_bytes = context.size_bytes;
+                        row.part_count = u32::try_from(
+                            context
+                                .size_bytes
+                                .div_ceil(crate::transfer::encrypted_part_plaintext_limit()),
+                        )
+                        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+                        row.completed_parts = row.part_count;
+                        row.package_id = Some(hex_id(&context.package_id));
+                        VaultTransferState::Completed
+                    }
+                    teleark_storage::VaultJobState::Retryable
+                    | teleark_storage::VaultJobState::Blocked => {
+                        let failure = job.failure_code.as_deref().and_then(parse_error);
+                        if failure.is_none() {
+                            // A newer failure code is not permission to replay
+                            // work whose recovery requirements we cannot explain.
+                            row.recovery_state = None;
+                        }
+                        VaultTransferState::Failed(
+                            failure.unwrap_or(ApplicationErrorKind::InvalidRequest),
+                        )
+                    }
+                };
+            }
+        }
+        let _pending_omitted = self.restore_pending_upload_rows(&database, account, &mut rows)?;
+        let (downloads, _download_omitted) = self.download_history(&database, account)?;
+        rows.extend(downloads);
+        rows.sort_by_key(|row| {
+            (
+                match row.state {
+                    VaultTransferState::Queued
+                    | VaultTransferState::Running
+                    | VaultTransferState::Pausing
+                    | VaultTransferState::Cancelling => 0,
+                    VaultTransferState::Paused => 1,
+                    VaultTransferState::Failed(_) if row.recovery_state.is_some() => 1,
+                    _ => 2,
+                },
+                std::cmp::Reverse(row.queued_at_unix_ms),
+            )
+        });
+        let total = database
+            .vault_transfer_history_count(account)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let omitted = total.saturating_sub(rows.len().min(256) as u64);
+        rows.truncate(256);
         let logs = self.library.managed_directories()?.logs.join("Transfers");
         for row in &mut rows {
             let path = logs.join(format!(
@@ -114,13 +224,9 @@ impl VaultOwner {
                 row.session_log_path = Some(path);
             }
         }
-        self.transfers
-            .restore_history(rows, history.omitted, |row| {
-                matches!(
-                    row.state,
-                    VaultTransferState::Queued | VaultTransferState::Running
-                ) || row.direction == VaultTransferDirection::Download
-            });
+        self.transfers.restore_history(rows, omitted, |row| {
+            row.account_id == account && !row.restored
+        });
         Ok(())
     }
 }
@@ -131,6 +237,8 @@ fn record(s: &VaultTransferSnapshot) -> VaultUploadRecord {
         VaultTransferState::Running => (State::Running, None),
         VaultTransferState::Completed => (State::Completed, None),
         VaultTransferState::Cancelled => (State::Cancelled, None),
+        VaultTransferState::Pausing | VaultTransferState::Paused => (State::Interrupted, None),
+        VaultTransferState::Cancelling => (State::Cancelled, None),
         VaultTransferState::Interrupted => (State::Interrupted, None),
         VaultTransferState::Failed(kind) => (State::Failed, Some(error_code(kind).to_owned())),
     };
@@ -153,6 +261,48 @@ fn record(s: &VaultTransferSnapshot) -> VaultUploadRecord {
         failure_code,
     }
 }
+fn orphan_upload_snapshot(
+    account: i64,
+    id: u64,
+    record: Option<&teleark_storage::VaultJobRecord>,
+) -> Result<VaultTransferSnapshot, ApplicationError> {
+    let context = record
+        .and_then(|record| crate::VaultRecoveryContext::from_record(record).ok())
+        .filter(|context| {
+            matches!(
+                context.direction,
+                crate::VaultRecoveryDirection::Upload { .. }
+            )
+        });
+    Ok(VaultTransferSnapshot {
+        id,
+        account_id: account,
+        chat_id: record.map_or(0, |record| record.chat_id),
+        recovery_state: None,
+        restored: true,
+        upload_activity: None,
+        batch_id: None,
+        queued_at_unix_ms: record.map_or(0, |record| record.created_at_unix_ms),
+        direction: VaultTransferDirection::Upload,
+        file_name: context
+            .as_ref()
+            .map_or_else(String::new, |context| context.file_name.clone()),
+        package_id: record.map(|record| hex_id(&record.package_id)),
+        size_bytes: context.as_ref().map_or(0, |context| context.size_bytes),
+        transferred_bytes: 0,
+        completed_parts: 0,
+        part_count: 0,
+        started_at_unix_ms: 0,
+        duration_ms: None,
+        average_bytes_per_second: None,
+        destination: None,
+        session_log_path: None,
+        telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+            .snapshot(),
+        state: VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest),
+    })
+}
+
 fn snapshot(r: VaultUploadRecord) -> Result<VaultTransferSnapshot, ApplicationError> {
     let state = match r.state {
         State::Queued | State::Running => VaultTransferState::Interrupted,
@@ -167,6 +317,7 @@ fn snapshot(r: VaultUploadRecord) -> Result<VaultTransferSnapshot, ApplicationEr
         ),
     };
     Ok(VaultTransferSnapshot {
+        recovery_state: None,
         restored: true,
         upload_activity: None,
         id: r.id,
@@ -193,7 +344,7 @@ fn snapshot(r: VaultUploadRecord) -> Result<VaultTransferSnapshot, ApplicationEr
 }
 
 // Independent v1 locale-neutral error codes. No Debug/prose matching in the durable codec.
-fn error_code(kind: ApplicationErrorKind) -> &'static str {
+pub(super) fn error_code(kind: ApplicationErrorKind) -> &'static str {
     match kind {
         ApplicationErrorKind::InvalidRequest => "invalid_request",
         ApplicationErrorKind::NotFound => "not_found",
@@ -216,7 +367,7 @@ fn error_code(kind: ApplicationErrorKind) -> &'static str {
         _ => "persistence",
     }
 }
-fn parse_error(code: &str) -> Option<ApplicationErrorKind> {
+pub(super) fn parse_error(code: &str) -> Option<ApplicationErrorKind> {
     [
         ApplicationErrorKind::InvalidRequest,
         ApplicationErrorKind::NotFound,
@@ -246,6 +397,7 @@ mod tests {
     use super::*;
     fn fixture(id: u64, state: VaultTransferState) -> VaultTransferSnapshot {
         VaultTransferSnapshot {
+            recovery_state: None,
             restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Persisting)),
             id,
@@ -285,8 +437,223 @@ mod tests {
             session_generation: 0,
             transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
             active_upload_batch: Arc::new(Mutex::new(None)),
+            upload_controls: UploadControls::default(),
         })
     }
+    #[test]
+    fn valid_queued_recovery_overrides_interrupted_legacy_history_while_locked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let owner = owner(temp.path())?;
+        let row = fixture(1, VaultTransferState::Running);
+        owner.persist_upload(&row)?;
+        let source = temp.path().join("synthetic.bin");
+        std::fs::write(&source, [9; 128])?;
+        let context = crate::VaultRecoveryContext {
+            account_id: 7,
+            task_id: 1,
+            chat_id: 90,
+            package_id: [1; 16],
+            vault_id: [2; 16],
+            master_key_generation: 1,
+            file_key_wrap: teleark_crypto::wrap_file_key(
+                &VaultMasterKey::from_bytes([3; 32]),
+                &teleark_crypto::FileKey::from_bytes([4; 32]),
+                &[2; 16],
+                &[1; 16],
+                1,
+                1,
+                &mut AeadUsageRegistry::new(),
+            )?,
+            file_name: row.file_name.clone(),
+            created_at_unix_ms: 100,
+            size_bytes: 128,
+            direction: crate::VaultRecoveryDirection::Upload {
+                source,
+                identity: teleark_transfer::SourceIdentity {
+                    filesystem_id: 1,
+                    size_bytes: 128,
+                    modified_at_units: 1,
+                    revision: 1,
+                },
+                source_blake3: *blake3::hash(&[9; 128]).as_bytes(),
+            },
+        };
+        let mut db = teleark_storage::Database::open(owner.library.database_path.as_ref())?;
+        assert!(db.admit_vault_job(&context.admission_record().expect("valid recovery context"))?);
+        owner.restore_upload_history(7)?;
+        let restored = owner.transfers.get(1).expect("restored task");
+        assert_eq!(restored.state, VaultTransferState::Queued);
+        assert_eq!(
+            restored.recovery_state,
+            Some(teleark_storage::VaultJobState::Queued)
+        );
+        assert_eq!(restored.batch_id, Some(50));
+        assert!(restored.restored);
+        assert!(owner.master_key.is_none(), "history does not unlock keys");
+        for (transition, expected) in [
+            (
+                teleark_storage::VaultJobTransition::Start,
+                VaultTransferState::Running,
+            ),
+            (
+                teleark_storage::VaultJobTransition::RequestPause,
+                VaultTransferState::Pausing,
+            ),
+            (
+                teleark_storage::VaultJobTransition::RequestCancel,
+                VaultTransferState::Cancelling,
+            ),
+        ] {
+            let saved = db.vault_job(7, 1)?.expect("authoritative job");
+            assert!(db.transition_vault_job(
+                teleark_storage::VaultJobLease {
+                    account_id: 7,
+                    id: 1,
+                    generation: saved.generation
+                },
+                saved.state,
+                transition,
+                200,
+                None,
+            )?);
+            owner.restore_upload_history(7)?;
+            assert_eq!(
+                owner.transfers.get(1).expect("updated phase").state,
+                expected
+            );
+        }
+        for (id, terminal, failure, expected) in [
+            (
+                2,
+                teleark_storage::VaultJobTransition::Complete,
+                None,
+                VaultTransferState::Completed,
+            ),
+            (
+                3,
+                teleark_storage::VaultJobTransition::FailRetryable,
+                Some("network"),
+                VaultTransferState::Failed(ApplicationErrorKind::Network),
+            ),
+            (
+                4,
+                teleark_storage::VaultJobTransition::FailBlocked,
+                Some("source_missing"),
+                VaultTransferState::Failed(ApplicationErrorKind::SourceMissing),
+            ),
+            (
+                5,
+                teleark_storage::VaultJobTransition::FailRetryable,
+                Some("future_problem"),
+                VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest),
+            ),
+        ] {
+            let mut legacy = fixture(id, VaultTransferState::Running);
+            legacy.transferred_bytes = 0;
+            legacy.completed_parts = 0;
+            legacy.part_count = 0;
+            legacy.average_bytes_per_second = Some(777);
+            legacy.duration_ms = Some(88);
+            owner.persist_upload(&legacy)?;
+            let mut saved_context = context.clone();
+            saved_context.task_id = id;
+            saved_context.file_name = legacy.file_name;
+            assert!(db.admit_vault_job(&saved_context.admission_record().expect("context"))?);
+            assert!(db.transition_vault_job(
+                teleark_storage::VaultJobLease {
+                    account_id: 7,
+                    id,
+                    generation: 0
+                },
+                teleark_storage::VaultJobState::Queued,
+                teleark_storage::VaultJobTransition::Start,
+                201,
+                None
+            )?);
+            assert!(db.transition_vault_job(
+                teleark_storage::VaultJobLease {
+                    account_id: 7,
+                    id,
+                    generation: 1
+                },
+                teleark_storage::VaultJobState::Running,
+                terminal,
+                202,
+                failure
+            )?);
+            owner.restore_upload_history(7)?;
+            let restored = owner.transfers.get(id).expect("terminal history");
+            assert_eq!(restored.state, expected);
+            if id == 2 {
+                assert_eq!(restored.transferred_bytes, 128);
+                assert_eq!((restored.completed_parts, restored.part_count), (1, 1));
+                assert_eq!(restored.package_id, Some(hex_id(&context.package_id)));
+                assert_eq!(restored.average_bytes_per_second, None);
+                assert_eq!(restored.duration_ms, None);
+            }
+            if id == 5 {
+                assert!(restored.recovery_state.is_none());
+            }
+        }
+        for id in 6..=8 {
+            let mut missing = context.clone();
+            missing.task_id = id;
+            let mut record = missing.admission_record().expect("context");
+            if id == 8 {
+                record.context = vec![1];
+            }
+            assert!(db.admit_vault_job(&record)?);
+            if id == 7 {
+                assert!(db.transition_vault_job(
+                    teleark_storage::VaultJobLease {
+                        account_id: 7,
+                        id,
+                        generation: 0
+                    },
+                    teleark_storage::VaultJobState::Queued,
+                    teleark_storage::VaultJobTransition::Start,
+                    201,
+                    None
+                )?);
+                assert!(db.transition_vault_job(
+                    teleark_storage::VaultJobLease {
+                        account_id: 7,
+                        id,
+                        generation: 1
+                    },
+                    teleark_storage::VaultJobState::Running,
+                    teleark_storage::VaultJobTransition::Complete,
+                    202,
+                    None
+                )?);
+            }
+        }
+        owner.restore_upload_history(7)?;
+        let queued = owner
+            .transfers
+            .get(6)
+            .expect("queued ledger without summary is visible");
+        assert_eq!(queued.state, VaultTransferState::Queued);
+        assert_eq!(queued.file_name, context.file_name);
+        let completed = owner
+            .transfers
+            .get(7)
+            .expect("completed ledger without summary is visible");
+        assert_eq!(completed.state, VaultTransferState::Completed);
+        assert_eq!(completed.transferred_bytes, 128);
+        let damaged = owner
+            .transfers
+            .get(8)
+            .expect("damaged ledger remains visible");
+        assert_eq!(
+            damaged.state,
+            VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest)
+        );
+        assert!(damaged.recovery_state.is_none());
+        Ok(())
+    }
+
     #[test]
     fn restart_restores_batch_results_while_locked_and_repeated_reads_keep_live_state()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -19,9 +19,11 @@ impl Endpoint {
         monitor: NetworkMonitor,
         generation: u64,
         bandwidth: teleark_telegram::TransferBandwidth,
+        lifecycle: lifecycle::Lifecycle,
     ) -> Result<Self, ApplicationError> {
         Self::spawn_with(route, monitor, generation, move |receiver, mut state| {
             state.bandwidth = bandwidth;
+            state.lifecycle = lifecycle;
             telegram_loop(receiver, state)
         })
     }
@@ -149,9 +151,19 @@ impl DesktopTelegram {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         let monitor = NetworkMonitor::new(&route);
-        let endpoint = Endpoint::spawn(route.clone(), monitor.clone(), 0, bandwidth.clone())?;
+        let lifecycle = lifecycle::Lifecycle::default();
+        let endpoint = Endpoint::spawn(
+            route.clone(),
+            monitor.clone(),
+            0,
+            bandwidth.clone(),
+            lifecycle.clone(),
+        )?;
         Ok(Self {
+            #[cfg(test)]
+            test_vault_remote: None,
             inner: Arc::new(TelegramWorkerInner {
+                lifecycle,
                 bandwidth,
                 endpoint: Mutex::new(Some(endpoint)),
                 changing: AtomicBool::new(false),
@@ -201,6 +213,7 @@ impl DesktopTelegram {
         }
         let _changing = Changing(&self.inner.changing);
         let generation = self.inner.monitor.begin_change(&route);
+        self.inner.lifecycle.publish(generation, None, None);
         *self.inner.route.lock().unwrap_or_else(|e| e.into_inner()) = route.clone();
         let old = self
             .inner
@@ -228,6 +241,7 @@ impl DesktopTelegram {
             self.inner.monitor.clone(),
             generation,
             self.inner.bandwidth.clone(),
+            self.inner.lifecycle.clone(),
         ) {
             Ok(endpoint) => endpoint,
             Err(error) => {

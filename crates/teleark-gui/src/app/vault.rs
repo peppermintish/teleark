@@ -1,8 +1,100 @@
 //! Vault presentation owner. Business operations stay in the runtime.
 
 use super::*;
+use crate::screens::transfers::TransferAction;
 
 impl TeleArkApp {
+    pub(crate) fn apply_vault_transfer_action(
+        &mut self,
+        id: u64,
+        action: TransferAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(account) = self.telegram_account.as_ref().map(|account| account.id) else {
+            return;
+        };
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let Some(snapshot) = self.vault_transfer_snapshot(id) else {
+            return;
+        };
+        if snapshot.account_id != account {
+            return;
+        }
+        let control = matches!(action, TransferAction::Pause | TransferAction::Cancel);
+        let key = (account, id, control);
+        if self.vault_transfer_jobs.contains_key(&key)
+            || self.vault_transfer_jobs.len() >= 64
+            || self.visual_preview
+        {
+            return;
+        }
+        let generation = self.telegram_login_generation;
+        let chat_id = snapshot.chat_id;
+        let upload = snapshot.direction == teleark_runtime::VaultTransferDirection::Upload;
+        self.transfer_action_error = None;
+        let work = cx.background_spawn(async move {
+            match action {
+                TransferAction::Pause => vault
+                    .submit_transfer_control(
+                        account,
+                        id,
+                        teleark_runtime::VaultTransferControl::Pause,
+                    )?
+                    .wait()
+                    .map(|()| None),
+                TransferAction::Cancel => vault
+                    .submit_transfer_control(
+                        account,
+                        id,
+                        teleark_runtime::VaultTransferControl::Cancel,
+                    )?
+                    .wait()
+                    .map(|()| None),
+                TransferAction::Resume | TransferAction::Retry => {
+                    if upload {
+                        vault.submit_resume_upload(account, id)?.wait().map(Some)
+                    } else {
+                        vault
+                            .submit_resume_download(account, id)?
+                            .wait()
+                            .map(|_| None)
+                    }
+                }
+                TransferAction::Delete => Err(teleark_core::ApplicationError::new(
+                    teleark_core::ApplicationErrorKind::InvalidRequest,
+                )),
+            }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.vault_transfer_jobs.remove(&key);
+                if this.telegram_login_generation != generation
+                    || this.telegram_account.as_ref().map(|account| account.id) != Some(account)
+                {
+                    return;
+                }
+                match result {
+                    Ok(Some(file)) => {
+                        this.apply_completed_vault_uploads(account, chat_id, vec![file])
+                    }
+                    Ok(None) => {}
+                    Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
+                    }
+                    Err(error) => this.transfer_action_error = Some(error.kind()),
+                }
+                cx.notify();
+            });
+        });
+        self.vault_transfer_jobs.insert(key, task);
+        cx.notify();
+    }
+
     pub(crate) fn request_vault_unlock(&mut self, intent: UnlockIntent, cx: &mut Context<Self>) {
         if self.vault_activity == VaultActivity::Working {
             return;
@@ -445,6 +537,51 @@ impl TeleArkApp {
                 this.sync_vault_status();
                 if this.vault_activity == VaultActivity::Succeeded {
                     this.resume_unlock_intent(cx);
+                    this.resume_durable_uploads(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    pub(super) fn resume_durable_uploads(&mut self, cx: &mut Context<Self>) {
+        if self.visual_preview || self.vault_locked || self.vault_recovery_scope.is_some() {
+            return;
+        }
+        let Some(account_id) = self.telegram_account.as_ref().map(|account| account.id) else {
+            return;
+        };
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let scope = (
+            self.telegram_login_generation,
+            self.vault_session_generation,
+        );
+        let job = vault.submit_resume_queued_transfers(account_id);
+        self.vault_recovery_scope = Some(scope);
+        self.vault_recovery_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { job?.wait() }).await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if this.vault_recovery_scope != Some(scope) {
+                    return;
+                }
+                this.vault_recovery_scope = None;
+                this.vault_recovery_task = None;
+                if scope
+                    != (
+                        this.telegram_login_generation,
+                        this.vault_session_generation,
+                    )
+                {
+                    this.resume_durable_uploads(cx);
+                    return;
+                }
+                if let Err(error) = result {
+                    this.vault_activity = VaultActivity::Failed(error.kind());
                 }
                 cx.notify();
             });
@@ -627,15 +764,60 @@ impl TeleArkApp {
                 }
                 this.vault_download_in_flight = false;
                 let key_activity = this.vault_activity;
-                this.vault_activity = result
-                    .map(|_| VaultActivity::Succeeded)
-                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
+                this.vault_activity = match result {
+                    Ok(_) => VaultActivity::Succeeded,
+                    Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
+                        VaultActivity::Idle
+                    }
+                    Err(error) => VaultActivity::Failed(error.kind()),
+                };
                 if key_activity == VaultActivity::Working {
                     this.vault_activity = key_activity;
                 }
                 cx.notify();
             });
         }));
+    }
+
+    fn start_upload_progress_presentation(&mut self, preparation: bool, cx: &mut Context<Self>) {
+        // Presentation only: display elapsed phase time and cancellation while
+        // the retained worker owns filesystem/network work.
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let Some(this) = this.upgrade() else { return };
+                let done = this.update(cx, |this, cx| {
+                    cx.notify();
+                    if preparation {
+                        !this.upload_preparing
+                    } else {
+                        !this.upload_in_flight
+                    }
+                });
+                if done {
+                    return;
+                }
+            }
+        });
+        if preparation {
+            self.upload_preparation_presentation = Some(task);
+        } else {
+            self.upload_selection_presentation = Some(task);
+        }
+    }
+
+    pub(crate) fn remove_upload_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.upload_preparing || index >= self.upload_sources.len() {
+            return;
+        }
+        let removed = self.upload_sources.remove(index);
+        self.upload_source_total_bytes = self
+            .upload_source_total_bytes
+            .saturating_sub(removed.size_bytes);
+        self.upload_draft_generation = self.upload_draft_generation.wrapping_add(1);
+        cx.notify();
     }
 
     pub(crate) fn choose_upload_file(&mut self, cx: &mut Context<Self>) {
@@ -648,30 +830,103 @@ impl TeleArkApp {
             multiple: true,
             prompt: Some(self.tr("upload-file-picker-prompt")),
         });
+        self.prepare_upload_selection(
+            async move {
+                match selected.await {
+                    Ok(Ok(paths)) => Ok(paths),
+                    Ok(Err(_)) | Err(_) => Err(ApplicationError::new(
+                        teleark_core::ApplicationErrorKind::PermissionDenied,
+                    )),
+                }
+            },
+            false,
+            cx,
+        );
+    }
+
+    pub(crate) fn can_accept_upload_files(&self) -> bool {
+        self.show_upload && !self.upload_preparing && self.vault_activity != VaultActivity::Working
+    }
+
+    pub(crate) fn drop_upload_files(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_accept_upload_files() || paths.is_empty() {
+            return;
+        }
+        let paths = paths.to_vec();
+        self.prepare_upload_selection(async move { Ok(Some(paths)) }, true, cx);
+    }
+
+    fn prepare_upload_selection(
+        &mut self,
+        selected: impl std::future::Future<
+            Output = Result<Option<Vec<std::path::PathBuf>>, ApplicationError>,
+        > + 'static,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.upload_preparing = true;
+        self.upload_draft_generation = self.upload_draft_generation.wrapping_add(1);
+        self.vault_activity = VaultActivity::Idle;
         let generation = self.telegram_login_generation;
+        let progress = teleark_runtime::VaultUploadSelectionProgress::new(0);
+        self.upload_preparation_progress = Some(progress.clone());
+        self.start_upload_progress_presentation(true, cx);
+        let existing = if append {
+            self.upload_sources
+                .iter()
+                .map(|source| source.path.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        // Acknowledgment is rendered before awaiting the picker or touching the filesystem.
+        cx.notify();
         self.upload_picker_task = Some(cx.spawn(async move |this, cx| {
             let result = match selected.await {
-                Ok(Ok(Some(paths))) => Some(
-                    cx.background_spawn(
-                        async move { teleark_runtime::inspect_upload_sources(&paths) },
-                    )
+                Ok(Some(paths)) => Some(
+                    cx.background_spawn(async move {
+                        let mut combined = existing;
+                        combined.extend(paths);
+                        // Exact duplicates need no extra filesystem work and should
+                        // not be added again on a repeated drop.
+                        let mut seen = std::collections::BTreeSet::new();
+                        combined.retain(|path| seen.insert(path.clone()));
+                        teleark_runtime::inspect_upload_sources_observed(&combined, Some(&progress))
+                            .map(|sources| {
+                                let total_bytes =
+                                    sources.iter().map(|source| source.size_bytes).sum::<u64>();
+                                (sources, total_bytes)
+                            })
+                    })
                     .await,
                 ),
-                Ok(Ok(None)) => None,
-                Ok(Err(_)) | Err(_) => Some(Err(ApplicationError::new(
-                    teleark_core::ApplicationErrorKind::PermissionDenied,
-                ))),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
             };
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
+                this.upload_preparing = false;
+                this.upload_preparation_presentation = None;
+                if let Some(progress) = &this.upload_preparation_progress {
+                    progress.finish(
+                        result
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .map(ApplicationError::kind),
+                    );
+                }
                 if generation != this.telegram_login_generation {
+                    cx.notify();
                     return;
                 }
-                this.upload_preparing = false;
                 if let Some(result) = result {
                     match result {
-                        Ok(sources) => {
+                        Ok((sources, total_bytes)) => {
+                            this.upload_source_total_bytes = total_bytes;
                             this.upload_draft_generation =
                                 this.upload_draft_generation.wrapping_add(1);
                             this.upload_sources = sources;
@@ -713,6 +968,10 @@ impl TeleArkApp {
             std::sync::Arc::make_mut(&mut self.managed_vault_files)
                 .retain(|item| item.package_numeric_id != file.package_numeric_id);
             std::sync::Arc::make_mut(&mut self.managed_vault_files).insert(0, file);
+            if self.managed_vault_files.len() > 1_000 {
+                std::sync::Arc::make_mut(&mut self.managed_vault_files).truncate(1_000);
+                self.managed_catalog_limited = true;
+            }
         }
     }
 
@@ -724,6 +983,11 @@ impl TeleArkApp {
         if self.upload_draft_generation == draft_generation {
             self.upload_sources
                 .retain(|source| retry_sources.contains(&source.path));
+            self.upload_source_total_bytes = self
+                .upload_sources
+                .iter()
+                .map(|source| source.size_bytes)
+                .sum();
         }
     }
 
@@ -772,18 +1036,54 @@ impl TeleArkApp {
             .collect();
         let login_generation = self.telegram_login_generation;
         let draft_generation = self.upload_draft_generation;
-        let job = match vault.submit_upload_files(account_id, chat_id, sources) {
+        let progress =
+            teleark_runtime::VaultUploadSelectionProgress::new(self.upload_sources.len());
+        self.upload_selection_progress = Some(progress.clone());
+        self.start_upload_progress_presentation(false, cx);
+        let job = match vault.submit_upload_files_observed(
+            account_id,
+            chat_id,
+            sources,
+            progress.clone(),
+        ) {
             Ok(job) => job,
             Err(error) => {
                 self.upload_in_flight = false;
+                self.upload_selection_presentation = None;
+                progress.finish(Some(error.kind()));
                 self.vault_activity = VaultActivity::Failed(error.kind());
                 cx.notify();
                 return;
             }
         };
-        let work = cx.background_spawn(async move { job.wait() });
+        let work = cx.background_spawn(async move {
+            job.wait().map(|report| {
+                let retry_sources = report
+                    .failed
+                    .iter()
+                    .map(|failure| failure.source.clone())
+                    .chain(report.cancelled.iter().cloned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                (report, retry_sources)
+            })
+        });
         self.vault_upload_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
+            // Also closes the progress owner if session admission rejected the
+            // command before the worker could run it.
+            let error = result
+                .as_ref()
+                .err()
+                .map(ApplicationError::kind)
+                .or_else(|| {
+                    result.as_ref().ok().and_then(|(report, _)| {
+                        report.failed.first().map(|f| f.kind).or_else(|| {
+                            (!report.cancelled.is_empty())
+                                .then_some(teleark_core::ApplicationErrorKind::Cancelled)
+                        })
+                    })
+                });
+            progress.finish(error);
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
                 if this.telegram_login_generation != login_generation
@@ -792,20 +1092,21 @@ impl TeleArkApp {
                     return;
                 }
                 this.upload_in_flight = false;
+                this.upload_selection_presentation = None;
                 let key_activity = this.vault_activity;
                 match result {
-                    Ok(report) => {
+                    Ok((report, retry_sources)) => {
+                        let receipts_limited = report.completed_count > report.completed.len();
                         this.apply_completed_vault_uploads(account_id, chat_id, report.completed);
-                        let retry_sources = report
-                            .failed
-                            .iter()
-                            .map(|failure| failure.source.clone())
-                            .chain(report.cancelled.iter().cloned())
-                            .collect::<std::collections::BTreeSet<_>>();
+                        if receipts_limited {
+                            this.scan_managed_vault_files(cx);
+                        }
                         this.retain_upload_retry_sources(draft_generation, &retry_sources);
                         this.vault_activity = report.failed.first().map_or_else(
                             || {
-                                if report.cancelled.is_empty() {
+                                if report.paused_count > 0 && report.cancelled.is_empty() {
+                                    VaultActivity::Idle
+                                } else if report.cancelled.is_empty() {
                                     VaultActivity::Succeeded
                                 } else {
                                     VaultActivity::Failed(

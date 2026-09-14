@@ -220,6 +220,7 @@ impl TeleArkApp {
                     match result {
                         Ok(()) => {
                             app.dialogs.transition(Phase::Reading, None);
+                            app.resume_durable_uploads(cx);
                             cx.notify();
                             true
                         }

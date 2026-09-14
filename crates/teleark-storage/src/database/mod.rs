@@ -1,3 +1,9 @@
+mod vault_jobs;
+pub use vault_jobs::{
+    PendingVaultUpload, PendingVaultUploadSnapshot, PendingVaultUploadState, VaultJobDirection,
+    VaultJobLease, VaultJobRecord, VaultJobState, VaultJobTransition, VaultManifestOutbox,
+    VaultPartRecord,
+};
 mod upload_history;
 pub use upload_history::{StoredVaultUploadState, VaultUploadHistory, VaultUploadRecord};
 mod vault_inventory;
@@ -13,7 +19,7 @@ mod collections;
 mod downloaded_files;
 mod index;
 mod native_downloads;
-pub use native_downloads::NATIVE_DOWNLOAD_HISTORY_LIMIT;
+pub use native_downloads::{NATIVE_DOWNLOAD_HISTORY_LIMIT, NativeDownloadCleanup};
 mod remote;
 mod search;
 mod telegram_index;

@@ -25,11 +25,10 @@ use teleark_crypto::{
 };
 use teleark_storage::VaultMetadataRecord;
 use teleark_transfer::{
-    AdaptiveControllerConfig, AdaptiveTransferController, ContentDigest, DestinationId,
-    EncryptionPipelineConfig, EncryptionPipelineError, FileSystemPort, MemoryCounters,
-    NativeFileSystem, ParameterBounds, PartCounters, PerformanceSample, PipelinePart,
-    QueueCounters, RemotePartKey, RemoteTransport, SourceId, SourcePort, TransferControlParameters,
-    TransferTelemetrySnapshot, run_encryption_upload_pipeline,
+    AdaptiveControllerConfig, AdaptiveTransferController, ContentDigest, EncryptionPipelineConfig,
+    EncryptionPipelineError, MemoryCounters, NativeFileSystem, ParameterBounds, PartCounters,
+    PerformanceSample, PipelinePart, QueueCounters, RemotePartKey, SourceId, SourcePort,
+    TransferControlParameters, TransferTelemetrySnapshot, run_encryption_upload_pipeline,
 };
 use zeroize::Zeroizing;
 
@@ -41,15 +40,30 @@ use crate::{
 };
 
 mod catalog;
+mod control;
 mod health;
 mod key_progress;
-mod session;
+use control::UploadControls;
+pub use control::VaultUploadControl;
+pub use control::VaultUploadControl as VaultTransferControl;
+mod download_history;
+mod manifest_resume;
+mod pending_upload;
+#[cfg(test)]
+mod recovery_acceptance;
+mod source_digest;
 mod upload_history;
+mod upload_progress;
+pub use upload_progress::{
+    VaultUploadSelectionPhase, VaultUploadSelectionProgress, VaultUploadSelectionSnapshot,
+};
+mod session;
 pub use key_progress::{VaultKeyPhase, VaultKeyProgress, VaultKeySnapshot};
 use session::{VaultEnvelope, VaultSession};
 
 const VAULT_QUEUE_CAPACITY: usize = 16;
-pub const MAX_VAULT_UPLOAD_BATCH: usize = 128;
+// Internal scheduling window, never a user selection limit.
+const VAULT_UPLOAD_WINDOW: usize = 128;
 const MAX_MANIFEST_SCAN: usize = 1_000;
 const RECOVERY_BUNDLE_PREFIX: &str = "TARK-RB1-";
 const TRANSFER_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
@@ -94,6 +108,9 @@ pub enum VaultTransferDirection {
 pub enum VaultTransferState {
     Queued,
     Running,
+    Pausing,
+    Paused,
+    Cancelling,
     Interrupted,
     Cancelled,
     Completed,
@@ -102,6 +119,8 @@ pub enum VaultTransferState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultTransferSnapshot {
+    /// Available durable control state; absent for legacy summaries and pre-admission work.
+    pub recovery_state: Option<teleark_storage::VaultJobState>,
     /// Historical totals are durable; high-frequency telemetry is not replayed as live measurements.
     pub restored: bool,
     pub upload_activity: Option<VaultUploadActivity>,
@@ -198,25 +217,45 @@ pub struct VaultUploadFailure {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VaultUploadReport {
+    /// Total successes. `completed` retains only recent receipts for immediate UI refresh.
+    pub completed_count: usize,
+    pub paused_count: usize,
     pub completed: Vec<ManagedVaultFile>,
     pub failed: Vec<VaultUploadFailure>,
     pub cancelled: Vec<PathBuf>,
 }
 
-/// Bounded picker preflight. The worker repeats it before queuing a batch and
+/// Sequential picker preflight with no fixed file-count limit. The worker repeats it and
 /// each item checks its size/mtime again before any encryption or publication.
 pub fn inspect_upload_sources(
     paths: &[PathBuf],
 ) -> Result<Vec<VaultUploadSource>, ApplicationError> {
-    if paths.is_empty() || paths.len() > MAX_VAULT_UPLOAD_BATCH {
+    inspect_upload_sources_observed(paths, None)
+}
+
+pub fn inspect_upload_sources_observed(
+    paths: &[PathBuf],
+    progress: Option<&VaultUploadSelectionProgress>,
+) -> Result<Vec<VaultUploadSource>, ApplicationError> {
+    if paths.is_empty() {
         return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+    }
+    if let Some(progress) = progress {
+        progress.phase(VaultUploadSelectionPhase::Inspecting);
+        progress.set_total(paths.len());
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut sources = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
     for path in paths {
+        if let Some(progress) = progress {
+            progress.check_cancelled()?;
+        }
         let canonical = path.canonicalize().map_err(map_source_io)?;
         if !seen.insert(canonical) {
+            if let Some(progress) = progress {
+                progress.inspected();
+            }
             continue;
         }
         let metadata = std::fs::metadata(path).map_err(map_source_io)?;
@@ -243,6 +282,12 @@ pub fn inspect_upload_sources(
             size_bytes: metadata.len(),
             modified: metadata.modified().ok(),
         });
+        if let Some(progress) = progress {
+            progress.inspected();
+        }
+    }
+    if let Some(progress) = progress {
+        progress.check_cancelled()?;
     }
     Ok(sources)
 }
@@ -279,7 +324,15 @@ impl UploadBatchPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VaultUploadRecoveryReport {
+    pub resumed: u64,
+    pub failed: u64,
+}
+
 struct QueuedUpload {
+    pending: crate::VaultPendingUploadContext,
+    generation: u64,
     id: u64,
     batch_id: u64,
     queued_at: i64,
@@ -319,6 +372,7 @@ struct VaultInner {
     sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
     transfer_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
     scan_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
+    control_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
     session: Arc<Mutex<VaultSession>>,
     transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
@@ -326,8 +380,26 @@ struct VaultInner {
 }
 
 enum VaultCommand {
+    StopUploadBatch {
+        account: i64,
+        batch: u64,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+    ControlUpload {
+        account: i64,
+        id: u64,
+        action: VaultUploadControl,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
     RestoreUploadHistory {
         account: i64,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+    #[cfg(test)]
+    TestControlledUpload {
+        lease: teleark_storage::VaultJobLease,
+        entered: mpsc::SyncSender<crate::TelegramScanCancellation>,
+        release: mpsc::Receiver<()>,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     #[cfg(test)]
@@ -388,11 +460,30 @@ enum VaultCommand {
         source: PathBuf,
         reply: mpsc::SyncSender<Result<ManagedVaultFile, ApplicationError>>,
     },
+    ResumeQueuedTransfers {
+        account_id: i64,
+        reply: mpsc::SyncSender<Result<VaultUploadRecoveryReport, ApplicationError>>,
+    },
+    ResumeQueuedUploads {
+        account_id: i64,
+        reply: mpsc::SyncSender<Result<VaultUploadRecoveryReport, ApplicationError>>,
+    },
+    ResumeUpload {
+        account_id: i64,
+        task_id: u64,
+        reply: mpsc::SyncSender<Result<ManagedVaultFile, ApplicationError>>,
+    },
     UploadBatch {
         account_id: i64,
         chat_id: i64,
         sources: Vec<PathBuf>,
+        progress: VaultUploadSelectionProgress,
         reply: mpsc::SyncSender<Result<VaultUploadReport, ApplicationError>>,
+    },
+    ResumeDownload {
+        account_id: i64,
+        task_id: u64,
+        reply: mpsc::SyncSender<Result<PathBuf, ApplicationError>>,
     },
     Download {
         account_id: i64,
@@ -416,6 +507,7 @@ struct VaultOwner {
     session_generation: u64,
     transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
+    upload_controls: UploadControls,
 }
 
 impl DesktopVault {
@@ -435,12 +527,14 @@ impl DesktopVault {
         let session = Arc::new(Mutex::new(VaultSession::new(record.clone())));
         let transfers = Arc::new(TransferSnapshots::new(Vec::new())?);
         let active_upload_batch: ActiveUploadBatch = Arc::new(Mutex::new(None));
+        let upload_controls = UploadControls::default();
         let mut senders = Vec::new();
         let mut joins = Vec::new();
         for name in [
             "teleark-vault-keys",
             "teleark-vault-transfers",
             "teleark-vault-scan",
+            "teleark-vault-controls",
         ] {
             let (sender, receiver) = mpsc::sync_channel(VAULT_QUEUE_CAPACITY);
             let owner = VaultOwner {
@@ -456,6 +550,7 @@ impl DesktopVault {
                 session_generation: 0,
                 transfers: transfers.clone(),
                 active_upload_batch: active_upload_batch.clone(),
+                upload_controls: upload_controls.clone(),
             };
             joins.push(
                 thread::Builder::new()
@@ -471,6 +566,7 @@ impl DesktopVault {
                 sender: Mutex::new(senders.next()),
                 transfer_sender: Mutex::new(senders.next()),
                 scan_sender: Mutex::new(senders.next()),
+                control_sender: Mutex::new(senders.next()),
                 session,
                 transfers,
                 active_upload_batch,
@@ -479,7 +575,7 @@ impl DesktopVault {
         })
     }
 
-    /// Background-only, works while locked and before network catalog loading.
+    /// Background-only, works while the vault is locked and before network catalog loading.
     pub fn restore_upload_history(&self, account: i64) -> Result<(), ApplicationError> {
         self.submit_upload_history_restore(account)?.wait()
     }
@@ -524,7 +620,10 @@ impl DesktopVault {
                 active
                     || matches!(
                         row.state,
-                        VaultTransferState::Queued | VaultTransferState::Running
+                        VaultTransferState::Queued
+                            | VaultTransferState::Running
+                            | VaultTransferState::Pausing
+                            | VaultTransferState::Cancelling
                     )
             })
             .unwrap_or(true)
@@ -536,7 +635,10 @@ impl DesktopVault {
             .fold(std::collections::BTreeSet::new(), |mut batches, row| {
                 if matches!(
                     row.state,
-                    VaultTransferState::Queued | VaultTransferState::Running
+                    VaultTransferState::Queued
+                        | VaultTransferState::Running
+                        | VaultTransferState::Pausing
+                        | VaultTransferState::Cancelling
                 ) && let Some(batch) = row.batch_id
                 {
                     batches.insert((row.account_id, batch));
@@ -736,6 +838,60 @@ impl DesktopVault {
         })
     }
 
+    pub fn submit_transfer_control(
+        &self,
+        account: i64,
+        id: u64,
+        action: VaultTransferControl,
+    ) -> Result<VaultJob<()>, ApplicationError> {
+        self.submit_upload_control(account, id, action)
+    }
+
+    pub fn submit_upload_control(
+        &self,
+        account: i64,
+        id: u64,
+        action: VaultUploadControl,
+    ) -> Result<VaultJob<()>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ControlUpload {
+            account,
+            id,
+            action,
+            reply,
+        })
+    }
+
+    /// Restores only queued work after unlock. Explicitly paused, cancelled,
+    /// failed and unknown-version jobs are never silently restarted.
+    /// Resume queued uploads and downloads for which this session has keys.
+    pub fn submit_resume_queued_transfers(
+        &self,
+        account_id: i64,
+    ) -> Result<VaultJob<VaultUploadRecoveryReport>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ResumeQueuedTransfers { account_id, reply })
+    }
+
+    pub fn submit_resume_queued_uploads(
+        &self,
+        account_id: i64,
+    ) -> Result<VaultJob<VaultUploadRecoveryReport>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ResumeQueuedUploads { account_id, reply })
+    }
+
+    /// Resumes a paused/retryable durable upload using its original identity.
+    /// The returned job is retained by the caller; waiting stays off the UI.
+    pub fn submit_resume_upload(
+        &self,
+        account_id: i64,
+        task_id: u64,
+    ) -> Result<VaultJob<ManagedVaultFile>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ResumeUpload {
+            account_id,
+            task_id,
+            reply,
+        })
+    }
+
     pub fn upload_files(
         &self,
         account_id: i64,
@@ -753,13 +909,37 @@ impl DesktopVault {
         chat_id: i64,
         sources: Vec<PathBuf>,
     ) -> Result<VaultJob<VaultUploadReport>, ApplicationError> {
-        if sources.is_empty() || sources.len() > MAX_VAULT_UPLOAD_BATCH {
+        let progress = VaultUploadSelectionProgress::new(sources.len());
+        self.submit_upload_files_observed(account_id, chat_id, sources, progress)
+    }
+
+    pub fn submit_upload_files_observed(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        sources: Vec<PathBuf>,
+        progress: VaultUploadSelectionProgress,
+    ) -> Result<VaultJob<VaultUploadReport>, ApplicationError> {
+        if sources.is_empty() {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         self.submit(|reply| VaultCommand::UploadBatch {
             account_id,
             chat_id,
             sources,
+            progress,
+            reply,
+        })
+    }
+
+    pub fn submit_stop_upload_batch(
+        &self,
+        account: i64,
+        batch: u64,
+    ) -> Result<VaultJob<()>, ApplicationError> {
+        self.submit(|reply| VaultCommand::StopUploadBatch {
+            account,
+            batch,
             reply,
         })
     }
@@ -794,6 +974,18 @@ impl DesktopVault {
     ) -> Result<PathBuf, ApplicationError> {
         self.submit_download_file(account_id, chat_id, package_id)?
             .wait()
+    }
+
+    pub fn submit_resume_download(
+        &self,
+        account_id: i64,
+        task_id: u64,
+    ) -> Result<VaultJob<PathBuf>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ResumeDownload {
+            account_id,
+            task_id,
+            reply,
+        })
     }
 
     pub fn submit_download_file(
@@ -855,7 +1047,12 @@ impl DesktopVault {
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
             .admit(command)?;
-        let queue = if envelope.command.is_transfer() {
+        let queue = if matches!(
+            envelope.command,
+            VaultCommand::ControlUpload { .. } | VaultCommand::StopUploadBatch { .. }
+        ) {
+            &self.inner.control_sender
+        } else if envelope.command.is_transfer() {
             &self.inner.transfer_sender
         } else if envelope.command.is_scan() {
             &self.inner.scan_sender
@@ -894,6 +1091,7 @@ impl Drop for VaultInner {
             &mut self.sender,
             &mut self.transfer_sender,
             &mut self.scan_sender,
+            &mut self.control_sender,
         ] {
             if let Ok(sender) = queue.get_mut()
                 && let Some(sender) = sender.take()
@@ -946,8 +1144,44 @@ impl VaultOwner {
 
     fn execute(&mut self, command: VaultCommand) {
         match command {
+            VaultCommand::StopUploadBatch {
+                account,
+                batch,
+                reply,
+            } => {
+                let _ = reply.send(self.stop_saved_upload_batch(account, batch));
+            }
+            VaultCommand::ControlUpload {
+                account,
+                id,
+                action,
+                reply,
+            } => {
+                let _ = reply.send(self.control_upload(account, id, action));
+            }
             VaultCommand::RestoreUploadHistory { account, reply } => {
                 let _ = reply.send(self.restore_upload_history(account));
+            }
+            #[cfg(test)]
+            VaultCommand::TestControlledUpload {
+                lease,
+                entered,
+                release,
+                reply,
+            } => {
+                let result = (|| {
+                    let registration = self.upload_controls.register(lease)?;
+                    let _ = entered.send(registration.cancellation.clone());
+                    let _ = release.recv();
+                    let mut database =
+                        teleark_storage::Database::open(self.library.database_path.as_ref())
+                            .map_err(|_| {
+                                ApplicationError::new(ApplicationErrorKind::Persistence)
+                            })?;
+                    control::finish_job(&mut database, lease, Some(ApplicationErrorKind::Cancelled))
+                        .map(|_| ())
+                })();
+                let _ = reply.send(result);
             }
             #[cfg(test)]
             VaultCommand::TestScan {
@@ -1102,15 +1336,61 @@ impl VaultOwner {
                 source,
                 reply,
             } => {
-                let _ = reply.send(self.upload(account_id, chat_id, &source, None));
+                let _ = reply.send(self.upload(account_id, chat_id, &source, None, None));
+            }
+            VaultCommand::ResumeQueuedTransfers { account_id, reply } => {
+                let _ = reply.send(self.resume_queued_jobs(account_id, true));
+            }
+            VaultCommand::ResumeQueuedUploads { account_id, reply } => {
+                let _ = reply.send(self.resume_queued_uploads(account_id));
+            }
+            VaultCommand::ResumeUpload {
+                account_id,
+                task_id,
+                reply,
+            } => {
+                let _ = reply.send(self.resume_upload(account_id, task_id));
             }
             VaultCommand::UploadBatch {
                 account_id,
                 chat_id,
                 sources,
+                progress,
                 reply,
             } => {
-                let _ = reply.send(self.upload_batch(account_id, chat_id, sources));
+                let result = self.upload_batch_with_progress(
+                    account_id,
+                    chat_id,
+                    sources,
+                    &progress,
+                    |owner| {
+                        owner
+                            .telegram
+                            .validate_storage_channel(account_id, chat_id)
+                            .map(|_| ())
+                    },
+                );
+                let error = result
+                    .as_ref()
+                    .err()
+                    .map(ApplicationError::kind)
+                    .or_else(|| {
+                        result.as_ref().ok().and_then(|report| {
+                            report.failed.first().map(|f| f.kind).or_else(|| {
+                                (!report.cancelled.is_empty())
+                                    .then_some(ApplicationErrorKind::Cancelled)
+                            })
+                        })
+                    });
+                progress.finish(error);
+                let _ = reply.send(result);
+            }
+            VaultCommand::ResumeDownload {
+                account_id,
+                task_id,
+                reply,
+            } => {
+                let _ = reply.send(self.resume_download(account_id, task_id));
             }
             VaultCommand::Download {
                 account_id,
@@ -1118,7 +1398,12 @@ impl VaultOwner {
                 package_id,
                 reply,
             } => {
-                let _ = reply.send(self.download(account_id, chat_id, PackageId::new(package_id)));
+                let _ = reply.send(self.download(
+                    account_id,
+                    chat_id,
+                    PackageId::new(package_id),
+                    None,
+                ));
             }
             VaultCommand::Shutdown => {}
         }
@@ -1493,148 +1778,552 @@ impl VaultOwner {
         Ok(report)
     }
 
-    fn upload_batch(
+    fn upload_batch_with_progress(
         &mut self,
         account_id: i64,
         chat_id: i64,
         paths: Vec<PathBuf>,
-    ) -> Result<VaultUploadReport, ApplicationError> {
-        self.upload_batch_with_validation(account_id, chat_id, paths, |owner| {
-            owner
-                .telegram
-                .validate_storage_channel(account_id, chat_id)
-                .map(|_| ())
-        })
-    }
-
-    fn upload_batch_with_validation(
-        &mut self,
-        account_id: i64,
-        chat_id: i64,
-        paths: Vec<PathBuf>,
+        progress: &VaultUploadSelectionProgress,
         validate: impl FnOnce(&Self) -> Result<(), ApplicationError>,
     ) -> Result<VaultUploadReport, ApplicationError> {
+        self.execute_upload_selection(
+            (account_id, chat_id),
+            paths,
+            progress,
+            validate,
+            |owner, plan| owner.upload(account_id, chat_id, &plan.source.path, Some(plan), None),
+        )
+    }
+
+    fn execute_upload_selection(
+        &mut self,
+        scope: (i64, i64),
+        paths: Vec<PathBuf>,
+        progress: &VaultUploadSelectionProgress,
+        validate: impl FnOnce(&Self) -> Result<(), ApplicationError>,
+        mut upload: impl FnMut(&mut Self, &QueuedUpload) -> Result<ManagedVaultFile, ApplicationError>,
+    ) -> Result<VaultUploadReport, ApplicationError> {
+        let (account_id, chat_id) = scope;
         if self.master_key.is_none() {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
-        let sources = inspect_upload_sources(&paths)?;
-        let batch_id = random_transfer_id()?;
+        let sources = inspect_upload_sources_observed(&paths, Some(progress))?;
+        drop(paths);
+        progress.set_total(sources.len());
         let queued_at = now_unix_ms()?;
-        let plans = sources
-            .into_iter()
-            .map(|source| {
-                Ok(QueuedUpload {
-                    id: random_transfer_id()?,
+        let vault_id = self
+            .record
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?
+            .vault_id;
+        progress.phase(VaultUploadSelectionPhase::SavingQueue);
+        let mut plans = Vec::with_capacity(sources.len());
+        for window in sources.chunks(VAULT_UPLOAD_WINDOW) {
+            let batch_id = random_transfer_id()?;
+            for source in window {
+                progress.check_cancelled()?;
+                let id = random_transfer_id()?;
+                let mut pending = crate::VaultPendingUploadContext {
+                    account_id,
+                    task_id: id,
+                    chat_id,
+                    batch_id,
+                    created_at_unix_ms: queued_at as u64,
+                    vault_id,
+                    master_key_generation: 1,
+                    file_name: source.file_name.clone(),
+                    source: source.path.clone(),
+                    identity: teleark_transfer::SourceIdentity {
+                        filesystem_id: 0,
+                        size_bytes: source.size_bytes,
+                        modified_at_units: 0,
+                        revision: 0,
+                    },
+                };
+                pending
+                    .inspect_source(&source.path)
+                    .map_err(map_transfer_error)?;
+                if pending.identity.size_bytes != source.size_bytes {
+                    return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+                }
+                plans.push(QueuedUpload {
+                    id,
                     batch_id,
                     queued_at,
-                    source,
+                    source: source.clone(),
+                    pending,
+                    generation: 0,
+                });
+            }
+        }
+        let mut queue_database =
+            teleark_storage::Database::open(self.library.database_path.as_ref())
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let mut admission_error = None;
+        let admission =
+            queue_database.admit_pending_vault_upload_selection(plans.iter().map(|plan| {
+                let record = progress.check_cancelled().and_then(|()| {
+                    plan.pending
+                        .admission_record()
+                        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))
+                });
+                record.map_err(|error| {
+                    admission_error = Some(error);
+                    teleark_storage::StorageError::InvalidInput {
+                        field: "pending_upload.admission",
+                        reason: teleark_storage::InputReason::InvalidCombination,
+                    }
                 })
-            })
-            .collect::<Result<Vec<_>, ApplicationError>>()?;
+            }));
+        admission.map_err(|_| {
+            admission_error
+                .unwrap_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))
+        })?;
+        progress.saved(plans.len());
+
         let queued_telemetry = transfer_controller(
             true,
             0,
             self.library.preferences()?.transfer_soft_limit_policy,
         )?
         .snapshot();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = progress.cancellation.clone();
+        let mut validation = Some(validate);
+        let mut policy = UploadBatchPolicy::default();
+        let mut report = VaultUploadReport::default();
+        let mut recent = std::collections::VecDeque::new();
+        let mut recent_bytes = 0_usize;
+        // Only one window of queue rows is live. Completed windows can be
+        // evicted normally, so selections larger than history retention still
+        // publish every running file and terminal result.
+        let scheduling_result = (|| -> Result<(), ApplicationError> {
+            for plans in plans.chunks(VAULT_UPLOAD_WINDOW) {
+                let batch_id = plans[0].batch_id;
+                *self
+                    .active_upload_batch
+                    .lock()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? =
+                    Some((account_id, batch_id, cancel.clone()));
+                let snapshots = plans
+                    .iter()
+                    .map(|plan| VaultTransferSnapshot {
+                        recovery_state: Some(teleark_storage::VaultJobState::Queued),
+                        restored: false,
+                        upload_activity: Some(VaultUploadActivity::new(
+                            VaultUploadPhase::Persisting,
+                        )),
+                        id: plan.id,
+                        account_id,
+                        chat_id,
+                        batch_id: Some(batch_id),
+                        queued_at_unix_ms: queued_at,
+                        direction: VaultTransferDirection::Upload,
+                        file_name: plan.source.file_name.clone(),
+                        package_id: None,
+                        size_bytes: plan.source.size_bytes,
+                        transferred_bytes: 0,
+                        completed_parts: 0,
+                        part_count: 0,
+                        started_at_unix_ms: 0,
+                        duration_ms: None,
+                        average_bytes_per_second: None,
+                        destination: None,
+                        session_log_path: None,
+                        telemetry: queued_telemetry.clone(),
+                        state: VaultTransferState::Queued,
+                    })
+                    .collect::<Vec<_>>();
+                self.admit_upload_window(snapshots)?;
+                for plan in plans {
+                    VaultUploadObserver::new(self.transfers.clone(), plan.id)
+                        .phase(VaultUploadPhase::CheckingStorage);
+                }
+                if let Some(validate) = validation.take() {
+                    progress.phase(VaultUploadSelectionPhase::CheckingStorage);
+                    policy.blocked = if cancel.load(Ordering::Acquire) {
+                        Some(ApplicationErrorKind::Cancelled)
+                    } else {
+                        validate(self).err().map(|error| error.kind())
+                    };
+                    if policy.blocked.is_none() {
+                        progress.phase(VaultUploadSelectionPhase::Uploading);
+                    }
+                }
+                if policy.blocked.is_none() {
+                    for plan in plans {
+                        self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
+                    }
+                }
+                for plan in plans {
+                    let result = policy.execute(&cancel, || upload(self, plan));
+                    if let Err(error) = &result {
+                        self.settle_pending_upload(plan, error.kind())?;
+                    }
+                    if self
+                        .transfers
+                        .get(plan.id)
+                        .is_some_and(|row| row.state == VaultTransferState::Paused)
+                    {
+                        progress.record_paused();
+                        report.paused_count += 1;
+                        continue;
+                    }
+                    progress.record(result.as_ref().map(|_| ()).map_err(ApplicationError::kind));
+                    match result {
+                        Ok(file) => {
+                            report.completed_count += 1;
+                            // Receipts are already durable in the manifest catalog. Keep
+                            // bounded recent metadata; never retain every large manifest.
+                            recent_bytes = recent_bytes.saturating_add(file.estimated_bytes());
+                            recent.push_back(file);
+                            while recent.len() > VAULT_UPLOAD_WINDOW
+                                || recent_bytes > 16 * 1024 * 1024
+                            {
+                                if let Some(file) = recent.pop_front() {
+                                    recent_bytes =
+                                        recent_bytes.saturating_sub(file.estimated_bytes());
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.update_transfer(plan.id, |snapshot| {
+                                snapshot.state = if error.kind() == ApplicationErrorKind::Cancelled
+                                {
+                                    VaultTransferState::Cancelled
+                                } else {
+                                    VaultTransferState::Failed(error.kind())
+                                }
+                            });
+                            self.persist_upload_id(plan.id)?;
+                            if error.kind() == ApplicationErrorKind::Cancelled {
+                                report.cancelled.push(plan.source.path.clone());
+                            } else {
+                                report.failed.push(VaultUploadFailure {
+                                    source: plan.source.path.clone(),
+                                    kind: error.kind(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = scheduling_result {
+            // A rejected durable boundary must not leave the rest of the admitted window queued forever.
+            for plan in &plans {
+                self.settle_pending_upload(plan, error.kind())?;
+            }
+            self.fail_pending_upload_window(account_id, error.kind());
+            let processed = report.completed_count
+                + report.paused_count
+                + report.failed.len()
+                + report.cancelled.len();
+            for source in &sources[processed..] {
+                progress.record(Err(error.kind()));
+                report.failed.push(VaultUploadFailure {
+                    source: source.path.clone(),
+                    kind: error.kind(),
+                });
+            }
+        }
         *self
             .active_upload_batch
             .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? =
-            Some((account_id, batch_id, cancel.clone()));
-        let snapshots = plans
-            .iter()
-            .map(|plan| VaultTransferSnapshot {
-                restored: false,
-                upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Persisting)),
-                id: plan.id,
-                account_id,
-                chat_id,
-                batch_id: Some(batch_id),
-                queued_at_unix_ms: queued_at,
-                direction: VaultTransferDirection::Upload,
-                file_name: plan.source.file_name.clone(),
-                package_id: None,
-                size_bytes: plan.source.size_bytes,
-                transferred_bytes: 0,
-                completed_parts: 0,
-                part_count: 0,
-                started_at_unix_ms: 0,
-                duration_ms: None,
-                average_bytes_per_second: None,
-                destination: None,
-                session_log_path: None,
-                telemetry: queued_telemetry.clone(),
-                state: VaultTransferState::Queued,
-            })
-            .collect::<Vec<_>>();
-        if let Err(error) = self.admit_upload_window(snapshots) {
-            *self
-                .active_upload_batch
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-            return Err(error);
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        report.completed = recent.into_iter().collect();
+        Ok(report)
+    }
+
+    fn settle_pending_upload(
+        &self,
+        plan: &QueuedUpload,
+        failure: ApplicationErrorKind,
+    ) -> Result<(), ApplicationError> {
+        use teleark_storage::{
+            Database, PendingVaultUploadState as S, VaultJobLease, VaultJobTransition as T,
+        };
+        let mut db = Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let Some(saved) = db
+            .pending_vault_upload(plan.pending.account_id, plan.id)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+        else {
+            return Ok(());
+        };
+        if matches!(saved.state, S::Paused | S::Cancelled) {
+            self.update_transfer(plan.id, |row| {
+                row.state = if saved.state == S::Paused {
+                    VaultTransferState::Paused
+                } else {
+                    VaultTransferState::Cancelled
+                };
+                row.upload_activity = None;
+            });
         }
-        for plan in &plans {
-            VaultUploadObserver::new(self.transfers.clone(), plan.id)
-                .phase(VaultUploadPhase::CheckingStorage);
+        if saved.state != S::Queued || saved.generation != plan.generation {
+            return Ok(());
         }
-        // Publish all queue rows before any network preflight. One complete
-        // discovery covers the batch; each file still revalidates its target.
-        let validation = if cancel.load(Ordering::Acquire) {
-            Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
+        let cancelled = failure == ApplicationErrorKind::Cancelled;
+        let action = if cancelled {
+            T::RequestCancel
+        } else if retryable_upload_failure(failure) {
+            T::FailRetryable
         } else {
-            validate(self)
+            T::FailBlocked
         };
-        let validation_succeeded = validation.is_ok();
-        let mut report = VaultUploadReport::default();
-        let mut policy = UploadBatchPolicy {
-            blocked: validation.err().map(|error| error.kind()),
-        };
-        if validation_succeeded {
-            for plan in &plans {
-                self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
+        db.transition_pending_vault_upload(
+            VaultJobLease {
+                account_id: plan.pending.account_id,
+                id: plan.id,
+                generation: plan.generation,
+            },
+            S::Queued,
+            action,
+            (!cancelled).then(|| upload_history::error_code(failure)),
+        )
+        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        Ok(())
+    }
+
+    fn resume_queued_uploads(
+        &mut self,
+        account_id: i64,
+    ) -> Result<VaultUploadRecoveryReport, ApplicationError> {
+        self.resume_queued_jobs(account_id, false)
+    }
+
+    fn resume_queued_jobs(
+        &mut self,
+        account_id: i64,
+        include_downloads: bool,
+    ) -> Result<VaultUploadRecoveryReport, ApplicationError> {
+        let (account_revision, account, _) = self.telegram.lifecycle().snapshot();
+        if account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        let database = teleark_storage::Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let mut report = VaultUploadRecoveryReport::default();
+        let mut after = 0;
+        loop {
+            let (revision, account, _) = self.telegram.lifecycle().snapshot();
+            if revision != account_revision || account != Some(account_id) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+            }
+            let ids = database
+                .vault_job_ids(
+                    account_id,
+                    teleark_storage::VaultJobState::Queued,
+                    after,
+                    32,
+                )
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            if ids.is_empty() {
+                break;
+            }
+            for id in ids {
+                after = id;
+                let record = match database.vault_job(account_id, id) {
+                    Ok(Some(record)) => record,
+                    Ok(_) => continue,
+                    Err(_) => {
+                        report.failed = report.failed.saturating_add(1);
+                        continue;
+                    }
+                };
+                if record.state != teleark_storage::VaultJobState::Queued {
+                    continue;
+                }
+                let result = match record.direction {
+                    teleark_storage::VaultJobDirection::Upload if self.master_key.is_some() => {
+                        self.resume_upload(account_id, id).map(|_| ())
+                    }
+                    teleark_storage::VaultJobDirection::Download if include_downloads => {
+                        self.resume_download(account_id, id).map(|_| ())
+                    }
+                    _ => continue,
+                };
+                match result {
+                    Ok(()) => report.resumed = report.resumed.saturating_add(1),
+                    Err(error) if error.kind() == ApplicationErrorKind::Cancelled => {}
+                    Err(_) => report.failed = report.failed.saturating_add(1),
+                }
             }
         }
-        for plan in &plans {
-            let result = policy.execute(&cancel, || {
-                self.upload(account_id, chat_id, &plan.source.path, Some(plan))
-            });
-            match result {
-                Ok(file) => report.completed.push(file),
-                Err(error) => {
-                    self.update_transfer(plan.id, |snapshot| {
-                        snapshot.state = if error.kind() == ApplicationErrorKind::Cancelled {
-                            VaultTransferState::Cancelled
-                        } else {
-                            VaultTransferState::Failed(error.kind())
-                        }
-                    });
-                    if let Err(error) = self.persist_upload_id(plan.id) {
-                        self.fail_pending_upload_window(account_id, error.kind());
-                        *self
-                            .active_upload_batch
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = None;
-                        return Err(error);
+
+        if self.master_key.is_some() {
+            let mut after = 0;
+            loop {
+                let records = database
+                    .queued_pending_vault_uploads(account_id, after, 32)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+                if records.is_empty() {
+                    break;
+                }
+                for record in records {
+                    after = record.id;
+                    let (revision, account, _) = self.telegram.lifecycle().snapshot();
+                    if revision != account_revision || account != Some(account_id) {
+                        return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
                     }
-                    if error.kind() == ApplicationErrorKind::Cancelled {
-                        report.cancelled.push(plan.source.path.clone());
-                    } else {
-                        report.failed.push(VaultUploadFailure {
-                            source: plan.source.path.clone(),
-                            kind: error.kind(),
-                        });
+                    match self.resume_pending_upload(account_id, record.id, true) {
+                        Ok(_) => report.resumed = report.resumed.saturating_add(1),
+                        Err(error) if error.kind() == ApplicationErrorKind::Cancelled => {}
+                        Err(_) => report.failed = report.failed.saturating_add(1),
                     }
                 }
             }
         }
-        *self
-            .active_upload_batch
-            .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))? = None;
         Ok(report)
+    }
+
+    fn resume_upload(
+        &mut self,
+        account_id: i64,
+        task_id: u64,
+    ) -> Result<ManagedVaultFile, ApplicationError> {
+        use teleark_storage::{VaultJobLease, VaultJobState, VaultJobTransition};
+        let (account_revision, account, _) = self.telegram.lifecycle().snapshot();
+        if account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        let master = self
+            .master_key
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
+        let mut db = teleark_storage::Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let Some(mut record) = db
+            .vault_job(account_id, task_id)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+        else {
+            return self.resume_pending_upload(account_id, task_id, false);
+        };
+        let context = crate::VaultRecoveryContext::from_record(&record)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+        context
+            .file_key(master)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
+        let crate::VaultRecoveryDirection::Upload { source, .. } = &context.direction else {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        };
+        let lease = VaultJobLease {
+            account_id,
+            id: task_id,
+            generation: record.generation,
+        };
+        let transition = match record.state {
+            VaultJobState::Paused => Some(VaultJobTransition::Resume),
+            VaultJobState::Retryable => Some(VaultJobTransition::Retry),
+            VaultJobState::Queued => None,
+            _ => return Err(ApplicationError::new(ApplicationErrorKind::Conflict)),
+        };
+        let (revision, account, _) = self.telegram.lifecycle().snapshot();
+        if revision != account_revision || account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        if let Some(transition) = transition {
+            if !db
+                .transition_vault_job(lease, record.state, transition, now_unix_ms()?, None)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+            record.state = VaultJobState::Queued;
+            record.failure_code = None;
+        }
+        let previous = self.transfers.get(task_id);
+        self.push_transfer(VaultTransferSnapshot {
+            recovery_state: Some(VaultJobState::Queued),
+            restored: false,
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::CheckingTarget)),
+            id: task_id,
+            account_id,
+            chat_id: context.chat_id,
+            batch_id: previous.as_ref().and_then(|row| row.batch_id),
+            queued_at_unix_ms: context.created_at_unix_ms as i64,
+            direction: VaultTransferDirection::Upload,
+            file_name: context.file_name.clone(),
+            package_id: previous.as_ref().and_then(|row| row.package_id.clone()),
+            size_bytes: context.size_bytes,
+            transferred_bytes: 0,
+            completed_parts: 0,
+            part_count: u32::try_from(
+                encrypted_part_sizes(context.size_bytes)
+                    .map_err(map_transfer_error)?
+                    .len(),
+            )
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?,
+            started_at_unix_ms: now_unix_ms()?,
+            duration_ms: None,
+            average_bytes_per_second: None,
+            destination: None,
+            session_log_path: None,
+            telemetry: transfer_controller(true, 0, teleark_transfer::SoftLimitPolicy::Respect)?
+                .snapshot(),
+            state: VaultTransferState::Queued,
+        })?;
+        let result = (|| {
+            let saved_manifest = db
+                .vault_manifest_outbox(account_id, task_id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .is_some_and(|outbox| outbox.envelope.is_some());
+            if saved_manifest {
+                self.resume_manifest_upload(&mut db, &record, &context)
+            } else {
+                self.upload(account_id, context.chat_id, source, None, Some(record))
+            }
+        })();
+        // Preflight can fail before the upload claims its Running lease. Keep
+        // that failure durable rather than leaving an endlessly queued record.
+        if let Err(error) = &result {
+            if db
+                .transition_vault_job(
+                    lease,
+                    VaultJobState::Queued,
+                    VaultJobTransition::Start,
+                    now_unix_ms()?,
+                    None,
+                )
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                let failed = VaultJobLease {
+                    generation: lease.generation + 1,
+                    ..lease
+                };
+                db.transition_vault_job(
+                    failed,
+                    VaultJobState::Running,
+                    if retryable_upload_failure(error.kind()) {
+                        VaultJobTransition::FailRetryable
+                    } else {
+                        VaultJobTransition::FailBlocked
+                    },
+                    now_unix_ms()?,
+                    Some(upload_history::error_code(error.kind())),
+                )
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
+            let recovery_state = db
+                .vault_job(account_id, task_id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .map(|record| record.state);
+            let stopped = recovery_state.and_then(|state| match state {
+                VaultJobState::Paused => Some(VaultTransferState::Paused),
+                VaultJobState::Cancelled => Some(VaultTransferState::Cancelled),
+                _ => None,
+            });
+            self.update_transfer(task_id, |snapshot| {
+                snapshot.recovery_state = recovery_state;
+                snapshot.state = stopped.unwrap_or(VaultTransferState::Failed(error.kind()));
+                if stopped.is_some() {
+                    snapshot.upload_activity = None;
+                }
+            });
+            self.persist_upload_id(task_id)?;
+        }
+        result
     }
 
     fn upload(
@@ -1643,10 +2332,69 @@ impl VaultOwner {
         chat_id: i64,
         source: &Path,
         queued: Option<&QueuedUpload>,
+        resumed: Option<teleark_storage::VaultJobRecord>,
     ) -> Result<ManagedVaultFile, ApplicationError> {
         if self.master_key.is_none() {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
+        let mut preflight_registration = if let Some(record) = &resumed {
+            let lease = teleark_storage::VaultJobLease {
+                account_id,
+                id: record.id,
+                generation: record.generation,
+            };
+            let registration = self.register_transfer(lease)?;
+            // Register first so a control arriving after this state read cannot
+            // disappear between the queued check and source preparation.
+            let database = teleark_storage::Database::open(self.library.database_path.as_ref())
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let current = database
+                .vault_job(account_id, record.id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+            if current.generation != lease.generation
+                || current.state != teleark_storage::VaultJobState::Queued
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            Some(registration)
+        } else if let Some(plan) = queued {
+            let lease = teleark_storage::VaultJobLease {
+                account_id,
+                id: plan.id,
+                generation: plan.generation,
+            };
+            let registration = self.register_transfer(lease)?;
+            let database = teleark_storage::Database::open(self.library.database_path.as_ref())
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let current = database
+                .pending_vault_upload(account_id, plan.id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+            if current.generation != lease.generation
+                || current.state != teleark_storage::PendingVaultUploadState::Queued
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            if current.record
+                != plan
+                    .pending
+                    .admission_record()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                || plan.pending.chat_id != chat_id
+                || self.record.as_ref().map(|record| record.vault_id) != Some(plan.pending.vault_id)
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorKind::VaultKeyUnavailable,
+                ));
+            }
+            Some(registration)
+        } else {
+            None
+        };
+        let preflight_cancellation = preflight_registration
+            .as_ref()
+            .map(|owner| owner.cancellation.clone());
         // Destination policy is enforced before touching plaintext or allocating
         // keys. A frontend cannot turn Saved Messages or an arbitrary channel
         // into a TeleArk upload target by supplying its numeric id.
@@ -1662,6 +2410,11 @@ impl VaultOwner {
             VaultUploadObserver::new(self.transfers.clone(), plan.id)
                 .phase(VaultUploadPhase::Preparing);
         }
+        let restored_context = resumed
+            .as_ref()
+            .map(crate::VaultRecoveryContext::from_record)
+            .transpose()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
         let metadata = std::fs::metadata(source).map_err(map_source_io)?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceMissing));
@@ -1672,17 +2425,35 @@ impl VaultOwner {
         }) {
             return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
         }
-        let logical_name = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
-            .to_owned();
+        let logical_name = if let Some(context) = &restored_context {
+            context.file_name.clone()
+        } else if let Some(plan) = queued {
+            // A pending restart uses the canonical target path, which can have
+            // a different basename from the originally selected symlink.
+            plan.pending.file_name.clone()
+        } else {
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
+                .to_owned()
+        };
         let part_sizes = encrypted_part_sizes(metadata.len()).map_err(map_transfer_error)?;
-        let package_id = random_nonzero_u64()?;
-        let transfer_id = queued
-            .map(|plan| plan.id)
-            .map_or_else(random_transfer_id, Ok)?;
+        let package_id = if let Some(context) = &restored_context {
+            crate::transfer::package_id_from_bytes(context.package_id)
+                .map_err(map_transfer_error)?
+                .get()
+        } else {
+            random_nonzero_u64()?
+        };
+        let transfer_id = if let Some(record) = &resumed {
+            record.id
+        } else {
+            queued
+                .map(|plan| plan.id)
+                .map_or_else(random_transfer_id, Ok)?
+        };
         let part_count = u32::try_from(part_sizes.len())
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
         let started_at = now_unix_ms()?;
@@ -1701,14 +2472,27 @@ impl VaultOwner {
             part_count,
             &controller.snapshot(),
         )?;
-        self.push_transfer(VaultTransferSnapshot {
+        let previous = self.transfers.get(transfer_id);
+        let initial_snapshot = VaultTransferSnapshot {
+            recovery_state: resumed
+                .as_ref()
+                .map(|_| teleark_storage::VaultJobState::Queued),
             restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: transfer_id,
             account_id,
             chat_id,
-            batch_id: queued.map(|plan| plan.batch_id),
-            queued_at_unix_ms: queued.map_or(started_at, |plan| plan.queued_at),
+            batch_id: queued
+                .map(|plan| plan.batch_id)
+                .or_else(|| previous.as_ref().and_then(|row| row.batch_id)),
+            queued_at_unix_ms: queued.map_or_else(
+                || {
+                    restored_context
+                        .as_ref()
+                        .map_or(started_at, |context| context.created_at_unix_ms as i64)
+                },
+                |plan| plan.queued_at,
+            ),
             direction: VaultTransferDirection::Upload,
             file_name: logical_name.clone(),
             package_id: None,
@@ -1723,9 +2507,27 @@ impl VaultOwner {
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
             state: VaultTransferState::Running,
-        })?;
+        };
+        if resumed.is_some() || queued.is_some() {
+            // Resume already published this task. Preserve any Pause/Cancel
+            // which arrived during target validation instead of replacing it.
+            self.update_transfer(transfer_id, |row| {
+                row.session_log_path = initial_snapshot.session_log_path;
+                row.telemetry = initial_snapshot.telemetry;
+                // Queue/history rows do not know part geometry yet. Preserve
+                // control intent while refreshing fields needed by receipts.
+                row.part_count = initial_snapshot.part_count;
+                row.started_at_unix_ms = initial_snapshot.started_at_unix_ms;
+                row.restored = false;
+            });
+        } else {
+            self.push_transfer(initial_snapshot)?;
+        }
+
         let started = Instant::now();
-        let result: Result<ManagedVaultFile, ApplicationError> = (|| {
+        let mut durable_database = None;
+        let mut durable_lease = None;
+        let mut result: Result<ManagedVaultFile, ApplicationError> = (|| {
             let mut files = NativeFileSystem::new();
             let source_id = SourceId(transfer_id);
             files
@@ -1734,23 +2536,160 @@ impl VaultOwner {
             let source_identity = files
                 .source_identity(source_id)
                 .map_err(map_transfer_error)?;
-            let file_key = generate_file_key(&mut OsRandom).map_err(map_crypto_error)?;
+            if queued.is_some_and(|plan| plan.pending.identity != source_identity) {
+                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            }
             let observer = Arc::new(VaultUploadObserver::new(
                 self.transfers.clone(),
                 transfer_id,
             ));
-            let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
-                .with_observer(observer.clone());
-            let mut remote = EncryptedRemoteTransport::new(
-                store,
-                AccountId::new(account_id),
-                chat_id,
-                PackageId::new(package_id),
-                file_key,
-                metadata.len(),
-                part_sizes.clone(),
+            let source_digests = source_digest::inspect(
+                source,
+                &part_sizes,
+                |bytes, total| {
+                    observer.source_progress(bytes, total);
+                    Ok(())
+                },
+                || {
+                    preflight_cancellation
+                        .as_ref()
+                        .is_some_and(|token| token.is_cancelled())
+                },
             )
             .map_err(map_transfer_error)?;
+            if files
+                .source_identity(source_id)
+                .map_err(map_transfer_error)?
+                != source_identity
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            }
+            let master = self
+                .master_key
+                .as_ref()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
+            let context = if let Some(context) = &restored_context {
+                if context.account_id != account_id || context.chat_id != chat_id {
+                    return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+                }
+                context
+                    .verify_upload_source(
+                        &std::fs::canonicalize(source).map_err(map_source_io)?,
+                        source_identity,
+                        source_digests.whole.0,
+                    )
+                    .map_err(map_transfer_error)?;
+                context.file_key(master).map_err(|_| {
+                    ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable)
+                })?;
+                context.clone()
+            } else {
+                let file_key = generate_file_key(&mut OsRandom).map_err(map_crypto_error)?;
+                let vault_id = self
+                    .record
+                    .as_ref()
+                    .map(|record| record.vault_id)
+                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+                let package_bytes = crate::transfer::package_bytes(PackageId::new(package_id));
+                let file_key_wrap = teleark_crypto::wrap_file_key(
+                    master,
+                    &file_key,
+                    &vault_id,
+                    &package_bytes,
+                    1,
+                    1,
+                    &mut AeadUsageRegistry::new(),
+                )
+                .map_err(map_crypto_error)?;
+                crate::VaultRecoveryContext {
+                    account_id,
+                    task_id: transfer_id,
+                    chat_id,
+                    package_id: package_bytes,
+                    vault_id,
+                    master_key_generation: 1,
+                    file_key_wrap,
+                    file_name: logical_name.clone(),
+                    created_at_unix_ms: queued.map_or(started_at, |plan| plan.queued_at) as u64,
+                    size_bytes: metadata.len(),
+                    direction: crate::VaultRecoveryDirection::Upload {
+                        source: std::fs::canonicalize(source).map_err(map_source_io)?,
+                        identity: source_identity,
+                        source_blake3: source_digests.whole.0,
+                    },
+                }
+            };
+            observer.phase(VaultUploadPhase::SavingRecovery);
+            let mut database = teleark_storage::Database::open(self.library.database_path.as_ref())
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let admission = context
+                .admission_record()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            if let Some(plan) = queued {
+                plan.pending
+                    .verify_executable(&context)
+                    .map_err(map_transfer_error)?;
+                if !database
+                    .promote_pending_vault_upload(
+                        &plan.pending.admission_record().map_err(|_| {
+                            ApplicationError::new(ApplicationErrorKind::Persistence)
+                        })?,
+                        plan.generation,
+                        &admission,
+                    )
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                {
+                    return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                }
+            } else {
+                database
+                    .admit_vault_job(&admission)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            }
+            let mut lease = teleark_storage::VaultJobLease {
+                account_id,
+                id: transfer_id,
+                generation: resumed.as_ref().map_or(0, |record| record.generation),
+            };
+            drop(preflight_registration.take());
+            if !database
+                .transition_vault_job(
+                    lease,
+                    teleark_storage::VaultJobState::Queued,
+                    teleark_storage::VaultJobTransition::Start,
+                    started_at,
+                    None,
+                )
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            lease.generation = lease
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+            durable_lease = Some(lease);
+            self.update_transfer(transfer_id, |row| {
+                if matches!(
+                    row.state,
+                    VaultTransferState::Queued | VaultTransferState::Running
+                ) {
+                    row.recovery_state = Some(teleark_storage::VaultJobState::Running);
+                    row.state = VaultTransferState::Running;
+                }
+            });
+            durable_database = Some(database);
+            let database = durable_database
+                .as_mut()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let registration = self.register_transfer(lease)?;
+            let cancellation = registration.cancellation.clone();
+            let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
+                .with_observer(observer.clone())
+                .with_cancellation(cancellation.clone());
+            let mut durable = crate::DurableUploadParts::open(database, lease, store, master)
+                .map_err(map_transfer_error)?
+                .with_cancellation(cancellation.clone());
             let mut encoded_size = 0_u64;
             let mut plaintext_offset = 0_u64;
             let mut pipeline_parts = Vec::with_capacity(part_sizes.len());
@@ -1758,26 +2697,24 @@ impl VaultOwner {
             for (position, plaintext_length) in part_sizes.iter().copied().enumerate() {
                 let part_index = u32::try_from(position)
                     .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
-                let key = RemotePartKey {
-                    account_id: AccountId::new(account_id),
-                    package_id: PackageId::new(package_id),
-                    part_index: PartIndex::new(part_index),
-                };
                 pipeline_parts.push(PipelinePart {
                     part_index,
                     plaintext_offset,
                     plaintext_length,
                 });
-                encryption_plans.push(
-                    remote
-                        .plan_part_encryption(key, None)
+                let digest =
+                    source_digests.parts.get(position).copied().ok_or_else(|| {
+                        ApplicationError::new(ApplicationErrorKind::SourceChanged)
+                    })?;
+                encryption_plans.push(Mutex::new(Some(
+                    durable
+                        .prepare_part_digest(database, part_index, plaintext_length, digest)
                         .map_err(map_transfer_error)?,
-                );
+                )));
                 plaintext_offset = plaintext_offset
                     .checked_add(plaintext_length)
                     .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
             }
-            let encryption_context = remote.encryption_context();
             let encryption_plans = Arc::new(encryption_plans);
             let source_path = source.to_owned();
             let whole_plaintext_hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
@@ -1794,10 +2731,16 @@ impl VaultOwner {
             let progress_bytes = Arc::clone(&completed_plaintext_bytes);
             let progress_parts = Arc::clone(&completed_part_count);
             let encryption_time = Arc::clone(&cumulative_encryption_micros);
+            observer.phase(VaultUploadPhase::Preparing);
+            let reader_cancellation = cancellation.clone();
+            let crypto_cancellation = cancellation.clone();
             let report = run_encryption_upload_pipeline(
                 pipeline_config,
                 &pipeline_parts,
                 move |descriptor| {
+                    if reader_cancellation.is_cancelled() {
+                        return Err(TransferError::Cancelled);
+                    }
                     let plaintext = read_source_part(&source_path, descriptor)?;
                     reader_hasher
                         .lock()
@@ -1808,26 +2751,28 @@ impl VaultOwner {
                 {
                     let encryption_plans = Arc::clone(&encryption_plans);
                     move |descriptor, plaintext| {
+                        if crypto_cancellation.is_cancelled() {
+                            return Err(TransferError::Cancelled);
+                        }
                         let position = usize::try_from(descriptor.part_index)
                             .map_err(|_| TransferError::SourceChanged)?;
-                        let plan = encryption_plans
+                        let job = encryption_plans
                             .get(position)
-                            .cloned()
+                            .ok_or(TransferError::SourceChanged)?
+                            .lock()
+                            .map_err(|_| TransferError::SourceChanged)?
+                            .take()
                             .ok_or(TransferError::SourceChanged)?;
-                        EncryptedRemoteTransport::<TelegramObjectStore>::encrypt_planned_part(
-                            &encryption_context,
-                            plan,
-                            plaintext,
-                        )
+                        job.encrypt(plaintext)
                     }
                 },
                 |part_index, prepared| {
-                    let plaintext_length = prepared.manifest_part.plaintext_length;
+                    let plaintext_length = prepared.plaintext_length();
                     observer.begin_part(plaintext_length);
                     if let Ok(mut duration) = encryption_time.lock() {
-                        *duration = duration.saturating_add(prepared.encryption_duration_micros);
+                        *duration = duration.saturating_add(prepared.encryption_duration_micros());
                     }
-                    let object = remote.upload_prepared_part(prepared)?;
+                    let object = durable.publish_prepared(database, prepared)?;
                     encoded_size = encoded_size.saturating_add(object.encoded_size);
                     let transferred_bytes = progress_bytes.lock().map_or(0, |mut bytes| {
                         *bytes = bytes.saturating_add(plaintext_length);
@@ -1938,22 +2883,22 @@ impl VaultOwner {
             {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
+            if whole_digest != source_digests.whole {
+                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            }
             observer.phase(VaultUploadPhase::Publishing);
-            let manifest_object = remote
+            let manifest_object = durable
                 .publish_manifest(
+                    database,
                     self.master_key.as_ref().ok_or_else(|| {
                         ApplicationError::new(ApplicationErrorKind::Authorization)
                     })?,
                     ManifestPublishRequest {
-                        vault_id: self
-                            .record
-                            .as_ref()
-                            .map(|record| record.vault_id)
-                            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?,
+                        vault_id: context.vault_id,
                         manifest_generation: 1,
-                        master_key_generation: 1,
-                        wrap_generation: 1,
-                        created_at_unix_ms: u64::try_from(started_at).unwrap_or_default(),
+                        master_key_generation: context.master_key_generation,
+                        wrap_generation: context.file_key_wrap.wrap_generation,
+                        created_at_unix_ms: context.created_at_unix_ms,
                         logical_name: logical_name.clone(),
                         relative_path: None,
                         mime_type: None,
@@ -1962,6 +2907,7 @@ impl VaultOwner {
                     },
                 )
                 .map_err(map_transfer_error)?;
+            let mut remote = durable.into_transport();
             self.catalog.remember_receipt(
                 (account_id, chat_id),
                 package_id,
@@ -2013,9 +2959,50 @@ impl VaultOwner {
             }
             Ok(file)
         })();
-        if let Err(error) = &result {
+        if resumed.is_some() && durable_lease.is_none() && result.is_err() {
+            // The resume owner settles an unclaimed preflight from the ledger.
+            // Do not transiently publish Failed/Queued over its accepted stop.
+            let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.update_transfer(transfer_id, |row| row.duration_ms = Some(elapsed));
+            let _ = session_log.append_finished(
+                elapsed,
+                result.as_ref().err().map(ApplicationError::kind),
+                &controller.snapshot(),
+            );
+            return result;
+        }
+        let mut stopped = None;
+        if let (Some(database), Some(lease)) = (durable_database.as_mut(), durable_lease) {
+            match control::finish_job(
+                database,
+                lease,
+                result.as_ref().err().map(ApplicationError::kind),
+            ) {
+                Ok(teleark_storage::VaultJobState::Paused) => {
+                    stopped = Some(VaultTransferState::Paused);
+                    result = Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                }
+                Ok(teleark_storage::VaultJobState::Cancelled) => {
+                    stopped = Some(VaultTransferState::Cancelled);
+                    result = Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                }
+                Ok(_) => {}
+                Err(error) => result = Err(error),
+            }
+        }
+        if let Some(database) = durable_database.as_ref()
+            && let Ok(Some(record)) = database.vault_job(account_id, transfer_id)
+        {
+            self.update_transfer(transfer_id, |row| row.recovery_state = Some(record.state));
+        }
+        if let Some(state) = stopped {
             self.update_transfer(transfer_id, |snapshot| {
-                snapshot.state = VaultTransferState::Failed(error.kind());
+                snapshot.state = state;
+                snapshot.upload_activity = None;
+            });
+        } else if let Err(error) = &result {
+            self.update_transfer(transfer_id, |snapshot| {
+                snapshot.state = VaultTransferState::Failed(error.kind())
             });
         }
         let _ = session_log.append_finished(
@@ -2031,12 +3018,132 @@ impl VaultOwner {
         result
     }
 
+    fn resume_download(
+        &mut self,
+        account_id: i64,
+        task_id: u64,
+    ) -> Result<PathBuf, ApplicationError> {
+        use teleark_storage::{VaultJobLease, VaultJobState, VaultJobTransition};
+        let (revision, account, _) = self.telegram.lifecycle().snapshot();
+        if account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        let mut database = teleark_storage::Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let mut record = database
+            .vault_job(account_id, task_id)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+        let context = crate::VaultRecoveryContext::from_record(&record)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+        if !matches!(
+            context.direction,
+            crate::VaultRecoveryDirection::Download { .. }
+        ) {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        let package_id = crate::transfer::package_id_from_bytes(context.package_id)
+            .map_err(map_transfer_error)?;
+        let lease = VaultJobLease {
+            account_id,
+            id: task_id,
+            generation: record.generation,
+        };
+        let transition = match record.state {
+            VaultJobState::Paused => Some(VaultJobTransition::Resume),
+            VaultJobState::Retryable => Some(VaultJobTransition::Retry),
+            VaultJobState::Queued => None,
+            _ => return Err(ApplicationError::new(ApplicationErrorKind::Conflict)),
+        };
+        let (current_revision, account, _) = self.telegram.lifecycle().snapshot();
+        if revision != current_revision || account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        if let Some(transition) = transition {
+            if !database
+                .transition_vault_job(lease, record.state, transition, now_unix_ms()?, None)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+            record.state = VaultJobState::Queued;
+            record.failure_code = None;
+        }
+        self.update_transfer(task_id, |row| {
+            row.state = VaultTransferState::Queued;
+            row.recovery_state = Some(VaultJobState::Queued);
+            row.upload_activity = None;
+        });
+        let result = self.download(account_id, context.chat_id, package_id, Some(record));
+        if let Err(error) = &result {
+            // Manifest fetch/key validation can fail before claiming the job.
+            // Preserve explicit stop intent and make other failures durable.
+            if database
+                .transition_vault_job(
+                    lease,
+                    VaultJobState::Queued,
+                    VaultJobTransition::Start,
+                    now_unix_ms()?,
+                    None,
+                )
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            {
+                let failed_lease = VaultJobLease {
+                    generation: lease
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?,
+                    ..lease
+                };
+                control::finish_job(&mut database, failed_lease, Some(error.kind()))?;
+            }
+            let state = database
+                .vault_job(account_id, task_id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .map(|record| record.state);
+            self.update_transfer(task_id, |row| {
+                row.recovery_state = state;
+                row.state = match state {
+                    Some(VaultJobState::Paused) => VaultTransferState::Paused,
+                    Some(VaultJobState::Cancelled) => VaultTransferState::Cancelled,
+                    _ => VaultTransferState::Failed(error.kind()),
+                };
+            });
+        }
+        result
+    }
+
     fn download(
         &mut self,
         expected_account_id: i64,
         chat_id: i64,
         package_id: PackageId,
+        resumed: Option<teleark_storage::VaultJobRecord>,
     ) -> Result<PathBuf, ApplicationError> {
+        let saved_context = resumed
+            .as_ref()
+            .map(crate::VaultRecoveryContext::from_record)
+            .transpose()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+        let expected_manifest = saved_context
+            .as_ref()
+            .map(|context| {
+                if context.account_id != expected_account_id
+                    || context.chat_id != chat_id
+                    || context.package_id != package_bytes(package_id.get())
+                {
+                    return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+                }
+                match &context.direction {
+                    crate::VaultRecoveryDirection::Download {
+                        manifest_message_id,
+                        manifest_blake3,
+                        ..
+                    } => Ok((*manifest_message_id, *manifest_blake3)),
+                    _ => Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest)),
+                }
+            })
+            .transpose()?;
         let active = self
             .record
             .as_ref()
@@ -2045,9 +3152,23 @@ impl VaultOwner {
         if active.is_none() && self.historical_key.is_none() {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
+        let preflight_registration = resumed
+            .as_ref()
+            .map(|record| {
+                self.upload_controls
+                    .register(teleark_storage::VaultJobLease {
+                        account_id: expected_account_id,
+                        id: record.id,
+                        generation: record.generation,
+                    })
+            })
+            .transpose()?;
         let mut store =
             TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id);
-        if expected_account_id != chat_id {
+        if let Some(registration) = &preflight_registration {
+            store = store.with_cancellation(registration.cancellation.clone());
+        }
+        if expected_manifest.is_none() && expected_account_id != chat_id {
             let catalog = if let Some(object) = self
                 .catalog
                 .locator_for((expected_account_id, chat_id), package_id)
@@ -2082,10 +3203,11 @@ impl VaultOwner {
             };
             store = store.with_manifest_catalog(catalog);
         }
-        let recovered = health::recover_target(
+        let (recovered, manifest_blake3) = health::recover_target(
             &mut store,
             (expected_account_id, chat_id),
             package_id,
+            expected_manifest,
             active,
             self.historical_key.as_ref(),
         )?;
@@ -2093,7 +3215,6 @@ impl VaultOwner {
         let size_bytes = recovered.manifest.public_header.logical_file_size;
         let part_count = recovered.manifest.public_header.part_count;
         let package_text = hex_id(&recovered.manifest.public_header.package_id);
-        let whole_digest = ContentDigest(recovered.manifest.metadata.whole_plaintext_blake3);
         let account_id = recovered
             .manifest
             .metadata
@@ -2101,8 +3222,16 @@ impl VaultOwner {
             .first()
             .map(|part| AccountId::new(part.remote_locator.account_id))
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
-        let destination = self.library.next_download_destination(&logical_name)?;
-        let transfer_id = random_transfer_id()?;
+        let destination = match saved_context.as_ref().map(|context| &context.direction) {
+            Some(crate::VaultRecoveryDirection::Download { destination, .. }) => {
+                destination.clone()
+            }
+            _ => self.library.next_download_destination(&logical_name)?,
+        };
+        let transfer_id = match &saved_context {
+            Some(context) => context.task_id,
+            None => random_transfer_id()?,
+        };
         let started_at = now_unix_ms()?;
         let mut controller = transfer_controller(
             false,
@@ -2118,7 +3247,65 @@ impl VaultOwner {
             part_count,
             &controller.snapshot(),
         )?;
-        self.push_transfer(VaultTransferSnapshot {
+        let header = &recovered.manifest.public_header;
+        let context = crate::VaultRecoveryContext {
+            account_id: expected_account_id,
+            task_id: transfer_id,
+            chat_id,
+            package_id: header.package_id,
+            vault_id: header.vault_id,
+            master_key_generation: header.master_key_generation,
+            file_key_wrap: header.file_key_wrap.clone(),
+            file_name: logical_name.clone(),
+            created_at_unix_ms: header.created_at_unix_ms,
+            size_bytes,
+            direction: crate::VaultRecoveryDirection::Download {
+                destination: destination.clone(),
+                manifest_message_id: i64::try_from(recovered.object.object_id)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?,
+                manifest_blake3,
+                whole_plaintext_blake3: recovered.manifest.metadata.whole_plaintext_blake3,
+            },
+        };
+        if saved_context
+            .as_ref()
+            .is_some_and(|saved| saved != &context)
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+        }
+        let mut database = teleark_storage::Database::open(self.library.database_path.as_ref())
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        database
+            .admit_vault_job(
+                &context
+                    .admission_record()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+            )
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let mut lease = teleark_storage::VaultJobLease {
+            account_id: expected_account_id,
+            id: transfer_id,
+            generation: resumed.as_ref().map_or(0, |record| record.generation),
+        };
+        drop(preflight_registration);
+        if !database
+            .transition_vault_job(
+                lease,
+                teleark_storage::VaultJobState::Queued,
+                teleark_storage::VaultJobTransition::Start,
+                started_at,
+                None,
+            )
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        lease.generation = lease
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        if let Err(error) = self.push_transfer(VaultTransferSnapshot {
+            recovery_state: Some(teleark_storage::VaultJobState::Running),
             restored: false,
             upload_activity: None,
             id: transfer_id,
@@ -2140,23 +3327,28 @@ impl VaultOwner {
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
             state: VaultTransferState::Running,
-        })?;
+        }) {
+            control::finish_job(&mut database, lease, Some(error.kind()))?;
+            return Err(error);
+        }
         let started = Instant::now();
-        let result = (|| {
+        let mut received_bytes = 0_u64;
+        let mut result = (|| {
+            let registration = self.register_transfer(lease)?;
             let store =
-                TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id);
+                TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id)
+                    .with_cancellation(registration.cancellation.clone());
             let parts = recovered.manifest.metadata.parts.clone();
             let mut remote =
                 EncryptedRemoteTransport::from_opened_manifest(store, recovered.manifest)
-                    .map_err(map_transfer_error)?;
-            let destination_id = DestinationId(transfer_id);
-            let mut files = NativeFileSystem::new();
-            files
-                .register_destination(destination_id, &destination)
-                .map_err(map_transfer_error)?;
-            files
-                .prepare_partial(destination_id, size_bytes)
-                .map_err(map_transfer_error)?;
+                    .map_err(map_transfer_error)?
+                    .with_cancellation(registration.cancellation.clone());
+            let mut durable = crate::durable_download::DurableDownload::open_cancellable(
+                &database,
+                lease,
+                registration.cancellation.clone(),
+            )
+            .map_err(map_transfer_error)?;
             let mut completed_bytes = 0_u64;
             let mut completed_parts = 0_u32;
             for part in parts {
@@ -2165,24 +3357,18 @@ impl VaultOwner {
                     package_id,
                     part_index: PartIndex::new(part.part_index),
                 };
-                let object = remote
-                    .discover_remote(key)
-                    .map_err(map_transfer_error)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
-                let plaintext = remote
-                    .download_remote(&object)
+                let extent_source = durable
+                    .restore_part(&mut database, &part, || remote.download_manifest_part(key))
                     .map_err(map_transfer_error)?;
-                files
-                    .write_partial(destination_id, part.plaintext_offset, &plaintext)
-                    .map_err(map_transfer_error)?;
+                if extent_source == crate::durable_download::ExtentSource::Remote {
+                    received_bytes = received_bytes.saturating_add(part.plaintext_length);
+                }
                 completed_bytes = completed_bytes.saturating_add(part.plaintext_length);
                 completed_parts = completed_parts.saturating_add(1);
                 let elapsed_ms = u64::try_from(started.elapsed().as_millis())
                     .unwrap_or(u64::MAX)
                     .max(1);
-                let average_bytes_per_second = completed_bytes
+                let average_bytes_per_second = received_bytes
                     .saturating_mul(1_000)
                     .checked_div(elapsed_ms)
                     .unwrap_or_default();
@@ -2229,19 +3415,7 @@ impl VaultOwner {
                     snapshot.telemetry = telemetry;
                 });
             }
-            if files
-                .digest_partial(destination_id)
-                .map_err(map_transfer_error)?
-                != whole_digest
-            {
-                return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
-            }
-            files
-                .flush_partial(destination_id)
-                .map_err(map_transfer_error)?;
-            files
-                .atomic_finalize(destination_id)
-                .map_err(map_transfer_error)?;
+            durable.finalize(&database).map_err(map_transfer_error)?;
             self.library
                 .record_vault_download(teleark_storage::VaultDownloadRecord {
                     account_id: expected_account_id,
@@ -2253,26 +3427,52 @@ impl VaultOwner {
                 })?;
             Ok(destination.clone())
         })();
-        if result.is_err() {
-            discard_partial(&destination);
+        let mut stopped = None;
+        match control::finish_job(
+            &mut database,
+            lease,
+            result.as_ref().err().map(ApplicationError::kind),
+        ) {
+            Ok(teleark_storage::VaultJobState::Paused) => {
+                stopped = Some(VaultTransferState::Paused);
+                result = Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            Ok(teleark_storage::VaultJobState::Cancelled) => {
+                stopped = Some(VaultTransferState::Cancelled);
+                result = Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            Ok(_) => {}
+            Err(error) => result = Err(error),
         }
+        let recovery_state = database
+            .vault_job(expected_account_id, transfer_id)
+            .ok()
+            .flatten()
+            .map(|record| record.state);
+        self.update_transfer(transfer_id, |snapshot| {
+            snapshot.recovery_state = recovery_state
+        });
         let _ = session_log.append_finished(
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             result.as_ref().err().map(ApplicationError::kind),
             &controller.snapshot(),
         );
-        self.finish_transfer(transfer_id, started, None);
+        self.finish_transfer(transfer_id, started, received_bytes);
         if let Err(error) = &result {
             self.update_transfer(transfer_id, |snapshot| {
-                snapshot.state = VaultTransferState::Failed(error.kind());
+                snapshot.state = stopped.unwrap_or(VaultTransferState::Failed(error.kind()));
             });
         }
         result
     }
 
     fn push_transfer(&self, snapshot: VaultTransferSnapshot) -> Result<(), ApplicationError> {
-        self.transfers
-            .insert_pruning(snapshot.clone(), vault_transfer_evictions);
+        if !self
+            .transfers
+            .insert_pruning(snapshot.clone(), vault_transfer_evictions)
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
+        }
         if snapshot.direction == VaultTransferDirection::Upload {
             self.persist_upload(&snapshot)?;
         }
@@ -2283,15 +3483,11 @@ impl VaultOwner {
         self.transfers.update(id, update);
     }
 
-    fn finish_transfer(&self, id: u64, started: Instant, package_id: Option<String>) {
+    fn finish_transfer(&self, id: u64, started: Instant, received_bytes: u64) {
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.update_transfer(id, |snapshot| {
-            if let Some(package_id) = package_id {
-                snapshot.package_id = Some(package_id);
-            }
             snapshot.duration_ms = Some(duration_ms);
-            snapshot.average_bytes_per_second = snapshot
-                .transferred_bytes
+            snapshot.average_bytes_per_second = received_bytes
                 .saturating_mul(1_000)
                 .checked_div(duration_ms.max(1));
             if snapshot.state == VaultTransferState::Running {
@@ -2567,19 +3763,28 @@ fn vault_transfer_evictions(transfers: &[&VaultTransferSnapshot]) -> Option<Vec<
     let item = transfers
         .iter()
         .filter(|item| {
-            !matches!(
-                item.state,
-                VaultTransferState::Queued | VaultTransferState::Running
-            ) && item.batch_id.is_none_or(|batch| {
-                transfers.iter().all(|member| {
-                    member.batch_id != Some(batch)
-                        || member.account_id != item.account_id
-                        || !matches!(
-                            member.state,
-                            VaultTransferState::Queued | VaultTransferState::Running
-                        )
+            (item.restored
+                || !matches!(
+                    item.state,
+                    VaultTransferState::Queued
+                        | VaultTransferState::Running
+                        | VaultTransferState::Pausing
+                        | VaultTransferState::Cancelling
+                ))
+                && item.batch_id.is_none_or(|batch| {
+                    transfers.iter().all(|member| {
+                        member.batch_id != Some(batch)
+                            || member.account_id != item.account_id
+                            || member.restored
+                            || !matches!(
+                                member.state,
+                                VaultTransferState::Queued
+                                    | VaultTransferState::Running
+                                    | VaultTransferState::Pausing
+                                    | VaultTransferState::Cancelling
+                            )
+                    })
                 })
-            })
         })
         .min_by_key(|item| (item.queued_at_unix_ms, item.started_at_unix_ms, item.id))?;
     Some(match item.batch_id {
@@ -2885,16 +4090,6 @@ fn file_kind(kind: teleark_crypto::MediaKind) -> FileKind {
     }
 }
 
-fn discard_partial(destination: &Path) {
-    let Some(name) = destination.file_name() else {
-        return;
-    };
-    let mut partial_name = name.to_os_string();
-    partial_name.push(".partial");
-    let partial = destination.with_file_name(partial_name);
-    let _ = std::fs::remove_file(partial);
-}
-
 fn map_source_io(error: std::io::Error) -> ApplicationError {
     ApplicationError::new(match error.kind() {
         std::io::ErrorKind::NotFound => ApplicationErrorKind::SourceMissing,
@@ -2921,6 +4116,23 @@ fn map_crypto_error(error: teleark_crypto::CryptoError) -> ApplicationError {
         }
         _ => ApplicationErrorKind::Persistence,
     })
+}
+
+fn retryable_upload_failure(kind: ApplicationErrorKind) -> bool {
+    matches!(
+        kind,
+        ApplicationErrorKind::Network
+            | ApplicationErrorKind::Cancelled
+            | ApplicationErrorKind::Server
+            | ApplicationErrorKind::Persistence
+            | ApplicationErrorKind::SourceMissing
+            | ApplicationErrorKind::PermissionDenied
+            | ApplicationErrorKind::SourcePermissionDenied
+            | ApplicationErrorKind::StorageAccessDenied
+            | ApplicationErrorKind::Authorization
+            | ApplicationErrorKind::VaultKeyUnavailable
+            | ApplicationErrorKind::Capacity
+    )
 }
 
 fn map_transfer_error(error: TransferError) -> ApplicationError {
@@ -2950,6 +4162,330 @@ fn map_transfer_error(error: TransferError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_resume_preserves_context_and_partial_on_preflight_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use teleark_storage::{Database, VaultJobLease, VaultJobState, VaultJobTransition};
+        let dir = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(dir.path().join("catalog.sqlite"))?;
+        let telegram = DesktopTelegram::open_direct(dir.path().join("synthetic.session"))?;
+        telegram.lifecycle().publish(1, Some(7), None);
+        let vault = DesktopVault::new(telegram, library.clone())?;
+        let master = Arc::new(VaultMasterKey::from_bytes([3; 32]));
+        let destination = dir.path().join("restored.bin");
+        let partial = dir.path().join("restored.bin.partial");
+        std::fs::write(&partial, b"data")?;
+        let package = crate::transfer::package_bytes(PackageId::new(1));
+        let context = crate::VaultRecoveryContext {
+            account_id: 7,
+            task_id: 9,
+            chat_id: 11,
+            package_id: package,
+            vault_id: [2; 16],
+            master_key_generation: 1,
+            file_key_wrap: teleark_crypto::wrap_file_key(
+                &master,
+                &teleark_crypto::FileKey::from_bytes([4; 32]),
+                &[2; 16],
+                &package,
+                1,
+                1,
+                &mut teleark_crypto::AeadUsageRegistry::new(),
+            )?,
+            file_name: "restored.bin".into(),
+            created_at_unix_ms: 100,
+            size_bytes: 4,
+            direction: crate::VaultRecoveryDirection::Download {
+                destination: destination.clone(),
+                manifest_message_id: 17,
+                manifest_blake3: [5; 32],
+                whole_plaintext_blake3: *blake3::hash(b"data").as_bytes(),
+            },
+        };
+        let mut db = Database::open(library.database_path.as_ref())?;
+        let original = context.admission_record().expect("valid download context");
+        db.admit_vault_job(&original)?;
+        let lease = VaultJobLease {
+            account_id: 7,
+            id: 9,
+            generation: 0,
+        };
+        db.transition_vault_job(
+            lease,
+            VaultJobState::Queued,
+            VaultJobTransition::RequestPause,
+            101,
+            None,
+        )?;
+        let mut corrupt = original.clone();
+        corrupt.id = 12;
+        corrupt.context = vec![0];
+        db.admit_vault_job(&corrupt)?;
+        db.transition_vault_job(
+            VaultJobLease { id: 12, ..lease },
+            VaultJobState::Queued,
+            VaultJobTransition::RequestPause,
+            102,
+            None,
+        )?;
+        assert!(vault.status().locked);
+        vault.restore_upload_history(7)?;
+        let unavailable = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.id == 12)
+            .expect("damaged task remains visible");
+        assert!(unavailable.file_name.is_empty());
+        assert_eq!(
+            unavailable.recovery_state, None,
+            "damaged context cannot advertise resume"
+        );
+        assert_eq!(
+            unavailable.state,
+            VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest)
+        );
+        let restored = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.id == 9)
+            .expect("paused download survives locked restart");
+        assert_eq!(restored.state, VaultTransferState::Paused);
+        assert_eq!(restored.recovery_state, Some(VaultJobState::Paused));
+        assert_eq!(restored.destination, Some(destination.clone()));
+        assert!(restored.restored);
+        assert_eq!(
+            restored.part_count, 0,
+            "part geometry waits for authenticated manifest"
+        );
+        let mut other = context.clone();
+        other.account_id = 8;
+        other.file_name = "Other account.bin".into();
+        db.admit_vault_job(&other.admission_record().expect("other account context"))?;
+        vault.restore_upload_history(8)?;
+        assert!(vault.transfers().iter().all(|row| row.account_id == 8));
+        assert_eq!(
+            vault.transfers()[0].file_name,
+            "Other account.bin",
+            "equal task IDs cannot reuse a foreign account projection"
+        );
+        vault.restore_upload_history(7)?;
+        vault.inner.session.lock().expect("session").publish(
+            0,
+            None,
+            None,
+            Some(([2; 16], master.clone())),
+        );
+        for expected_generation in [1, 2] {
+            assert_eq!(
+                vault
+                    .submit_resume_download(7, 9)?
+                    .wait()
+                    .expect_err("transport is deliberately unauthorized")
+                    .kind(),
+                ApplicationErrorKind::Authorization
+            );
+            let saved = db.vault_job(7, 9)?.expect("retained task");
+            assert_eq!(saved.state, VaultJobState::Retryable);
+            assert_eq!(saved.generation, expected_generation);
+            assert_eq!(saved.context, original.context);
+            assert_eq!(saved.package_id, original.package_id);
+            assert_eq!(std::fs::read(&partial)?, b"data");
+            assert!(!destination.exists());
+        }
+        let mut queued_download = context.clone();
+        queued_download.task_id = 10;
+        db.admit_vault_job(&queued_download.admission_record().expect("queued download"))?;
+        let mut queued_upload = context.clone();
+        queued_upload.task_id = 11;
+        queued_upload.direction = crate::VaultRecoveryDirection::Upload {
+            source: dir.path().join("source.bin"),
+            identity: teleark_transfer::SourceIdentity {
+                filesystem_id: 1,
+                size_bytes: 4,
+                modified_at_units: 1,
+                revision: 1,
+            },
+            source_blake3: *blake3::hash(b"data").as_bytes(),
+        };
+        db.admit_vault_job(&queued_upload.admission_record().expect("queued upload"))?;
+        assert_eq!(
+            vault.submit_resume_queued_transfers(7)?.wait()?,
+            VaultUploadRecoveryReport {
+                resumed: 0,
+                failed: 1
+            }
+        );
+        assert_eq!(
+            db.vault_job(7, 10)?.expect("download attempted").state,
+            VaultJobState::Retryable
+        );
+        assert_eq!(
+            db.vault_job(7, 11)?
+                .expect("upload waits for active key")
+                .state,
+            VaultJobState::Queued
+        );
+        assert_eq!(
+            db.vault_job(7, 11)?.expect("unclaimed upload").generation,
+            0
+        );
+        assert_eq!(
+            vault.submit_resume_queued_transfers(7)?.wait()?,
+            VaultUploadRecoveryReport::default(),
+            "failed downloads require explicit retry"
+        );
+        assert_eq!(
+            vault
+                .submit_resume_download(8, 9)?
+                .wait()
+                .expect_err("other account")
+                .kind(),
+            ApplicationErrorKind::Authorization
+        );
+        vault.lock()?;
+        assert_eq!(
+            vault
+                .submit_resume_download(7, 9)
+                .err()
+                .expect("locked admission")
+                .kind(),
+            ApplicationErrorKind::VaultKeyUnavailable
+        );
+        assert_eq!(db.vault_job(7, 9)?.expect("unchanged").generation, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn queued_recovery_preserves_pause_and_continues_after_an_unavailable_transport()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use teleark_storage::{Database, VaultJobLease, VaultJobState, VaultJobTransition};
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3"))?;
+        let telegram = DesktopTelegram::open_direct(temp.path().join("synthetic.session"))?;
+        // Readiness projection only; the request owner remains unauthorized,
+        // deterministically rejecting transport before network work.
+        telegram.lifecycle().publish(1, Some(7), None);
+        let master = Arc::new(VaultMasterKey::from_bytes([17; 32]));
+        let mut owner = VaultOwner {
+            catalog: catalog::ManifestCache::default(),
+            catalog_key_revision: 0,
+            telegram,
+            library: library.clone(),
+            record: None,
+            master_key: Some(master.clone()),
+            historical_key: None,
+            health_worker: None,
+            session: Arc::new(Mutex::new(VaultSession::new(None))),
+            session_generation: 0,
+            transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
+            active_upload_batch: Arc::new(Mutex::new(None)),
+            upload_controls: UploadControls::default(),
+        };
+        let source = temp.path().join("source.bin");
+        std::fs::write(&source, b"data")?;
+        let mut files = NativeFileSystem::new();
+        files.register_source(SourceId(1), &source).expect("source");
+        let identity = files.source_identity(SourceId(1)).expect("identity");
+        let mut db = Database::open(library.database_path.as_ref())?;
+        for id in 1..=3 {
+            let package_id = crate::transfer::package_bytes(PackageId::new(id));
+            let file_key_wrap = teleark_crypto::wrap_file_key(
+                &master,
+                &teleark_crypto::FileKey::from_bytes([42; 32]),
+                &[3; 16],
+                &package_id,
+                1,
+                1,
+                &mut AeadUsageRegistry::new(),
+            )
+            .expect("wrap");
+            let context = crate::VaultRecoveryContext {
+                account_id: 7,
+                task_id: id,
+                chat_id: 11,
+                package_id,
+                vault_id: [3; 16],
+                master_key_generation: 1,
+                file_key_wrap,
+                file_name: "source.bin".into(),
+                created_at_unix_ms: 100,
+                size_bytes: 4,
+                direction: crate::VaultRecoveryDirection::Upload {
+                    source: source.clone(),
+                    identity,
+                    source_blake3: *blake3::hash(b"data").as_bytes(),
+                },
+            };
+            db.admit_vault_job(&context.admission_record().expect("admission"))?;
+        }
+        db.transition_vault_job(
+            VaultJobLease {
+                account_id: 7,
+                id: 3,
+                generation: 0,
+            },
+            VaultJobState::Queued,
+            VaultJobTransition::RequestPause,
+            101,
+            None,
+        )?;
+        db.transition_vault_job(
+            VaultJobLease {
+                account_id: 7,
+                id: 1,
+                generation: 0,
+            },
+            VaultJobState::Queued,
+            VaultJobTransition::Start,
+            102,
+            None,
+        )?;
+        let _facade = DesktopVault::new(owner.telegram.clone(), library.clone())?;
+        let recovered = db
+            .vault_job(7, 1)?
+            .expect("constructor recovered interrupted upload");
+        assert_eq!(
+            (recovered.state, recovered.generation),
+            (VaultJobState::Queued, 2)
+        );
+        let report = owner.resume_queued_uploads(7)?;
+        assert_eq!(
+            report,
+            VaultUploadRecoveryReport {
+                resumed: 0,
+                failed: 2
+            }
+        );
+        for id in [1, 2] {
+            assert_eq!(
+                db.vault_job(7, id)?.expect("failed job").state,
+                VaultJobState::Retryable
+            );
+            let row = owner.transfers.get(id).expect("visible failed recovery");
+            assert_eq!(
+                row.state,
+                VaultTransferState::Failed(ApplicationErrorKind::Authorization)
+            );
+            assert!(!row.restored);
+        }
+        assert_eq!(
+            db.vault_job(7, 3)?.expect("paused job").state,
+            VaultJobState::Paused
+        );
+        assert_eq!(
+            owner.resume_queued_uploads(7)?,
+            VaultUploadRecoveryReport::default()
+        );
+        assert_eq!(
+            owner
+                .resume_queued_uploads(8)
+                .expect_err("foreign account")
+                .kind(),
+            ApplicationErrorKind::Authorization
+        );
+        Ok(())
+    }
 
     #[test]
     fn upload_preflight_distinguishes_folders_and_app_bundles_from_missing_files() {
@@ -3043,6 +4579,7 @@ mod tests {
     fn upload_activity_advances_before_first_verified_part_and_never_claims_completion() {
         use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
         let fixture = VaultTransferSnapshot {
+            recovery_state: None,
             restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Preparing)),
             id: 1,
@@ -3070,6 +4607,22 @@ mod tests {
         let transfers = Arc::new(TransferSnapshots::new(vec![fixture]).expect("snapshot store"));
         let observer = VaultUploadObserver::new(transfers.clone(), 1);
         let snapshot = || transfers.get(1).expect("test snapshot");
+        observer.source_progress(1024, 1024);
+        let checked = snapshot();
+        let checking = checked.upload_activity.expect("source checking");
+        assert_eq!(checking.phase, VaultUploadPhase::CheckingSource);
+        assert_eq!((checking.bytes, checking.total), (1024, 1024));
+        assert_eq!(checking.uploaded_bytes, 0);
+        assert_eq!(checked.transferred_bytes, 0);
+        assert_eq!(checked.state, VaultTransferState::Running);
+        observer.phase(VaultUploadPhase::SavingRecovery);
+        assert_eq!(
+            snapshot()
+                .upload_activity
+                .expect("saving recovery")
+                .uploaded_bytes,
+            0
+        );
         observer.begin_part(60 * 1024 * 1024);
         observer.observe(ByteTransferEvent::Uploading {
             bytes: 512 * 1024,
@@ -3127,7 +4680,9 @@ mod tests {
     fn batch_publishes_queue_before_remote_validation_and_keeps_failures_visible()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let paths = vec![temp.path().join("one.txt"), temp.path().join("two.txt")];
+        let paths = (0..513)
+            .map(|i| temp.path().join(format!("source-{i:04}.txt")))
+            .collect::<Vec<_>>();
         for path in &paths {
             std::fs::write(path, b"synthetic upload")?;
         }
@@ -3139,7 +4694,15 @@ mod tests {
                 catalog_key_revision: 0,
                 telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
                 library,
-                record: None,
+                record: Some(VaultMetadataRecord {
+                    vault_id: [3; 16],
+                    password_wrap: vec![],
+                    recovery_wrap: vec![],
+                    password_generation: 1,
+                    recovery_generation: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                }),
                 master_key: Some(Arc::new(VaultMasterKey::from_bytes([7; 32]))),
                 historical_key: None,
                 health_worker: None,
@@ -3147,40 +4710,107 @@ mod tests {
                 session_generation: 0,
                 transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshot store")),
                 active_upload_batch: Arc::new(Mutex::new(None)),
+                upload_controls: UploadControls::default(),
             };
             let mut calls = 0;
-            let report = owner.upload_batch_with_validation(100, 700, paths.clone(), |owner| {
-                calls += 1;
-                let rows = owner.transfers.all().expect("snapshots");
-                assert_eq!(rows.len(), 2);
-                assert!(
-                    rows.iter()
-                        .all(|row| row.state == VaultTransferState::Queued)
-                );
-                assert!(
-                    rows.iter()
-                        .all(|row| row.transferred_bytes == 0 && row.package_id.is_none())
-                );
-                assert!(rows.iter().all(|row| {
-                    row.upload_activity
-                        .as_ref()
-                        .is_some_and(|activity| activity.phase == VaultUploadPhase::CheckingStorage)
-                }));
-                let active = owner.active_upload_batch.lock().expect("active batch");
-                let (_, _, cancel) = active.as_ref().expect("cancellable before network");
-                if cancel_during_validation {
-                    cancel.store(true, Ordering::Release);
-                    Ok(())
-                } else {
-                    Err(ApplicationError::new(ApplicationErrorKind::Conflict))
-                }
-            })?;
+            let mut admitted_ids = Vec::new();
+            let progress = VaultUploadSelectionProgress::new(paths.len());
+            let report =
+                owner.upload_batch_with_progress(100, 700, paths.clone(), &progress, |owner| {
+                    calls += 1;
+                    let database =
+                        teleark_storage::Database::open(owner.library.database_path.as_ref())
+                            .map_err(|_| {
+                                ApplicationError::new(ApplicationErrorKind::Persistence)
+                            })?;
+                    let mut after = 0;
+                    loop {
+                        let page = database
+                            .queued_pending_vault_uploads(100, after, 128)
+                            .map_err(|_| {
+                                ApplicationError::new(ApplicationErrorKind::Persistence)
+                            })?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        for record in page {
+                            after = record.id;
+                            let context = crate::VaultPendingUploadContext::from_record(&record)
+                                .expect("real pending codec");
+                            assert_eq!(context.vault_id, [3; 16]);
+                            assert!(
+                                database
+                                    .vault_job(100, record.id)
+                                    .expect("formal ledger")
+                                    .is_none()
+                            );
+                            admitted_ids.push(record.id);
+                        }
+                    }
+                    assert_eq!(
+                        admitted_ids.len(),
+                        paths.len(),
+                        "every window is durable before remote validation"
+                    );
+                    assert_eq!(progress.snapshot().saved, paths.len());
+
+                    let rows = owner.transfers.all().expect("snapshots");
+                    assert_eq!(rows.len(), VAULT_UPLOAD_WINDOW);
+                    assert!(
+                        rows.iter()
+                            .all(|row| row.state == VaultTransferState::Queued)
+                    );
+                    assert!(
+                        rows.iter()
+                            .all(|row| row.transferred_bytes == 0 && row.package_id.is_none())
+                    );
+                    assert!(rows.iter().all(|row| {
+                        row.upload_activity.as_ref().is_some_and(|activity| {
+                            activity.phase == VaultUploadPhase::CheckingStorage
+                        })
+                    }));
+                    let active = owner.active_upload_batch.lock().expect("active batch");
+                    let (_, _, cancel) = active.as_ref().expect("cancellable before network");
+                    if cancel_during_validation {
+                        cancel.store(true, Ordering::Release);
+                        Ok(())
+                    } else {
+                        Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                    }
+                })?;
             assert_eq!(calls, 1);
+            let database = teleark_storage::Database::open(owner.library.database_path.as_ref())?;
+            for id in admitted_ids {
+                let saved = database
+                    .pending_vault_upload(100, id)?
+                    .expect("retained pending result");
+                assert_eq!(
+                    saved.state,
+                    if cancel_during_validation {
+                        teleark_storage::PendingVaultUploadState::Cancelled
+                    } else {
+                        teleark_storage::PendingVaultUploadState::Blocked
+                    }
+                );
+            }
+
+            let retained = owner.transfers.all().expect("bounded history");
+            assert!(retained.len() <= 256);
+            assert!(
+                retained
+                    .iter()
+                    .any(|row| row.file_name == "source-0512.txt"),
+                "later windows must remain visible"
+            );
+            assert_eq!(progress.snapshot().total, paths.len());
+            assert!(progress.snapshot().timeline.len() <= 6);
             assert!(report.completed.is_empty());
             if cancel_during_validation {
-                assert_eq!(report.cancelled.len(), 2);
+                assert_eq!(report.cancelled.len(), paths.len());
+                assert_eq!(progress.snapshot().cancelled, paths.len());
             } else {
-                assert_eq!(report.failed.len(), 2);
+                assert_eq!(report.failed.len(), paths.len());
+                assert_eq!(progress.snapshot().failed, paths.len());
                 assert!(owner.transfers.all().expect("snapshots").iter().all(|row| {
                     row.upload_activity
                         .as_ref()
@@ -3207,6 +4837,128 @@ mod tests {
                             VaultTransferState::Failed(ApplicationErrorKind::Conflict)
                         })
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn large_selections_publish_every_file_and_preserve_stop_policy_across_windows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let paths = (0..513)
+            .map(|i| temp.path().join(format!("file-{i:04}.txt")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            std::fs::write(path, b"synthetic")?;
+        }
+        for stop in [
+            None,
+            Some(ApplicationErrorKind::Cancelled),
+            Some(ApplicationErrorKind::Network),
+        ] {
+            let library = DesktopLibrary::open(temp.path().join("library.sqlite3"))?;
+            let mut owner = VaultOwner {
+                catalog: catalog::ManifestCache::default(),
+                catalog_key_revision: 0,
+                telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
+                library,
+                record: Some(VaultMetadataRecord {
+                    vault_id: [3; 16],
+                    password_wrap: vec![],
+                    recovery_wrap: vec![],
+                    password_generation: 1,
+                    recovery_generation: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                }),
+                master_key: Some(Arc::new(VaultMasterKey::from_bytes([7; 32]))),
+                historical_key: None,
+                health_worker: None,
+                session: Arc::new(Mutex::new(VaultSession::new(None))),
+                session_generation: 0,
+                transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshots")),
+                active_upload_batch: Arc::new(Mutex::new(None)),
+                upload_controls: UploadControls::default(),
+            };
+            let progress = VaultUploadSelectionProgress::new(paths.len());
+            let mut calls = 0;
+            let mut validations = 0;
+            let report = owner.execute_upload_selection(
+                (100, 700),
+                paths.clone(),
+                &progress,
+                |_| {
+                    validations += 1;
+                    Ok(())
+                },
+                |owner, plan| {
+                    let rows = owner.transfers.all().expect("visible window");
+                    assert!(rows.len() <= 256);
+                    assert!(
+                        rows.iter().any(|row| row.id == plan.id),
+                        "every executing file must be visible"
+                    );
+                    calls += 1;
+                    if calls == 131
+                        && let Some(kind) = stop
+                    {
+                        if kind == ApplicationErrorKind::Cancelled {
+                            progress.cancel();
+                        }
+                        return Err(ApplicationError::new(kind));
+                    }
+                    owner.update_transfer(plan.id, |row| row.state = VaultTransferState::Completed);
+                    Ok(ManagedVaultFile {
+                        vault_id: Some([1; 16]),
+                        health: crate::VaultFileHealth::Present,
+                        part_message_ids: vec![calls as i64],
+                        package_numeric_id: calls as u64,
+                        package_id: calls.to_string(),
+                        logical_name: plan.source.file_name.clone(),
+                        relative_path: None,
+                        mime_type: None,
+                        media_kind: FileKind::Document,
+                        size_bytes: plan.source.size_bytes,
+                        encoded_size_bytes: 64,
+                        part_count: 1,
+                        created_at_unix_ms: 1,
+                        manifest_message_id: calls as i64,
+                        related_remote_names: Vec::new(),
+                    })
+                },
+            )?;
+            assert_eq!(validations, 1);
+            let expected = if stop.is_none() { 513 } else { 130 };
+            assert_eq!(report.completed_count, expected);
+            assert_eq!(
+                report.completed.len(),
+                128,
+                "receipt metadata is bounded independently of selection size"
+            );
+            assert_eq!(progress.snapshot().completed, expected);
+            match stop {
+                None => {
+                    assert_eq!(calls, 513);
+                    assert!(report.failed.is_empty() && report.cancelled.is_empty());
+                    assert_eq!(
+                        report.completed.last().expect("last receipt").logical_name,
+                        "file-0512.txt"
+                    );
+                }
+                Some(ApplicationErrorKind::Cancelled) => {
+                    assert_eq!(calls, 131);
+                    assert_eq!(report.cancelled.len(), 383);
+                }
+                Some(_) => {
+                    assert_eq!(calls, 131);
+                    assert_eq!(report.failed.len(), 383);
+                }
+            }
+            assert_eq!(
+                report.completed_count + report.failed.len() + report.cancelled.len(),
+                paths.len()
+            );
+            assert!(owner.active_upload_batch.lock().expect("owner").is_none());
         }
         Ok(())
     }
@@ -3387,6 +5139,7 @@ mod tests {
             session_generation: 0,
             transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
             active_upload_batch: Arc::new(Mutex::new(None)),
+            upload_controls: UploadControls::default(),
         };
         owner.initialize("synthetic independent password")?;
         assert!(
@@ -3404,6 +5157,7 @@ mod tests {
     #[test]
     fn bounded_history_evicts_whole_completed_batches_and_keeps_active_members() {
         let fixture = VaultTransferSnapshot {
+            recovery_state: None,
             restored: false,
             upload_activity: None,
             id: 1,
@@ -3428,6 +5182,41 @@ mod tests {
                 .snapshot(),
             state: VaultTransferState::Completed,
         };
+        let restored = (1..=256)
+            .map(|id| {
+                let mut row = fixture.clone();
+                row.id = id;
+                row.batch_id = None;
+                row.state = VaultTransferState::Queued;
+                row.restored = true;
+                row
+            })
+            .collect();
+        let projection = TransferSnapshots::new(restored).expect("restored history");
+        let mut live = fixture.clone();
+        live.id = 257;
+        live.batch_id = None;
+        live.state = VaultTransferState::Running;
+        assert!(
+            projection.insert_pruning(live.clone(), vault_transfer_evictions),
+            "restored queued metadata must yield to live execution"
+        );
+        assert!(projection.get(257).is_some());
+        let view = projection.view().expect("projection");
+        assert_eq!(view.items.len(), 256);
+        assert_eq!(view.omitted_items, 1);
+        let active = (1..=256)
+            .map(|id| {
+                let mut row = live.clone();
+                row.id = id;
+                row
+            })
+            .collect();
+        let projection = TransferSnapshots::new(active).expect("owned tasks");
+        assert!(
+            !projection.insert_pruning(live, vault_transfer_evictions),
+            "owned work must not be evicted"
+        );
         let mut history = Vec::new();
         for id in 1..=256 {
             let mut item = fixture.clone();
@@ -3468,7 +5257,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_preflight_is_bounded_deduplicates_sources_and_keeps_names() {
+    fn upload_preflight_has_no_count_limit_deduplicates_sources_and_keeps_names() {
         let root = tempfile::tempdir().expect("fixture");
         let source = root.path().join("旅の写真.zip");
         std::fs::write(&source, b"test archive").expect("fixture file");
@@ -3477,7 +5266,26 @@ mod tests {
         assert_eq!(files[0].file_name, "旅の写真.zip");
         assert_eq!(files[0].size_bytes, 12);
         assert!(inspect_upload_sources(&[]).is_err());
-        assert!(inspect_upload_sources(&vec![source.clone(); MAX_VAULT_UPLOAD_BATCH + 1]).is_err());
+        assert_eq!(
+            inspect_upload_sources(&vec![source.clone(); 4096])
+                .expect("no count cap")
+                .len(),
+            1
+        );
+        let many = (0..513)
+            .map(|i| {
+                let path = root.path().join(format!("file-{i}.txt"));
+                std::fs::write(&path, b"fixture").expect("source");
+                path
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inspect_upload_sources(&many)
+                .expect("distinct files over old cap")
+                .len(),
+            513
+        );
+        assert!(inspect_upload_sources(&[root.path().to_path_buf()]).is_err());
         std::fs::remove_file(&source).expect("remove source");
         assert!(inspect_upload_sources(&[source]).is_err());
     }

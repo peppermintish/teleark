@@ -32,6 +32,7 @@ pub enum LayoutViolation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum CryptoError {
+    Cancelled,
     AuthenticationFailed,
     AeadIdentityAlreadyUsed,
     InvalidMagic {
@@ -100,6 +101,7 @@ impl CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("cryptographic operation cancelled"),
             Self::AuthenticationFailed => formatter.write_str("authentication failed"),
             Self::AeadIdentityAlreadyUsed => {
                 formatter.write_str("AEAD key/nonce identity was already consumed")

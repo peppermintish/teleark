@@ -163,6 +163,19 @@ pub fn icon_button(
         .tooltip(tooltip)
 }
 
+/// Compact desktop actions share one size and typography across dense toolbars.
+pub fn compact_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    icon: Option<IconName>,
+    primary: bool,
+) -> Button {
+    button(id, label, icon, primary)
+        .xsmall()
+        .h(px(theme::COMPACT_CONTROL_HEIGHT))
+        .text_size(px(12.0))
+}
+
 /// Shared geometry and typography for data rows, menu entries and summaries.
 pub fn list_row() -> Div {
     div()

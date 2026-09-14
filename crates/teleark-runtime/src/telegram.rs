@@ -1,4 +1,5 @@
 mod dispatch;
+pub(crate) mod lifecycle;
 mod network_owner;
 use teleark_telegram::network::{NetworkMonitor, NetworkRoute};
 
@@ -29,6 +30,9 @@ const MAX_DIALOGS: usize = 10_000;
 const MAX_BATCH_SCAN_MESSAGES: usize = 50_000;
 const MAX_BATCH_FILES: usize = 2_000;
 const SCAN_PAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[cfg(test)]
+pub(crate) mod test_vault_remote;
 
 pub type TelegramScanCancellation = ScanCancellation;
 
@@ -113,10 +117,13 @@ impl std::fmt::Debug for TelegramAuthState {
 
 #[derive(Clone)]
 pub struct DesktopTelegram {
+    #[cfg(test)]
+    test_vault_remote: Option<Arc<test_vault_remote::TestVaultRemote>>,
     inner: Arc<TelegramWorkerInner>,
 }
 
 struct TelegramWorkerInner {
+    lifecycle: lifecycle::Lifecycle,
     endpoint: Mutex<Option<network_owner::Endpoint>>,
     bandwidth: teleark_telegram::TransferBandwidth,
     changing: std::sync::atomic::AtomicBool,
@@ -254,7 +261,9 @@ enum TelegramRequest {
         reply: mpsc::SyncSender<Result<Vec<TelegramFileSummary>, ApplicationError>>,
     },
     UploadBytes {
+        publication_random_id: Option<i64>,
         observer: Option<Arc<dyn ByteTransferObserver>>,
+        cancellation: Option<TelegramScanCancellation>,
         account_id: i64,
         chat_id: i64,
         file_name: String,
@@ -280,6 +289,7 @@ enum LoginState {
 }
 
 struct WorkerState {
+    lifecycle: lifecycle::Lifecycle,
     bandwidth: teleark_telegram::TransferBandwidth,
     network_route: NetworkRoute,
     network_monitor: NetworkMonitor,
@@ -296,6 +306,7 @@ struct WorkerState {
 impl Default for WorkerState {
     fn default() -> Self {
         Self {
+            lifecycle: lifecycle::Lifecycle::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             network_route: NetworkRoute::Direct,
             network_monitor: NetworkMonitor::new(&NetworkRoute::Direct),
@@ -845,7 +856,7 @@ impl DesktopTelegram {
             file_name.into(),
             caption.into(),
             bytes,
-            None,
+            UploadByteOptions::default(),
         )
     }
 
@@ -856,10 +867,12 @@ impl DesktopTelegram {
         file_name: String,
         caption: String,
         bytes: Vec<u8>,
-        observer: Option<Arc<dyn ByteTransferObserver>>,
+        options: UploadByteOptions,
     ) -> Result<i64, ApplicationError> {
         self.request("upload_bytes", |reply| TelegramRequest::UploadBytes {
-            observer,
+            publication_random_id: options.publication_random_id,
+            observer: options.observer,
+            cancellation: options.cancellation,
             account_id,
             chat_id,
             file_name,
@@ -886,6 +899,13 @@ impl DesktopTelegram {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        #[cfg(test)]
+        if let Some(remote) = &self.test_vault_remote {
+            remote.handle(build(reply));
+            return response
+                .recv()
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
         }
         let (sender, generation) = {
             let endpoint = self
@@ -936,10 +956,18 @@ impl WorkerState {
             Ok(TelegramAuthState::Authorized(account)) => Some(account.id),
             _ => None,
         };
+        self.lifecycle.publish(
+            self.network_generation,
+            self.authorized_account_id,
+            self.connection
+                .as_ref()
+                .map(|connection| connection.channel_update_signals()),
+        );
     }
 
     fn read_snapshot(&self) -> Self {
         Self {
+            lifecycle: self.lifecycle.clone(),
             network_route: self.network_route.clone(),
             network_monitor: self.network_monitor.clone(),
             network_generation: self.network_generation,
@@ -1375,7 +1403,9 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             let _ = reply.send(result);
         }
         TelegramRequest::UploadBytes {
+            publication_random_id,
             observer,
+            cancellation,
             account_id,
             chat_id,
             file_name,
@@ -1383,20 +1413,22 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             bytes,
             reply,
         } => {
-            let result = upload_bytes(
-                state,
-                account_id,
-                chat_id,
-                &file_name,
-                &caption,
-                &bytes,
-                observer.as_deref(),
-            )
-            .await;
+            let options = UploadByteOptions {
+                observer,
+                cancellation,
+                publication_random_id,
+            };
+            let operation = upload_bytes(
+                state, account_id, chat_id, &file_name, &caption, &bytes, &options,
+            );
+            let result = interruptible_upload(operation, options.cancellation.as_ref()).await;
             let _ = reply.send(result);
         }
         TelegramRequest::SignOut { reply } => {
             state.authorized_account_id = None;
+            state
+                .lifecycle
+                .publish(state.network_generation, None, None);
             let result = sign_out(state).await;
             let _ = reply.send(result);
         }
@@ -2061,7 +2093,7 @@ async fn upload_bytes(
     file_name: &str,
     caption: &str,
     bytes: &[u8],
-    observer: Option<&dyn ByteTransferObserver>,
+    options: &UploadByteOptions,
 ) -> Result<i64, ApplicationError> {
     require_account(state, account_id)?;
     let chat = state
@@ -2069,7 +2101,16 @@ async fn upload_bytes(
         .get(&chat_id)
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
     connection_ref(state)?
-        .upload_bytes_observed(chat, bytes, file_name, caption, observer)
+        .upload_bytes_with_publication(
+            chat,
+            bytes,
+            file_name,
+            caption,
+            teleark_telegram::UploadPublicationOptions {
+                observer: options.observer.as_deref(),
+                random_id: options.publication_random_id,
+            },
+        )
         .await
         .map(|sent| sent.message_id)
         .map_err(map_telegram_error)
@@ -2209,6 +2250,7 @@ mod tests {
             retired.send(()).expect("retirement receiver");
         });
         let inner = TelegramWorkerInner {
+            lifecycle: lifecycle::Lifecycle::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             endpoint: Mutex::new(Some(network_owner::Endpoint {
                 sender,
@@ -2431,6 +2473,92 @@ mod tests {
             .expect_err("reversed range must fail")
             .kind(),
             ApplicationErrorKind::InvalidRequest
+        );
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct UploadByteOptions {
+    pub publication_random_id: Option<i64>,
+    pub observer: Option<Arc<dyn ByteTransferObserver>>,
+    pub cancellation: Option<TelegramScanCancellation>,
+}
+
+/// Dropping a pending send can leave its remote result unknown. The object
+/// adapter must reconcile the stable publication identity before any resend.
+async fn interruptible_upload<T>(
+    operation: impl std::future::Future<Output = Result<T, ApplicationError>>,
+    cancellation: Option<&TelegramScanCancellation>,
+) -> Result<T, ApplicationError> {
+    match cancellation {
+        Some(cancellation) => tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
+            result = operation => result,
+        },
+        None => operation.await,
+    }
+}
+
+#[cfg(test)]
+mod upload_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn already_cancelled_upload_does_not_poll_or_publish() {
+        let cancel = TelegramScanCancellation::new();
+        cancel.cancel();
+        let polled = std::cell::Cell::new(false);
+        let result = interruptible_upload(
+            async {
+                polled.set(true);
+                Ok::<_, ApplicationError>(())
+            },
+            Some(&cancel),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("cancelled").kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        assert!(!polled.get(), "cancelled upload must not begin");
+    }
+    #[tokio::test]
+    async fn cancellation_drops_a_stalled_upload_without_stopping_other_work() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+        let cancellation = TelegramScanCancellation::new();
+        let worker_cancel = cancellation.clone();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (dropped, finished) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            interruptible_upload(
+                async move {
+                    let _drop = DropSignal(Some(dropped));
+                    let _ = entered.send(());
+                    std::future::pending::<Result<(), ApplicationError>>().await
+                },
+                Some(&worker_cancel),
+            )
+            .await
+        });
+        ready.await.expect("entered pending transport");
+        cancellation.cancel();
+        assert_eq!(
+            worker.await.expect("worker").expect_err("cancelled").kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        finished.await.expect("transport future dropped");
+        assert_eq!(
+            interruptible_upload(async { Ok(42) }, None)
+                .await
+                .expect("unrelated operation"),
+            42
         );
     }
 }

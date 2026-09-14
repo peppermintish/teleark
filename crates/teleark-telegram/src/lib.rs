@@ -44,7 +44,9 @@ pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
 
 mod channel_sync;
 pub mod network;
+mod publication;
 mod session;
+pub use publication::UploadPublicationOptions;
 mod storage_channel;
 pub use channel_sync::{
     ChannelDifferencePage, ChannelFileUpdate, ChannelPush, ChannelUpdateHints,
@@ -1114,7 +1116,35 @@ impl TelegramConnection {
         caption: &str,
         observer: Option<&dyn ByteTransferObserver>,
     ) -> Result<SentDocument, TelegramError> {
-        if bytes.is_empty()
+        self.upload_bytes_with_publication(
+            chat,
+            bytes,
+            file_name,
+            caption,
+            UploadPublicationOptions {
+                observer,
+                random_id: None,
+            },
+        )
+        .await
+    }
+
+    /// Reuses a durably reserved publication ID across ambiguous sends. Callers
+    /// must bind the ID to immutable content and reconcile missing receipts.
+    pub async fn upload_bytes_with_publication(
+        &self,
+        chat: &TelegramChat,
+        bytes: &[u8],
+        file_name: &str,
+        caption: &str,
+        options: UploadPublicationOptions<'_>,
+    ) -> Result<SentDocument, TelegramError> {
+        let UploadPublicationOptions {
+            observer,
+            random_id: publication_random_id,
+        } = options;
+        if publication_random_id == Some(0)
+            || bytes.is_empty()
             || bytes.len() > MAX_TRANSFER_OBJECT_BYTES
             || file_name.is_empty()
             || caption.is_empty()
@@ -1133,6 +1163,22 @@ impl TelegramConnection {
             .map_err(map_io)?;
         if let Some(observer) = observer {
             observer.observe(ByteTransferEvent::SendingMessage);
+        }
+        if let Some(random_id) = publication_random_id {
+            let request = publication::document_request(
+                chat.peer_ref.into(),
+                uploaded.raw,
+                file_name,
+                caption,
+                random_id,
+            );
+            let updates = self.client.invoke(&request).await.map_err(map_invocation)?;
+            let message_id = publication::sent_message_id(updates, random_id)
+                .filter(|id| *id > 0)
+                .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?;
+            return Ok(SentDocument {
+                message_id: i64::from(message_id),
+            });
         }
         let message = InputMessage::new().text(caption).document(uploaded);
         let sent = self

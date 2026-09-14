@@ -1,3 +1,7 @@
+mod manifest_outbox;
+mod reserved;
+pub use reserved::ReservedPublicationStore;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -12,9 +16,9 @@ use teleark_core::{
 use teleark_crypto::{
     AeadUsageRegistry, CRYPTO_SUITE_ID, CryptoError, FileKey, ManifestLimits, ManifestMetadata,
     ManifestPart, ManifestPublicHeader, MediaKind, NONCE_STRATEGY_ID, OpenedManifest, OsRandom,
-    PartHeader, PartInstanceRegistry, PartLimits, RemoteLocator, VaultMasterKey, decrypt_part,
-    encrypt_part, open_manifest, remote_manifest_name, remote_part_name, seal_manifest,
-    wrap_file_key,
+    PartHeader, PartInstanceRegistry, PartLimits, RemoteLocator, VaultMasterKey,
+    decrypt_part_cancellable, encrypt_part_cancellable, open_manifest, remote_manifest_name,
+    remote_part_name, seal_manifest, wrap_file_key,
 };
 use teleark_telegram::MAX_TRANSFER_OBJECT_BYTES;
 use teleark_transfer::{
@@ -166,6 +170,63 @@ impl TelegramObjectStore {
     }
 }
 
+impl TelegramObjectStore {
+    /// Publishes an immutable object using its durably reserved identity.
+    /// An ambiguous result must be reconciled before completing the local part.
+    pub fn upload_reserved(
+        &mut self,
+        name: &str,
+        caption: &str,
+        bytes: Vec<u8>,
+        random_id: std::num::NonZeroI64,
+    ) -> Result<RemoteByteObject, UploadError> {
+        self.upload_publication(name, caption, bytes, Some(random_id.get()))
+    }
+
+    fn upload_publication(
+        &mut self,
+        name: &str,
+        caption: &str,
+        bytes: Vec<u8>,
+        publication_random_id: Option<i64>,
+    ) -> Result<RemoteByteObject, UploadError> {
+        let encoded_size = bytes.len() as u64;
+        if let Some(observer) = &self.observer {
+            observer.observe(teleark_telegram::ByteTransferEvent::WaitingForUpload);
+        }
+        match self.telegram.upload_bytes_observed(
+            self.account_id,
+            self.chat_id,
+            name.to_owned(),
+            caption.to_owned(),
+            bytes,
+            crate::telegram::UploadByteOptions {
+                publication_random_id,
+                observer: self.observer.clone(),
+                cancellation: self.cancellation.clone(),
+            },
+        ) {
+            Ok(message_id) => Ok(RemoteByteObject {
+                object_id: u64::try_from(message_id)
+                    .map_err(|_| UploadError::Definite(TransferError::RemoteMissing))?,
+                name: name.to_owned(),
+                encoded_size,
+            }),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ApplicationErrorKind::Network
+                        | ApplicationErrorKind::Server
+                        | ApplicationErrorKind::Cancelled
+                ) =>
+            {
+                Err(UploadError::AmbiguousSuccess)
+            }
+            Err(error) => Err(UploadError::Definite(map_application_error(error))),
+        }
+    }
+}
+
 impl RemoteObjectStore for TelegramObjectStore {
     fn search_exact_caption(
         &mut self,
@@ -207,34 +268,7 @@ impl RemoteObjectStore for TelegramObjectStore {
         caption: &str,
         bytes: Vec<u8>,
     ) -> Result<RemoteByteObject, UploadError> {
-        let encoded_size = bytes.len() as u64;
-        if let Some(observer) = &self.observer {
-            observer.observe(teleark_telegram::ByteTransferEvent::WaitingForUpload);
-        }
-        match self.telegram.upload_bytes_observed(
-            self.account_id,
-            self.chat_id,
-            name.to_owned(),
-            caption.to_owned(),
-            bytes,
-            self.observer.clone(),
-        ) {
-            Ok(message_id) => Ok(RemoteByteObject {
-                object_id: u64::try_from(message_id)
-                    .map_err(|_| UploadError::Definite(TransferError::RemoteMissing))?,
-                name: name.to_owned(),
-                encoded_size,
-            }),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ApplicationErrorKind::Network | ApplicationErrorKind::Server
-                ) =>
-            {
-                Err(UploadError::AmbiguousSuccess)
-            }
-            Err(error) => Err(UploadError::Definite(map_application_error(error))),
-        }
+        self.upload_publication(name, caption, bytes, None)
     }
 
     fn download(&mut self, object_id: u64) -> Result<Vec<u8>, TransferError> {
@@ -275,6 +309,7 @@ pub struct EncryptedRemoteTransport<S> {
     recovered_whole_digest: Option<[u8; 32]>,
     manifest_publication: Option<ManifestPublication>,
     published_manifest_envelope: Option<Vec<u8>>,
+    cancellation: Option<crate::TelegramScanCancellation>,
 }
 
 struct ManifestPublication {
@@ -286,6 +321,7 @@ struct ManifestPublication {
 pub(crate) struct PartEncryptionContext {
     file_key: Arc<FileKey>,
     limits: PartLimits,
+    cancellation: Option<crate::TelegramScanCancellation>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,7 +371,16 @@ impl<S> EncryptedRemoteTransport<S> {
             recovered_whole_digest: None,
             manifest_publication: None,
             published_manifest_envelope: None,
+            cancellation: None,
         })
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: crate::TelegramScanCancellation,
+    ) -> Self {
+        self.cancellation = Some(cancellation);
+        self
     }
 
     /// The already re-read/authenticated envelope can be persisted locally
@@ -439,6 +484,7 @@ impl<S> EncryptedRemoteTransport<S> {
         PartEncryptionContext {
             file_key: Arc::clone(&self.file_key),
             limits: self.limits,
+            cancellation: self.cancellation.clone(),
         }
     }
 
@@ -492,6 +538,13 @@ impl<S> EncryptedRemoteTransport<S> {
         plan: PartEncryptionPlan,
         plaintext: Vec<u8>,
     ) -> Result<PreparedEncryptedPart, TransferError> {
+        if context
+            .cancellation
+            .as_ref()
+            .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+        {
+            return Err(TransferError::Cancelled);
+        }
         let plaintext_digest = Blake3Digest.digest(&plaintext);
         if plaintext.len() as u64 != plan.header.plaintext_length
             || plan
@@ -505,13 +558,19 @@ impl<S> EncryptedRemoteTransport<S> {
         let mut encoded = Vec::with_capacity(capacity);
         let mut worker_usage = AeadUsageRegistry::new();
         let encryption_started = std::time::Instant::now();
-        let summary = encrypt_part(
+        let summary = encrypt_part_cancellable(
             &mut Cursor::new(plaintext),
             &mut encoded,
             &plan.header,
             &context.file_key,
             context.limits,
             &mut worker_usage,
+            || {
+                context
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+            },
         )
         .map_err(map_crypto_error)?;
         let encryption_duration_micros =
@@ -557,6 +616,7 @@ impl<S> EncryptedRemoteTransport<S> {
         Ok((prepared.encoded, prepared.manifest_part))
     }
 
+    #[cfg(test)]
     pub(crate) fn upload_prepared_part(
         &mut self,
         mut prepared: PreparedEncryptedPart,
@@ -564,36 +624,50 @@ impl<S> EncryptedRemoteTransport<S> {
     where
         S: RemoteObjectStore,
     {
-        let expected_plaintext_size = prepared.manifest_part.plaintext_length;
         let caption = self.caption(prepared.key);
         let object = self
             .store
             .upload(
                 &prepared.manifest_part.remote_locator.remote_name,
                 &caption,
-                prepared.encoded,
+                std::mem::take(&mut prepared.encoded),
             )
             .map_err(|error| match error {
                 UploadError::Definite(error) => error,
                 UploadError::AmbiguousSuccess => TransferError::Network,
             })?;
+        self.finish_prepared_part(prepared, object)
+    }
+
+    fn finish_prepared_part(
+        &mut self,
+        prepared: PreparedEncryptedPart,
+        object: RemoteByteObject,
+    ) -> Result<RemoteObject, TransferError>
+    where
+        S: RemoteObjectStore,
+    {
+        if object.object_id == 0
+            || object.name != prepared.manifest_part.remote_locator.remote_name
+            || object.encoded_size != prepared.manifest_part.encoded_length
+        {
+            return Err(TransferError::HashMismatch);
+        }
+        let expected_plaintext_size = prepared.manifest_part.plaintext_length;
+        let encoded = self.store.download(object.object_id)?;
+        if encoded.len() as u64 != prepared.manifest_part.encoded_length
+            || blake3::hash(&encoded).as_bytes()
+                != &prepared.manifest_part.encoded_ciphertext_blake3
+        {
+            return Err(TransferError::HashMismatch);
+        }
         self.hydrated_objects.insert(object.object_id);
-        prepared.manifest_part.remote_locator.message_id =
-            i64::try_from(object.object_id).map_err(|_| TransferError::ManifestCorrupted)?;
-        self.manifest_parts
-            .insert(prepared.key.part_index.get(), prepared.manifest_part);
-        let remote_object = RemoteObject {
-            object_id: object.object_id,
-            key: prepared.key,
-            plaintext_size: expected_plaintext_size,
-            encoded_size: object.encoded_size,
-            digest: prepared.plaintext_digest,
-        };
-        self.verify_remote(
-            &remote_object,
-            expected_plaintext_size,
-            prepared.plaintext_digest,
-        )?;
+        let (_, remote_object) = self.decode(prepared.key, &object, &encoded)?;
+        if remote_object.plaintext_size != expected_plaintext_size
+            || remote_object.digest != prepared.plaintext_digest
+        {
+            return Err(TransferError::HashMismatch);
+        }
         Ok(remote_object)
     }
 
@@ -611,11 +685,16 @@ impl<S> EncryptedRemoteTransport<S> {
             return Err(TransferError::HashMismatch);
         }
         let mut plaintext = Vec::with_capacity(self.part_sizes[position] as usize);
-        let summary = decrypt_part(
+        let summary = decrypt_part_cancellable(
             &mut Cursor::new(encoded),
             &mut plaintext,
             &self.file_key,
             self.limits,
+            || {
+                self.cancellation
+                    .as_ref()
+                    .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+            },
         )
         .map_err(map_crypto_error)?;
         let expected_offset = self.plaintext_offset(position)?;
@@ -694,6 +773,34 @@ impl<S> EncryptedRemoteTransport<S> {
     {
         let encoded = self.store.download(object.object_id)?;
         self.decode(key, object, &encoded)
+    }
+
+    /// Download one part named by an authenticated opened manifest. Unlike
+    /// discovery, this retains the verified plaintext for the destination owner.
+    pub(crate) fn download_manifest_part(
+        &mut self,
+        key: RemotePartKey,
+    ) -> Result<Vec<u8>, TransferError>
+    where
+        S: RemoteObjectStore,
+    {
+        self.validate_key(key)?;
+        if self.recovered_public.is_none() {
+            return Err(TransferError::ManifestCorrupted);
+        }
+        let part = self
+            .manifest_parts
+            .get(&key.part_index.get())
+            .cloned()
+            .ok_or(TransferError::ManifestCorrupted)?;
+        let object = RemoteByteObject {
+            object_id: u64::try_from(part.remote_locator.message_id)
+                .map_err(|_| TransferError::ManifestCorrupted)?,
+            name: part.remote_locator.remote_name,
+            encoded_size: part.encoded_length,
+        };
+        let (plaintext, _) = self.fetch_decode(key, &object)?;
+        Ok(plaintext)
     }
 
     /// Publish and re-read the authenticated recovery manifest. The common
@@ -1583,7 +1690,7 @@ fn validate_part_sizes(total: u64, parts: &[u64]) -> Result<(), TransferError> {
     Ok(())
 }
 
-fn package_bytes(package_id: PackageId) -> [u8; 16] {
+pub(crate) fn package_bytes(package_id: PackageId) -> [u8; 16] {
     let mut bytes = *b"TARKPKG1\0\0\0\0\0\0\0\0";
     bytes[8..].copy_from_slice(&package_id.get().to_be_bytes());
     bytes
@@ -1630,6 +1737,7 @@ fn map_application_error(error: ApplicationError) -> TransferError {
 
 fn map_crypto_error(error: CryptoError) -> TransferError {
     match error {
+        CryptoError::Cancelled => TransferError::Cancelled,
         CryptoError::AuthenticationFailed => TransferError::AuthenticationFailed,
         CryptoError::UnsupportedVersion { major, .. } => {
             TransferError::UnsupportedManifestVersion {
@@ -1890,6 +1998,10 @@ mod tests {
                 .any(|window| window == plaintext)
         );
         first.verify_remote(&uploaded, plaintext.len() as u64, digest)?;
+        assert_eq!(
+            first.download_manifest_part(key()),
+            Err(TransferError::ManifestCorrupted)
+        );
         let request = manifest_request(digest);
         first.publish_manifest(&master_key, request.clone())?;
         first.publish_manifest(&master_key, request)?;
@@ -1904,10 +2016,27 @@ mod tests {
             .pop()
             .ok_or(TransferError::ManifestCorrupted)?
             .manifest;
-        let mut recovered = EncryptedRemoteTransport::from_opened_manifest(store, opened)?;
+        let mut recovered = EncryptedRemoteTransport::from_opened_manifest(store.clone(), opened)?;
         let discovered = recovered.discover_remote(key())?;
         assert_eq!(discovered.len(), 1);
         assert_eq!(recovered.download_remote(&discovered[0])?, plaintext);
+        assert_eq!(recovered.download_manifest_part(key())?, plaintext);
+        {
+            let mut state = store.inner.lock().map_err(|_| TransferError::Network)?;
+            let object = state
+                .objects
+                .get_mut(&uploaded.object_id)
+                .ok_or(TransferError::RemoteMissing)?;
+            let last = object
+                .2
+                .last_mut()
+                .ok_or(TransferError::ManifestCorrupted)?;
+            *last ^= 1;
+        }
+        assert!(
+            recovered.download_manifest_part(key()).is_err(),
+            "authenticated manifest does not authorize corrupted part bytes"
+        );
         Ok(())
     }
 

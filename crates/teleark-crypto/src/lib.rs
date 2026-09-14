@@ -21,11 +21,13 @@ pub use error::{CryptoError, FormatKind, LayoutViolation};
 pub use manifest::{
     ExtensionField, LogicalTimestamps, ManifestLimits, ManifestMetadata, ManifestPart,
     ManifestPublicHeader, MediaKind, OpenedManifest, RemoteLocator, SourceMetadataField,
-    manifest_vault_id_hint, open_manifest, remote_manifest_name, remote_part_name, seal_manifest,
+    manifest_content_commitment, manifest_vault_id_hint, open_manifest, remote_manifest_name,
+    remote_part_name, seal_manifest,
 };
 pub use part::{
     EncryptedPartSummary, PartHeader, PartInstanceId, PartInstanceRegistry, PartLimits,
-    PlaintextPartSummary, decrypt_part, encrypt_part, frame_nonce,
+    PlaintextPartSummary, decrypt_part, decrypt_part_cancellable, encrypt_part,
+    encrypt_part_cancellable, frame_nonce,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use random::DeterministicRandom;
