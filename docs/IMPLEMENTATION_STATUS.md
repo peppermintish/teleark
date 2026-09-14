@@ -1,5 +1,19 @@
 # Implementation status — v0.4.4
 
+## Automatic Vault sync after unlock (2026-09-14)
+
+Unlock remains a local key operation. Its success is preserved while the managed
+file projection downloads and authenticates manifests in the background. Transient
+manifest failures retry automatically with delays from 2 to 60 seconds and no
+attempt cutoff; Telegram-requested waits retain their full duration through the
+object adapter. The global inspector shows the waiting reason, scheduled wait,
+and cancellation. Authentication, permission, missing-source and persistence errors
+remain terminal and actionable. Navigation retains synchronization; cancellation,
+account replacement and key/session changes fence further attempts and late results.
+Backoff runs outside the Vault workers, preserving independent key, scan and transfer
+operations. No persistent schema, encryption or recovery codec changes are required.
+
+
 ## Durable transfer recovery delivery (2026-09-14)
 
 Uploads and encrypted downloads now retain account-scoped recovery context, verified

@@ -1717,18 +1717,27 @@ pub(crate) fn hex_id(bytes: &[u8; 16]) -> String {
     output
 }
 
-fn map_application_error(error: ApplicationError) -> TransferError {
+pub(crate) fn map_application_error(error: ApplicationError) -> TransferError {
+    if let Some(delay) = error.retry_after() {
+        return TransferError::FloodWait { retry_after: delay };
+    }
     match error.kind() {
         ApplicationErrorKind::Authorization => TransferError::Authorization,
         ApplicationErrorKind::NotFound | ApplicationErrorKind::SourceMissing => {
             TransferError::RemoteMissing
         }
-        ApplicationErrorKind::PermissionDenied => TransferError::PermissionDenied,
+        ApplicationErrorKind::PermissionDenied
+        | ApplicationErrorKind::StorageAccessDenied
+        | ApplicationErrorKind::StorageConfigurationUnsafe => TransferError::PermissionDenied,
+        ApplicationErrorKind::VaultKeyUnavailable => TransferError::KeyUnavailable,
         ApplicationErrorKind::Cancelled => TransferError::Cancelled,
         ApplicationErrorKind::Persistence => TransferError::Database,
-        ApplicationErrorKind::Network | ApplicationErrorKind::Server => TransferError::Network,
+        ApplicationErrorKind::Network
+        | ApplicationErrorKind::Server
+        | ApplicationErrorKind::Conflict => TransferError::Network,
         ApplicationErrorKind::InvalidRequest
-        | ApplicationErrorKind::Conflict
+        | ApplicationErrorKind::StorageIdentityDamaged
+        | ApplicationErrorKind::StorageIdentityUnsupported
         | ApplicationErrorKind::SourceChanged
         | ApplicationErrorKind::Capacity => TransferError::ManifestCorrupted,
         _ => TransferError::Network,

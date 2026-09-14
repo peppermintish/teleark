@@ -2171,6 +2171,7 @@ fn connection_ref(state: &WorkerState) -> Result<&TelegramConnection, Applicatio
 }
 
 fn map_telegram_error(error: TelegramError) -> ApplicationError {
+    let retry_after = error.retry_after();
     let kind = match error.kind() {
         TelegramErrorKind::InvalidConfiguration
         | TelegramErrorKind::SignUpRequired
@@ -2196,7 +2197,11 @@ fn map_telegram_error(error: TelegramError) -> ApplicationError {
         }
         _ => ApplicationErrorKind::Network,
     };
-    ApplicationError::new(kind)
+    let mapped = ApplicationError::new(kind);
+    match retry_after {
+        Some(delay) => mapped.with_retry_after(delay),
+        None => mapped,
+    }
 }
 
 #[cfg(test)]

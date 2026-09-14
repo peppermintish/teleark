@@ -52,6 +52,7 @@ mod pending_upload;
 #[cfg(test)]
 mod recovery_acceptance;
 mod source_digest;
+mod sync_retry;
 mod upload_history;
 mod upload_progress;
 pub use upload_progress::{
@@ -369,6 +370,7 @@ pub enum ManagedScanMode {
 }
 
 struct VaultInner {
+    lifecycle: crate::telegram::lifecycle::Lifecycle,
     sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
     transfer_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
     scan_sender: Mutex<Option<mpsc::SyncSender<VaultEnvelope>>>,
@@ -563,6 +565,7 @@ impl DesktopVault {
         let mut senders = senders.into_iter();
         Ok(Self {
             inner: Arc::new(VaultInner {
+                lifecycle: telegram.lifecycle(),
                 sender: Mutex::new(senders.next()),
                 transfer_sender: Mutex::new(senders.next()),
                 scan_sender: Mutex::new(senders.next()),
@@ -1039,14 +1042,26 @@ impl DesktopVault {
         &self,
         build: impl FnOnce(mpsc::SyncSender<Result<T, ApplicationError>>) -> VaultCommand,
     ) -> Result<VaultJob<T>, ApplicationError> {
+        self.submit_in_session(None, build)
+    }
+
+    fn submit_in_session<T>(
+        &self,
+        revision: Option<(u64, u64)>,
+        build: impl FnOnce(mpsc::SyncSender<Result<T, ApplicationError>>) -> VaultCommand,
+    ) -> Result<VaultJob<T>, ApplicationError> {
         let (reply, response) = mpsc::sync_channel(1);
         let command = build(reply);
-        let envelope = self
+        let session = self
             .inner
             .session
             .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-            .admit(command)?;
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        if revision.is_some_and(|revision| revision != session.scan_revision()) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        let envelope = session.admit(command)?;
+        drop(session);
         let queue = if matches!(
             envelope.command,
             VaultCommand::ControlUpload { .. } | VaultCommand::StopUploadBatch { .. }
@@ -4136,6 +4151,9 @@ fn retryable_upload_failure(kind: ApplicationErrorKind) -> bool {
 }
 
 fn map_transfer_error(error: TransferError) -> ApplicationError {
+    if let TransferError::FloodWait { retry_after } = error {
+        return ApplicationError::new(ApplicationErrorKind::Network).with_retry_after(retry_after);
+    }
     ApplicationError::new(match error {
         TransferError::Network | TransferError::FloodWait { .. } => ApplicationErrorKind::Network,
         TransferError::Authorization

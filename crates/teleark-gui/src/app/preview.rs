@@ -350,6 +350,29 @@ impl TeleArkApp {
                 managed_review_pending: !waiting,
                 managed_scan: None,
             });
+            if state == "channel-sync-vault-retry" {
+                self.page = Page::Storage;
+                self.storage_view = StorageView::Files;
+                self.vault_locked = false;
+                self.vault_activity = VaultActivity::Succeeded;
+                self.managed_scan_loading = true;
+                self.managed_scan_cancellation = Some(TelegramScanCancellation::new());
+                self.channel_sync_details = true;
+                if let Some(snapshot) = &mut self.channel_sync_snapshot {
+                    snapshot.managed_scan = Some(teleark_runtime::ManagedScanStatus {
+                        chat_id: 9000,
+                        phase: ChannelSyncPhase::Waiting,
+                        phase_started: now,
+                        last_activity: now,
+                        completed: 1,
+                        total: Some(3),
+                        cached: 1,
+                        rejected: 0,
+                        failure: Some(teleark_core::ApplicationErrorKind::Network),
+                        retry_after: Some(Duration::from_secs(60)),
+                    });
+                }
+            }
         }
         self.refresh_channel_file_table(cx);
         self.refresh_preview_library(cx);

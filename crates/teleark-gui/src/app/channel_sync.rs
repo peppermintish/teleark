@@ -626,8 +626,32 @@ impl TeleArkApp {
             .child(timing);
         if let Some(snapshot) = &self.channel_sync_snapshot {
             if let Some(scan) = &snapshot.managed_scan {
-                if let Some(failure) = scan.failure {
+                if let Some(delay) = scan.retry_after {
+                    body = body.child(
+                        div()
+                            .debug_selector(|| "managed-sync-retry".into())
+                            .text_sm()
+                            .child(self.tr_with(
+                                "managed-sync-retry",
+                                MessageArgs::new().with(
+                                    "seconds",
+                                    format_integer(self.locale(), delay.as_secs()),
+                                ),
+                            )),
+                    );
+                } else if let Some(failure) = scan.failure {
                     body = body.child(self.application_error_message(failure));
+                }
+                if scan.phase == ChannelSyncPhase::ManifestFailed {
+                    body = body.child(
+                        components::button(
+                            "managed-scan-retry",
+                            self.tr("common-retry"),
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| app.scan_managed_vault_files(cx))),
+                    );
                 }
                 if scan.active() {
                     body = body.child(
@@ -914,6 +938,52 @@ pub(super) mod tests {
     use super::*;
     use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, component::table::TableDelegate as _};
+
+    #[gpui::test]
+    fn vault_retry_remains_visible_and_cancellable_after_unlock(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        let cancellation = TelegramScanCancellation::new();
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.managed_scan = Some(teleark_runtime::ManagedScanStatus {
+                chat_id: 9000,
+                phase: ChannelSyncPhase::Waiting,
+                phase_started: now,
+                last_activity: now,
+                completed: 1,
+                total: Some(3),
+                cached: 1,
+                rejected: 0,
+                failure: Some(teleark_core::ApplicationErrorKind::Network),
+                retry_after: Some(Duration::from_secs(2)),
+            });
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            app.vault_locked = false;
+            app.vault_activity = VaultActivity::Succeeded;
+            app.managed_scan_loading = true;
+            app.managed_scan_cancellation = Some(cancellation.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("managed-sync-retry").is_some());
+        app.update(cx, |app, cx| {
+            assert_eq!(app.vault_activity, VaultActivity::Succeeded);
+            assert!(!app.vault_locked);
+            app.set_page(Page::Transfers, cx);
+            assert!(
+                app.managed_scan_loading,
+                "navigation retains automatic sync"
+            );
+            assert!(!cancellation.is_cancelled());
+            app.cancel_managed_scan();
+            assert!(cancellation.is_cancelled());
+            assert!(!app.managed_scan_loading);
+            assert_eq!(app.vault_activity, VaultActivity::Succeeded);
+        });
+    }
 
     #[gpui::test]
     fn compact_sync_controls_and_independent_timeline_work_in_every_locale(

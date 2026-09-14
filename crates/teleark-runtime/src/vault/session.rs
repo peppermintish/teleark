@@ -25,6 +25,10 @@ pub(super) struct VaultEnvelope {
 }
 
 impl VaultSession {
+    pub(super) fn scan_revision(&self) -> (u64, u64) {
+        (self.generation, self.keys.revision)
+    }
+
     pub fn new(record: Option<VaultMetadataRecord>) -> Self {
         Self {
             generation: 0,

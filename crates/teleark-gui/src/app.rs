@@ -972,7 +972,7 @@ impl TeleArkApp {
         {
             self.cancel_telegram_file_load(cx);
         }
-        if self.page != page {
+        if self.page == Page::LegacyRecovery && self.page != page {
             self.cancel_managed_scan();
         }
         if self.page == Page::Library && page != Page::Library {

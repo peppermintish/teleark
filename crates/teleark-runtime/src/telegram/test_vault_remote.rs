@@ -9,6 +9,7 @@ pub(crate) enum GateKind {
     Validation,
     UploadPart,
     DownloadPart,
+    ManifestDownload,
     ManifestUpload,
     PartAcknowledgment,
     ManifestAcknowledgment,
@@ -110,6 +111,15 @@ impl TestVaultRemote {
     }
     pub(crate) fn downloads(&self) -> Vec<i64> {
         self.state.lock().expect("state").downloads.clone()
+    }
+    pub(crate) fn summaries(&self) -> Vec<TelegramFileSummary> {
+        self.state
+            .lock()
+            .expect("state")
+            .objects
+            .values()
+            .map(|object| object.summary.clone())
+            .collect()
     }
     pub(crate) fn uploads(&self) -> Vec<(i64, [u8; 32])> {
         self.state.lock().expect("state").uploads.clone()
@@ -309,6 +319,9 @@ impl TestVaultRemote {
                     if object.summary.caption != crate::transfer::MANIFEST_CAPTION {
                         self.cross_gate(GateKind::DownloadPart)?;
                         self.fail_if_armed(GateKind::DownloadPart)?;
+                    } else {
+                        self.cross_gate(GateKind::ManifestDownload)?;
+                        self.fail_if_armed(GateKind::ManifestDownload)?;
                     }
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
                     if let Some(observer) = &observer {

@@ -1306,6 +1306,7 @@ managed-scan-verifying = Authenticating manifests
 managed-scan-completed = Manifest verification complete
 managed-scan-failed = Manifest verification failed
 managed-scan-cancelled = Manifest verification cancelled
+managed-sync-retry = File sync will retry automatically after a { $seconds }-second wait. You can keep using TeleArk.
 managed-scan-unknown = unknown
 managed-scan-progress = { $phase } · { $done } / { $total }
 managed-scan-detail = { $phase } · { $done } / { $total } records · { $cached } unchanged · { $rejected } rejected · phase { $duration } · last activity { $activity } ago

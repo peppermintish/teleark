@@ -1279,6 +1279,7 @@ managed-scan-verifying = マニフェストを認証中
 managed-scan-completed = マニフェストの検証が完了しました
 managed-scan-failed = マニフェストの検証に失敗しました
 managed-scan-cancelled = マニフェストの検証をキャンセルしました
+managed-sync-retry = ファイルの同期は { $seconds } 秒の待機後に自動的に再試行されます。TeleArk は引き続き使用できます。
 managed-scan-unknown = 不明
 managed-scan-progress = { $phase } · { $done } / { $total }
 managed-scan-detail = { $phase } · { $done } / { $total } 件 · 変更なし { $cached } 件 · 拒否 { $rejected } 件 · 現在の段階 { $duration } · 最終動作 { $activity } 前

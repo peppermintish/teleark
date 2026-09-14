@@ -536,7 +536,11 @@ impl TeleArkApp {
                     .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
                 this.sync_vault_status();
                 if this.vault_activity == VaultActivity::Succeeded {
+                    this.cancel_managed_scan();
                     this.resume_unlock_intent(cx);
+                    if this.page != Page::LegacyRecovery {
+                        this.scan_managed_vault_files(cx);
+                    }
                     this.resume_durable_uploads(cx);
                 }
                 cx.notify();
@@ -661,23 +665,29 @@ impl TeleArkApp {
         } else {
             teleark_runtime::ManagedScanMode::Remote
         };
-        let job = match vault.submit_managed_scan(
-            account_id,
-            chat_id,
-            mode,
-            cancellation,
-            observer.clone(),
-        ) {
-            Ok(job) => job,
-            Err(error) => {
-                self.managed_scan_loading = false;
-                self.managed_scan_cancellation = None;
-                self.vault_activity = VaultActivity::Failed(error.kind());
-                cx.notify();
-                return;
-            }
+        let work = if cached && !verify_health {
+            cx.background_spawn(async move {
+                vault.synchronize_managed_files(account_id, chat_id, cancellation, observer)
+            })
+        } else {
+            let job = match vault.submit_managed_scan(
+                account_id,
+                chat_id,
+                mode,
+                cancellation,
+                observer.clone(),
+            ) {
+                Ok(job) => job,
+                Err(error) => {
+                    self.managed_scan_loading = false;
+                    self.managed_scan_cancellation = None;
+                    self.vault_activity = VaultActivity::Failed(error.kind());
+                    cx.notify();
+                    return;
+                }
+            };
+            cx.background_spawn(async move { job.wait() })
         };
-        let work = cx.background_spawn(async move { job.wait() });
         self.vault_scan_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
@@ -715,9 +725,15 @@ impl TeleArkApp {
                         this.managed_catalog_limited = scan.catalog_limited;
                         this.managed_health_checked =
                             scan.health_checked_files.or(this.managed_health_checked);
-                        this.vault_activity = VaultActivity::Succeeded;
+                        if !cached || verify_health {
+                            this.vault_activity = VaultActivity::Succeeded;
+                        }
                     }
-                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
+                    Err(error) => {
+                        if !cached || verify_health {
+                            this.vault_activity = VaultActivity::Failed(error.kind());
+                        }
+                    }
                 }
                 if key_activity == VaultActivity::Working {
                     this.vault_activity = key_activity;

@@ -12,6 +12,7 @@ pub struct ManagedScanStatus {
     pub cached: usize,
     pub rejected: usize,
     pub failure: Option<ApplicationErrorKind>,
+    pub retry_after: Option<Duration>,
 }
 impl ManagedScanStatus {
     pub fn active(&self) -> bool {
@@ -43,6 +44,7 @@ impl ManagedScanObserver {
             cached: 0,
             rejected: 0,
             failure: None,
+            retry_after: None,
         };
         listener(state.clone(), true);
         Self {
@@ -71,6 +73,28 @@ impl ManagedScanObserver {
     pub(crate) fn phase(&self, phase: ChannelSyncPhase) {
         self.update(|state| state.phase = phase);
     }
+    pub(crate) fn retry(&self, error: &ApplicationError, delay: Duration) {
+        self.update(|state| {
+            state.phase = if error.retry_after().is_some() {
+                ChannelSyncPhase::RateLimited
+            } else {
+                ChannelSyncPhase::Waiting
+            };
+            state.failure = Some(error.kind());
+            state.retry_after = Some(delay);
+        });
+    }
+    pub(crate) fn restart(&self) {
+        self.update(|state| {
+            state.phase = ChannelSyncPhase::ManifestQueued;
+            state.failure = None;
+            state.retry_after = None;
+            state.completed = 0;
+            state.total = None;
+            state.cached = 0;
+            state.rejected = 0;
+        });
+    }
     pub(crate) fn total(&self, total: usize) {
         self.update(|state| state.total = Some(total));
     }
@@ -84,6 +108,7 @@ impl ManagedScanObserver {
     pub(crate) fn finish(&self, failure: Option<ApplicationErrorKind>) {
         self.update(|state| {
             state.failure = failure;
+            state.retry_after = None;
             state.phase = match failure {
                 None => ChannelSyncPhase::ManifestCompleted,
                 Some(ApplicationErrorKind::Cancelled) => ChannelSyncPhase::ManifestCancelled,

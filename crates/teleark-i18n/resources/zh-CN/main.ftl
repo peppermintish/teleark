@@ -1279,6 +1279,7 @@ managed-scan-verifying = 正在验证清单真实性
 managed-scan-completed = 清单核验完成
 managed-scan-failed = 清单核验失败
 managed-scan-cancelled = 清单核验已取消
+managed-sync-retry = 文件同步将在等待 { $seconds } 秒后自动重试。您可以继续使用 TeleArk。
 managed-scan-unknown = 未知
 managed-scan-progress = { $phase } · { $done } / { $total }
 managed-scan-detail = { $phase } · { $done } / { $total } 份清单 · { $cached } 份未变更 · { $rejected } 份被拒绝 · 本阶段 { $duration } · 上次活动于 { $activity } 前

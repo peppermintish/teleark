@@ -157,15 +157,29 @@ pub enum ApplicationErrorKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationError {
     kind: ApplicationErrorKind,
+    retry_after: Option<std::time::Duration>,
 }
 
 impl ApplicationError {
     pub const fn new(kind: ApplicationErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            retry_after: None,
+        }
     }
 
     pub const fn kind(&self) -> ApplicationErrorKind {
         self.kind
+    }
+
+    /// Server-requested minimum wait; ephemeral, never a persisted error code.
+    pub const fn with_retry_after(mut self, delay: std::time::Duration) -> Self {
+        self.retry_after = Some(delay);
+        self
+    }
+
+    pub const fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
     }
 }
 
