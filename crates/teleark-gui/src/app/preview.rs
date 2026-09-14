@@ -551,6 +551,14 @@ impl TeleArkApp {
                 rows.push(row);
             }
         }
+        for row in &mut rows {
+            if !matches!(
+                row.state,
+                crate::mock::TransferState::Uploading | crate::mock::TransferState::Downloading
+            ) {
+                row.eta = self.tr("transfer-value-unavailable");
+            }
+        }
         for index in 0..48 {
             let mut row = fixture[index % fixture.len()].clone();
             row.name = format!("{:02} {}", index + 1, row.name).into();
@@ -744,6 +752,7 @@ impl TeleArkApp {
                 .with("count", "2")
                 .with("source", "Kyoto · September"),
         );
+        let unavailable = self.tr("transfer-value-unavailable");
         for row in &mut self.preview_transfer_rows {
             if let Some(summary) = row.batch_summary.as_mut() {
                 summary.total = 2;
@@ -758,6 +767,7 @@ impl TeleArkApp {
                 row.transferred = row.size.clone();
                 row.progress = 100.0;
                 row.state = crate::mock::TransferState::Completed;
+                row.eta = unavailable.clone();
             }
         }
         self.preview_transfer_rows

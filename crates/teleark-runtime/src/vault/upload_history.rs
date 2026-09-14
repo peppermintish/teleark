@@ -169,7 +169,7 @@ impl VaultOwner {
                         row.part_count = u32::try_from(
                             context
                                 .size_bytes
-                                .div_ceil(crate::transfer::encrypted_part_plaintext_limit()),
+                                .div_ceil(context.container_plaintext_limit),
                         )
                         .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
                         row.completed_parts = row.part_count;
@@ -451,6 +451,7 @@ mod tests {
         let source = temp.path().join("synthetic.bin");
         std::fs::write(&source, [9; 128])?;
         let context = crate::VaultRecoveryContext {
+            container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
             account_id: 7,
             task_id: 1,
             chat_id: 90,

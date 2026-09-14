@@ -47,7 +47,9 @@ pub use teleark_telegram::{AuthorizationPhase, AuthorizationSnapshot, Authorizat
 pub use teleark_telegram::{TelegramAccount, TelegramChatKind};
 
 mod channel_sync;
+mod transfer_rate;
 mod transfer_updates;
+pub use transfer_rate::TransferRate;
 pub use transfer_updates::{TransferSnapshotView, TransferSubscription};
 mod channel_transfer;
 pub use channel_sync::{
@@ -797,8 +799,24 @@ impl DesktopLibrary {
     ) -> Result<Vec<teleark_storage::CachedManifestCandidate>, ApplicationError> {
         self.worker.request("cached_manifest_candidates", |reply| {
             StorageRequest::CachedManifestCandidates {
+                caption: transfer::MANIFEST_CAPTION,
                 account: AccountId::new(account),
                 chat: teleark_core::ChatId::new(chat),
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn cached_pending_upload_candidates(
+        &self,
+        account: i64,
+        chat: i64,
+    ) -> Result<Vec<teleark_storage::CachedManifestCandidate>, ApplicationError> {
+        self.worker.request("cached_pending_uploads", |reply| {
+            StorageRequest::CachedManifestCandidates {
+                account: AccountId::new(account),
+                chat: teleark_core::ChatId::new(chat),
+                caption: vault::remote_upload::CAPTION,
                 reply,
             }
         })
@@ -955,6 +973,7 @@ enum StorageRequest {
         reply: SyncSender<Result<teleark_storage::ManagedChannelWatch, ApplicationError>>,
     },
     CachedManifestCandidates {
+        caption: &'static str,
         account: AccountId,
         chat: teleark_core::ChatId,
         reply: SyncSender<Result<Vec<teleark_storage::CachedManifestCandidate>, ApplicationError>>,
@@ -1609,18 +1628,14 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 );
             }
             StorageRequest::CachedManifestCandidates {
+                caption,
                 account,
                 chat,
                 reply,
             } => {
                 let _ = reply.send(
                     database
-                        .cached_manifest_candidates(
-                            account,
-                            chat,
-                            transfer::MANIFEST_CAPTION,
-                            1_001,
-                        )
+                        .cached_manifest_candidates(account, chat, caption, 1_001)
                         .map_err(map_storage_error),
                 );
             }

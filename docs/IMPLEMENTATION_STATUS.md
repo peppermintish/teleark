@@ -1,5 +1,49 @@
 # Implementation status — v0.4.4
 
+## Memory streaming, portable recovery and receipt rates (2026-09-15)
+
+Implemented the six-point transfer update and the memory-only payload rule in
+[AGENTS.md](../AGENTS.md). New encrypted containers are capped at **1.9 GiB**
+(2,040,109,465 encoded bytes including framing), while full encryption/transport
+blocks remain 512 KiB. Upload encrypts and sends from bounded memory. Download
+authenticates/decrypts in memory, writes plaintext partial output and publishes it
+only after complete verification. No new ciphertext spool is created; old ones
+remain readable solely for compatible recovery.
+
+Whole-file/container BLAKE3 share one source pass. A separate incomplete remote
+announcement precedes that pass and carries authenticated published-container
+progress afterward. A second independent database with the recovery key and same
+source can discover and resume it in the same account/channel. Wrong sources are
+rejected, published containers are verified/reused, and lost unpublished memory
+gets a new encryption identity. Pending metadata and local context formats are
+specified in [ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md),
+[pending format](PENDING_UPLOAD_FORMAT.md) and
+[recovery formats](VAULT_TRANSFER_RECOVERY.md). V1 context bytes/keys retain their
+meaning; v2 persists geometry. SQLite remains 22 and existing migrations remain.
+
+RPC acknowledgements update shared memory counters immediately. Ordinary numbers
+publish once per second using a trailing three-second window with fixed 50 ms
+buckets. First usable samples and important transitions publish promptly; silence
+expires the rate, outstanding requests show waiting/last confirmation, and restored
+progress produces no burst. Checkpoint saves run concurrently and retain progress.
+Per-account rates are incremental, stable row identities and changed-row overlays
+avoid rebuilding task history, and filters/action scopes are cached. Expanded
+upload/download rows show processed/total size and ETA with complete-value tooltips.
+Charts retain 96 samples, timelines 128 events, and block maps at most 128 grouped
+cells; omission/aggregation is visible.
+
+Deterministic evidence includes first-block streaming, authentication-before-output,
+blocked persistence with continuing acknowledgements, timing/restore/duplicate
+behavior, compatible frozen codecs, transactional import rollback, and a real-crypto
+two-database resume/download round trip. Full gate and interface results are recorded
+in the [validation record](validation/2026-09-15-memory-streaming.md). Tests/previews
+use synthetic data; no live Telegram throughput
+or reduced-startup-duration claim is made. The complete source baseline still
+precedes payload encryption, so this is not a fully one-pass mutable-source upload.
+Remote metadata/orphan messages are retained; distributed writer exclusion and
+remote cleanup are outside this handoff boundary. Earlier entries below are
+historical observations, superseded where this section/ADR 0041 says otherwise.
+
 ## Upload byte-count scope (2026-09-15)
 
 The upload activity line now explicitly labels acknowledged encrypted bytes as

@@ -35,6 +35,62 @@ fn step(
 }
 
 #[test]
+fn remote_import_is_atomic_restartable_and_cannot_promote_after_pause() -> StorageResult<()> {
+    let mut db = Database::open_in_memory()?;
+    let job = job(9, VaultJobDirection::Upload);
+    let pending = PendingVaultUpload {
+        account_id: 7,
+        id: 9,
+        chat_id: 11,
+        batch_id: 9,
+        created_at_unix_ms: 100,
+        codec_version: 1,
+        context: vec![1, 2, 3],
+    };
+    db.admit_pending_vault_uploads(std::slice::from_ref(&pending))?;
+    let parts = [VaultPartRecord {
+        part_index: 0,
+        identity: vec![4],
+        receipt: Some(vec![5]),
+    }];
+    db.connection.execute_batch("CREATE TEMP TRIGGER interrupt_import BEFORE INSERT ON vault_transfer_parts BEGIN SELECT RAISE(ABORT, 'synthetic import interruption'); END;")?;
+    assert!(db.import_vault_upload(&pending, 0, &job, &parts).is_err());
+    assert!(db.vault_job(7, 9)?.is_none());
+    assert_eq!(
+        db.pending_vault_upload(7, 9)?
+            .expect("pending preserved")
+            .state,
+        PendingVaultUploadState::Queued
+    );
+    db.connection
+        .execute_batch("DROP TRIGGER interrupt_import;")?;
+    assert!(db.transition_pending_vault_upload(
+        lease(9, 0),
+        PendingVaultUploadState::Queued,
+        VaultJobTransition::RequestPause,
+        None
+    )?);
+    assert!(!db.import_vault_upload(&pending, 0, &job, &parts)?);
+    assert!(db.vault_job(7, 9)?.is_none());
+    assert!(db.transition_pending_vault_upload(
+        lease(9, 1),
+        PendingVaultUploadState::Paused,
+        VaultJobTransition::Resume,
+        None
+    )?);
+    assert!(db.import_vault_upload(&pending, 2, &job, &parts)?);
+    assert!(!db.import_vault_upload(&pending, 2, &job, &parts)?);
+    assert_eq!(db.vault_parts(7, 9, None, 1)?, parts);
+    assert_eq!(db.last_confirmed_vault_part(7, 9)?, Some(0));
+    let plan:String = db.connection.query_row("EXPLAIN QUERY PLAN SELECT part_index FROM vault_transfer_parts WHERE account_id=7 AND task_id=9 AND receipt IS NOT NULL ORDER BY part_index DESC LIMIT 1",[],|row| row.get(3))?;
+    assert!(
+        plan.contains("SEARCH") && !plan.contains("TEMP B-TREE"),
+        "{plan}"
+    );
+    Ok(())
+}
+
+#[test]
 fn admission_is_idempotent_without_rewinding_work_or_replacing_identity() -> StorageResult<()> {
     let mut db = Database::open_in_memory()?;
     let original = job(1, VaultJobDirection::Upload);
@@ -372,7 +428,7 @@ fn keyset_pages_use_the_filtered_index_and_future_context_stays_intact() -> Stor
     );
     drop(stmt);
     db.connection.execute(
-        "UPDATE vault_transfer_jobs SET context_version=2 WHERE id=1",
+        "UPDATE vault_transfer_jobs SET context_version=99 WHERE id=1",
         [],
     )?;
     assert!(db.vault_job(7, 1).is_err());
@@ -536,7 +592,7 @@ fn cold_start_recovers_all_accounts_without_rewriting_future_contexts() -> Stora
         }
     }
     db.connection.execute(
-        "UPDATE vault_transfer_jobs SET context_version=2 WHERE account_id=10",
+        "UPDATE vault_transfer_jobs SET context_version=99 WHERE account_id=10",
         [],
     )?;
     assert_eq!(db.recover_all_vault_jobs(103)?, 3);

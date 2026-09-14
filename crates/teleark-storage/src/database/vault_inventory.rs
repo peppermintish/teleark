@@ -8,6 +8,7 @@ pub enum VaultFileHealth {
     #[default]
     Unchecked,
     Present,
+    PendingUpload,
     MissingParts,
     MissingManifest,
     KeyUnavailable,

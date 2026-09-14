@@ -20,9 +20,10 @@ mod wrap;
 pub use error::{CryptoError, FormatKind, LayoutViolation};
 pub use manifest::{
     ExtensionField, LogicalTimestamps, ManifestLimits, ManifestMetadata, ManifestPart,
-    ManifestPublicHeader, MediaKind, OpenedManifest, RemoteLocator, SourceMetadataField,
-    manifest_content_commitment, manifest_vault_id_hint, open_manifest, remote_manifest_name,
-    remote_part_name, seal_manifest,
+    ManifestPublicHeader, MediaKind, OpenedManifest, PendingUpload, PendingUploadScope,
+    RemoteLocator, SourceMetadataField, manifest_content_commitment, manifest_vault_id_hint,
+    open_manifest, open_pending_upload, remote_manifest_name, remote_part_name, seal_manifest,
+    seal_pending_upload,
 };
 pub use part::{
     EncryptedPartSummary, PartHeader, PartInstanceId, PartInstanceRegistry, PartLimits,

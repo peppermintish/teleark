@@ -31,6 +31,7 @@ use grammers_session::{
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
+mod download_stream;
 mod upload;
 pub use upload::{
     StreamUploadOptions, UPLOAD_PART_BYTES, UPLOAD_RESUME_WINDOW_MS, UploadCheckpoint, UploadStream,
@@ -70,7 +71,10 @@ const MAX_DIALOGS_PER_REQUEST: usize = 10_000;
 const MAX_MESSAGES_PER_SCAN: usize = 10_000;
 const MAX_SEARCH_RESULTS: usize = 1_000;
 const RECENT_SEARCH_MESSAGES: usize = 512;
+/// Small in-memory documents; large containers must use the disk/stream path.
 pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+/// Floor(1.9 GiB), including the container header and authentication tags.
+pub const MAX_STREAM_OBJECT_BYTES: u64 = 19 * 1024 * 1024 * 1024 / 10;
 const DOWNLOAD_CHUNK_SIZE: u64 = 512 * 1024;
 pub const DOWNLOAD_PART_SIZE_BYTES: u64 = 1024 * 1024;
 const MAX_DOWNLOAD_INFLIGHT_PARTS: usize = 64;
@@ -109,9 +113,19 @@ pub enum DownloadControl {
 ///
 /// Implementations must return quickly and must not expose secrets or file
 /// content. Telegram invokes the observer after each durable in-process write.
+pub trait DownloadReceiptObserver: Send + Sync {
+    /// Cumulative bytes of this logical range confirmed by individual RPC replies.
+    /// Retries may report the same prefix; observers must count only its increase.
+    fn acknowledged(&self, part: u64, bytes: u64);
+    fn completed(&self, _part: u64) {}
+}
+
 pub trait DownloadObserver: Send + Sync {
     fn control(&self) -> DownloadControl;
     fn progressed(&self, transferred_bytes: u64);
+    fn receipt_observer(&self) -> Option<Arc<dyn DownloadReceiptObserver>> {
+        None
+    }
 
     fn desired_inflight_parts(&self) -> usize {
         4
@@ -969,6 +983,7 @@ impl TelegramConnection {
                     let document = file.document.clone();
                     let flood_gate = Arc::clone(&flood_gate);
                     let bandwidth = self.bandwidth.download.clone();
+                    let receipts = observer.receipt_observer();
                     inflight_downloads.spawn(async move {
                         let attempt_started = Instant::now();
                         let result = download_logical_part(
@@ -979,6 +994,7 @@ impl TelegramConnection {
                             length_bytes,
                             flood_gate,
                             bandwidth,
+                            receipts,
                         )
                         .await;
                         (
@@ -1051,6 +1067,7 @@ impl TelegramConnection {
                 persist_download_part_map(&part_map_path, &part_map).await?;
                 received = part_map.completed_bytes();
                 observer.progressed(received);
+                if let Some(receipts) = observer.receipt_observer() { receipts.completed(part_index); }
                 observer.part_event(DownloadPartEvent {
                     part_index: downloaded.part_index,
                     offset_bytes: downloaded.offset_bytes,
@@ -1143,6 +1160,7 @@ impl TelegramConnection {
                             length as u64,
                             flood_gate.clone(),
                             bandwidth.clone(),
+                            None,
                         )
                         .await;
                         match result {
@@ -1435,6 +1453,7 @@ fn take_ready_part(
     queue.remove(position)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_logical_part(
     client: Client,
     document: Document,
@@ -1443,8 +1462,9 @@ async fn download_logical_part(
     length_bytes: u64,
     flood_gate: Arc<DownloadFloodGate>,
     bandwidth: BandwidthBudget,
+    receipts: Option<Arc<dyn DownloadReceiptObserver>>,
 ) -> Result<DownloadedLogicalPart, TelegramError> {
-    let chunk_size = bandwidth.download_chunk_size();
+    let chunk_size = bandwidth.download_chunk_size().min(UPLOAD_PART_BYTES);
     let skipped_chunks = i32::try_from(offset_bytes / chunk_size as u64)
         .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
     let expected_length = usize::try_from(length_bytes)
@@ -1476,6 +1496,9 @@ async fn download_logical_part(
             return Err(TelegramError::new(TelegramErrorKind::Network));
         }
         bytes.extend_from_slice(&chunk);
+        if let Some(receipts) = &receipts {
+            receipts.acknowledged(part_index, bytes.len() as u64);
+        }
     }
     Ok(DownloadedLogicalPart {
         part_index,

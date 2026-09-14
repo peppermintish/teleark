@@ -17,9 +17,10 @@ pub enum VaultUploadPhase {
     CheckingSource,
     SavingRecovery,
     Preparing,
-    SealingSpool,
+    SealingContainer,
     WaitingForTelegram,
     Uploading,
+    Downloading,
     SendingMessage,
     Verifying,
     Publishing,
@@ -36,6 +37,9 @@ pub struct VaultUploadActivity {
     /// Logical-size equivalent of acknowledged ciphertext on the streaming path.
     /// Publication and whole-file verification remain separate.
     pub uploaded_bytes: u64,
+    /// New RPC acknowledgements in this owner generation; restored receipts excluded.
+    pub acknowledged_bytes: u64,
+    pub persistence_since: Option<Instant>,
     part_plaintext_bytes: u64,
     pub started: Instant,
     pub last_activity: Instant,
@@ -89,6 +93,8 @@ impl VaultUploadActivity {
             bytes: 0,
             total: 0,
             uploaded_bytes: 0,
+            acknowledged_bytes: 0,
+            persistence_since: None,
             part_plaintext_bytes: 0,
             started: now,
             last_activity: now,
@@ -123,13 +129,13 @@ impl VaultUploadActivity {
             wait_millis,
         });
     }
-    fn sample(&mut self, now: Instant, force: bool) {
+    pub(crate) fn sample(&mut self, now: Instant, force: bool) -> bool {
         let elapsed = now.duration_since(self.sample_at);
-        if elapsed < Duration::from_millis(250) && !force {
-            return;
+        if elapsed < Duration::from_secs(1) && !force {
+            return false;
         }
         if elapsed.is_zero() {
-            return;
+            return false;
         }
         let total = self
             .acknowledged_base
@@ -150,6 +156,7 @@ impl VaultUploadActivity {
         });
         self.sample_at = now;
         self.sample_bytes = total;
+        true
     }
     fn acknowledged(&mut self, bytes: u64, total: u64, verified: u64, file_size: u64) {
         self.bytes = bytes.min(total);
@@ -167,8 +174,17 @@ impl VaultUploadActivity {
         if self.phase != phase {
             self.phase = phase;
             self.since = Instant::now();
-            self.bytes = 0;
-            self.total = 0;
+            if !matches!(
+                phase,
+                VaultUploadPhase::Uploading
+                    | VaultUploadPhase::SavingRecovery
+                    | VaultUploadPhase::WaitingForTelegram
+                    | VaultUploadPhase::SealingContainer
+                    | VaultUploadPhase::SendingMessage
+            ) {
+                self.bytes = 0;
+                self.total = 0;
+            }
             self.event(None, false, 0, 0);
         }
     }
@@ -243,6 +259,8 @@ impl VaultUploadObserver {
                     .saturating_add(activity.acknowledged_current);
                 activity.acknowledged_current = 0;
                 activity.parts.clear();
+                activity.bytes = 0;
+                activity.total = 0;
             }
         });
     }
@@ -255,6 +273,8 @@ impl ByteTransferObserver for VaultUploadObserver {
             ByteTransferEvent::Uploading { .. }
                 | ByteTransferEvent::Downloading { .. }
                 | ByteTransferEvent::UploadQueue { .. }
+                | ByteTransferEvent::PartAcknowledged { .. }
+                | ByteTransferEvent::PartStarted { .. }
         ) {
             self.log(event);
         }
@@ -276,7 +296,7 @@ impl ByteTransferObserver for VaultUploadObserver {
                             state: VaultUploadPartState::Queued,
                             attempt: 0
                         };
-                        parts.min(128) as usize
+                        parts.min(4096) as usize
                     ];
                     activity.total = total;
                     // Restored acknowledgements are a baseline, never a burst of new throughput.
@@ -315,11 +335,16 @@ impl ByteTransferObserver for VaultUploadObserver {
                         snapshot.transferred_bytes,
                         snapshot.size_bytes,
                     );
+                    if attempt > 0 {
+                        activity.acknowledged_bytes = activity
+                            .acknowledged_bytes
+                            .saturating_add(bytes.saturating_sub(activity.acknowledged_current));
+                    }
                     activity.acknowledged_current = bytes;
                     if attempt == 0 {
                         activity.sample_bytes = activity.acknowledged_base.saturating_add(bytes);
                     } else {
-                        activity.sample(Instant::now(), bytes == total);
+                        // Rate and chart publication belongs to the one-second owner.
                     }
                 }
                 ByteTransferEvent::PartStarted { index, attempt } => {
@@ -345,21 +370,38 @@ impl ByteTransferObserver for VaultUploadObserver {
                     activity.event(Some(index), false, attempt, wait_millis);
                 }
                 ByteTransferEvent::SavingCheckpoint => {
-                    activity.set_phase(VaultUploadPhase::SavingRecovery)
+                    activity.persistence_since = Some(Instant::now());
+                    activity.event(None, false, 0, 0);
                 }
                 ByteTransferEvent::CheckpointSaved => {
-                    activity.set_phase(VaultUploadPhase::Uploading)
+                    activity.persistence_since = None;
+                    activity.event(None, false, 0, 0);
                 }
                 ByteTransferEvent::WaitingForSeal => {
-                    activity.set_phase(VaultUploadPhase::SealingSpool)
+                    activity.set_phase(VaultUploadPhase::SealingContainer)
                 }
                 ByteTransferEvent::SendingMessage => {
                     activity.set_phase(VaultUploadPhase::SendingMessage)
                 }
                 ByteTransferEvent::Downloading { bytes, total } => {
-                    activity.set_phase(VaultUploadPhase::Verifying);
-                    activity.bytes = bytes.min(total);
-                    activity.total = total;
+                    if snapshot.direction == crate::VaultTransferDirection::Download {
+                        activity.set_phase(VaultUploadPhase::Downloading);
+                        activity.acknowledged_bytes = activity
+                            .acknowledged_bytes
+                            .saturating_add(bytes.saturating_sub(activity.acknowledged_current));
+                        activity.acknowledged_current = bytes;
+                        activity.acknowledged(
+                            bytes,
+                            total,
+                            snapshot.transferred_bytes,
+                            snapshot.size_bytes,
+                        );
+                        activity.active = u16::from(bytes < total);
+                    } else {
+                        activity.set_phase(VaultUploadPhase::Verifying);
+                        activity.bytes = bytes.min(total);
+                        activity.total = total;
+                    }
                 }
             }
         });
@@ -380,15 +422,15 @@ mod tests {
         }
         assert_eq!(activity.events.len(), 128);
         assert_eq!(activity.omitted_events, 873);
-        assert_eq!(activity.samples.len(), 4);
-        assert_eq!(activity.samples[0].interval_millis, 250);
-        assert_eq!(activity.samples[0].bytes_per_second, 250 * 512 * 1024 * 4);
+        assert_eq!(activity.samples.len(), 1);
+        assert_eq!(activity.samples[0].interval_millis, 1000);
+        assert_eq!(activity.samples[0].bytes_per_second, 1000 * 512 * 1024);
         for index in 1..=150 {
             activity.acknowledged_current += 512 * 1024;
-            activity.sample(start + Duration::from_millis(1000 + index * 250), false);
+            activity.sample(start + Duration::from_millis(1000 + index * 1000), false);
         }
         assert_eq!(activity.samples.len(), 96);
-        assert_eq!(activity.omitted_samples, 58);
+        assert_eq!(activity.omitted_samples, 55);
         activity.set_phase(VaultUploadPhase::SendingMessage);
         activity.set_phase(VaultUploadPhase::Persisting);
         assert_eq!(

@@ -2,64 +2,62 @@
 
 Status: DesktopVault uploads and downloads persist recovery context, support mid-file pause/cancel/retry, and dispatch eligible work after restart and unlock. Native cancellation retains a durable cleanup obligation. Legacy summaries without recovery context remain viewable but cannot be resumed. The evidence and limits below describe synthetic transport tests and native macOS UI review; no live Telegram or other-platform qualification is implied.
 
-## Streaming upload recovery (2026-09-14)
+## Current streaming recovery (2026-09-15)
 
-New uploads use aligned part/manifest codecs 2.0 and the existing context,
-reservation, receipt and outbox envelopes. Key wraps/recovery bundles stay v1.
-A full encrypted frame including its framing is one 512 KiB Telegram upload part;
-the last frame can be shorter. Application containers remain at most 60 MiB
-plaintext. The following policy supersedes historical reconstruct-and-read-back
-upload descriptions in earlier ADRs and acceptance notes.
+[ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md) supersedes
+older descriptions of new ciphertext spools, 60 MiB container targets and retiring
+the whole package merely because temporary Telegram parts expired. Encrypted
+containers now have a 1.9 GiB encoded ceiling. Upload and download stream 512 KiB
+blocks through bounded memory; authenticated plaintext alone goes to the download
+partial file. Legacy ciphertext spools remain readable compatibility inputs, never
+new outputs. Full source and per-container hashes share one inspection pass, and
+encryption rechecks source content on its subsequent pass.
 
-An upload attempt has a **24-hour** recovery window from its context creation
-clock. A backwards clock or an age of at least 24 hours causes an automatic fresh
-package and File Key before any new encryption, clearing the superseded part/outbox
-ledger in the same transaction. Source/key material remains available and the
-source is checked again. Initial queued-at history is preserved. Paused work still
-requires Resume. A sealed manifest outbox represents finalization of already
-published documents and can finish without the original source after this window.
-Telegram can expire temporary parts earlier; this policy does not promise server
-retention. Structured missing-part errors reset only the temporary upload ID and
-allow one immediate replay of existing ciphertext.
+A new upload first publishes an independently authenticated, incomplete
+[pending descriptor](PENDING_UPLOAD_FORMAT.md). After source verification and each
+published container it publishes an updated prefix. A second device with the same
+source, recovery key and Telegram account/channel can import that prefix and
+stream-verify remote containers before reuse. Unpublished containers get fresh
+encryption identities when their in-memory ciphertext was lost. The manifest is
+published only after all source/container/remote checks; sealed finalization
+metadata is replayed byte-for-byte without requiring the original source.
 
-Each container has a private spool below the database-adjacent `upload-spool`
-directory, scoped by account/task and BLAKE3 of the committed reservation:
+The immutable local context and part reservations are still committed before
+payload encryption. Source changes, stale leases, pause/cancel intent and failed
+imports cannot publish a completed logical file. A local `TARKRI01` locator
+preserves preflight announcements across restart. Tiny `.seal`, upload bitmap and
+manifest outbox records are recovery metadata, separate from payload streaming.
+Saving them retains upload progress and has its own concurrent activity indicator.
 
-| Suffix | Version / meaning |
-| --- | --- |
-| `.ciphertext` | exact part-codec bytes, <=64 MiB; create-new, never overwritten for encryption |
-| `.seal` | exactly192 bytes: header96, plaintext hash32, encoded hash32, BLAKE3(identity + preceding160 bytes)32 |
-| `.upload` | `TARKUP01`8, file ID i64 LE, start time u64 LE, length u64 LE, one 0/1 byte per protocol part, BLAKE3 of preceding bytes32 |
+Unfinished v1 reservations without a sealed manifest still restart automatically
+under a fresh package/File Key and aligned codec 2, with visible upgrade feedback.
+Completed v1 files and sealed v1/v2 manifest outboxes retain their exact readers and
+bytes. Failed/stale transitions preserve original recovery records. The 24-hour
+RPC attempt window is a client policy, not guaranteed Telegram retention.
 
-Spool files are0600 and task directories0700. Encryption writes a bounded block
-to disk and forwards it to the bounded transport queue. A seal is published only
-after the source digest matches and ciphertext has been flushed/synced; sendMedia
-waits for that seal. ACK maps are atomically replaced after eight acknowledgements
-or the final one on a blocking owner. A crash may lose recent bits and cause
-idempotent retransmission of the same bytes, never nonce reuse. Newer checkpoint
-magic stays intact and fails closed; a corrupted v1 map is retained as
-`.upload-corrupt` while a new temporary file ID is allocated.
+## Context version 2 and supported read/write matrix
 
-A valid sealed spool is length/hash checked only during recovery, then replayed
-without encryption. If local preparation was interrupted or the spool is missing
-or corrupt, the current container restarts: its saved 128-bit instance ID advances
-without wrap in a fenced transaction, deriving a new content key. The old ID can
-never be selected again for that part; overflow fails closed. Only after this
-commit is the old partial spool removed. Fully published containers retain their
-receipts and tiny summaries; their large local ciphertext is released.
+SQLite remains 22 with the existing automatic 0–21 migration chain; this change
+adds no tables. Executable contexts read **1 and 2**. Version 2 uses the same
+`TARKVR01` magic, a version u32 of 2, and inserts a little-endian u64
+`container_plaintext_limit` immediately after logical size, before the filename.
+The fixed header is therefore 151 bytes. The checksum covers that field as well.
+All other fields and scopes retain v1 meanings. Geometry must be positive and at
+most the current plaintext ceiling; upload offsets and download restart use the
+saved geometry instead of the current default.
 
-Normal part publication uses its locally sealed digest and the confirmed Telegram
-message ID, with no remote content read-back. A sealed but unreceipted publication
-can require bounded search/hash reconciliation, and legacy receipts without local
-summaries require one authenticated read. The small authoritative manifest retains
-its separate verification. Restart never encrypts with a saved retired identity.
+Version 1 is read with its original 60 MiB plaintext geometry and re-encodes to
+exactly its original bytes. Its reader is retained, so a skipped upgrade requires
+no export, reset or reinterpretation. New contexts with explicit geometry write
+v2; canonical legacy geometry retains v1. Pending source admission, part reservation,
+receipts, manifest outbox and temporary/native bitmaps retain their versions.
+Part/manifest readers remain 1.0/2.0 and fresh payload writers use 2.0. Unsupported
+context versions remain intact and supported-version SQL guards cannot mutate them.
 
-Unfinished v1 reservations without a sealed manifest restart automatically under
-new package/key identities and codec2, with an upgrade phase in the event timeline.
-Completed v1 files and sealed v1 manifest outboxes retain the old reader and exact
-bytes. Transactions preserve the old context/parts on failed or stale upgrades;
-SQL failure/rollback, saved-key recovery, new/old fixtures and skipped old jobs are
-covered by deterministic tests. No manual exports or reset are required.
+Frozen synthetic fixtures are `upload-context-v1.bin` and
+`upload-context-v2.bin` under `crates/teleark-runtime/src/vault_recovery/fixtures`.
+They verify exact encoding, preserved wrapped keys, differing geometry and
+compatible reads without changing previously stored bytes.
 
 ## Context version 1
 
@@ -91,9 +89,9 @@ content write. A revision change alone therefore does not reject admission,
 preparation, finalization or resume. Full-source hashing, immutable per-part digests,
 and remote ciphertext/AEAD verification remain required. Resume checks the saved
 whole digest before restoring encryption work; even same-size content changes with
-a restored modification time are rejected before nonce reuse. Both context and
-pending-source codecs remain read/write v1, including the original revision bytes;
-existing saved contexts and reservations are retained without conversion. See
+a restored modification time are rejected before nonce reuse. The v1 context and
+pending-source revision bytes retain their meanings; v2 adds only geometry as specified above. Existing saved contexts and reservations remain
+readable without conversion. See
 [ADR 0035](adr/0035-vault-source-metadata-validation.md).
 
 Download fields after the destination path: positive manifest message ID i64, manifest-envelope BLAKE3-256, complete plaintext BLAKE3-256. The runtime must authenticate the exact manifest, validate its package/part layout and key scope, and revalidate any retained local extents before skipping work. The persisted absolute destination must be honored with non-overwriting publication.
@@ -371,16 +369,17 @@ source files, encryption/authentication, `TelegramObjectStore` mapping and SQLit
 together. Acceptance cases cover:
 
 - Pending alias-name preservation across pause/restart and authenticated download.
-- Upload transport pause with identical publication ID and ciphertext on restart.
+- Upload transport pause with safe identity retirement before re-encryption when
+  unpublished in-memory ciphertext is lost; published immutable bytes are reused.
 - Download transport pause with the same restored task and destination.
 - Saved-manifest completion after deleting the synthetic original source.
 - Part and manifest publication whose successful reply is lost: remote bytes exist
   without a verified local receipt; after pause/restart or a durable network failure
   and explicit retry, reconciliation completes without another send. Manifest
   recovery also succeeds with the original synthetic source deleted.
-- A 61 MiB file using the production 60 MiB part limit: pause during the second
-  part, restart, recheck and reuse the first verified local extent, fetch only the
-  interrupted part, then compare the entire output hash and both durable receipts.
+- A synthetic 2 MiB file using an explicit 1 MiB test geometry: pause during the
+  second part, restart, recheck and reuse the first verified local extent, fetch only
+  the interrupted part, then compare the entire output hash and both durable receipts.
 - Upload and download network failures persisted as Retryable, followed by restart
   and successful retry with unchanged recovery context and a new generation.
 - Upload and download cancellation acknowledged during transport and retained

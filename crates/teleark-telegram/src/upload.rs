@@ -25,7 +25,7 @@ pub struct UploadCheckpoint {
 }
 impl UploadCheckpoint {
     pub fn new(total_bytes: u64, now: u64) -> Result<Self, TelegramError> {
-        if total_bytes == 0 || total_bytes > MAX_TRANSFER_OBJECT_BYTES as u64 {
+        if total_bytes == 0 || total_bytes > MAX_STREAM_OBJECT_BYTES {
             return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
         }
         let mut bytes = [0; 8];
@@ -55,7 +55,7 @@ impl UploadCheckpoint {
         bytes
     }
     pub fn decode(bytes: &[u8], total: u64) -> Option<Self> {
-        if total == 0 || total > MAX_TRANSFER_OBJECT_BYTES as u64 {
+        if total == 0 || total > MAX_STREAM_OBJECT_BYTES {
             return None;
         }
         let count = total.div_ceil(UPLOAD_PART_BYTES as u64) as usize;
@@ -121,7 +121,7 @@ impl TelegramConnection {
         }
         let count = stream.total_bytes.div_ceil(UPLOAD_PART_BYTES as u64) as usize;
         if count == 0
-            || stream.total_bytes > MAX_TRANSFER_OBJECT_BYTES as u64
+            || stream.total_bytes > MAX_STREAM_OBJECT_BYTES
             || stream.checkpoint.file_id == 0
             || stream.checkpoint.acknowledged.len() != count
         {
@@ -201,7 +201,7 @@ impl TelegramConnection {
         if let Some(observer) = &options.observer {
             observer.observe(ByteTransferEvent::WaitingForSeal);
         }
-        // The producer must close only after source validation and durable spool sealing.
+        // The producer must close only after source validation and its durable metadata summary.
         finish_stream(&mut stream).await?;
         if let Some(observer) = &options.observer {
             observer.observe(ByteTransferEvent::SendingMessage);
@@ -222,7 +222,7 @@ impl TelegramConnection {
             Ok(updates) => updates,
             Err(error) if missing_temporary_parts(&error) => {
                 // Persist a new temporary identity before requesting a bounded
-                // replay from the Runtime's immutable ciphertext spool.
+                // restart from Runtime (only legacy recovery can replay a ciphertext spool).
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?
@@ -269,6 +269,52 @@ async fn save_parts<F>(
 where
     F: std::future::Future<Output = Result<(usize, Vec<u8>), TelegramError>> + Send + 'static,
 {
+    save_parts_with_persistence(
+        stream,
+        parallel,
+        observer,
+        upload,
+        Duration::from_secs(1),
+        Arc::new(|checkpoint, path| checkpoint.save(&path)),
+    )
+    .await
+}
+
+type CheckpointWriter = Arc<dyn Fn(UploadCheckpoint, PathBuf) -> std::io::Result<()> + Send + Sync>;
+async fn persist_checkpoint(
+    checkpoint: UploadCheckpoint,
+    path: PathBuf,
+    writer: CheckpointWriter,
+) -> Result<(), TelegramError> {
+    static OWNERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let permit = OWNERS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?;
+    // The blocking runtime retains this tiny write after cancellation. The permit
+    // bounds such retiring owners across the session; no ciphertext enters this path.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        writer(checkpoint, path)
+    })
+    .await
+    .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?
+    .map_err(map_io)
+}
+
+async fn save_parts_with_persistence<F>(
+    stream: &mut UploadStream,
+    parallel: u16,
+    observer: Option<&Arc<dyn ByteTransferObserver>>,
+    upload: impl Fn(usize, Vec<u8>) -> F,
+    interval: Duration,
+    writer: CheckpointWriter,
+) -> Result<(), TelegramError>
+where
+    F: std::future::Future<Output = Result<(usize, Vec<u8>), TelegramError>> + Send + 'static,
+{
     let count = stream.total_bytes.div_ceil(UPLOAD_PART_BYTES as u64) as usize;
     let mut inflight: JoinSet<Result<(usize, Vec<u8>), TelegramError>> = JoinSet::new();
     let mut received = 0usize;
@@ -284,6 +330,8 @@ where
         })
         .sum::<u64>();
     let mut dirty = 0;
+    let mut checkpoint_job = None;
+    let mut last_checkpoint = Instant::now();
     if let Some(observer) = observer {
         observer.observe(ByteTransferEvent::UploadPlan {
             parts: count as u32,
@@ -306,7 +354,24 @@ where
                 active: inflight.len() as u16,
             });
         }
-        if received == count && inflight.is_empty() {
+        if checkpoint_job.is_none()
+            && dirty > 0
+            && (last_checkpoint.elapsed() >= interval || received == count && inflight.is_empty())
+        {
+            if let Some(observer) = observer {
+                observer.observe(ByteTransferEvent::SavingCheckpoint);
+            }
+            let checkpoint = stream.checkpoint.clone();
+            let path = stream.checkpoint_path.clone();
+            checkpoint_job = Some(Box::pin(persist_checkpoint(
+                checkpoint,
+                path,
+                writer.clone(),
+            )));
+            dirty = 0;
+            last_checkpoint = Instant::now();
+        }
+        if received == count && inflight.is_empty() && checkpoint_job.is_none() && dirty == 0 {
             break;
         }
         tokio::select! {
@@ -319,14 +384,12 @@ where
                 if let Some(observer) = observer { observer.observe(ByteTransferEvent::PartAcknowledged {index:index as u32,bytes:acknowledged_bytes,total:stream.total_bytes}); }
                 let _ = stream.recycled.try_send(bytes);
                 dirty += 1;
-                if dirty >= 8 || acknowledged_bytes == stream.total_bytes {
-                    if let Some(observer) = observer { observer.observe(ByteTransferEvent::SavingCheckpoint); }
-                    let checkpoint = stream.checkpoint.clone(); let path = stream.checkpoint_path.clone();
-                    tokio::task::spawn_blocking(move || checkpoint.save(&path)).await
-                        .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?.map_err(map_io)?;
-                    dirty = 0;
-                    if let Some(observer) = observer { observer.observe(ByteTransferEvent::CheckpointSaved); }
-                }
+
+            }
+            result = async { checkpoint_job.as_mut().expect("guarded checkpoint owner").await }, if checkpoint_job.is_some() => {
+                checkpoint_job = None;
+                result?;
+                if let Some(observer) = observer { observer.observe(ByteTransferEvent::CheckpointSaved); }
             }
             bytes = stream.blocks.recv(), if received < count && inflight.len() < usize::from(parallel) => {
                 let bytes = bytes.ok_or_else(|| TelegramError::new(TelegramErrorKind::SourceMissing))?;
@@ -344,6 +407,92 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn blocked_checkpoint_does_not_delay_individual_rpc_acknowledgements() {
+        struct Observer(tokio::sync::watch::Sender<u64>);
+        impl ByteTransferObserver for Observer {
+            fn observe(&self, event: ByteTransferEvent) {
+                if let ByteTransferEvent::PartAcknowledged { bytes, .. } = event {
+                    self.0.send_replace(bytes);
+                }
+            }
+        }
+        let dir = tempfile::tempdir().expect("metadata directory");
+        let total = 4 * UPLOAD_PART_BYTES;
+        let (sender, blocks) = mpsc::channel(4);
+        for _ in 0..4 {
+            sender
+                .send(vec![1; UPLOAD_PART_BYTES])
+                .await
+                .expect("block");
+        }
+        drop(sender);
+        let (recycled, _) = mpsc::channel(4);
+        let (_, sealed) = tokio::sync::oneshot::channel();
+        let mut stream = UploadStream {
+            total_bytes: total as u64,
+            blocks,
+            recycled,
+            sealed,
+            checkpoint: UploadCheckpoint::new(total as u64, 100).expect("checkpoint"),
+            checkpoint_path: dir.path().join("checkpoint"),
+        };
+        let (persisting, waiting) = tokio::sync::watch::channel(false);
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(Some(wait));
+        let writer: CheckpointWriter = Arc::new(move |checkpoint, path| {
+            let gate = wait.lock().expect("gate").take();
+            if let Some(gate) = gate {
+                persisting.send_replace(true);
+                gate.recv_timeout(Duration::from_secs(5))
+                    .map_err(std::io::Error::other)?;
+            }
+            checkpoint.save(&path)
+        });
+        let (counts, mut acknowledged) = tokio::sync::watch::channel(0);
+        let observer: Arc<dyn ByteTransferObserver> = Arc::new(Observer(counts));
+        let job = tokio::spawn(async move {
+            save_parts_with_persistence(
+                &mut stream,
+                4,
+                Some(&observer),
+                move |index, bytes| {
+                    let mut waiting = waiting.clone();
+                    async move {
+                        if index > 0 {
+                            waiting
+                                .wait_for(|value| *value)
+                                .await
+                                .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?;
+                        }
+                        Ok((index, bytes))
+                    }
+                },
+                Duration::ZERO,
+                writer,
+            )
+            .await
+        });
+        let progress = tokio::time::timeout(
+            Duration::from_secs(3),
+            acknowledged.wait_for(|value| *value == total as u64),
+        )
+        .await;
+        let still_saving = !job.is_finished();
+        release.send(()).expect("release metadata owner");
+        assert!(
+            progress.is_ok(),
+            "all four RPC acknowledgements arrive while persistence is blocked"
+        );
+        assert!(
+            still_saving,
+            "completion waits for the outstanding checkpoint"
+        );
+        job.await
+            .expect("retained upload owner")
+            .expect("saved checkpoint");
+    }
+
     #[tokio::test]
     async fn ten_parts_run_concurrently_and_checkpoint_skips_confirmed_parts() {
         use std::sync::atomic::{AtomicUsize, Ordering};

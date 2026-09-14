@@ -1,4 +1,4 @@
-//! Ciphertext spool and bounded producer. No encryption identity is replayed.
+//! Bounded in-memory encryption and tiny recovery metadata, with read-only legacy spool replay.
 use super::*;
 use crate::VaultPartRecovery;
 use std::{
@@ -91,8 +91,8 @@ fn load_checkpoint(
 ) -> Result<UploadCheckpoint, TransferError> {
     match File::open(path) {
         Ok(file) => {
-            let mut bytes = Vec::with_capacity(193);
-            file.take(193)
+            let mut bytes = Vec::with_capacity(4161);
+            file.take(4161)
                 .read_to_end(&mut bytes)
                 .map_err(map_spool_error)?;
             // Newer checkpoint codecs remain intact; do not downgrade them.
@@ -136,7 +136,7 @@ fn save_seal(
     )
     .map_err(map_spool_error)
 }
-fn private_file(path: &Path, exclusive: bool) -> Result<File, TransferError> {
+pub(super) fn private_file(path: &Path, exclusive: bool) -> Result<File, TransferError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
     if exclusive {
@@ -152,7 +152,6 @@ fn private_file(path: &Path, exclusive: bool) -> Result<File, TransferError> {
     options.open(path).map_err(map_spool_error)
 }
 struct PipeWriter {
-    file: File,
     pending: Vec<u8>,
     sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     recycled: tokio::sync::mpsc::Receiver<Vec<u8>>,
@@ -162,7 +161,6 @@ impl PipeWriter {
         if self.pending.is_empty() {
             return Ok(());
         }
-        self.file.write_all(&self.pending)?;
         let mut next = self
             .recycled
             .try_recv()
@@ -188,11 +186,63 @@ impl Write for PipeWriter {
         Ok(length)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.emit()?;
-        self.file.flush()
+        self.emit()
     }
 }
 impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
+    pub(crate) fn reconcile_summary_receipt(
+        &mut self,
+        key: RemotePartKey,
+        reservation: &VaultPartRecovery,
+        identity: &[u8],
+        root: &Path,
+    ) -> Result<Option<RemoteObject>, TransferError> {
+        let Some(summary) = read_seal(&spool_prefix(root, identity), identity, &reservation.header)
+        else {
+            return Ok(None);
+        };
+        if summary.plaintext_blake3 != reservation.plaintext_blake3 {
+            return Err(TransferError::HashMismatch);
+        }
+        let candidates = self
+            .store
+            .search_exact_caption(&self.caption(key), MAX_RECONCILIATION_RESULTS)?;
+        if candidates.len() >= MAX_RECONCILIATION_RESULTS {
+            return Err(TransferError::RemoteMissing);
+        }
+        for object in candidates {
+            if object.name != self.name(key) || object.encoded_size != summary.encoded_length {
+                continue;
+            }
+            let mut reader = self
+                .store
+                .download_reader(object.object_id, object.encoded_size)?;
+            let mut hash = blake3::Hasher::new();
+            let mut buffer = vec![0; UPLOAD_PART_BYTES];
+            loop {
+                if self
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+                {
+                    return Err(TransferError::Cancelled);
+                }
+                let n = reader
+                    .read(&mut buffer)
+                    .map_err(|_| reader.error().unwrap_or(TransferError::Network))?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&buffer[..n]);
+            }
+            if hash.finalize().as_bytes() == &summary.encoded_blake3 {
+                return self
+                    .accept_uploaded_part(self.summary_part(key, &summary), object)
+                    .map(Some);
+            }
+        }
+        Ok(None)
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn stream_reserved_source(
         &mut self,
@@ -244,26 +294,47 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                     },
                 );
             }
-            let bytes = self.store.download(object_id)?;
-            let object = RemoteByteObject {
-                object_id,
-                name: self.name(key),
-                encoded_size: bytes.len() as u64,
-            };
-            let (_, decoded) = self.decode(key, &object, &bytes)?;
-            let part = self
-                .manifest_parts
-                .get(&key.part_index.get())
-                .ok_or(TransferError::ManifestCorrupted)?;
-            if part.part_instance_id != reservation.header.part_instance_id.0
-                || decoded.digest.0 != reservation.plaintext_blake3
+            let mut reader = self
+                .store
+                .download_reader(object_id, plan.expected_encoded_size)?;
+            let decoded = decrypt_part_cancellable(
+                &mut reader,
+                &mut std::io::sink(),
+                &self.file_key,
+                self.limits,
+                || {
+                    self.cancellation
+                        .as_ref()
+                        .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+                },
+            );
+            if let Some(error) = reader.error() {
+                return Err(error);
+            }
+            let decoded = decoded.map_err(map_crypto_error)?;
+            if decoded.header != reservation.header
+                || decoded.plaintext_blake3 != reservation.plaintext_blake3
             {
                 return Err(TransferError::HashMismatch);
             }
-            return Ok(decoded);
+            let summary = teleark_crypto::EncryptedPartSummary {
+                header: decoded.header,
+                plaintext_blake3: decoded.plaintext_blake3,
+                encoded_blake3: decoded.encoded_blake3,
+                encoded_length: decoded.encoded_length,
+            };
+            save_seal(&prefix, identity, &summary)?;
+            return self.accept_uploaded_part(
+                self.summary_part(key, &summary),
+                RemoteByteObject {
+                    object_id,
+                    name: self.name(key),
+                    encoded_size: summary.encoded_length,
+                },
+            );
         }
         // Only ambiguous publication recovery performs a bounded read-back.
-        // Fresh uploads and saved receipts never read remote ciphertext.
+        // Fresh uploads avoid readback; imported receipts are authenticated above.
         if let Some(summary) = &saved {
             let candidates = self
                 .store
@@ -273,12 +344,29 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             }
             for object in candidates {
                 if object.name == self.name(key) && object.encoded_size == summary.encoded_length {
-                    let bytes = self.store.download(object.object_id)?;
-                    if blake3::hash(&bytes).as_bytes() == &summary.encoded_blake3 {
+                    let mut reader = self
+                        .store
+                        .download_reader(object.object_id, object.encoded_size)?;
+                    let mut hash = blake3::Hasher::new();
+                    let mut buffer = vec![0; UPLOAD_PART_BYTES];
+                    loop {
+                        let count = reader
+                            .read(&mut buffer)
+                            .map_err(|_| reader.error().unwrap_or(TransferError::Network))?;
+                        if count == 0 {
+                            break;
+                        }
+                        hash.update(&buffer[..count]);
+                    }
+                    if hash.finalize().as_bytes() == &summary.encoded_blake3 {
                         return self.accept_uploaded_part(self.summary_part(key, summary), object);
                     }
                 }
             }
+        }
+        if saved.is_some() && !prefix.with_extension("ciphertext").exists() {
+            // Only a new durable identity may re-encrypt after in-memory blocks are gone.
+            return Err(TransferError::Network);
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -317,7 +405,9 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             .name("teleark-upload-crypto".into())
             .spawn(move || {
                 let result = (|| {
-                    if let Some(summary) = saved {
+                    if let Some(summary) =
+                        saved.filter(|_| prefix_worker.with_extension("ciphertext").exists())
+                    {
                         let mut file = File::open(prefix_worker.with_extension("ciphertext"))
                             .map_err(|_| TransferError::SourceMissing)?;
                         let mut recycled = recycle_receiver;
@@ -349,7 +439,6 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                         file.seek(SeekFrom::Start(plan.header.plaintext_offset))
                             .map_err(|_| TransferError::SourceChanged)?;
                         let mut writer = PipeWriter {
-                            file: private_file(&prefix_worker.with_extension("ciphertext"), true)?,
                             pending: Vec::with_capacity(UPLOAD_PART_BYTES),
                             sender,
                             recycled: recycle_receiver,
@@ -372,10 +461,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                         if Some(ContentDigest(summary.plaintext_blake3)) != plan.expected_digest {
                             return Err(TransferError::SourceChanged);
                         }
-                        writer
-                            .flush()
-                            .and_then(|()| writer.file.sync_all())
-                            .map_err(map_spool_error)?;
+                        writer.flush().map_err(map_spool_error)?;
                         save_seal(&prefix_worker, &identity, &summary)?;
                         Ok(summary)
                     }
@@ -401,6 +487,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
         }
         if result.is_err()
             && allow_restart
+            && prefix.with_extension("ciphertext").exists()
             && summary.is_ok()
             && std::fs::read(&replay_checkpoint_path)
                 .ok()
@@ -506,7 +593,7 @@ mod tests {
             _: &str,
             mut stream: UploadStream,
             _: std::num::NonZeroI64,
-            tuning: TransferTuning,
+            _tuning: TransferTuning,
         ) -> Result<RemoteByteObject, UploadError> {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -522,12 +609,14 @@ mod tests {
             // Keep the consumer stopped after its first receive. The bounded
             // queue allows only ready blocks plus the producer's pending write,
             // regardless of how long the producer runs before these assertions.
-            let spooled = std::fs::metadata(self.prefix.with_extension("ciphertext"))
-                .expect("active spool")
-                .len();
-            assert!(spooled <= (u64::from(tuning.upload_queue) + 2) * UPLOAD_PART_BYTES as u64);
-            assert!(spooled < stream.total_bytes);
-            assert!(!self.prefix.with_extension("seal").exists());
+            assert!(
+                !self.prefix.with_extension("ciphertext").exists(),
+                "ciphertext stays in memory"
+            );
+            assert!(
+                !self.prefix.with_extension("seal").exists(),
+                "backpressure bounds preparation"
+            );
             self.blocks_received = 1;
             if self.interrupt {
                 return Err(UploadError::Definite(TransferError::Network));
@@ -559,7 +648,7 @@ mod tests {
             let mut file = File::create(&source).expect("source");
             let block = vec![0x5a; UPLOAD_PART_BYTES];
             let mut digest = blake3::Hasher::new();
-            let total = encrypted_part_plaintext_limit();
+            let total = 60 * 1024 * 1024;
             for _ in 0..total / UPLOAD_PART_BYTES as u64 {
                 file.write_all(&block).expect("synthetic content");
                 digest.update(&block);

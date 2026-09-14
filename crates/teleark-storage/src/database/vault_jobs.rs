@@ -197,7 +197,7 @@ impl Database {
         let direction: String = row.get(1)?;
         let package: Vec<u8> = row.get(2)?;
         let version: u32 = row.get(3)?;
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err(corrupt(
                 "vault_transfer_jobs",
                 "context_version",
@@ -256,7 +256,7 @@ impl Database {
         } else {
             generation
         };
-        self.durable_vault_write(|tx|Ok(tx.execute("UPDATE vault_transfer_jobs SET state=?5,generation=?6,updated_at=max(updated_at,?7),failure_code=?8 WHERE account_id=?1 AND id=?2 AND generation=?3 AND state=?4 AND context_version=1",params![lease.account_id,id,generation,expected.code(),target.code(),next,at,failure])? == 1))
+        self.durable_vault_write(|tx|Ok(tx.execute("UPDATE vault_transfer_jobs SET state=?5,generation=?6,updated_at=max(updated_at,?7),failure_code=?8 WHERE account_id=?1 AND id=?2 AND generation=?3 AND state=?4 AND context_version IN (1,2)",params![lease.account_id,id,generation,expected.code(),target.code(),next,at,failure])? == 1))
     }
 
     /// Call at cold process startup, before creating execution owners. Preserve
@@ -266,7 +266,7 @@ impl Database {
         if account <= 0 || at < 0 {
             return Err(invalid("vault_job.recover"));
         }
-        self.durable_vault_write(|tx|Ok(tx.execute("UPDATE vault_transfer_jobs SET state=CASE state WHEN 'running' THEN 'queued' WHEN 'pausing' THEN 'paused' WHEN 'cancelling' THEN 'cancelled' END,generation=generation+1,updated_at=max(updated_at,?2) WHERE account_id=?1 AND context_version=1 AND state IN ('running','pausing','cancelling')",params![account,at])?))
+        self.durable_vault_write(|tx|Ok(tx.execute("UPDATE vault_transfer_jobs SET state=CASE state WHEN 'running' THEN 'queued' WHEN 'pausing' THEN 'paused' WHEN 'cancelling' THEN 'cancelled' END,generation=generation+1,updated_at=max(updated_at,?2) WHERE account_id=?1 AND context_version IN (1,2) AND state IN ('running','pausing','cancelling')",params![account,at])?))
     }
 
     /// Cold-start recovery before any transfer owner is created. This covers
@@ -276,7 +276,7 @@ impl Database {
             return Err(invalid("vault_job.recover"));
         }
         self.durable_vault_write(|tx| Ok(tx.execute(
-            "UPDATE vault_transfer_jobs SET state=CASE state WHEN 'running' THEN 'queued' WHEN 'pausing' THEN 'paused' WHEN 'cancelling' THEN 'cancelled' END,generation=generation+1,updated_at=max(updated_at,?1) WHERE context_version=1 AND state IN ('running','pausing','cancelling')", params![at],
+            "UPDATE vault_transfer_jobs SET state=CASE state WHEN 'running' THEN 'queued' WHEN 'pausing' THEN 'paused' WHEN 'cancelling' THEN 'cancelled' END,generation=generation+1,updated_at=max(updated_at,?1) WHERE context_version IN (1,2) AND state IN ('running','pausing','cancelling')", params![at],
         )?))
     }
 
@@ -376,6 +376,46 @@ impl Database {
         nonnegative_from_sql("vault_transfer_jobs", "count", count)
     }
 
+    /// Authenticated remote locators are imported atomically with their local job.
+    /// Runtime rechecks their ciphertext before issuing any completion receipt.
+    pub fn import_vault_upload(
+        &mut self,
+        pending: &PendingVaultUpload,
+        generation: u64,
+        job: &VaultJobRecord,
+        parts: &[VaultPartRecord],
+    ) -> StorageResult<bool> {
+        validate_admission(job)?;
+        if pending.account_id != job.account_id
+            || pending.id != job.id
+            || pending.chat_id != job.chat_id
+            || pending.created_at_unix_ms != job.created_at_unix_ms
+            || pending.codec_version != 1
+            || job.direction != VaultJobDirection::Upload
+            || parts.len() > 1_000_000
+            || parts.iter().enumerate().any(|(index, part)| {
+                part.part_index as usize != index
+                    || part.identity.is_empty()
+                    || part.identity.len() > 16384
+                    || part
+                        .receipt
+                        .as_ref()
+                        .is_none_or(|receipt| receipt.is_empty() || receipt.len() > 16384)
+            })
+        {
+            return Err(invalid("vault_job.import"));
+        }
+        self.durable_vault_write(|tx| {
+            let changed = tx.execute("UPDATE vault_pending_uploads SET state='promoted',generation=generation+1 WHERE account_id=?1 AND id=?2 AND context=?3 AND codec_version=1 AND state='queued' AND generation=?4", params![pending.account_id,unsigned_to_sql("pending_upload.id",pending.id)?,pending.context,unsigned_to_sql("pending_upload.generation",generation)?])?;
+            if changed == 0 { return Ok(false); }
+            if !admit_job(tx, job)? { return Err(invalid("vault_job.import_conflict")); }
+            for part in parts {
+                tx.execute("INSERT INTO vault_transfer_parts(account_id,task_id,part_index,identity,receipt) VALUES(?1,?2,?3,?4,?5)", params![job.account_id,unsigned_to_sql("vault_job.id",job.id)?,part.part_index,part.identity,part.receipt])?;
+            }
+            Ok(true)
+        })
+    }
+
     /// Reserve before encryption; retrying a different identity is forbidden.
     pub fn reserve_vault_part(
         &mut self,
@@ -406,7 +446,7 @@ impl Database {
         validate_admission(replacement)?;
         if replacement.account_id != lease.account_id
             || replacement.id != lease.id
-            || replacement.context_version != 1
+            || !matches!(replacement.context_version, 1 | 2)
             || replacement.direction != VaultJobDirection::Upload
             || replacement.context == previous
         {
@@ -414,8 +454,8 @@ impl Database {
         }
         self.durable_vault_write(|tx| {
             let id=unsigned_to_sql("vault_job.id",lease.id)?;
-            let changed=tx.execute("UPDATE vault_transfer_jobs SET package_id=?5,context=?6,created_at=?7,updated_at=?7 WHERE account_id=?1 AND id=?2 AND generation=?3 AND context=?4 AND context_version=1 AND state='queued' AND direction='upload' AND chat_id=?8",
-                params![lease.account_id,id,unsigned_to_sql("vault_job.generation",lease.generation)?,previous,replacement.package_id,replacement.context,replacement.created_at_unix_ms,replacement.chat_id])?;
+            let changed=tx.execute("UPDATE vault_transfer_jobs SET package_id=?5,context=?6,context_version=?9,created_at=?7,updated_at=?7 WHERE account_id=?1 AND id=?2 AND generation=?3 AND context=?4 AND context_version IN (1,2) AND state='queued' AND direction='upload' AND chat_id=?8",
+                params![lease.account_id,id,unsigned_to_sql("vault_job.generation",lease.generation)?,previous,replacement.package_id,replacement.context,replacement.created_at_unix_ms,replacement.chat_id,replacement.context_version])?;
             if changed!=1 {return Ok(false);}
             tx.execute("DELETE FROM vault_transfer_parts WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;
             tx.execute("DELETE FROM vault_manifest_outbox WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;
@@ -460,6 +500,10 @@ impl Database {
         })
     }
 
+    pub fn last_confirmed_vault_part(&self, account: i64, task: u64) -> StorageResult<Option<u32>> {
+        self.connection.query_row("SELECT part_index FROM vault_transfer_parts WHERE account_id=?1 AND task_id=?2 AND receipt IS NOT NULL ORDER BY part_index DESC LIMIT 1", params![account,unsigned_to_sql("vault_job.id",task)?], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
     pub fn vault_parts(
         &self,
         account: i64,
@@ -493,7 +537,7 @@ impl Database {
 fn active_lease(tx: &Transaction<'_>, lease: VaultJobLease, stopping: bool) -> StorageResult<bool> {
     let value: Option<(String,i64,u32)>=tx.query_row("SELECT state,generation,context_version FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2",params![lease.account_id,unsigned_to_sql("vault_job.id",lease.id)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
     Ok(value.is_some_and(|(state, generation, version)| {
-        version == 1
+        matches!(version, 1 | 2)
             && u64::try_from(generation).ok() == Some(lease.generation)
             && (state == "running"
                 || stopping && matches!(state.as_str(), "pausing" | "cancelling"))
@@ -512,7 +556,7 @@ fn validate_admission(job: &VaultJobRecord) -> StorageResult<()> {
         || job.failure_code.is_some()
         || job.created_at_unix_ms < 0
         || job.updated_at_unix_ms != job.created_at_unix_ms
-        || job.context_version != 1
+        || !matches!(job.context_version, 1 | 2)
         || job.context.is_empty()
         || job.context.len() > 2 * 1024 * 1024
         || job.package_id == [0; 16]
@@ -524,9 +568,9 @@ fn validate_admission(job: &VaultJobRecord) -> StorageResult<()> {
 
 fn admit_job(tx: &Transaction<'_>, job: &VaultJobRecord) -> StorageResult<bool> {
     let id = unsigned_to_sql("vault_job.id", job.id)?;
-    let changed = tx.execute("INSERT INTO vault_transfer_jobs(account_id,id,chat_id,direction,package_id,context_version,context,state,generation,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1,?6,'queued',0,?7,?7) ON CONFLICT(account_id,id) DO NOTHING", params![job.account_id,id,job.chat_id,job.direction.code(),job.package_id.as_slice(),job.context,job.created_at_unix_ms])?;
+    let changed = tx.execute("INSERT INTO vault_transfer_jobs(account_id,id,chat_id,direction,package_id,context_version,context,state,generation,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?8,?6,'queued',0,?7,?7) ON CONFLICT(account_id,id) DO NOTHING", params![job.account_id,id,job.chat_id,job.direction.code(),job.package_id.as_slice(),job.context,job.created_at_unix_ms,job.context_version])?;
     if changed == 0 {
-        let same: bool = tx.query_row("SELECT chat_id=?3 AND direction=?4 AND package_id=?5 AND context_version=1 AND context=?6 AND created_at=?7 FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2", params![job.account_id,id,job.chat_id,job.direction.code(),job.package_id.as_slice(),job.context,job.created_at_unix_ms], |row|row.get(0))?;
+        let same: bool = tx.query_row("SELECT chat_id=?3 AND direction=?4 AND package_id=?5 AND context_version=?8 AND context=?6 AND created_at=?7 FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2", params![job.account_id,id,job.chat_id,job.direction.code(),job.package_id.as_slice(),job.context,job.created_at_unix_ms,job.context_version], |row|row.get(0))?;
         if !same {
             return Err(invalid("vault_job.identity"));
         }

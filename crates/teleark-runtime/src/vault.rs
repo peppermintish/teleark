@@ -1,3 +1,4 @@
+use crate::RemoteObjectStore;
 use crate::transfer_updates::{
     TransferRecord, TransferSnapshotView, TransferSnapshots, TransferSubscription,
 };
@@ -52,6 +53,7 @@ mod manifest_resume;
 mod pending_upload;
 #[cfg(test)]
 mod recovery_acceptance;
+pub(crate) mod remote_upload;
 mod source_digest;
 mod sync_retry;
 mod upload_history;
@@ -69,8 +71,8 @@ const VAULT_UPLOAD_WINDOW: usize = 128;
 const MAX_MANIFEST_SCAN: usize = 1_000;
 const RECOVERY_BUNDLE_PREFIX: &str = "TARK-RB1-";
 const TRANSFER_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
-// With 60 MiB application parts, three workers plus the bounded reader,
-// encrypted queue, and active upload stay inside the 512 MiB transfer budget.
+// Producers and network queues are bounded in 512 KiB blocks, independently
+// of the 1.9 GiB container boundary; active files share the session budget.
 const MAX_ENCRYPTION_WORKERS: u16 = 3;
 
 /// Explicit recovery export; redacted in diagnostics and erased on drop.
@@ -165,7 +167,36 @@ pub struct VaultTransferSnapshot {
 }
 
 impl TransferRecord for VaultTransferSnapshot {
-    type Phase = (VaultTransferState, Option<VaultUploadPhase>);
+    fn rate_input(&self) -> crate::transfer_rate::RateInput {
+        let upload = self.direction == VaultTransferDirection::Upload;
+        let activity = self.upload_activity.as_ref();
+        crate::transfer_rate::RateInput {
+            account: self.account_id,
+            upload,
+            active: self.state == VaultTransferState::Running && !self.restored,
+            bytes: activity.map_or(self.transferred_bytes, |v| v.acknowledged_bytes),
+            logical_bytes: activity.map_or(self.transferred_bytes, |v| {
+                v.uploaded_bytes.max(self.transferred_bytes)
+            }),
+            total: self.size_bytes,
+            in_flight: activity.is_some_and(|v| v.active > 0),
+        }
+    }
+    fn sample_activity(&mut self, now: std::time::Instant, rate: crate::TransferRate) -> bool {
+        if let Some(activity) = &mut self.upload_activity
+            && let Some(speed) = rate.bytes_per_second
+            && activity.sample(now, false)
+        {
+            if let Some(sample) = activity.samples.back_mut() {
+                sample.bytes_per_second = speed;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    type Phase = (VaultTransferState, Option<VaultUploadPhase>, bool);
     fn id(&self) -> u64 {
         self.id
     }
@@ -173,6 +204,9 @@ impl TransferRecord for VaultTransferSnapshot {
         (
             self.state,
             self.upload_activity.as_ref().map(|activity| activity.phase),
+            self.upload_activity
+                .as_ref()
+                .is_some_and(|activity| activity.persistence_since.is_some()),
         )
     }
 }
@@ -520,6 +554,13 @@ enum VaultCommand {
     ResumeQueuedUploads {
         account_id: i64,
         reply: mpsc::SyncSender<Result<VaultUploadRecoveryReport, ApplicationError>>,
+    },
+    ResumeRemoteUpload {
+        account_id: i64,
+        chat_id: i64,
+        message_id: i64,
+        source: PathBuf,
+        reply: mpsc::SyncSender<Result<ManagedVaultFile, ApplicationError>>,
     },
     ResumeUpload {
         account_id: i64,
@@ -1009,6 +1050,22 @@ impl DesktopVault {
 
     /// Resumes a paused/retryable durable upload using its original identity.
     /// The returned job is retained by the caller; waiting stays off the UI.
+    pub fn submit_resume_remote_upload(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        message_id: i64,
+        source: PathBuf,
+    ) -> Result<VaultJob<ManagedVaultFile>, ApplicationError> {
+        self.submit(|reply| VaultCommand::ResumeRemoteUpload {
+            account_id,
+            chat_id,
+            message_id,
+            source,
+            reply,
+        })
+    }
+
     pub fn submit_resume_upload(
         &self,
         account_id: i64,
@@ -1534,6 +1591,16 @@ impl VaultOwner {
             VaultCommand::ResumeQueuedUploads { account_id, reply } => {
                 let _ = reply.send(self.resume_queued_uploads(account_id));
             }
+            VaultCommand::ResumeRemoteUpload {
+                account_id,
+                chat_id,
+                message_id,
+                source,
+                reply,
+            } => {
+                let _ =
+                    reply.send(self.resume_remote_upload(account_id, chat_id, message_id, &source));
+            }
             VaultCommand::ResumeUpload {
                 account_id,
                 task_id,
@@ -1928,7 +1995,7 @@ impl VaultOwner {
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
         let mut store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
             .with_tuning(self.library.preferences()?.transfer_tuning)
-            .with_cancellation(cancellation);
+            .with_cancellation(cancellation.clone());
         let report = recover_remote_manifests(&mut store, master, MAX_MANIFEST_SCAN)
             .map_err(map_transfer_error)?;
         let mut files = report
@@ -1942,6 +2009,16 @@ impl VaultOwner {
                 .cmp(&left.created_at_unix_ms)
                 .then_with(|| left.logical_name.cmp(&right.logical_name))
         });
+        let pending = store
+            .search_exact_caption(remote_upload::CAPTION, MAX_MANIFEST_SCAN)
+            .map_err(map_transfer_error)?;
+        files.extend(self.pending_remote_files(
+            account_id,
+            chat_id,
+            pending,
+            &files,
+            cancellation,
+        )?);
         Ok(ManagedVaultScan {
             health_checked_files: None,
             files,
@@ -1968,7 +2045,14 @@ impl VaultOwner {
         }
         observer.phase(crate::ChannelSyncPhase::ManifestReading);
         let watch = self.library.managed_channel_watch(account, chat, false)?;
-        let candidates = self.library.cached_manifest_candidates(account, chat)?;
+        let mut candidates = self.library.cached_manifest_candidates(account, chat)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = self
+            .library
+            .cached_pending_upload_candidates(account, chat)?;
+        pending.retain(|candidate| seen.insert(candidate.file.file_name.clone()));
+        candidates.extend(pending);
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.file.message_id.get()));
         let mut store = TelegramObjectStore::new(self.telegram.clone(), account, chat)
             .with_cancellation(cancellation.clone());
         let library = &self.library;
@@ -1978,6 +2062,15 @@ impl VaultOwner {
             candidates,
             &cancellation,
             |candidate| {
+                if candidate.file.file_name.ends_with(".tarku") {
+                    return remote_upload::load(
+                        &mut store,
+                        catalog::byte_object(candidate)?,
+                        active.map(|(_, key)| key),
+                        account,
+                        chat,
+                    );
+                }
                 health::load(
                     &mut store,
                     library,
@@ -1991,7 +2084,10 @@ impl VaultOwner {
             Some(observer),
         )?;
         for file in &mut report.files {
-            if file.health != crate::VaultFileHealth::KeyUnavailable {
+            if !matches!(
+                file.health,
+                crate::VaultFileHealth::KeyUnavailable | crate::VaultFileHealth::PendingUpload
+            ) {
                 file.health = health::check(
                     library,
                     (account, chat),
@@ -2008,6 +2104,16 @@ impl VaultOwner {
             historical,
             &cancellation,
         )?;
+        let completed: std::collections::BTreeSet<_> = report
+            .files
+            .iter()
+            .filter(|file| file.health != crate::VaultFileHealth::PendingUpload)
+            .map(|file| file.package_numeric_id)
+            .collect();
+        report.files.retain(|file| {
+            file.health != crate::VaultFileHealth::PendingUpload
+                || !completed.contains(&file.package_numeric_id)
+        });
         report.catalog_pending = !watch.catalog_ready;
         Ok(report)
     }
@@ -2677,7 +2783,7 @@ impl VaultOwner {
             .transpose()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
             .is_some_and(|part| part.header.format_major == 1);
-        if (expired || legacy_parts || unsealed_manifest) && !manifest_ready {
+        if (legacy_parts || unsealed_manifest) && !manifest_ready {
             VaultUploadObserver::new(self.transfers.clone(), task_id).phase(if expired {
                 VaultUploadPhase::RestartingExpired
             } else if unsealed_manifest {
@@ -2747,12 +2853,8 @@ impl VaultOwner {
             size_bytes: context.size_bytes,
             transferred_bytes: 0,
             completed_parts: 0,
-            part_count: u32::try_from(
-                encrypted_part_sizes(context.size_bytes)
-                    .map_err(map_transfer_error)?
-                    .len(),
-            )
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?,
+            part_count: u32::try_from(context.part_sizes().map_err(map_transfer_error)?.len())
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?,
             started_at_unix_ms: now_unix_ms()?,
             duration_ms: None,
             average_bytes_per_second: None,
@@ -2833,6 +2935,18 @@ impl VaultOwner {
         source: &Path,
         queued: Option<&QueuedUpload>,
         resumed: Option<teleark_storage::VaultJobRecord>,
+    ) -> Result<ManagedVaultFile, ApplicationError> {
+        self.upload_with_digests(account_id, chat_id, source, queued, resumed, None)
+    }
+
+    fn upload_with_digests(
+        &mut self,
+        account_id: i64,
+        chat_id: i64,
+        source: &Path,
+        queued: Option<&QueuedUpload>,
+        resumed: Option<teleark_storage::VaultJobRecord>,
+        prehashed: Option<source_digest::SourceDigests>,
     ) -> Result<ManagedVaultFile, ApplicationError> {
         if self.master_key.is_none() {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
@@ -2939,7 +3053,13 @@ impl VaultOwner {
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
                 .to_owned()
         };
-        let part_sizes = encrypted_part_sizes(metadata.len()).map_err(map_transfer_error)?;
+        let part_sizes = restored_context
+            .as_ref()
+            .map_or_else(
+                || encrypted_part_sizes(metadata.len()),
+                |context| context.part_sizes(),
+            )
+            .map_err(map_transfer_error)?;
         let package_id = if let Some(context) = &restored_context {
             crate::transfer::package_id_from_bytes(context.package_id)
                 .map_err(map_transfer_error)?
@@ -3048,43 +3168,14 @@ impl VaultOwner {
                 VaultUploadObserver::new(self.transfers.clone(), transfer_id)
                     .with_log(session_log.writer.event_sink()),
             );
-            let source_digests = source_digest::inspect(
-                source,
-                &part_sizes,
-                |bytes, total| {
-                    observer.source_progress(bytes, total);
-                    Ok(())
-                },
-                || {
-                    preflight_cancellation
-                        .as_ref()
-                        .is_some_and(|token| token.is_cancelled())
-                },
-            )
-            .map_err(map_transfer_error)?;
-            if !crate::vault_recovery::upload_source_metadata_matches(
-                source_identity,
-                files
-                    .source_identity(source_id)
-                    .map_err(map_transfer_error)?,
-            ) {
-                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
-            }
             let master = self
                 .master_key
                 .as_ref()
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-            let context = if let Some(context) = &restored_context {
+            let mut context = if let Some(context) = &restored_context {
                 if context.account_id != account_id || context.chat_id != chat_id {
                     return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
                 }
-                context
-                    .verify_upload_source(
-                        &std::fs::canonicalize(source).map_err(map_source_io)?,
-                        source_identity,
-                        source_digests.whole.0,
-                    )
-                    .map_err(map_transfer_error)?;
                 context.file_key(master).map_err(|_| {
                     ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable)
                 })?;
@@ -3108,6 +3199,7 @@ impl VaultOwner {
                 )
                 .map_err(map_crypto_error)?;
                 crate::VaultRecoveryContext {
+                    container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
                     account_id,
                     task_id: transfer_id,
                     chat_id,
@@ -3121,9 +3213,78 @@ impl VaultOwner {
                     direction: crate::VaultRecoveryDirection::Upload {
                         source: std::fs::canonicalize(source).map_err(map_source_io)?,
                         identity: source_identity,
-                        source_blake3: source_digests.whole.0,
+                        source_blake3: [0; 32],
                     },
                 }
+            };
+            let mut descriptor_store =
+                TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
+                    .with_cancellation(preflight_cancellation.clone().unwrap_or_default());
+            if restored_context.is_none() {
+                observer.phase(VaultUploadPhase::SavingRecovery);
+                let message = remote_upload::publish(
+                    &mut descriptor_store,
+                    &context,
+                    master,
+                    Vec::new(),
+                    false,
+                )?;
+                if let Some(plan) = queued {
+                    let pending = plan
+                        .pending
+                        .admission_record()
+                        .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+                    remote_upload::remember_remote(
+                        &self.library.database_path,
+                        &pending,
+                        i64::from(message),
+                    )?;
+                }
+            }
+            let source_digests = if let Some(digests) = prehashed {
+                digests
+            } else {
+                source_digest::inspect(
+                    source,
+                    &part_sizes,
+                    |bytes, total| {
+                        observer.source_progress(bytes, total);
+                        Ok(())
+                    },
+                    || {
+                        preflight_cancellation
+                            .as_ref()
+                            .is_some_and(|token| token.is_cancelled())
+                    },
+                )
+                .map_err(map_transfer_error)?
+            };
+            if !crate::vault_recovery::upload_source_metadata_matches(
+                source_identity,
+                files
+                    .source_identity(source_id)
+                    .map_err(map_transfer_error)?,
+            ) {
+                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            }
+            if restored_context.is_some() {
+                context
+                    .verify_upload_source(
+                        &std::fs::canonicalize(source).map_err(map_source_io)?,
+                        source_identity,
+                        source_digests.whole.0,
+                    )
+                    .map_err(map_transfer_error)?;
+            } else if let crate::VaultRecoveryDirection::Upload { source_blake3, .. } =
+                &mut context.direction
+            {
+                *source_blake3 = source_digests.whole.0;
+            }
+            // A restart must never replace a published prefix with an empty one.
+            let mut manifest_generation = if restored_context.is_none() {
+                remote_upload::publish(&mut descriptor_store, &context, master, Vec::new(), true)?
+            } else {
+                0
             };
             observer.phase(VaultUploadPhase::SavingRecovery);
             let mut database = teleark_storage::Database::open(self.library.database_path.as_ref())
@@ -3190,6 +3351,7 @@ impl VaultOwner {
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
             let registration = self.register_transfer(lease)?;
             let cancellation = registration.cancellation.clone();
+            descriptor_store = descriptor_store.with_cancellation(cancellation.clone());
             let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
                 .with_tuning(self.library.preferences()?.transfer_tuning)
                 .with_observer(observer.clone())
@@ -3197,6 +3359,9 @@ impl VaultOwner {
             let mut durable = crate::DurableUploadParts::open(database, lease, store, master)
                 .map_err(map_transfer_error)?
                 .with_cancellation(cancellation.clone());
+            let previously_confirmed = database
+                .last_confirmed_vault_part(account_id, transfer_id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
             let mut encoded_size = 0_u64;
             let tuning = self.library.preferences()?.transfer_tuning;
             let spool_root = self
@@ -3226,6 +3391,15 @@ impl VaultOwner {
                         tuning,
                     )
                     .map_err(map_transfer_error)?;
+                if previously_confirmed.is_none_or(|last| part_index >= last) {
+                    manifest_generation = remote_upload::publish(
+                        &mut descriptor_store,
+                        &context,
+                        master,
+                        durable.confirmed_manifest_parts(),
+                        true,
+                    )?;
+                }
                 encoded_size = encoded_size.saturating_add(object.encoded_size);
                 transferred_bytes = transferred_bytes.saturating_add(plaintext_length);
                 let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -3273,7 +3447,7 @@ impl VaultOwner {
                     })?,
                     ManifestPublishRequest {
                         vault_id: context.vault_id,
-                        manifest_generation: 1,
+                        manifest_generation,
                         master_key_generation: context.master_key_generation,
                         wrap_generation: context.file_key_wrap.wrap_generation,
                         created_at_unix_ms: context.created_at_unix_ms,
@@ -3629,6 +3803,11 @@ impl VaultOwner {
         )?;
         let header = &recovered.manifest.public_header;
         let context = crate::VaultRecoveryContext {
+            container_plaintext_limit: saved_context
+                .as_ref()
+                .map_or(header.application_part_target, |context| {
+                    context.container_plaintext_limit
+                }),
             account_id: expected_account_id,
             task_id: transfer_id,
             chat_id,
@@ -3687,7 +3866,7 @@ impl VaultOwner {
         if let Err(error) = self.push_transfer(VaultTransferSnapshot {
             recovery_state: Some(teleark_storage::VaultJobState::Running),
             restored: false,
-            upload_activity: None,
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Downloading)),
             id: transfer_id,
             account_id: expected_account_id,
             chat_id,
@@ -3715,9 +3894,14 @@ impl VaultOwner {
         let mut received_bytes = 0_u64;
         let mut result = (|| {
             let registration = self.register_transfer(lease)?;
+            let observer = Arc::new(VaultUploadObserver::new(
+                self.transfers.clone(),
+                transfer_id,
+            ));
             let store =
                 TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id)
                     .with_tuning(self.library.preferences()?.transfer_tuning)
+                    .with_observer(observer.clone())
                     .with_cancellation(registration.cancellation.clone());
             let parts = recovered.manifest.metadata.parts.clone();
             let mut remote =
@@ -3733,13 +3917,17 @@ impl VaultOwner {
             let mut completed_bytes = 0_u64;
             let mut completed_parts = 0_u32;
             for part in parts {
+                observer.begin_part(part.plaintext_length);
+                observer.phase(VaultUploadPhase::Downloading);
                 let key = RemotePartKey {
                     account_id,
                     package_id,
                     part_index: PartIndex::new(part.part_index),
                 };
                 let extent_source = durable
-                    .restore_part(&mut database, &part, || remote.download_manifest_part(key))
+                    .restore_part_to(&mut database, &part, |output| {
+                        remote.download_manifest_part_to(key, output)
+                    })
                     .map_err(map_transfer_error)?;
                 if extent_source == crate::durable_download::ExtentSource::Remote {
                     received_bytes = received_bytes.saturating_add(part.plaintext_length);
@@ -3796,6 +3984,7 @@ impl VaultOwner {
                     snapshot.telemetry = telemetry;
                 });
             }
+            observer.phase(VaultUploadPhase::Verifying);
             durable.finalize(&database).map_err(map_transfer_error)?;
             self.library
                 .record_vault_download(teleark_storage::VaultDownloadRecord {
@@ -4504,6 +4693,7 @@ mod tests {
         std::fs::write(&partial, b"data")?;
         let package = crate::transfer::package_bytes(PackageId::new(1));
         let context = crate::VaultRecoveryContext {
+            container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
             account_id: 7,
             task_id: 9,
             chat_id: 11,
@@ -4728,6 +4918,7 @@ mod tests {
             )
             .expect("wrap");
             let context = crate::VaultRecoveryContext {
+                container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
                 account_id: 7,
                 task_id: id,
                 chat_id: 11,
@@ -4791,11 +4982,12 @@ mod tests {
             );
             let restarted = db.vault_job(7, id)?.expect("restarted attempt");
             let context = crate::VaultRecoveryContext::from_record(&restarted).expect("context");
-            assert_ne!(
+            assert_eq!(
                 context.package_id,
-                crate::transfer::package_bytes(PackageId::new(id))
+                crate::transfer::package_bytes(PackageId::new(id)),
+                "temporary RPC expiry does not retire already published containers or their file key"
             );
-            assert!(context.created_at_unix_ms > 100 + teleark_telegram::UPLOAD_RESUME_WINDOW_MS);
+            assert_eq!(context.created_at_unix_ms, 100);
             context
                 .file_key(&master)
                 .expect("fresh wrapped key remains recoverable");
@@ -5001,6 +5193,26 @@ mod tests {
             snapshot().upload_activity.expect("upload activity").phase,
             VaultUploadPhase::Publishing
         );
+        transfers.update(1, |row| {
+            row.direction = VaultTransferDirection::Download;
+            row.upload_activity = Some(VaultUploadActivity::new(VaultUploadPhase::Downloading));
+        });
+        observer.begin_part(60 * 1024 * 1024);
+        observer.observe(ByteTransferEvent::Downloading {
+            bytes: 0,
+            total: 64 * 1024 * 1024,
+        });
+        let waiting = snapshot().rate_input();
+        assert!(
+            waiting.in_flight,
+            "a dispatched download waits even before its first reply"
+        );
+        assert_eq!(waiting.bytes, 0, "dispatch is not an acknowledgement");
+        observer.observe(ByteTransferEvent::Downloading {
+            bytes: 512 * 1024,
+            total: 64 * 1024 * 1024,
+        });
+        assert_eq!(snapshot().rate_input().bytes, 512 * 1024);
         transfers.update(1, |row| {
             row.state = VaultTransferState::Failed(ApplicationErrorKind::Network)
         });

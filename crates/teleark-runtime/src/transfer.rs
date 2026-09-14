@@ -33,7 +33,10 @@ use teleark_storage::{Database, StoredPartState, StoredTransferState, TransferTa
 use crate::DesktopTelegram;
 
 const FRAME_PLAINTEXT_BYTES: u32 = 512 * 1024 - 32;
-const ENCRYPTED_PART_PLAINTEXT_BYTES: u64 = 60 * 1024 * 1024;
+pub(crate) const LEGACY_PART_PLAINTEXT_BYTES: u64 = 60 * 1024 * 1024;
+const ENCRYPTED_PART_PLAINTEXT_BYTES: u64 = teleark_telegram::MAX_STREAM_OBJECT_BYTES
+    - 96
+    - 32 * teleark_telegram::MAX_STREAM_OBJECT_BYTES.div_ceil(512 * 1024);
 const MAX_RECONCILIATION_RESULTS: usize = 1_000;
 pub(crate) const MANIFEST_CAPTION: &str = "teleark-manifest-v1";
 const CHECKPOINT_VERSION: u32 = 1;
@@ -47,17 +50,30 @@ pub const fn encrypted_part_plaintext_limit() -> u64 {
 }
 
 /// Splits a non-empty logical file into bounded plaintext ranges whose encoded
-/// containers fit the Telegram object's in-memory safety cap.
+/// containers fit the Telegram streaming object limit.
 pub fn encrypted_part_sizes(total_bytes: u64) -> Result<Vec<u64>, TransferError> {
     if total_bytes == 0 {
         return Err(TransferError::SourceMissing);
     }
-    let count = total_bytes.div_ceil(ENCRYPTED_PART_PLAINTEXT_BYTES);
+    encrypted_part_sizes_with_limit(total_bytes, ENCRYPTED_PART_PLAINTEXT_BYTES)
+}
+
+pub(crate) fn encrypted_part_sizes_with_limit(
+    total_bytes: u64,
+    limit: u64,
+) -> Result<Vec<u64>, TransferError> {
+    if total_bytes == 0 || limit == 0 || limit > ENCRYPTED_PART_PLAINTEXT_BYTES {
+        return Err(TransferError::ManifestCorrupted);
+    }
+    let count = total_bytes.div_ceil(limit);
+    if count > 1_000_000 {
+        return Err(TransferError::ManifestCorrupted);
+    }
     let capacity = usize::try_from(count).map_err(|_| TransferError::SourceChanged)?;
     let mut parts = Vec::with_capacity(capacity);
     let mut remaining = total_bytes;
     while remaining != 0 {
-        let size = remaining.min(ENCRYPTED_PART_PLAINTEXT_BYTES);
+        let size = remaining.min(limit);
         parts.push(size);
         remaining -= size;
     }
@@ -125,7 +141,29 @@ pub trait RemoteObjectStore {
     ) -> Result<RemoteByteObject, UploadError>;
 
     fn download(&mut self, object_id: u64) -> Result<Vec<u8>, TransferError>;
+    /// Returns ordered ciphertext using a bounded in-memory window.
+    fn download_reader(
+        &mut self,
+        object_id: u64,
+        expected: u64,
+    ) -> Result<Box<dyn RemoteReader>, TransferError> {
+        if expected > MAX_TRANSFER_OBJECT_BYTES as u64 {
+            return Err(TransferError::ManifestCorrupted);
+        }
+        let bytes = self.download(object_id)?;
+        if bytes.len() as u64 != expected {
+            return Err(TransferError::HashMismatch);
+        }
+        Ok(Box::new(std::io::Cursor::new(bytes)))
+    }
 }
+
+pub trait RemoteReader: std::io::Read {
+    fn error(&self) -> Option<TransferError> {
+        None
+    }
+}
+impl RemoteReader for std::io::Cursor<Vec<u8>> {}
 
 /// Real Telegram implementation of the byte-store boundary.
 pub struct TelegramObjectStore {
@@ -278,6 +316,36 @@ impl RemoteObjectStore for TelegramObjectStore {
         self.upload_publication(name, caption, bytes, None)
     }
 
+    fn download_reader(
+        &mut self,
+        object_id: u64,
+        expected: u64,
+    ) -> Result<Box<dyn RemoteReader>, TransferError> {
+        if expected > teleark_telegram::MAX_STREAM_OBJECT_BYTES {
+            return Err(TransferError::ManifestCorrupted);
+        }
+        if let Some(observer) = &self.observer {
+            // Start the sampling clock before dispatch, so a slow first reply is
+            // visible as waiting and preparation time is excluded from the rate.
+            observer.observe(teleark_telegram::ByteTransferEvent::Downloading {
+                bytes: 0,
+                total: expected,
+            });
+        }
+        self.telegram
+            .download_reader(
+                self.account_id,
+                self.chat_id,
+                i64::try_from(object_id).map_err(|_| TransferError::RemoteMissing)?,
+                expected,
+                self.cancellation.clone(),
+                Some(Arc::new(TunedByteObserver {
+                    tuning: self.tuning.unwrap_or_default(),
+                    observer: self.observer.clone(),
+                })),
+            )
+            .map_err(map_application_error)
+    }
     fn download(&mut self, object_id: u64) -> Result<Vec<u8>, TransferError> {
         let message_id = i64::try_from(object_id).map_err(|_| TransferError::RemoteMissing)?;
         if let Some(observer) = &self.observer {
@@ -368,6 +436,10 @@ pub(crate) struct PreparedEncryptedPart {
 }
 
 impl<S> EncryptedRemoteTransport<S> {
+    pub(crate) fn confirmed_manifest_parts(&self) -> Vec<ManifestPart> {
+        self.manifest_parts.values().cloned().collect()
+    }
+
     pub fn new(
         store: S,
         account_id: AccountId,
@@ -546,7 +618,7 @@ impl<S> EncryptedRemoteTransport<S> {
         .map_err(map_crypto_error)?;
         let header = header.aligned(self.limits).map_err(map_crypto_error)?;
         let expected_encoded_size = header.expected_encoded_length().map_err(map_crypto_error)?;
-        if expected_encoded_size > MAX_TRANSFER_OBJECT_BYTES as u64 {
+        if expected_encoded_size > teleark_telegram::MAX_STREAM_OBJECT_BYTES {
             return Err(TransferError::ManifestCorrupted);
         }
         Ok(PartEncryptionPlan {
@@ -829,8 +901,49 @@ impl<S> EncryptedRemoteTransport<S> {
         self.decode(key, object, &encoded)
     }
 
+    pub(crate) fn download_manifest_part_to(
+        &mut self,
+        key: RemotePartKey,
+        mut output: &mut dyn std::io::Write,
+    ) -> Result<(), TransferError>
+    where
+        S: RemoteObjectStore,
+    {
+        self.validate_key(key)?;
+        let part = self
+            .manifest_parts
+            .get(&key.part_index.get())
+            .cloned()
+            .ok_or(TransferError::ManifestCorrupted)?;
+        let public = self
+            .recovered_public
+            .as_ref()
+            .ok_or(TransferError::ManifestCorrupted)?;
+        let mut encoded = self
+            .store
+            .download_reader(part.remote_locator.message_id as u64, part.encoded_length)?;
+        let decoded = decrypt_part_cancellable(
+            &mut encoded,
+            &mut output,
+            &self.file_key,
+            self.limits,
+            || {
+                self.cancellation
+                    .as_ref()
+                    .is_some_and(crate::TelegramScanCancellation::is_cancelled)
+            },
+        );
+        if let Some(error) = encoded.error() {
+            return Err(error);
+        }
+        let summary = decoded.map_err(map_crypto_error)?;
+        part.verify_decrypted_part(public, &summary)
+            .map_err(map_crypto_error)
+    }
+
     /// Download one part named by an authenticated opened manifest. Unlike
     /// discovery, this retains the verified plaintext for the destination owner.
+    #[cfg(test)]
     pub(crate) fn download_manifest_part(
         &mut self,
         key: RemotePartKey,
@@ -1931,6 +2044,38 @@ mod tests {
             package_id: PackageId::new(11),
             part_index: PartIndex::new(0),
         }
+    }
+
+    #[test]
+    fn container_cap_includes_every_header_and_authentication_tag() {
+        let maximum = encrypted_part_plaintext_limit();
+        let make = |length| {
+            PartHeader::new(
+                [1; 16],
+                teleark_crypto::PartInstanceId([2; 16]),
+                0,
+                1,
+                length,
+                0,
+                length,
+                FRAME_PLAINTEXT_BYTES,
+                PartLimits::default(),
+            )
+            .expect("header")
+            .aligned(PartLimits::default())
+            .expect("aligned")
+        };
+        assert_eq!(teleark_telegram::MAX_STREAM_OBJECT_BYTES, 2_040_109_465);
+        assert_eq!(
+            make(maximum).expected_encoded_length().expect("length"),
+            teleark_telegram::MAX_STREAM_OBJECT_BYTES
+        );
+        assert!(
+            make(maximum + 1).expected_encoded_length().expect("length")
+                > teleark_telegram::MAX_STREAM_OBJECT_BYTES
+        );
+        assert_eq!(make(maximum).frame_count, 3892);
+        assert!(encrypted_part_sizes_with_limit(u64::MAX, 1).is_err());
     }
 
     #[test]

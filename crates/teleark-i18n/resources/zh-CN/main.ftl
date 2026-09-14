@@ -1591,14 +1591,14 @@ transfer-upload-restarting-expired = 24 小时上传恢复窗口已过期，正�
 
 transfer-upload-upgrading = 正在使用新的加密标识升级上传格式
 
-transfer-upload-sealing = 正在保存并验证加密数据
+transfer-upload-sealing = 验证加密容器
 upload-pipeline-title = 上传活动
 upload-pipeline-queue = 缓冲队列：{ $queued } · 活跃 part：{ $active } · 距上次活动：{ $idle } · 重试等待：{ $wait }
-upload-chart-title = 已确认密文字节速率
+upload-chart-title = 已确认数据 / 秒
 upload-chart-empty = 等待实际确认回执，速度尚未知。
 upload-chart-sample = { $time } · { $interval } 内为 { $speed }
 upload-chart-range = 本次尝试开始后 { $from } – { $to }
-upload-chart-explanation = 柱高为各测量时段内已确认密文的平均速率，柱宽为时长；范围外不绘制估算。消息发布单独完成。
+upload-chart-explanation = 每个采样使用最近 3 秒的已确认数据，每秒发布一次；窗口边界精度为 50 毫秒。没有新确认时速度自然降至零。文件发布与完整性验证单独完成。
 upload-part-map-title = 当前容器 · 512 KiB 上传 part
 upload-part-map-legend = 灰色：排队 · 蓝色：传输 · 橙色：重试 · 绿色：已确认。最后一个 part 可不足 512 KiB。
 upload-part-state = Part { $part } · { $state } · 第 { $attempt } 次尝试
@@ -1713,3 +1713,22 @@ managed-key-phase-loading = 正在读取系统钥匙串
 managed-key-phase-securing = 正在保存并验证钥匙串记录
 
 managed-key-store-error = 无法访问系统钥匙串。请允许 TeleArk 访问后，在设置 → 加密密钥中重试。
+
+transfer-rate-sampling = 正在采样…
+transfer-persistence-parallel = { $activity } · 正在保存恢复信息
+transfer-eta-compact = 剩余 { $eta }
+transfer-rate-basis = 已确认的应用数据 · 最近 3 秒窗口 · 每秒更新
+transfer-rate-awaiting = 等待确认 · 上次确认在 { $elapsed } 前
+
+vault-health-pending-upload = 尚未上传完成
+vault-pending-resume = 继续上传…
+vault-pending-select-source = 选择原始文件以继续上传
+
+transfer-download-receiving-blocks = 正在接收并解密数据块
+
+transfer-rate-awaiting-first = 等待首次确认
+transfer-bytes-heading = 已处理 / 总大小
+transfer-eta-heading = 预计剩余
+upload-part-group = 块 { $first }–{ $last } · 已确认 { $confirmed } · { $state }
+storage-channel-pending-explanation = 此上传尚未完成。恢复对应密钥并选择相同的原文件后可继续；仅复用已发布且验证通过的容器。
+upload-part-map-grouping = 共 { $count } 个块 · 每格最多 { $size } 个。悬停可查看具体范围。

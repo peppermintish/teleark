@@ -54,43 +54,47 @@ impl RateCache {
             upload: Some(0),
             cleanup: None,
         };
-        for item in native
-            .items
-            .iter()
-            .filter(|item| account.is_some() && item.account_id == account)
-        {
-            if let Some(cleanup) = item.cleanup
-                && (rates.cleanup.is_none()
-                    || matches!(
-                        cleanup.phase,
-                        teleark_runtime::ChannelDownloadCleanupPhase::Failed(_)
-                    ))
+        let structure_unchanged = self.cached.as_ref().is_some_and(|cached| {
+            cached.account == account
+                && cached.native.ptr_eq(&native_key)
+                && cached.vault.ptr_eq(&vault_key)
+        });
+        if structure_unchanged {
+            rates.cleanup = self.cached.as_ref().and_then(|cached| cached.rates.cleanup);
+        } else {
+            for item in native
+                .items
+                .iter()
+                .filter(|item| account.is_some() && item.account_id == account)
             {
-                rates.cleanup = Some((item.id, cleanup.phase));
+                if let Some(cleanup) = item.cleanup
+                    && (rates.cleanup.is_none()
+                        || matches!(
+                            cleanup.phase,
+                            teleark_runtime::ChannelDownloadCleanupPhase::Failed(_)
+                        ))
+                {
+                    rates.cleanup = Some((item.id, cleanup.phase));
+                }
             }
-            if item.state != teleark_runtime::ChannelDownloadState::Running {
-                continue;
-            }
-            rates.download = rates
-                .download
-                .zip(item.current_bytes_per_second)
-                .map(|(sum, rate)| sum.saturating_add(rate));
         }
-        for item in vault.items.iter().filter(|item| {
-            Some(item.account_id) == account
-                && item.state == teleark_runtime::VaultTransferState::Running
-        }) {
-            // A restored/not-yet-measured task cannot invent a zero-speed sample.
-            let measured = item
-                .average_bytes_per_second
-                .map(|_| item.telemetry.goodput_bytes_per_second);
-            let total = match item.direction {
-                teleark_runtime::VaultTransferDirection::Upload => &mut rates.upload,
-                teleark_runtime::VaultTransferDirection::Download => &mut rates.download,
-            };
-            *total = total
-                .zip(measured)
-                .map(|(sum, rate)| sum.saturating_add(rate));
+        if let Some(account) = account {
+            for totals in [
+                native.account_rates.get(&account),
+                vault.account_rates.get(&account),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                rates.download = rates.download.and_then(|sum| {
+                    (totals.downloads_sampling == 0)
+                        .then(|| sum.saturating_add(totals.download_bytes_per_second))
+                });
+                rates.upload = rates.upload.and_then(|sum| {
+                    (totals.uploads_sampling == 0)
+                        .then(|| sum.saturating_add(totals.upload_bytes_per_second))
+                });
+            }
         }
         self.cached = Some(CachedRates {
             account,
@@ -615,6 +619,17 @@ mod tests {
                 revision: 1,
                 items: rows.into(),
                 omitted_items: 0,
+                account_rates: Arc::new(
+                    [(
+                        1,
+                        teleark_runtime::TransferRates {
+                            uploads_sampling: 1,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                ),
+                ..Default::default()
             };
             let mut cache = RateCache::default();
             for _ in 0..100 {
@@ -628,7 +643,17 @@ mod tests {
                 "ordinary renders never rescan retained history"
             );
             running.average_bytes_per_second = Some(1024);
-            running.telemetry.goodput_bytes_per_second = 2048;
+            running.telemetry.goodput_bytes_per_second = 9999;
+            view.account_rates = Arc::new(
+                [(
+                    1,
+                    teleark_runtime::TransferRates {
+                        upload_bytes_per_second: 2048,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            );
             view.items = vec![Arc::new(running.clone())].into();
             // Replacement owners can restart their revision sequence.
             assert_eq!(
@@ -642,6 +667,7 @@ mod tests {
                 "previous account samples stay isolated"
             );
             running.state = teleark_runtime::VaultTransferState::Completed;
+            view.account_rates = Arc::default();
             view.items = vec![Arc::new(running)].into();
             assert_eq!(
                 cache.read(Some(1), &app.native_transfer_view, &view).upload,

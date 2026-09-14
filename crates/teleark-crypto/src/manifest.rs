@@ -1,3 +1,5 @@
+mod pending;
+pub use pending::{PendingUpload, PendingUploadScope, open_pending_upload, seal_pending_upload};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -1520,7 +1522,7 @@ mod tests {
     use super::*;
     use crate::wrap::wrap_file_key;
 
-    fn sample() -> (
+    pub(super) fn sample() -> (
         VaultMasterKey,
         FileKey,
         ManifestPublicHeader,

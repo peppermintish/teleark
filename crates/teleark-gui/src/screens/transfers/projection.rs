@@ -11,6 +11,7 @@ pub(crate) struct TransferProjectionCache {
     vault: Option<std::sync::Weak<[Arc<VaultTransferSnapshot>]>>,
     account: Option<i64>,
     items: Arc<Vec<TransferItem>>,
+    presentation: Option<std::rc::Rc<Presentation>>,
 }
 
 impl TransferProjectionCache {
@@ -43,6 +44,117 @@ impl TransferProjectionCache {
         self.vault = Some(Arc::downgrade(&app.vault_transfer_view.items));
         self.account = account;
         self.items = items;
+    }
+}
+
+pub(super) struct Presentation {
+    source: Arc<Vec<TransferItem>>,
+    selection: &'static str,
+    query: String,
+    expanded: BTreeSet<u64>,
+    selected: BTreeSet<u64>,
+    pub stats: [usize; 5],
+    pub activity_row: Option<TransferItem>,
+    pub rows: Arc<Vec<TransferItem>>,
+    pub keys: Arc<Vec<u64>>,
+    pub key_indices: BTreeMap<u64, usize>,
+    pub selected_count: usize,
+    pub actions: BTreeMap<usize, Arc<Vec<u64>>>,
+    pub scroll_applied: std::cell::Cell<bool>,
+}
+impl TransferProjectionCache {
+    pub(super) fn presentation(
+        &mut self,
+        app: &TeleArkApp,
+        source: Arc<Vec<TransferItem>>,
+        query: &str,
+    ) -> std::rc::Rc<Presentation> {
+        if let Some(cached) = &self.presentation
+            && Arc::ptr_eq(&cached.source, &source)
+            && cached.selection == app.nav_selection
+            && cached.query == query
+            && cached.expanded == app.expanded_transfer_batches
+            && cached.selected == app.selected_transfer_keys
+        {
+            return cached.clone();
+        }
+        let mut stats = [0; 5];
+        for item in source.iter().filter(|item| !item.child()) {
+            let index = match item.state() {
+                TransferState::Uploading => 0,
+                TransferState::Downloading => 1,
+                TransferState::Waiting | TransferState::Paused => 2,
+                TransferState::Completed => 3,
+                TransferState::Failed | TransferState::Cancelled => 4,
+            };
+            stats[index] += 1;
+        }
+        let activity_row = source
+            .iter()
+            .find(|item| {
+                !item.child()
+                    && item.direction() == TransferDirection::Upload
+                    && item.activity_detail(app).is_some()
+            })
+            .cloned();
+        let rows = Arc::new(visible_items(
+            &source,
+            app,
+            app.nav_selection,
+            query,
+            &app.expanded_transfer_batches,
+        ));
+        let keys = Arc::new(
+            rows.iter()
+                .enumerate()
+                .map(|(i, row)| row.key(i))
+                .collect::<Vec<_>>(),
+        );
+        let key_indices = keys.iter().enumerate().map(|(i, key)| (*key, i)).collect();
+        let selected_count = keys
+            .iter()
+            .filter(|key| app.selected_transfer_keys.contains(key))
+            .count();
+        let snapshots = &app.native_transfer_view.items;
+        let batches = snapshots
+            .iter()
+            .map(|row| (row.id, row.batch_id))
+            .collect::<Vec<_>>();
+        let scoped = scope_ids(&rows, &app.selected_transfer_keys, &batches);
+        let actions = [
+            TransferAction::Resume,
+            TransferAction::Pause,
+            TransferAction::Retry,
+            TransferAction::Cancel,
+            TransferAction::Delete,
+        ]
+        .into_iter()
+        .map(|action| {
+            let ids = snapshots
+                .iter()
+                .filter(|row| scoped.contains(&row.id) && action.supports_snapshot(row))
+                .map(|row| row.id)
+                .collect();
+            (action as usize, Arc::new(ids))
+        })
+        .collect();
+        let result = std::rc::Rc::new(Presentation {
+            source,
+            selection: app.nav_selection,
+            query: query.into(),
+            expanded: app.expanded_transfer_batches.clone(),
+            selected: app.selected_transfer_keys.clone(),
+            stats,
+            activity_row,
+            rows,
+            keys,
+            key_indices,
+            selected_count,
+            actions,
+            scroll_applied: std::cell::Cell::new(false),
+        });
+        self.presentation = Some(result.clone());
+        result
     }
 }
 
@@ -196,12 +308,17 @@ impl TransferItem {
                 .iter()
                 .find_map(|row| row.cleanup)
                 .map(|cleanup| app.native_cleanup_detail(cleanup)),
-            Self::Vault(row, _) if active(row) => row
+            Self::Vault(row, _) if active(row) => app
+                .vault_transfer_view
+                .updates
+                .get(&row.id)
+                .unwrap_or(row)
                 .upload_activity
                 .as_ref()
                 .map(|activity| app.upload_activity_detail(activity)),
             Self::VaultBatch(_, _, rows) => rows
                 .iter()
+                .map(|row| app.vault_transfer_view.updates.get(&row.id).unwrap_or(row))
                 .find(|row| row.state == VaultTransferState::Running)
                 .or_else(|| {
                     rows.iter().find(|row| {

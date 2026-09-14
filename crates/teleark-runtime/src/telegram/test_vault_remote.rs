@@ -144,7 +144,13 @@ impl TestVaultRemote {
         Ok(())
     }
     pub(crate) fn objects(&self) -> usize {
-        self.state.lock().expect("state").objects.len()
+        self.state
+            .lock()
+            .expect("state")
+            .objects
+            .values()
+            .filter(|object| object.summary.caption != crate::vault::remote_upload::CAPTION)
+            .count()
     }
     pub(crate) fn downloads(&self) -> Vec<i64> {
         self.state.lock().expect("state").downloads.clone()
@@ -275,11 +281,17 @@ impl TestVaultRemote {
             } => {
                 let result = (|| {
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                    let random = publication_random_id
-                        .expect("durable runtime must supply publication identity");
+                    let pending_metadata = caption == crate::vault::remote_upload::CAPTION;
+                    let random = publication_random_id.unwrap_or_else(|| {
+                        assert!(
+                            pending_metadata,
+                            "durable payloads need a publication identity"
+                        );
+                        -(self.state.lock().expect("state").objects.len() as i64 + 1)
+                    });
                     assert_ne!(random, 0);
                     assert!(bytes.len() <= 64 * 1024 * 1024, "bounded encrypted object");
-                    {
+                    if !pending_metadata {
                         let mut state = self.state.lock().expect("state");
                         assert!(state.uploads.len() < 64);
                         state
@@ -294,17 +306,19 @@ impl TestVaultRemote {
                             total: bytes.len() as u64,
                         });
                     }
-                    self.cross_gate(if caption == crate::transfer::MANIFEST_CAPTION {
-                        GateKind::ManifestUpload
-                    } else {
-                        GateKind::UploadPart
-                    })?;
-                    Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                    self.fail_if_armed(if caption == crate::transfer::MANIFEST_CAPTION {
-                        GateKind::ManifestUpload
-                    } else {
-                        GateKind::UploadPart
-                    })?;
+                    if !pending_metadata {
+                        self.cross_gate(if caption == crate::transfer::MANIFEST_CAPTION {
+                            GateKind::ManifestUpload
+                        } else {
+                            GateKind::UploadPart
+                        })?;
+                        Self::scope(account_id, chat_id, cancellation.as_ref())?;
+                        self.fail_if_armed(if caption == crate::transfer::MANIFEST_CAPTION {
+                            GateKind::ManifestUpload
+                        } else {
+                            GateKind::UploadPart
+                        })?;
+                    }
                     let mut state = self.state.lock().expect("state");
                     if let Some(id) = state.publications.get(&random).copied() {
                         let object = state.objects.get(&id).expect("stable publication");
@@ -313,7 +327,7 @@ impl TestVaultRemote {
                         assert_eq!(object.summary.caption, caption);
                         return Ok(id);
                     }
-                    assert!(state.objects.len() < 32);
+                    assert!(state.objects.len() < 256);
                     assert!(
                         state
                             .objects
@@ -349,9 +363,11 @@ impl TestVaultRemote {
                     drop(state);
                     // The remote object exists, but no successful reply or
                     // verified local receipt has reached the Vault owner yet.
-                    self.cross_gate(acknowledgment)?;
-                    Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                    self.fail_if_armed(acknowledgment)?;
+                    if !pending_metadata {
+                        self.cross_gate(acknowledgment)?;
+                        Self::scope(account_id, chat_id, cancellation.as_ref())?;
+                        self.fail_if_armed(acknowledgment)?;
+                    }
                     if let Some(observer) = &observer {
                         observer.observe(teleark_telegram::ByteTransferEvent::Uploading {
                             bytes: size,
@@ -359,6 +375,54 @@ impl TestVaultRemote {
                         });
                     }
                     Ok(id)
+                })();
+                let _ = reply.send(result);
+            }
+            TelegramRequest::DownloadStream {
+                account_id,
+                chat_id,
+                message_id,
+                expected,
+                blocks,
+                observer,
+                cancellation,
+                abort,
+                reply,
+            } => {
+                let result = (|| {
+                    Self::scope(account_id, chat_id, cancellation.as_ref())?;
+                    let object = {
+                        let mut state = self.state.lock().expect("state");
+                        state.downloads.push(message_id);
+                        state.objects.get(&message_id).cloned().ok_or_else(|| {
+                            ApplicationError::new(ApplicationErrorKind::SourceMissing)
+                        })?
+                    };
+                    assert_eq!(object.bytes.len() as u64, expected);
+                    if let Some(observer) = &observer {
+                        observer.observe(teleark_telegram::ByteTransferEvent::Downloading {
+                            bytes: expected / 2,
+                            total: expected,
+                        });
+                    }
+                    self.cross_gate(GateKind::DownloadPart)?;
+                    self.fail_if_armed(GateKind::DownloadPart)?;
+                    Self::scope(account_id, chat_id, cancellation.as_ref())?;
+                    for block in object.bytes.chunks(teleark_telegram::UPLOAD_PART_BYTES) {
+                        if abort.is_cancelled() {
+                            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                        }
+                        blocks
+                            .blocking_send(block.to_vec())
+                            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))?;
+                    }
+                    if let Some(observer) = &observer {
+                        observer.observe(teleark_telegram::ByteTransferEvent::Downloading {
+                            bytes: expected,
+                            total: expected,
+                        });
+                    }
+                    Ok(())
                 })();
                 let _ = reply.send(result);
             }

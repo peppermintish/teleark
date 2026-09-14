@@ -1,6 +1,6 @@
 //! File-local health and encrypted inventory. All work runs on the Vault owner.
 use super::*;
-use crate::{RemoteObjectStore as _, StorageRequest, VaultFileHealth};
+use crate::{StorageRequest, VaultFileHealth};
 use teleark_crypto::{ManifestLimits, manifest_vault_id_hint, open_manifest};
 use teleark_storage::VaultInventoryRecord;
 

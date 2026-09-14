@@ -8,22 +8,27 @@ The format provides bounded-memory authenticated encryption for very large logic
 
 It does not hide ciphertext size, part count, upload timing, account/channel relationships, or traffic patterns. It does not encrypt native Telegram files outside Vault mode and does not replace secure endpoint/credential handling.
 
-The desktop groups encrypted data into containers of at most 60 MiB plaintext
-(64 MiB encoded transport ceiling). Container size is distinct from the wire
-block: one authenticated encryption frame, including its framing, occupies one
-512 KiB Telegram upload part. The final block can be shorter. A retained producer
-streams through one reusable plaintext frame buffer into a bounded ciphertext
-queue and a private, bounded per-container recovery spool. No full plaintext
-container is prepared in memory. The codec still reads older container/frame
-geometries within its original limits.
+The current desktop encrypted-container ceiling is **1.9 GiB**, rounded down to
+2,040,109,465 encoded bytes including headers/tags. For aligned v2 this permits
+2,039,984,825 plaintext bytes in 3,892 frames. Each full transport block is 512 KiB;
+the final block can be shorter. A retained producer encrypts in memory and sends
+through bounded reusable queues. Download receives bounded ranges, authenticates
+and decrypts each frame in memory, then writes only authenticated plaintext.
+Whole-file verification precedes final publication. No new encrypted payload spool
+or whole-container buffer is created for upload, download, retry or verification.
 
-Fresh encryption is performed once per reserved instance. A sealed ciphertext
-spool is replayed verbatim; source changes fail admission. If a spool is missing,
-partial or corrupt, the ledger advances that part's 128-bit instance ID before
-any encryption. Initial IDs are random; replacements increment the saved ID and
-fail on overflow, so a retry cannot accidentally select a retired instance even
-if the RNG repeats. This changes the derived content key. Indexed nonces are
-unique within that key; sending existing ciphertext again is not encryption.
+Published containers can be reused after verification. If an unpublished
+container's immutable memory buffers are gone, its reservation is retired before
+new encryption. Initial IDs are random; replacements increment the saved 128-bit
+ID and fail on overflow, changing the derived content key. Existing legacy spools
+can be read verbatim for recovery, and are removed only after safe retirement or
+publication. Source changes still fail content validation. See
+[ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md).
+
+Pending uploads use the separate [pending envelope v1](PENDING_UPLOAD_FORMAT.md),
+with independently salted keys and authenticated account/channel scope. This is
+metadata, never a completed file or authorization to skip source validation.
+Completed part/manifest and key-wrap codecs retain the versions above.
 
 The desktop access model is now defined by [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md): automatic OS-random keys, system Keychain storage and an optional application-only PIN. The password-wrap primitive and bytes below are unchanged; new desktop records use a discarded random wrapping password, and users never enter it. Master/File/Recovery keys remain independently generated. This change introduces no new encrypted file codec or reinterpretation of existing bytes.
 

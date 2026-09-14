@@ -177,6 +177,18 @@ impl VaultOwner {
             self.telegram
                 .validate_storage_channel(account, plan.pending.chat_id)?;
             drop(registration);
+            if let Some(message) = super::remote_upload::remembered_remote(
+                &self.library.database_path,
+                &current.record,
+            )? {
+                return self.resume_remote_upload_inner(
+                    account,
+                    plan.pending.chat_id,
+                    message,
+                    &plan.source.path,
+                    Some(current),
+                );
+            }
             self.upload(
                 account,
                 plan.pending.chat_id,
@@ -621,6 +633,7 @@ mod tests {
             .expect("visible");
         let package = [1; 16];
         let context = crate::VaultRecoveryContext {
+            container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
             account_id: 7,
             task_id: 1,
             chat_id: 11,

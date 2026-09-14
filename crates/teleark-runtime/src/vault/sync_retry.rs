@@ -205,8 +205,8 @@ mod tests {
         assert_eq!(result.files[0].logical_name, "example.txt");
         assert_eq!(
             remote.downloads().len() - downloads,
-            2,
-            "failed candidate retries; authenticated cached entry is reused"
+            3,
+            "failed manifest retries and the pending envelope is authenticated once"
         );
     }
 

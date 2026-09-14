@@ -1,5 +1,27 @@
 # Transfers and diagnostics
 
+## Current payload and presentation contract (2026-09-15)
+
+[ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md) supersedes
+older ciphertext spool, 60 MiB target and container-completion speed descriptions.
+The new ceiling is **1.9 GiB of encrypted bytes**, including headers and tags.
+Upload streams plaintext → in-memory encryption → bounded 512 KiB blocks → RPCs;
+download streams RPC blocks → in-memory frame authentication/decryption →
+plaintext partial output. Container and final-file checks precede publication.
+Legacy ciphertext spools are recovery inputs only; tiny recovery metadata remains
+persistent. Whole-file and container BLAKE3 share one sequential inspection pass.
+
+[Pending uploads](PENDING_UPLOAD_FORMAT.md) are published before source inspection
+and updated with verified published-container prefixes. Same-source/device handoff
+requires the original recovery key and account/channel scope. Unpublished lost
+memory is retired before fresh encryption. RPC confirmations update hot counters
+immediately, including native download chunk replies. Ordinary display samples
+publish once per second over three seconds (50 ms edge quantization), and silence
+expires the rate. Restored/duplicate/stale confirmations cannot create speed.
+Checkpoint persistence runs alongside transport and never resets progress.
+Global totals are incremental; list filters/identities and action scopes are
+cached, visible rows resolve changed records, and charts/maps have fixed bounds.
+
 Three implementations must remain distinct: the deterministic Core transfer engine, the connected durable native-download owner, and the connected Vault owner. The first provides tested ports/policy; the latter two define currently exposed desktop capabilities. [Status](IMPLEMENTATION_STATUS.md) records remaining integration work.
 
 ## Ownership and ports

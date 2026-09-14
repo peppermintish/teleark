@@ -48,6 +48,7 @@ pub struct VaultRecoveryContext {
     pub file_name: String,
     pub created_at_unix_ms: u64,
     pub size_bytes: u64,
+    pub container_plaintext_limit: u64,
     pub direction: VaultRecoveryDirection,
 }
 
@@ -74,10 +75,13 @@ impl VaultRecoveryContext {
     pub fn from_record(
         record: &teleark_storage::VaultJobRecord,
     ) -> Result<Self, RecoveryContextError> {
-        if record.context_version != 1 {
+        if !matches!(record.context_version, 1 | 2) {
             return Err(RecoveryContextError::UnsupportedVersion);
         }
         let context = Self::decode(&record.context)?;
+        if context.codec_version() != record.context_version {
+            return Err(RecoveryContextError::Corrupt);
+        }
         let direction = match context.direction {
             VaultRecoveryDirection::Upload { .. } => teleark_storage::VaultJobDirection::Upload,
             VaultRecoveryDirection::Download { .. } => teleark_storage::VaultJobDirection::Download,
@@ -103,7 +107,7 @@ impl VaultRecoveryContext {
             id: self.task_id,
             chat_id: self.chat_id,
             package_id: self.package_id,
-            context_version: 1,
+            context_version: self.codec_version(),
             context,
             direction: match self.direction {
                 VaultRecoveryDirection::Upload { .. } => teleark_storage::VaultJobDirection::Upload,
@@ -161,11 +165,24 @@ impl VaultRecoveryContext {
         )
         .map_err(|_| RecoveryContextError::Authentication)
     }
+    fn codec_version(&self) -> u32 {
+        if self.container_plaintext_limit == crate::transfer::LEGACY_PART_PLAINTEXT_BYTES {
+            1
+        } else {
+            2
+        }
+    }
+    pub fn part_sizes(&self) -> Result<Vec<u64>, teleark_core::TransferError> {
+        crate::transfer::encrypted_part_sizes_with_limit(
+            self.size_bytes,
+            self.container_plaintext_limit,
+        )
+    }
     pub fn encode(&self) -> Result<Vec<u8>, RecoveryContextError> {
         self.validate()?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&self.codec_version().to_le_bytes());
         bytes.push(match self.direction {
             VaultRecoveryDirection::Upload { .. } => 1,
             VaultRecoveryDirection::Download { .. } => 2,
@@ -182,6 +199,9 @@ impl VaultRecoveryContext {
         bytes.extend_from_slice(&self.file_key_wrap.tag);
         bytes.extend_from_slice(&self.created_at_unix_ms.to_le_bytes());
         bytes.extend_from_slice(&self.size_bytes.to_le_bytes());
+        if self.codec_version() == 2 {
+            bytes.extend_from_slice(&self.container_plaintext_limit.to_le_bytes());
+        }
         append(&mut bytes, self.file_name.as_bytes(), MAX_NAME)?;
         match &self.direction {
             VaultRecoveryDirection::Upload {
@@ -219,7 +239,8 @@ impl VaultRecoveryContext {
         }
         let mut input = Reader(bytes);
         input.array::<8>()?;
-        if u32::from_le_bytes(input.array()?) != 1 {
+        let version = u32::from_le_bytes(input.array()?);
+        if !matches!(version, 1 | 2) {
             return Err(RecoveryContextError::UnsupportedVersion);
         }
         if bytes.len() < 44 {
@@ -245,6 +266,11 @@ impl VaultRecoveryContext {
         };
         let created_at_unix_ms = u64::from_le_bytes(input.array()?);
         let size_bytes = u64::from_le_bytes(input.array()?);
+        let container_plaintext_limit = if version == 2 {
+            u64::from_le_bytes(input.array()?)
+        } else {
+            crate::transfer::LEGACY_PART_PLAINTEXT_BYTES
+        };
         let file_name = String::from_utf8(input.bytes(MAX_NAME)?.to_vec())
             .map_err(|_| RecoveryContextError::Invalid)?;
         let path = decode_path(&mut input)?;
@@ -281,6 +307,7 @@ impl VaultRecoveryContext {
             file_name,
             created_at_unix_ms,
             size_bytes,
+            container_plaintext_limit,
             direction,
         };
         result.validate()?;
@@ -301,6 +328,8 @@ impl VaultRecoveryContext {
             || self.file_name.len() > MAX_NAME
             || self.file_name.contains('\0')
             || self.created_at_unix_ms > i64::MAX as u64
+            || self.container_plaintext_limit == 0
+            || self.container_plaintext_limit > crate::encrypted_part_plaintext_limit()
             || self.size_bytes == 0
             || self.size_bytes > i64::MAX as u64
         {

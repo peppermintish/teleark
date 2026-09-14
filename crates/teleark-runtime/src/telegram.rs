@@ -1,6 +1,7 @@
 mod dispatch;
 pub(crate) mod lifecycle;
 mod network_owner;
+mod stream_reader;
 use teleark_telegram::network::{NetworkMonitor, NetworkRoute};
 
 use std::{
@@ -239,6 +240,17 @@ enum TelegramRequest {
         message_id: i64,
         destination: PathBuf,
         observer: Option<Arc<dyn DownloadObserver>>,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
+    DownloadStream {
+        account_id: i64,
+        chat_id: i64,
+        message_id: i64,
+        expected: u64,
+        blocks: tokio::sync::mpsc::Sender<Vec<u8>>,
+        observer: Option<Arc<dyn ByteTransferObserver>>,
+        cancellation: Option<TelegramScanCancellation>,
+        abort: TelegramScanCancellation,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     DownloadBytes {
@@ -789,6 +801,76 @@ impl DesktopTelegram {
         .map_err(map_telegram_error)
     }
 
+    pub(crate) fn download_reader(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        message_id: i64,
+        expected: u64,
+        cancellation: Option<TelegramScanCancellation>,
+        observer: Option<Arc<dyn ByteTransferObserver>>,
+    ) -> Result<Box<dyn crate::transfer::RemoteReader>, ApplicationError> {
+        let (blocks, receiver) = tokio::sync::mpsc::channel(2);
+        let (reply, response) = mpsc::sync_channel(1);
+        let abort = TelegramScanCancellation::new();
+        let request = TelegramRequest::DownloadStream {
+            account_id,
+            chat_id,
+            message_id,
+            expected,
+            blocks,
+            observer,
+            cancellation,
+            abort: abort.clone(),
+            reply,
+        };
+        if self
+            .inner
+            .changing
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        #[cfg(test)]
+        if let Some(remote) = &self.test_vault_remote {
+            let remote = remote.clone();
+            let worker = std::thread::Builder::new()
+                .name("teleark-fake-stream".into())
+                .spawn(move || remote.handle(request))
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            return Ok(Box::new(crate::telegram::stream_reader::ByteReader::new(
+                receiver,
+                response,
+                abort,
+                self.clone(),
+                None,
+                Some(worker),
+            )));
+        }
+        let (sender, generation) = {
+            let endpoint = self
+                .inner
+                .endpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let endpoint = endpoint
+                .as_ref()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Network))?;
+            (endpoint.sender.clone(), endpoint.generation)
+        };
+        sender
+            .blocking_send(request)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
+        Ok(Box::new(crate::telegram::stream_reader::ByteReader::new(
+            receiver,
+            response,
+            abort,
+            self.clone(),
+            Some(generation),
+            None,
+        )))
+    }
+
     pub fn download_bytes(
         &self,
         account_id: i64,
@@ -1056,7 +1138,7 @@ impl TelegramRequest {
             Self::ScanFilteredFiles { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
-            Self::Download { reply, .. } => {
+            Self::Download { reply, .. } | Self::DownloadStream { reply, .. } => {
                 let _ = reply.send(Err(ApplicationError::new(ApplicationErrorKind::Capacity)));
             }
             Self::DownloadBytes { reply, .. } => {
@@ -1081,6 +1163,7 @@ impl TelegramRequest {
             Self::TestProxy { .. } => Lane::Probe,
             Self::Download { .. }
             | Self::DownloadBytes { .. }
+            | Self::DownloadStream { .. }
             | Self::UploadBytes { .. }
             | Self::UploadStream { .. } => Lane::Transfer,
             Self::SyncChannel { .. }
@@ -1372,6 +1455,34 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
                 observer,
             )
             .await;
+            let _ = reply.send(result);
+        }
+        TelegramRequest::DownloadStream {
+            account_id,
+            chat_id,
+            message_id,
+            expected,
+            blocks,
+            observer,
+            cancellation,
+            abort,
+            reply,
+        } => {
+            let operation = async {
+                require_account(state, account_id)?;
+                let (connection, file) = fetch_file(state, chat_id, message_id).await?;
+                connection
+                    .download_stream_observed(&file, expected, blocks, observer)
+                    .await
+                    .map_err(map_telegram_error)
+            };
+            let parent = cancellation.unwrap_or_default();
+            let result = tokio::select! {
+                biased;
+                _ = abort.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
+                _ = parent.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
+                result = operation => result,
+            };
             let _ = reply.send(result);
         }
         TelegramRequest::DownloadBytes {

@@ -844,6 +844,94 @@ mod tests {
     }
 
     #[test]
+    fn aligned_download_writes_authenticated_plaintext_before_requesting_the_next_block() {
+        use std::{cell::Cell, rc::Rc};
+        const BLOCK: usize = 512 * 1024;
+        struct Output(Rc<Cell<usize>>);
+        impl Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.set(self.0.get() + bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Network {
+            bytes: Cursor<Vec<u8>>,
+            written: Rc<Cell<usize>>,
+        }
+        impl Read for Network {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let position = self.bytes.position() as usize;
+                if position == BLOCK {
+                    assert_eq!(
+                        self.written.get(),
+                        BLOCK - PART_HEADER_LENGTH - FRAME_HEADER_LENGTH - TAG_LENGTH,
+                        "first block is authenticated and written before the next arrives"
+                    );
+                }
+                let count = out.len().min(BLOCK - position % BLOCK);
+                self.bytes.read(&mut out[..count])
+            }
+        }
+        let key = FileKey::from_bytes([3; 32]);
+        let plain = vec![0x5a; 2 * BLOCK];
+        let header = PartHeader::new(
+            [1; 16],
+            PartInstanceId([2; 16]),
+            0,
+            1,
+            plain.len() as u64,
+            0,
+            plain.len() as u64,
+            (BLOCK - 32) as u32,
+            PartLimits::default(),
+        )
+        .expect("header")
+        .aligned(PartLimits::default())
+        .expect("aligned frames");
+        let mut bytes = Vec::new();
+        encrypt_part(
+            &mut Cursor::new(&plain),
+            &mut bytes,
+            &header,
+            &key,
+            PartLimits::default(),
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("encrypted fixture");
+        for corrupt in [false, true] {
+            let mut encoded = bytes.clone();
+            if corrupt {
+                encoded[2 * BLOCK - 1] ^= 1;
+            }
+            let written = Rc::new(Cell::new(0));
+            let mut input = Network {
+                bytes: Cursor::new(encoded),
+                written: written.clone(),
+            };
+            let result = decrypt_part(
+                &mut input,
+                &mut Output(written.clone()),
+                &key,
+                PartLimits::default(),
+            );
+            if corrupt {
+                assert!(result.is_err());
+                assert_eq!(
+                    written.get(),
+                    BLOCK - 128,
+                    "unauthenticated second-frame plaintext never reaches the file writer"
+                );
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(written.get(), plain.len());
+            }
+        }
+    }
+
+    #[test]
     fn cancellation_stops_at_frame_boundary_without_a_success_summary() {
         use std::{cell::Cell, rc::Rc};
         struct StopWriter {

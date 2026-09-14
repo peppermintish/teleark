@@ -1,6 +1,9 @@
 # ADR 0036: Streaming upload, immutable retry and manual concurrency
 
-Date: 2026-09-14. Status: accepted.
+Date: 2026-09-14. Status: accepted, partially superseded by
+[ADR 0041](0041-memory-streaming-and-portable-upload-recovery.md) on 2026-09-15.
+Its 60 MiB target, new ciphertext spools and package retirement on temporary-part
+expiry are historical. Manual bounded concurrency and legacy readers remain.
 
 ## Decision and scope
 

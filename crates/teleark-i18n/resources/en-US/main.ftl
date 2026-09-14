@@ -1618,14 +1618,14 @@ transfer-upload-restarting-expired = The 24-hour upload window expired. Starting
 
 transfer-upload-upgrading = Upgrading upload format with a fresh encryption identity
 
-transfer-upload-sealing = Saving and validating encrypted data
+transfer-upload-sealing = Validating encrypted container
 upload-pipeline-title = Upload activity
 upload-pipeline-queue = Queued buffers: { $queued } · Active parts: { $active } · Last activity: { $idle } ago · Retry wait: { $wait }
-upload-chart-title = Acknowledged ciphertext / second
+upload-chart-title = Confirmed payload / second
 upload-chart-empty = Waiting for measured acknowledgements. Speed is unknown.
 upload-chart-sample = { $time } · { $speed } over { $interval }
 upload-chart-range = { $from } – { $to } since this attempt started
-upload-chart-explanation = Bars average confirmed ciphertext over each measured interval; widths show duration. No estimate is drawn outside this range. Publication completes separately.
+upload-chart-explanation = Each sample uses the latest 3 seconds of confirmed payload. Samples publish once per second; the window edge is quantized to 50 ms. Silence expires to zero. File publication and integrity verification complete separately.
 upload-part-map-title = Current container · 512 KiB upload parts
 upload-part-map-legend = Gray: queued · Blue: sending · Amber: retry · Green: acknowledged. Last part may be shorter.
 upload-part-state = Part { $part } · { $state } · Attempt { $attempt }
@@ -1740,3 +1740,22 @@ managed-key-phase-loading = Reading the system keychain
 managed-key-phase-securing = Saving and verifying the keychain entry
 
 managed-key-store-error = The system keychain could not be accessed. Allow TeleArk access and retry in Settings → Encryption keys.
+
+transfer-rate-sampling = Sampling…
+transfer-persistence-parallel = { $activity } · Saving recovery information
+transfer-eta-compact = ETA { $eta }
+transfer-rate-basis = Confirmed application payload · 3 s window · updated every 1 s
+transfer-rate-awaiting = Waiting for confirmation · last confirmation { $elapsed } ago
+
+vault-health-pending-upload = Upload incomplete
+vault-pending-resume = Continue upload…
+vault-pending-select-source = Select the original file to continue uploading
+
+transfer-download-receiving-blocks = Receiving and decrypting blocks
+
+transfer-rate-awaiting-first = Waiting for first confirmation
+transfer-bytes-heading = Processed / Total
+transfer-eta-heading = ETA
+upload-part-group = Blocks { $first }–{ $last } · { $confirmed } confirmed · { $state }
+storage-channel-pending-explanation = This upload is incomplete. Restore its recovery key and select the same original file to continue; only published, verified containers can be reused.
+upload-part-map-grouping = { $count } blocks · Up to { $size } per cell. Hover for exact ranges.

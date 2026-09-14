@@ -1,7 +1,12 @@
 # Upload performance proposal
 
-Status: proposed, 2026-09-15. This is a design recommendation, not implemented
-behavior or a replacement for the accepted recovery/security contracts.
+Status: historical proposal, superseded on 2026-09-15 by
+[ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md). Current
+behavior uses 1.9 GiB encoded containers, memory-only payload streaming, portable
+pending descriptors, one-second rate publication and a three-second window.
+Whole-file/container hashes share one inspection pass; a fully one-pass mutable
+source upload remains unimplemented. The original recommendations below are
+retained as design history, not the current contract.
 
 ## Recommendation and order
 

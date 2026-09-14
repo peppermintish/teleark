@@ -73,38 +73,79 @@ impl TeleArkApp {
                     gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
                 })
         });
-        let parts = activity.parts.iter().enumerate().map(|(index, part)| {
-            let (tone, label) = match part.state {
-                VaultUploadPartState::Queued => (Tone::Neutral, "upload-part-queued"),
-                VaultUploadPartState::Uploading => (Tone::Blue, "upload-part-active"),
-                VaultUploadPartState::Waiting => (Tone::Amber, "upload-part-waiting"),
-                VaultUploadPartState::Acknowledged => (Tone::Green, "upload-part-confirmed"),
-            };
-            let text = self.tr_with(
-                "upload-part-state",
-                MessageArgs::new()
-                    .with("part", format_integer(self.locale(), index as u64 + 1))
-                    .with("state", self.tr(label).to_string())
-                    .with(
-                        "attempt",
-                        format_integer(self.locale(), u64::from(part.attempt)),
-                    ),
-            );
-            div()
-                .id(("upload-part-cell", index))
-                .size(px(24.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .bg(tone.background())
-                .text_color(tone.foreground())
-                .child(format_integer(self.locale(), index as u64 + 1))
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
-                })
-        });
+        let group_size = activity.parts.len().div_ceil(128).max(1);
+        let parts = activity
+            .parts
+            .chunks(group_size)
+            .enumerate()
+            .map(|(index, group)| {
+                let state = if group
+                    .iter()
+                    .any(|p| p.state == VaultUploadPartState::Waiting)
+                {
+                    VaultUploadPartState::Waiting
+                } else if group
+                    .iter()
+                    .any(|p| p.state == VaultUploadPartState::Uploading)
+                {
+                    VaultUploadPartState::Uploading
+                } else if group
+                    .iter()
+                    .all(|p| p.state == VaultUploadPartState::Acknowledged)
+                {
+                    VaultUploadPartState::Acknowledged
+                } else {
+                    VaultUploadPartState::Queued
+                };
+                let (tone, label) = match state {
+                    VaultUploadPartState::Queued => (Tone::Neutral, "upload-part-queued"),
+                    VaultUploadPartState::Uploading => (Tone::Blue, "upload-part-active"),
+                    VaultUploadPartState::Waiting => (Tone::Amber, "upload-part-waiting"),
+                    VaultUploadPartState::Acknowledged => (Tone::Green, "upload-part-confirmed"),
+                };
+                let text = self.tr_with(
+                    "upload-part-group",
+                    MessageArgs::new()
+                        .with(
+                            "first",
+                            format_integer(self.locale(), (index * group_size + 1) as u64),
+                        )
+                        .with(
+                            "last",
+                            format_integer(
+                                self.locale(),
+                                (index * group_size + group.len()) as u64,
+                            ),
+                        )
+                        .with(
+                            "confirmed",
+                            format_integer(
+                                self.locale(),
+                                group
+                                    .iter()
+                                    .filter(|p| p.state == VaultUploadPartState::Acknowledged)
+                                    .count() as u64,
+                            ),
+                        )
+                        .with("state", self.tr(label).to_string()),
+                );
+                div()
+                    .id(("upload-part-cell", index))
+                    .size(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .bg(tone.background())
+                    .text_color(tone.foreground())
+                    .when(group_size == 1, |cell| {
+                        cell.child(format_integer(self.locale(), (index + 1) as u64))
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                    })
+            });
         let selected = if replay {
             activity.events.get(cursor).into_iter().collect::<Vec<_>>()
         } else {
@@ -286,6 +327,19 @@ impl TeleArkApp {
                     .child(self.tr("upload-part-map-title")),
             )
             .child(self.tr("upload-part-map-legend"))
+            .when(group_size > 1, |card| {
+                card.child(
+                    self.tr_with(
+                        "upload-part-map-grouping",
+                        MessageArgs::new()
+                            .with(
+                                "count",
+                                format_integer(self.locale(), activity.parts.len() as u64),
+                            )
+                            .with("size", format_integer(self.locale(), group_size as u64)),
+                    ),
+                )
+            })
             .child(div().flex().flex_wrap().gap_1().children(parts))
             .child(
                 div()

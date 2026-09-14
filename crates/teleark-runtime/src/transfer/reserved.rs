@@ -192,7 +192,7 @@ impl<S> EncryptedRemoteTransport<S> {
         let expected_encoded_size = expected_header
             .expected_encoded_length()
             .map_err(map_crypto_error)?;
-        if expected_encoded_size > MAX_TRANSFER_OBJECT_BYTES as u64 {
+        if expected_encoded_size > teleark_telegram::MAX_STREAM_OBJECT_BYTES {
             return Err(TransferError::ManifestCorrupted);
         }
         Ok(PartEncryptionPlan {
@@ -541,6 +541,7 @@ mod tests {
         )
         .expect("wrap synthetic key");
         let context = crate::VaultRecoveryContext {
+            container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
             account_id: 1,
             task_id: 9,
             chat_id: 3,

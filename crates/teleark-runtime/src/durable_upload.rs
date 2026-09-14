@@ -1,7 +1,7 @@
 //! Ledger-backed part execution. Call only on a retained background owner.
 use crate::{
     EncryptedRemoteTransport, ReservedPublicationStore, VaultPartRecovery, VaultRecoveryContext,
-    VaultRecoveryDirection, encrypted_part_sizes,
+    VaultRecoveryDirection,
 };
 use std::num::NonZeroI64;
 use teleark_core::{AccountId, PartIndex, TransferError};
@@ -96,7 +96,7 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
             crate::transfer::package_id_from_bytes(context.package_id)?,
             file_key,
             context.size_bytes,
-            encrypted_part_sizes(context.size_bytes)?,
+            context.part_sizes()?,
         )?;
         Ok(Self {
             lease,
@@ -165,14 +165,14 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
         if record.context != self.encoded_context {
             return Err(TransferError::ManifestCorrupted);
         }
-        let offset = u64::from(index) * crate::encrypted_part_plaintext_limit();
+        let offset = u64::from(index) * self.context.container_plaintext_limit;
         let expected_size = self
             .context
             .size_bytes
             .checked_sub(offset)
             .filter(|size| *size != 0)
             .ok_or(TransferError::ManifestCorrupted)?
-            .min(crate::encrypted_part_plaintext_limit());
+            .min(self.context.container_plaintext_limit);
         if plaintext_length != expected_size {
             return Err(TransferError::SourceChanged);
         }
@@ -332,6 +332,23 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
             let reservation = VaultPartRecovery::decode(&previous.identity)
                 .map_err(|_| TransferError::ManifestCorrupted)?;
             if previous.receipt.is_none()
+                && let Some(object) = self.transport.reconcile_summary_receipt(
+                    key,
+                    &reservation,
+                    &previous.identity,
+                    root,
+                )?
+            {
+                let receipt = encode_receipt(object.object_id, &previous.identity)?;
+                if !database
+                    .confirm_vault_part(self.lease, index, &receipt)
+                    .map_err(|_| TransferError::Database)?
+                {
+                    return Err(TransferError::Cancelled);
+                }
+                return Ok(object);
+            }
+            if previous.receipt.is_none()
                 && !crate::transfer::streaming::reusable_spool(
                     root,
                     &previous.identity,
@@ -408,6 +425,9 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
         )
     }
 
+    pub(crate) fn confirmed_manifest_parts(&self) -> Vec<teleark_crypto::ManifestPart> {
+        self.transport.confirmed_manifest_parts()
+    }
     pub fn into_transport(self) -> EncryptedRemoteTransport<S> {
         self.transport
     }
@@ -426,7 +446,7 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
 
 // TARKUR01, u32 codec version, positive i64-compatible message ID, BLAKE3
 // reservation identity, BLAKE3 checksum. Exactly 84 bytes, all integers LE.
-fn encode_receipt(id: u64, identity: &[u8]) -> Result<Vec<u8>, TransferError> {
+pub(crate) fn encode_receipt(id: u64, identity: &[u8]) -> Result<Vec<u8>, TransferError> {
     if id == 0 || id > i64::MAX as u64 {
         return Err(TransferError::ManifestCorrupted);
     }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -230,6 +230,8 @@ pub struct ChannelDownloadSnapshot {
     pub finished_at_unix_ms: Option<i64>,
     pub queue_wait_ms: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// Live RPC acknowledgements in this attempt; never persisted or restored as speed.
+    pub acknowledged_bytes: u64,
     pub current_bytes_per_second: Option<u64>,
     pub average_bytes_per_second: Option<u64>,
     pub eta_ms: Option<u64>,
@@ -243,6 +245,25 @@ pub struct ChannelDownloadSnapshot {
 }
 
 impl TransferRecord for ChannelDownloadSnapshot {
+    fn rate_input(&self) -> crate::transfer_rate::RateInput {
+        crate::transfer_rate::RateInput {
+            account: self.account_id.unwrap_or_default(),
+            upload: false,
+            active: self.state == ChannelDownloadState::Running,
+            bytes: self.acknowledged_bytes,
+            logical_bytes: self.transferred_bytes,
+            total: self.size_bytes,
+            in_flight: self.state == ChannelDownloadState::Running,
+        }
+    }
+
+    fn sample_activity(&mut self, _now: Instant, rate: crate::TransferRate) -> bool {
+        let changed = self.current_bytes_per_second != rate.bytes_per_second
+            || self.eta_ms != rate.eta_millis;
+        self.current_bytes_per_second = rate.bytes_per_second;
+        self.eta_ms = rate.eta_millis;
+        changed
+    }
     type Phase = (
         ChannelDownloadState,
         ChannelDownloadVerification,
@@ -271,6 +292,8 @@ pub struct DesktopTransfers {
 pub struct TransferRates {
     pub download_bytes_per_second: u64,
     pub upload_bytes_per_second: u64,
+    pub uploads_sampling: u32,
+    pub downloads_sampling: u32,
 }
 
 struct TransferWorkerInner {
@@ -356,8 +379,42 @@ impl ChannelDownloadBackend for DesktopTelegram {
     }
 }
 
-struct ProgressSample {
-    observations: VecDeque<(u64, Instant)>,
+struct NativeReceipts {
+    id: u64,
+    account: Option<i64>,
+    attempt: u32,
+    snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
+    // Only unfinished ranges; a completed range cannot be scheduled again by this owner.
+    state: Mutex<(u64, BTreeMap<u64, u64>)>,
+}
+impl teleark_telegram::DownloadReceiptObserver for NativeReceipts {
+    fn acknowledged(&self, part: u64, bytes: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let previous = state.1.entry(part).or_default();
+        let delta = bytes.saturating_sub(*previous);
+        *previous = (*previous).max(bytes);
+        let baseline = state.0;
+        self.snapshots.update(self.id, |snapshot| {
+            if snapshot.state != ChannelDownloadState::Running
+                || snapshot.attempts != self.attempt
+                || snapshot.account_id != self.account
+            {
+                return;
+            }
+            snapshot.acknowledged_bytes = snapshot.acknowledged_bytes.saturating_add(delta);
+            snapshot.transferred_bytes = snapshot
+                .transferred_bytes
+                .max(baseline.saturating_add(snapshot.acknowledged_bytes))
+                .min(snapshot.size_bytes);
+        });
+    }
+    fn completed(&self, part: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.1.remove(&part);
+        }
+    }
 }
 
 struct RuntimeDownloadObserver {
@@ -369,7 +426,7 @@ struct RuntimeDownloadObserver {
     library: DesktopLibrary,
     started: Instant,
     previous_duration_ms: u64,
-    sample: Mutex<ProgressSample>,
+    receipts: Arc<NativeReceipts>,
     last_persisted: Mutex<Instant>,
     controller: Mutex<AdaptiveTransferController>,
     tuning: teleark_telegram::TransferTuning,
@@ -403,29 +460,24 @@ impl DownloadObserver for RuntimeDownloadObserver {
         }
     }
 
+    fn receipt_observer(&self) -> Option<Arc<dyn teleark_telegram::DownloadReceiptObserver>> {
+        Some(self.receipts.clone())
+    }
+
     fn progressed(&self, transferred_bytes: u64) {
         let now = Instant::now();
-        let current_speed = self.sample.lock().ok().and_then(|mut sample| {
-            sample.observations.push_back((transferred_bytes, now));
-            while sample.observations.len() > 2
-                && sample.observations.get(1).is_some_and(|(_, measured_at)| {
-                    now.duration_since(*measured_at) >= Duration::from_secs(5)
-                })
+        if let Ok(mut state) = self.receipts.state.lock()
+            && state.1.is_empty()
+        {
+            // Initial checkpoint baseline precedes any network requests.
+            if self
+                .snapshots
+                .read(self.id, |row| row.acknowledged_bytes == 0)
+                .unwrap_or(false)
             {
-                sample.observations.pop_front();
+                state.0 = transferred_bytes;
             }
-            let (earliest_bytes, earliest_time) = sample.observations.front().copied()?;
-            rate_for(
-                transferred_bytes.saturating_sub(earliest_bytes),
-                now.duration_since(earliest_time),
-            )
-        });
-        let eta_ms = current_speed.and_then(|speed| {
-            self.size_bytes
-                .saturating_sub(transferred_bytes)
-                .checked_mul(1_000)
-                .map(|remaining| remaining / speed.max(1))
-        });
+        }
         let should_persist = self.last_persisted.lock().is_ok_and(|mut persisted| {
             if now.duration_since(*persisted) >= PROGRESS_PERSIST_INTERVAL
                 || transferred_bytes >= self.size_bytes
@@ -437,9 +489,14 @@ impl DownloadObserver for RuntimeDownloadObserver {
             }
         });
         let snapshot = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
-            snapshot.transferred_bytes = transferred_bytes.min(snapshot.size_bytes);
-            snapshot.current_bytes_per_second = current_speed;
-            snapshot.eta_ms = eta_ms;
+            if snapshot.state != ChannelDownloadState::Running
+                || snapshot.attempts != self.receipts.attempt
+            {
+                return None;
+            }
+            snapshot.transferred_bytes = snapshot
+                .transferred_bytes
+                .max(transferred_bytes.min(snapshot.size_bytes));
             snapshot.duration_ms = Some(
                 self.previous_duration_ms
                     .saturating_add(elapsed_millis(self.started.elapsed())),
@@ -1186,21 +1243,10 @@ impl DesktopTransfers {
     }
 
     pub fn current_rates(&self) -> Result<TransferRates, ApplicationError> {
-        let download_bytes_per_second = self
-            .inner
+        self.inner
             .snapshots
-            .fold(0_u64, |total, snapshot| {
-                if snapshot.state == ChannelDownloadState::Running {
-                    total.saturating_add(snapshot.current_bytes_per_second.unwrap_or(0))
-                } else {
-                    total
-                }
-            })
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
-        Ok(TransferRates {
-            download_bytes_per_second,
-            upload_bytes_per_second: 0,
-        })
+            .current_rates()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))
     }
 
     /// Enable scheduling after the frontend has refreshed the authorized account's sources.
@@ -1762,6 +1808,7 @@ fn run_download(
         current.started_at_unix_ms = current.started_at_unix_ms.or(started_at_unix_ms);
         current.queue_wait_ms = Some(queue_wait_ms);
         current.attempts = current.attempts.saturating_add(1);
+        current.acknowledged_bytes = 0;
         current.events.push(ChannelDownloadEvent {
             kind: ChannelDownloadEventKind::Started,
             timestamp_unix_ms: started_at_unix_ms.unwrap_or(current.queued_at_unix_ms),
@@ -1866,8 +1913,12 @@ fn run_download(
         library: library.clone(),
         started,
         previous_duration_ms,
-        sample: Mutex::new(ProgressSample {
-            observations: VecDeque::from([(snapshot.transferred_bytes, started)]),
+        receipts: Arc::new(NativeReceipts {
+            id: snapshot.id,
+            account: snapshot.account_id,
+            attempt: snapshot.attempts.saturating_add(1),
+            snapshots: snapshots.clone(),
+            state: Mutex::new((snapshot.transferred_bytes, BTreeMap::new())),
         }),
         last_persisted: Mutex::new(started),
         tuning,
@@ -2240,6 +2291,7 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
         finished_at_unix_ms: record.finished_at_unix_ms,
         queue_wait_ms: record.queue_wait_ms,
         duration_ms: record.duration_ms,
+        acknowledged_bytes: 0,
         current_bytes_per_second: None,
         average_bytes_per_second: record.average_bytes_per_second,
         eta_ms: None,
@@ -2315,13 +2367,6 @@ fn unix_time_millis() -> Result<i64, ApplicationError> {
 
 fn elapsed_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn rate_for(bytes: u64, duration: Duration) -> Option<u64> {
-    let millis = elapsed_millis(duration);
-    (bytes > 0 && millis > 0)
-        .then(|| bytes.saturating_mul(1_000) / millis)
-        .filter(|speed| *speed > 0)
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), ApplicationError> {
@@ -3778,6 +3823,68 @@ mod tests {
             ChannelDownloadState::Completed
         );
         assert_eq!(backend.attempts.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn rpc_receipts_deduplicate_prefixes_and_reject_stopped_or_stale_attempts() {
+        use teleark_telegram::DownloadReceiptObserver;
+        let directory = tempfile::tempdir().expect("directory");
+        let transfers = test_transfers(
+            Arc::new(FakeBackend {
+                outcome: Ok(()),
+                calls: StdMutex::new(Vec::new()),
+            }),
+            library(&directory),
+        )
+        .expect("transfers");
+        let id = transfers
+            .enqueue_channel_download(request(directory.path().join("test.zip")))
+            .expect("enqueue");
+        let mut row = wait_for_terminal(&transfers, id);
+        row.state = ChannelDownloadState::Running;
+        row.attempts = 5;
+        row.acknowledged_bytes = 0;
+        row.transferred_bytes = 0;
+        let snapshots = Arc::new(TransferSnapshots::new(vec![row]).expect("snapshots"));
+        let observer = NativeReceipts {
+            id,
+            account: Some(1),
+            attempt: 5,
+            snapshots: snapshots.clone(),
+            state: Mutex::new((0, BTreeMap::new())),
+        };
+        observer.acknowledged(0, 7);
+        observer.acknowledged(0, 7);
+        observer.acknowledged(1, 7);
+        assert_eq!(
+            snapshots.read(id, |row| (row.acknowledged_bytes, row.transferred_bytes)),
+            Some((14, 14))
+        );
+        observer.completed(0);
+        assert_eq!(
+            observer
+                .state
+                .lock()
+                .expect("bounded unfinished ranges")
+                .1
+                .len(),
+            1
+        );
+        for (attempt, account, state, prefix) in [
+            (6, Some(1), ChannelDownloadState::Running, 7),
+            (5, Some(2), ChannelDownloadState::Running, 14),
+            (5, Some(1), ChannelDownloadState::Paused, 21),
+        ] {
+            snapshots.update(id, |row| {
+                row.attempts = attempt;
+                row.account_id = account;
+                row.state = state;
+                row.acknowledged_bytes = 0;
+                row.transferred_bytes = 0;
+            });
+            observer.acknowledged(2, prefix);
+            assert_eq!(snapshots.read(id, |row| row.acknowledged_bytes), Some(0));
+        }
     }
 
     #[test]

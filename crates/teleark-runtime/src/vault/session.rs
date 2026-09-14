@@ -157,6 +157,7 @@ impl VaultCommand {
             self,
             Self::Upload { .. }
                 | Self::ResumeUpload { .. }
+                | Self::ResumeRemoteUpload { .. }
                 | Self::ResumeQueuedUploads { .. }
                 | Self::ResumeQueuedTransfers { .. }
                 | Self::UploadBatch { .. }

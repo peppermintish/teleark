@@ -736,6 +736,13 @@ impl TeleArkApp {
         else {
             return;
         };
+        if let Some(file) = self.managed_vault_files.iter().find(|file| {
+            file.package_numeric_id == package_id
+                && file.health == teleark_runtime::VaultFileHealth::PendingUpload
+        }) {
+            self.resume_pending_remote_file(file.manifest_message_id, cx);
+            return;
+        }
         self.vault_download_in_flight = true;
         let Some(account_id) = self.telegram_account.as_ref().map(|a| a.id) else {
             return;
@@ -776,14 +783,78 @@ impl TeleArkApp {
         }));
     }
 
+    fn resume_pending_remote_file(&mut self, message_id: i64, cx: &mut Context<Self>) {
+        let (Some(vault), Some(chat_id), Some(account_id)) = (
+            self.vault.clone(),
+            self.active_storage_chat_id(),
+            self.telegram_account.as_ref().map(|a| a.id),
+        ) else {
+            return;
+        };
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(self.tr("vault-pending-select-source")),
+        });
+        let generation = self.telegram_login_generation;
+        self.vault_download_in_flight = true;
+        self.vault_activity = VaultActivity::Working;
+        cx.notify();
+        self.vault_download_task = Some(cx.spawn(async move |this, cx| {
+            let source = match selected.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(source) = source else {
+                let _ = this.update(cx, |this, cx| {
+                    this.vault_download_in_flight = false;
+                    this.vault_activity = VaultActivity::Idle;
+                    cx.notify();
+                });
+                return;
+            };
+            let current = this
+                .update(cx, |this, _| this.telegram_login_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let result = cx
+                .background_spawn(async move {
+                    vault
+                        .submit_resume_remote_upload(account_id, chat_id, message_id, source)?
+                        .wait()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.telegram_login_generation != generation {
+                    return;
+                }
+                this.vault_download_in_flight = false;
+                this.vault_activity = match result {
+                    Ok(file) => {
+                        let files = std::sync::Arc::make_mut(&mut this.managed_vault_files);
+                        files.retain(|existing| {
+                            existing.package_numeric_id != file.package_numeric_id
+                        });
+                        files.insert(0, file);
+                        VaultActivity::Succeeded
+                    }
+                    Err(error) => VaultActivity::Failed(error.kind()),
+                };
+                this.advance_transition(cx);
+                cx.notify();
+            });
+        }));
+    }
+
     fn start_upload_progress_presentation(&mut self, preparation: bool, cx: &mut Context<Self>) {
         // Presentation only: display elapsed phase time and cancellation while
         // the retained worker owns filesystem/network work.
         let task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let Some(this) = this.upgrade() else { return };
                 let done = this.update(cx, |this, cx| {
                     cx.notify();

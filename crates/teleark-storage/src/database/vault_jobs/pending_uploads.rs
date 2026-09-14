@@ -1,7 +1,7 @@
 //! Metadata-only admission before hashing or allocating any encryption identity.
 use super::*;
 
-const STOP_FORMAL_BATCH_SQL: &str = "UPDATE vault_transfer_jobs SET state='cancelled',updated_at=max(updated_at,?4),failure_code=NULL WHERE account_id=?1 AND state='queued' AND direction='upload' AND context_version=1 AND (?3 IS NULL OR id!=?3) AND id IN (SELECT id FROM vault_pending_uploads INDEXED BY vault_pending_uploads_batch WHERE account_id=?1 AND state='promoted' AND batch_id=?2 AND codec_version=1 UNION SELECT h.id FROM vault_upload_history h INDEXED BY vault_upload_history_batch JOIN vault_transfer_jobs j ON j.account_id=h.account_id AND j.id=h.id AND j.chat_id=h.chat_id WHERE h.account_id=?1 AND h.batch_id=?2 AND NOT EXISTS(SELECT 1 FROM vault_pending_uploads p WHERE p.account_id=h.account_id AND p.id=h.id))";
+const STOP_FORMAL_BATCH_SQL: &str = "UPDATE vault_transfer_jobs SET state='cancelled',updated_at=max(updated_at,?4),failure_code=NULL WHERE account_id=?1 AND state='queued' AND direction='upload' AND context_version IN (1,2) AND (?3 IS NULL OR id!=?3) AND id IN (SELECT id FROM vault_pending_uploads INDEXED BY vault_pending_uploads_batch WHERE account_id=?1 AND state='promoted' AND batch_id=?2 AND codec_version=1 UNION SELECT h.id FROM vault_upload_history h INDEXED BY vault_upload_history_batch JOIN vault_transfer_jobs j ON j.account_id=h.account_id AND j.id=h.id AND j.chat_id=h.chat_id WHERE h.account_id=?1 AND h.batch_id=?2 AND NOT EXISTS(SELECT 1 FROM vault_pending_uploads p WHERE p.account_id=h.account_id AND p.id=h.id))";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingVaultUpload {
@@ -345,7 +345,7 @@ mod tests {
             [],
         )?;
         db.connection.execute(
-            "UPDATE vault_transfer_jobs SET context_version=2 WHERE account_id=7 AND id=8",
+            "UPDATE vault_transfer_jobs SET context_version=99 WHERE account_id=7 AND id=8",
             [],
         )?;
         assert!(db.transition_vault_job(
@@ -431,7 +431,7 @@ mod tests {
             None
         )?);
         db.connection.execute(
-            "UPDATE vault_transfer_jobs SET context_version=2 WHERE account_id=7 AND id=516",
+            "UPDATE vault_transfer_jobs SET context_version=99 WHERE account_id=7 AND id=516",
             [],
         )?;
 

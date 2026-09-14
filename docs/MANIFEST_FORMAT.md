@@ -7,6 +7,18 @@ integration tests restore exact contents with a fresh SQLite database.
 Incompatible changes require a new major version and automatic migration for
 supported upgrades; old fixtures remain readable. See [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
+## Incomplete uploads
+
+The independent [pending-upload envelope v1](PENDING_UPLOAD_FORMAT.md) announces
+incomplete files and authenticated published-container prefixes. Its different
+magic, flags and encryption domain prevent it from being opened as a completed
+manifest. Desktop resume requires matching source bytes, recovery key and
+account/channel scope. The successful pending-update message ID supplies a unique
+positive completed-manifest generation within that authenticated scope; completed
+outboxes still seal once and replay the original envelope. Payload codecs stay
+1.0/2.0 and fresh encrypted containers have a 1.9 GiB encoded upper bound, as
+specified by [ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md).
+
 ## Role
 
 The manifest is the recovery backbone for a completed Vault package. SQLite is a cache/index/checkpoint store; losing it must not make a completed remote package unintelligible. With Telegram account/channel access and a valid password or Recovery Key, TeleArk should be able to scan manifest objects, validate/decrypt them, discover parts, rebuild logical files, and restore the local library.

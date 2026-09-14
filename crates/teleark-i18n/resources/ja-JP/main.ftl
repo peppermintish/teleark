@@ -1591,14 +1591,14 @@ transfer-upload-restarting-expired = 24 時間の再開期限が切れました�
 
 transfer-upload-upgrading = 新しい暗号化識別子でアップロード形式を更新中
 
-transfer-upload-sealing = 暗号化データを保存・検証中
+transfer-upload-sealing = 暗号化コンテナを検証中
 upload-pipeline-title = アップロード状況
 upload-pipeline-queue = 待機バッファ：{ $queued } · 実行中 part：{ $active } · 最終更新：{ $idle } 前 · 再試行待ち：{ $wait }
-upload-chart-title = 確認済み暗号文の転送速度
+upload-chart-title = 確認済みデータ / 秒
 upload-chart-empty = 確認応答を待っています。速度はまだ不明です。
 upload-chart-sample = { $time } · { $interval } 間で { $speed }
 upload-chart-range = 今回の試行開始から { $from } – { $to }
-upload-chart-explanation = 棒の高さは測定区間の確認済み暗号文の平均速度、幅は時間です。範囲外は推定しません。メッセージ公開は別途完了します。
+upload-chart-explanation = 直近 3 秒間の確認済みデータから毎秒更新します。窓の境界精度は 50 ミリ秒です。確認が途絶えるとゼロになります。公開と整合性検証は別途完了します。
 upload-part-map-title = 現在のコンテナ · 512 KiB アップロード part
 upload-part-map-legend = 灰：待機 · 青：送信 · 黄：再試行 · 緑：確認済み。最後の part は短い場合があります。
 upload-part-state = Part { $part } · { $state } · 試行 { $attempt }
@@ -1713,3 +1713,22 @@ managed-key-phase-loading = システムキーチェーンを読み取り中
 managed-key-phase-securing = キーチェーンの項目を保存・検証中
 
 managed-key-store-error = システムキーチェーンにアクセスできません。TeleArk のアクセスを許可し、設定 → 暗号化キーで再試行してください。
+
+transfer-rate-sampling = 測定中…
+transfer-persistence-parallel = { $activity } · 復旧情報を保存中
+transfer-eta-compact = 残り { $eta }
+transfer-rate-basis = 確認済みアプリデータ · 直近 3 秒 · 1 秒ごとに更新
+transfer-rate-awaiting = 確認待ち · 最終確認は { $elapsed } 前
+
+vault-health-pending-upload = アップロード未完了
+vault-pending-resume = アップロードを再開…
+vault-pending-select-source = 元のファイルを選択してアップロードを再開
+
+transfer-download-receiving-blocks = ブロックを受信・復号中
+
+transfer-rate-awaiting-first = 最初の確認を待機中
+transfer-bytes-heading = 処理済み / 合計
+transfer-eta-heading = 残り時間
+upload-part-group = ブロック { $first }–{ $last } · 確認済み { $confirmed } · { $state }
+storage-channel-pending-explanation = アップロードは未完了です。復旧キーを復元し、同じ元ファイルを選んで続行できます。公開済みで検証できたコンテナのみ再利用します。
+upload-part-map-grouping = { $count } ブロック · 1 セル最大 { $size } 個。範囲はホバーで確認できます。

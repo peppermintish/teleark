@@ -1,6 +1,7 @@
 use super::*;
 pub(super) fn fixture() -> VaultRecoveryContext {
     VaultRecoveryContext {
+        container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
         account_id: 7,
         task_id: 9,
         chat_id: 11,
@@ -64,7 +65,7 @@ fn rejects_every_truncation_corruption_and_future_version_without_reinterpretati
         );
     }
     let mut newer = bytes;
-    newer[8..12].copy_from_slice(&2u32.to_le_bytes());
+    newer[8..12].copy_from_slice(&99u32.to_le_bytes());
     assert_eq!(
         VaultRecoveryContext::decode(&newer),
         Err(RecoveryContextError::UnsupportedVersion)
@@ -103,8 +104,8 @@ fn native_non_utf8_source_paths_round_trip_without_loss() {
 #[test]
 fn malformed_length_is_rejected_even_with_a_valid_checksum() {
     let mut bytes = fixture().encode().expect("encode");
-    // Name length follows the 143-byte fixed header, including time and size.
-    let offset = 8 + 4 + 1 + 8 + 8 + 8 + 16 + 16 + 4 + 2 + 4 + 32 + 16 + 8 + 8;
+    // v2 adds the explicit eight-byte container geometry to the fixed header.
+    let offset = 8 + 4 + 1 + 8 + 8 + 8 + 16 + 16 + 4 + 2 + 4 + 32 + 16 + 8 + 8 + 8;
     bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     let end = bytes.len() - 32;
     let hash = blake3::hash(&bytes[..end]);
@@ -194,6 +195,7 @@ fn persisted_context_restores_the_same_key_and_rejects_foreign_scope() {
 #[test]
 fn version_one_context_matches_the_frozen_binary_fixture() {
     let mut context = fixture();
+    context.container_plaintext_limit = crate::transfer::LEGACY_PART_PLAINTEXT_BYTES;
     if let VaultRecoveryDirection::Upload { source, .. } = &mut context.direction {
         *source = "/tmp/teleark-context-fixture".into();
     }
@@ -203,6 +205,29 @@ fn version_one_context_matches_the_frozen_binary_fixture() {
         VaultRecoveryContext::decode(bytes).expect("historical fixture"),
         context
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn version_two_geometry_matches_the_frozen_fixture_and_preserves_v1_without_migration() {
+    let mut context = fixture();
+    if let VaultRecoveryDirection::Upload { source, .. } = &mut context.direction {
+        *source = "/tmp/teleark-context-fixture".into();
+    }
+    let bytes = include_bytes!("fixtures/upload-context-v2.bin");
+    assert_eq!(context.encode().expect("v2").as_slice(), bytes);
+    assert_eq!(
+        VaultRecoveryContext::decode(bytes).expect("v2 reader"),
+        context
+    );
+    let legacy = include_bytes!("fixtures/upload-context-v1.bin");
+    let old = VaultRecoveryContext::decode(legacy).expect("skipped-release legacy read");
+    assert_eq!(old.encode().expect("unchanged v1"), legacy);
+    assert_eq!(
+        old.container_plaintext_limit,
+        crate::transfer::LEGACY_PART_PLAINTEXT_BYTES
+    );
+    assert_eq!(old.file_key_wrap, context.file_key_wrap);
 }
 
 #[test]

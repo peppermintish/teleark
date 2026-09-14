@@ -1032,8 +1032,22 @@ impl TeleArkApp {
                             .child(
                                 components::list_icon_button(
                                     ("managed-download", package_id),
-                                    IconName::ArrowDown,
-                                    this.tr("storage-channel-download-restored-action"),
+                                    if file.health
+                                        == teleark_runtime::VaultFileHealth::PendingUpload
+                                    {
+                                        IconName::ArrowUp
+                                    } else {
+                                        IconName::ArrowDown
+                                    },
+                                    this.tr(
+                                        if file.health
+                                            == teleark_runtime::VaultFileHealth::PendingUpload
+                                        {
+                                            "vault-pending-resume"
+                                        } else {
+                                            "storage-channel-download-restored-action"
+                                        },
+                                    ),
                                 )
                                 .ghost()
                                 .debug_selector(move || format!("managed-file-action-{package_id}"))
@@ -1232,6 +1246,7 @@ pub(crate) fn vault_health_id(health: teleark_runtime::VaultFileHealth) -> &'sta
     use teleark_runtime::VaultFileHealth;
     match health {
         VaultFileHealth::Unchecked => "vault-health-unchecked",
+        VaultFileHealth::PendingUpload => "vault-health-pending-upload",
         VaultFileHealth::Present => "vault-health-present",
         VaultFileHealth::MissingParts => "vault-health-missing-parts",
         VaultFileHealth::MissingManifest => "vault-health-missing-manifest",

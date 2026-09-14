@@ -422,7 +422,7 @@ fn download_paused_during_transport_resumes_same_task_after_restart() {
 }
 
 #[test]
-fn upload_paused_during_transport_reuses_publication_and_ciphertext_after_restart() {
+fn upload_paused_during_transport_retires_unpublished_ciphertext_after_restart() {
     upload_transport_restart(GateKind::UploadPart, false);
 }
 
@@ -525,13 +525,23 @@ fn upload_transport_restart(gate: GateKind, remove_source: bool) {
         .collect();
     assert_eq!(
         matching,
-        if acknowledgment_lost {
-            vec![interrupted]
-        } else {
+        if gate == GateKind::ManifestUpload {
             vec![interrupted, interrupted]
+        } else {
+            vec![interrupted]
         },
-        "published bytes are reconciled without resending; unsent bytes retain identity"
+        "containers retire uncommitted ciphertext; a sealed metadata envelope replays exact bytes"
     );
+    if !acknowledgment_lost && gate != GateKind::ManifestUpload {
+        assert!(
+            remote
+                .uploads()
+                .iter()
+                .any(|(publication, digest)| *publication != interrupted.0
+                    && *digest != interrupted.1),
+            "fresh identity produces fresh ciphertext"
+        );
+    }
     assert_eq!(remote.objects(), 2, "no duplicate publication");
     let db = Database::open(library.database_path.as_ref()).expect("database");
     let job = db.vault_job(7, id).expect("job").expect("same ledger");
@@ -546,14 +556,14 @@ fn upload_transport_restart(gate: GateKind, remove_source: bool) {
 }
 
 #[test]
-fn multipart_download_restart_reuses_verified_first_extent() {
-    use std::io::{Read, Write};
-    let dir = tempfile::tempdir().expect("directory");
+fn another_device_reuses_authenticated_published_containers_and_rejects_wrong_source() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("first device");
     let remote = TestVaultRemote::new();
     let (vault, library) = open(dir.path(), &remote);
-    vault.initialize(PASSWORD.into()).expect("initialize");
+    let bundle = vault.initialize(PASSWORD.into()).expect("initialize");
     let source = dir.path().join("multipart.bin");
-    let length = crate::transfer::encrypted_part_plaintext_limit() + 1024 * 1024;
+    let length = 2 * 1024 * 1024;
     let chunk = vec![0x69; 1024 * 1024];
     let mut original = std::fs::File::create(&source).expect("source");
     let mut expected = blake3::Hasher::new();
@@ -563,7 +573,208 @@ fn multipart_download_restart_reuses_verified_first_extent() {
     }
     original.sync_all().expect("source synced");
     drop(original);
-    vault.upload_file(7, 11, source).expect("multipart upload");
+    let (recovery, wrap) = decode_recovery_bundle(&bundle).expect("recovery bundle");
+    let master = teleark_crypto::unwrap_master_key_with_recovery(&wrap, &recovery)
+        .expect("synthetic master");
+    let mut fs = NativeFileSystem::new();
+    fs.register_source(SourceId(99), &source)
+        .expect("source identity");
+    let package = package_bytes(123);
+    let context = crate::VaultRecoveryContext {
+        account_id: 7,
+        task_id: 99,
+        chat_id: 11,
+        package_id: package,
+        vault_id: wrap.vault_id,
+        master_key_generation: 1,
+        file_key_wrap: teleark_crypto::wrap_file_key(
+            &master,
+            &teleark_crypto::FileKey::from_bytes([7; 32]),
+            &wrap.vault_id,
+            &package,
+            1,
+            1,
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("wrapped file key"),
+        file_name: "multipart.bin".into(),
+        created_at_unix_ms: now_unix_ms().expect("clock") as u64,
+        size_bytes: length,
+        container_plaintext_limit: 1024 * 1024,
+        direction: crate::VaultRecoveryDirection::Upload {
+            source: std::fs::canonicalize(&source).expect("path"),
+            identity: fs.source_identity(SourceId(99)).expect("identity"),
+            source_blake3: *expected.finalize().as_bytes(),
+        },
+    };
+    Database::open(library.database_path.as_ref())
+        .expect("database")
+        .admit_vault_job(&context.admission_record().expect("context"))
+        .expect("admit versioned test geometry");
+    let (entered, release) = remote.gate(GateKind::UploadPart, 1);
+    let work = vault.submit_resume_upload(7, 99).expect("start");
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("second container active");
+    let pending = remote
+        .summaries()
+        .into_iter()
+        .filter(|file| file.caption == remote_upload::CAPTION)
+        .max_by_key(|file| file.message_id)
+        .expect("remote recovery before completion");
+    let first_publication = remote.uploads()[0];
+    vault
+        .submit_transfer_control(7, 99, control::VaultUploadControl::Pause)
+        .expect("pause")
+        .wait()
+        .expect("durable intent");
+    release.send(()).expect("finish network callback");
+    assert_eq!(
+        work.wait().expect_err("paused").kind(),
+        ApplicationErrorKind::Cancelled
+    );
+    drop(vault);
+    drop(library);
+
+    let second = tempfile::tempdir().expect("independent device");
+    let (vault, library) = open(second.path(), &remote);
+    vault
+        .restore_with_recovery(bundle, PASSWORD.into())
+        .expect("same recovery key");
+    let scan = vault
+        .scan_managed_files(7, 11, crate::TelegramScanCancellation::new())
+        .expect("discover incomplete upload");
+    assert_eq!(scan.files.len(), 1);
+    assert_eq!(scan.files[0].health, crate::VaultFileHealth::PendingUpload);
+    assert_eq!(scan.files[0].part_message_ids.len(), 1);
+    let wrong = second.path().join("wrong.bin");
+    std::fs::write(&wrong, vec![0; length as usize]).expect("different source");
+    assert_eq!(
+        vault
+            .submit_resume_remote_upload(7, 11, pending.message_id, wrong)
+            .expect("admit verification")
+            .wait()
+            .expect_err("content mismatch")
+            .kind(),
+        ApplicationErrorKind::SourceChanged
+    );
+    assert_eq!(
+        remote.objects(),
+        1,
+        "wrong source publishes no payload or completion"
+    );
+    let local = second.path().join("same-file.bin");
+    std::fs::copy(&source, &local).expect("same source on another device");
+    let resumed = vault
+        .submit_resume_remote_upload(7, 11, pending.message_id, local)
+        .expect("resume remote")
+        .wait()
+        .expect("complete on new device");
+    assert_eq!(resumed.logical_name, "multipart.bin");
+    assert_eq!(
+        remote
+            .uploads()
+            .iter()
+            .filter(|attempt| **attempt == first_publication)
+            .count(),
+        1,
+        "published ciphertext was verified and reused"
+    );
+    assert_eq!(
+        remote.objects(),
+        3,
+        "two containers and one completed manifest"
+    );
+    let output = vault
+        .download_file(7, 11, 123)
+        .expect("stream authenticated plaintext");
+    assert_eq!(
+        std::fs::read(output).expect("output"),
+        std::fs::read(source).expect("source")
+    );
+    let scan = vault
+        .scan_managed_files(7, 11, crate::TelegramScanCancellation::new())
+        .expect("completed discovery");
+    assert_eq!(scan.files.len(), 1);
+    assert_ne!(scan.files[0].health, crate::VaultFileHealth::PendingUpload);
+    let spool = library.database_path.with_extension("upload-spool");
+    for account in std::fs::read_dir(spool).expect("tiny metadata") {
+        for task in std::fs::read_dir(account.expect("account").path()).expect("tasks") {
+            for entry in std::fs::read_dir(task.expect("task").path()).expect("metadata") {
+                assert_ne!(
+                    entry
+                        .expect("record")
+                        .path()
+                        .extension()
+                        .and_then(|value| value.to_str()),
+                    Some("ciphertext")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multipart_download_restart_reuses_verified_first_extent() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    let bundle = vault.initialize(PASSWORD.into()).expect("initialize");
+    let source = dir.path().join("multipart.bin");
+    let length = 2 * 1024 * 1024;
+    let chunk = vec![0x69; 1024 * 1024];
+    let mut original = std::fs::File::create(&source).expect("source");
+    let mut expected = blake3::Hasher::new();
+    for _ in 0..length / chunk.len() as u64 {
+        original.write_all(&chunk).expect("source chunk");
+        expected.update(&chunk);
+    }
+    original.sync_all().expect("source synced");
+    drop(original);
+    let (recovery, wrap) = decode_recovery_bundle(&bundle).expect("recovery bundle");
+    let master = teleark_crypto::unwrap_master_key_with_recovery(&wrap, &recovery)
+        .expect("synthetic master");
+    let mut fs = NativeFileSystem::new();
+    fs.register_source(SourceId(99), &source)
+        .expect("source identity");
+    let package = package_bytes(123);
+    let context = crate::VaultRecoveryContext {
+        account_id: 7,
+        task_id: 99,
+        chat_id: 11,
+        package_id: package,
+        vault_id: wrap.vault_id,
+        master_key_generation: 1,
+        file_key_wrap: teleark_crypto::wrap_file_key(
+            &master,
+            &teleark_crypto::FileKey::from_bytes([7; 32]),
+            &wrap.vault_id,
+            &package,
+            1,
+            1,
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("wrapped file key"),
+        file_name: "multipart.bin".into(),
+        created_at_unix_ms: now_unix_ms().expect("clock") as u64,
+        size_bytes: length,
+        container_plaintext_limit: 1024 * 1024,
+        direction: crate::VaultRecoveryDirection::Upload {
+            source: std::fs::canonicalize(&source).expect("path"),
+            identity: fs.source_identity(SourceId(99)).expect("identity"),
+            source_blake3: *expected.finalize().as_bytes(),
+        },
+    };
+    Database::open(library.database_path.as_ref())
+        .expect("database")
+        .admit_vault_job(&context.admission_record().expect("context"))
+        .expect("admit versioned test geometry");
+    vault
+        .submit_resume_upload(7, 99)
+        .expect("upload")
+        .wait()
+        .expect("multipart upload");
     let db = Database::open(library.database_path.as_ref()).expect("database");
     let upload = vault
         .transfers()

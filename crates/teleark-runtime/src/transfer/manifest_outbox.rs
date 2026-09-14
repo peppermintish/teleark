@@ -83,7 +83,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             || request.master_key_generation != context.master_key_generation
             || request.wrap_generation != context.file_key_wrap.wrap_generation
             || request.created_at_unix_ms != context.created_at_unix_ms
-            || request.manifest_generation != 1
+            || request.manifest_generation == 0
             || request.logical_name != context.file_name
         {
             return Err(TransferError::ManifestCorrupted);

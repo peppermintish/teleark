@@ -77,6 +77,13 @@ impl LayoutPolicy {
     pub(crate) fn transfer_inspector_width(self) -> f32 {
         if self.is_compact() { 380.0 } else { 420.0 }
     }
+    pub(crate) fn docks_transfer_inspector(self) -> bool {
+        self.width
+            - self.sidebar_width()
+            - self.transfer_inspector_width()
+            - 2.0 * self.content_padding()
+            >= 740.0
+    }
     pub(crate) fn properties_width(self) -> f32 {
         if self.is_compact() { 250.0 } else { 300.0 }
     }
@@ -116,8 +123,8 @@ mod tests {
         for width in [900.0, 960.0, 1299.0, 1300.0, 1360.0, 1599.0, 1600.0, 1920.0] {
             let policy = LayoutPolicy::from_size(width, 600.0);
             let content = width - policy.sidebar_width() - 2.0 * policy.content_padding();
-            // Transfer rows: checkbox, progress, actions, padding/gaps.
-            assert!(content - 28.0 - 188.0 - 116.0 - 64.0 >= 260.0);
+            // Transfer rows: checkbox, processed bytes, ETA, progress, actions and padding.
+            assert!(content - 28.0 - 140.0 - 72.0 - 188.0 - 116.0 - 64.0 >= 180.0);
             let library_fixed = if policy.is_compact() {
                 90.0
             } else {

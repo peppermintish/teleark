@@ -79,11 +79,24 @@ impl DurableDownload {
 
     /// A receipt authorizes a bounded local recheck, never blind skipping.
     /// Corrupt or lost local bytes are fetched again from the authenticated part.
+    #[cfg(test)]
     pub fn restore_part(
         &mut self,
         database: &mut Database,
         part: &ManifestPart,
         fetch: impl FnOnce() -> Result<Vec<u8>, TransferError>,
+    ) -> Result<ExtentSource, TransferError> {
+        self.restore_part_to(database, part, |out| {
+            let bytes = fetch()?;
+            out.write_all(&bytes).map_err(|_| TransferError::Database)
+        })
+    }
+
+    pub fn restore_part_to(
+        &mut self,
+        database: &mut Database,
+        part: &ManifestPart,
+        fetch: impl FnOnce(&mut dyn std::io::Write) -> Result<(), TransferError>,
     ) -> Result<ExtentSource, TransferError> {
         let identity = self.identity(part)?;
         let reservation = VaultPartRecord {
@@ -100,8 +113,12 @@ impl DurableDownload {
         if let Some(output) = self.published.as_mut() {
             // The complete final file was verified when reopening. Verify this
             // range again before acknowledging progress without remote work.
-            let bytes = output.read_range(part.plaintext_offset, part.plaintext_length)?;
-            return if blake3::hash(&bytes).as_bytes() == &part.plaintext_blake3 {
+            let digest = range_digest(
+                part,
+                |offset, length| output.read_range(offset, length),
+                &self.cancellation,
+            )?;
+            return if digest == part.plaintext_blake3 {
                 Ok(ExtentSource::Local)
             } else {
                 Err(TransferError::HashMismatch)
@@ -123,30 +140,42 @@ impl DurableDownload {
             if saved_receipt != receipt {
                 return Err(TransferError::ManifestCorrupted);
             }
-            let bytes = self.files.read_partial(
-                DestinationId(self.lease.id),
-                part.plaintext_offset,
-                part.plaintext_length,
+            let digest = range_digest(
+                part,
+                |offset, length| {
+                    self.files
+                        .read_partial(DestinationId(self.lease.id), offset, length)
+                },
+                &self.cancellation,
             )?;
-            if blake3::hash(&bytes).as_bytes() == &part.plaintext_blake3 {
+            if digest == part.plaintext_blake3 {
                 return Ok(ExtentSource::Local);
             }
         }
-        let bytes = fetch()?;
-        if bytes.len() as u64 != part.plaintext_length
-            || blake3::hash(&bytes).as_bytes() != &part.plaintext_blake3
-        {
+        let mut writer = ExtentWriter {
+            files: &mut self.files,
+            id: DestinationId(self.lease.id),
+            offset: part.plaintext_offset,
+            remaining: part.plaintext_length,
+            hash: blake3::Hasher::new(),
+            error: None,
+            cancellation: &self.cancellation,
+        };
+        let fetched = fetch(&mut writer);
+        if let Some(error) = writer.error {
+            return Err(error);
+        }
+        fetched?;
+        if writer.remaining != 0 || writer.hash.finalize().as_bytes() != &part.plaintext_blake3 {
             return Err(TransferError::HashMismatch);
         }
-        // A stop arriving during remote I/O must prevent a new local write.
-        if !database
-            .reserve_vault_part(self.lease, &reservation)
-            .map_err(|_| TransferError::Database)?
+        if self.cancellation.is_cancelled()
+            || !database
+                .reserve_vault_part(self.lease, &reservation)
+                .map_err(|_| TransferError::Database)?
         {
             return Err(TransferError::Cancelled);
         }
-        self.files
-            .write_partial(DestinationId(self.lease.id), part.plaintext_offset, &bytes)?;
         self.files.flush_partial(DestinationId(self.lease.id))?;
         if !database
             .confirm_vault_part(self.lease, part.part_index, &receipt)
@@ -222,6 +251,61 @@ impl DurableDownload {
     }
 }
 
+fn range_digest(
+    part: &ManifestPart,
+    mut read: impl FnMut(u64, u64) -> Result<Vec<u8>, TransferError>,
+    cancel: &crate::TelegramScanCancellation,
+) -> Result<[u8; 32], TransferError> {
+    let mut hash = blake3::Hasher::new();
+    let mut offset = part.plaintext_offset;
+    let mut remaining = part.plaintext_length;
+    while remaining > 0 {
+        if cancel.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let length = remaining.min(1024 * 1024);
+        let bytes = read(offset, length)?;
+        if bytes.len() as u64 != length {
+            return Err(TransferError::HashMismatch);
+        }
+        hash.update(&bytes);
+        offset += length;
+        remaining -= length;
+    }
+    Ok(*hash.finalize().as_bytes())
+}
+struct ExtentWriter<'a> {
+    files: &'a mut NativeFileSystem,
+    id: DestinationId,
+    offset: u64,
+    remaining: u64,
+    hash: blake3::Hasher,
+    error: Option<TransferError>,
+    cancellation: &'a crate::TelegramScanCancellation,
+}
+impl std::io::Write for ExtentWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let result = if self.cancellation.is_cancelled() {
+            Err(TransferError::Cancelled)
+        } else if bytes.len() as u64 > self.remaining {
+            Err(TransferError::HashMismatch)
+        } else {
+            self.files.write_partial(self.id, self.offset, bytes)
+        };
+        if let Err(error) = result {
+            self.error = Some(error);
+            return Err(std::io::Error::other("container destination unavailable"));
+        }
+        self.hash.update(bytes);
+        self.offset += bytes.len() as u64;
+        self.remaining -= bytes.len() as u64;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn receipt(identity: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(40);
     bytes.extend_from_slice(b"TARKDR01");
@@ -240,6 +324,7 @@ mod tests {
     fn fixture(path: &std::path::Path) -> (Database, VaultJobLease, Vec<ManifestPart>) {
         let mut db = Database::open(path).expect("database");
         let context = VaultRecoveryContext {
+            container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
             account_id: 7,
             task_id: 9,
             chat_id: 11,
@@ -548,7 +633,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("jobs.sqlite");
         let (mut db, lease, parts) = fixture(&path);
-        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        let cancellation = crate::TelegramScanCancellation::new();
+        let mut worker =
+            DurableDownload::open_cancellable(&db, lease, cancellation.clone()).expect("open");
         assert_eq!(
             worker.restore_part(&mut db, &parts[0], || {
                 let mut control = Database::open(&path).expect("independent control");
@@ -563,6 +650,7 @@ mod tests {
                         )
                         .expect("pause")
                 );
+                cancellation.cancel();
                 Ok(b"abcd".to_vec())
             }),
             Err(TransferError::Cancelled)

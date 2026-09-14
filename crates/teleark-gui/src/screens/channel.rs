@@ -1116,8 +1116,20 @@ impl TeleArkApp {
                 .child(
                     components::button(
                         "storage-channel-download-managed",
-                        self.tr("storage-channel-download-restored-action"),
-                        Some(IconName::ArrowDown),
+                        self.tr(
+                            if package.health == teleark_runtime::VaultFileHealth::PendingUpload {
+                                "vault-pending-resume"
+                            } else {
+                                "storage-channel-download-restored-action"
+                            },
+                        ),
+                        Some(
+                            if package.health == teleark_runtime::VaultFileHealth::PendingUpload {
+                                IconName::ArrowUp
+                            } else {
+                                IconName::ArrowDown
+                            },
+                        ),
                         true,
                     )
                     .mt_4()
@@ -1689,6 +1701,10 @@ impl TeleArkApp {
                 .child(div().mt_2().text_sm().whitespace_normal().child(caption))
                 .when_some(teleark_descriptor, |detail, descriptor| {
                     let (role, explanation) = match descriptor.role {
+                        TeleArkRemoteRole::Pending => (
+                            self.tr("vault-health-pending-upload"),
+                            self.tr("storage-channel-pending-explanation"),
+                        ),
                         TeleArkRemoteRole::Manifest => (
                             self.tr("storage-channel-role-manifest"),
                             self.tr("storage-channel-manifest-explanation"),
@@ -1816,6 +1832,7 @@ fn current_unix_millis() -> i64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TeleArkRemoteRole {
+    Pending,
     Manifest,
     Part(u32),
 }
@@ -1844,6 +1861,15 @@ struct SavedMessagePackage {
 }
 
 fn teleark_remote_file(file_name: &str, caption: &str) -> Option<TeleArkRemoteFile> {
+    if let Some(package_id) = file_name.strip_suffix(".tarku") {
+        return (caption == "TeleArk pending upload v1"
+            && package_id.len() == 32
+            && package_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| TeleArkRemoteFile {
+            package_id: package_id.into(),
+            role: TeleArkRemoteRole::Pending,
+        });
+    }
     let (package_id, suffix) = file_name.split_once(".v1.")?;
     if package_id.len() != 32 || !package_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
@@ -1884,6 +1910,7 @@ fn saved_message_packages(files: &[TelegramFileSummary]) -> Vec<SavedMessagePack
             });
         package.encoded_size = package.encoded_size.saturating_add(file.size_bytes);
         match descriptor.role {
+            TeleArkRemoteRole::Pending => {}
             TeleArkRemoteRole::Manifest => {
                 package.has_manifest = true;
                 package.reference_message_id = file.message_id;

@@ -1,5 +1,22 @@
 # TeleArk architecture
 
+## Current transfer contract (2026-09-15)
+
+[ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md) supersedes
+older 60 MiB/spool/rate descriptions below. New encrypted containers have a
+**1.9 GiB encoded ceiling**, including framing. Upload and download use bounded
+512 KiB transport blocks and in-memory encryption/authenticated decryption; only
+verified plaintext is written for downloads. No new ciphertext payload spool is
+created. Whole-file/container BLAKE3 share one source inspection pass.
+
+A separate [pending envelope v1](PENDING_UPLOAD_FORMAT.md) precedes upload and
+supports same-source, same-account/channel recovery on another device with the
+recovery key. Local executable contexts read v1/v2, preserving v1 geometry and
+wrapped keys; SQLite remains 22. Receipt counters update per RPC, ordinary rate
+publication is one second with a trailing three-second window, and global rates
+are incrementally maintained. Stable row identities and visible-row projections
+keep presentation independent of complete history/database scans.
+
 TeleArk presents Telegram content as files. `LogicalFile` is the enduring domain abstraction; messages, encrypted pieces and MTProto units are adapter details. [Implementation status](IMPLEMENTATION_STATUS.md) distinguishes connected product behavior from tested engine foundations and unfinished work.
 
 ## Boundaries

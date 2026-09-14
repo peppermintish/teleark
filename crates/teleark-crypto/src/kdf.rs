@@ -67,6 +67,14 @@ pub(crate) fn manifest_key(
     derive(file_key, package_id, &[MANIFEST_KEY_DOMAIN, &generation])
 }
 
+pub(crate) fn pending_upload_key(
+    file_key: &[u8; 32],
+    package: &[u8; 16],
+    salt: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    derive(file_key, salt, &[b"teleark/pending-upload/v1", package])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
