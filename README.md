@@ -52,7 +52,7 @@ Edit `.env.local` and replace both sample values with your application's API ID 
 After configuring `.env.local`, copy and run this single command to build and launch:
 
 ```bash
-(set +x; set -a; . ./.env.local || exit 1; set +a; cargo run -r -p teleark-gui --bin teleark --locked)
+scripts/build-local.sh && ./target/release/teleark
 ```
 
 To build without launching:
