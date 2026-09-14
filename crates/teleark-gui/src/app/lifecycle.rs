@@ -61,6 +61,15 @@ impl TeleArkApp {
             cx.quit();
             return;
         }
+        if self.session_loss_pending() {
+            if action == TransitionAction::Quit {
+                self.session_loss
+                    .as_mut()
+                    .expect("pending session loss")
+                    .quit_after_pause = true;
+            }
+            return;
+        }
         let main = self.main_window;
         cx.defer(move |cx| {
             let _ = main.update(cx, |_, window, _| window.activate_window());
@@ -179,6 +188,14 @@ impl TeleArkApp {
             let _ = main.update(cx, |_, window, _| {
                 window.on_next_frame(move |_, cx| {
                     let _ = entity.update(cx, |app, cx| {
+                        if app.session_loss_pending()
+                            || app
+                                .transition
+                                .as_ref()
+                                .is_none_or(|t| t.phase != TransitionPhase::Pausing)
+                        {
+                            return;
+                        }
                         // Independent owners receive pause concurrently: a blocked native
                         // writer cannot prevent encrypted transfers receiving their controls.
                         let native = cx.background_spawn(async move {

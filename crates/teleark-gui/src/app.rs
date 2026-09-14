@@ -12,6 +12,7 @@ mod managed_projection;
 mod navigation;
 mod preferences;
 mod preview;
+mod session_loss;
 mod speed_limits;
 mod status_bar;
 mod sync_history;
@@ -297,6 +298,11 @@ pub struct TeleArkApp {
     pub(crate) app_lock: app_lock::AppLockUi,
     pub(crate) transition: Option<lifecycle::Transition>,
     shutdown_task: Option<Task<()>>,
+    pub(crate) session_loss: Option<session_loss::SessionLoss>,
+    session_loss_task: Option<Task<()>>,
+    session_loss_clock: Option<Task<()>>,
+    authorization_task: Option<Task<()>>,
+    authorization_snapshot: Option<teleark_runtime::AuthorizationSnapshot>,
     main_window: gpui_kit::AnyWindowHandle,
     pub(crate) proxy: proxy::ProxyUi,
     pub(crate) page: Page,
@@ -738,6 +744,11 @@ impl TeleArkApp {
             app_lock,
             transition: None,
             shutdown_task: None,
+            session_loss: None,
+            session_loss_task: None,
+            session_loss_clock: None,
+            authorization_task: None,
+            authorization_snapshot: None,
             main_window: window.window_handle(),
             proxy,
             page,
@@ -999,6 +1010,7 @@ impl TeleArkApp {
         app.start_volume_space_refresh(cx);
         app.start_local_file_refresh(cx);
         app.start_network_observer(cx);
+        app.start_authorization_observer(cx);
         app.start_bandwidth_observer(cx);
         app.restore_telegram_session(cx);
         app
@@ -1599,6 +1611,9 @@ impl Render for TeleArkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_access_menus(cx);
         self.schedule_pin_work(window, cx);
+        if self.session_loss_pending() {
+            return self.render_signed_out_screen(window, cx);
+        }
         if self.app_is_locked() {
             return self.render_app_lock_screen(window, cx);
         }

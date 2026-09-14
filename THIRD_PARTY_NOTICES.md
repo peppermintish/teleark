@@ -184,3 +184,13 @@ Runtime's session-log queue tests also directly use the already bundled `serde_j
 ## Proxy transport dependency review (2026-09-08)
 
 The existing `grammers-mtsender` proxy feature supplies the sender-pool proxy configuration API and adds `tokio-socks` (MIT OR Apache-2.0) and Hickory 0.26.2 (MIT OR Apache-2.0). TeleArk supplies numeric loopback endpoints and does not use Hickory DNS resolution. The bounded gateway uses existing Tokio I/O, base64 and zeroize, plus direct `getrandom` 0.4.3 (MIT OR Apache-2.0) for local authentication. Runtime's explicit policy codec uses existing `serde_json` (MIT OR Apache-2.0). Locked `chacha20` was updated from yanked 0.10.1 to 0.10.2 in the feature's transitive random graph. The resolved declarations remain within the existing license policy; no exception was added. Cargo-deny checks maintenance/advisories, sources, licenses and bans for the locked graph. No external GPL implementation was used.
+
+## Session authorization event classification
+
+`grammers-mtproto` 0.10.0 (MIT OR Apache-2.0), already present transitively through
+`grammers-mtsender`, is now a direct dependency so TeleArk can classify the typed
+MTProto `BadStatus { status: 404 }` transport error without parsing display text.
+This adds no package version or new transitive dependency and needs no license-policy
+exception. The public `grammers-client` retry-policy API supplies event observation;
+normal client retry policies remain intact. No incompatible external implementation
+was inspected or used.

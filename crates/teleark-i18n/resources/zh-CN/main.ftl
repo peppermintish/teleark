@@ -1675,3 +1675,12 @@ transition-pause-failed-title = 未能完成暂停
 transition-pause-failed = TeleArk 保持打开。部分任务可能已暂停。请检查可用磁盘空间后重试。
 
 transition-pause-retry = 重试暂停并退出
+
+session-loss-checking = 正在确认 Telegram 登录状态…
+session-loss-pausing = Telegram 登录已失效 · 正在暂停任务…
+session-loss-retiring = 任务已暂停 · 正在返回登录页…
+session-loss-failed = 登录已失效 · 请重试
+session-loss-paused = Telegram 登录已失效 · 任务已暂停
+session-loss-description = 当前 Telegram 登录已失效。TeleArk 将保存任务进度并返回登录页。如未能完成，请重试以安全退出登录。
+session-loss-step-time = 当前阶段：距离上次更新 { $duration }
+session-loss-history-omitted = 已省略 { $count } 条较早的活动记录

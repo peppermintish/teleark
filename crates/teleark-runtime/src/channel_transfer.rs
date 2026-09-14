@@ -1215,15 +1215,10 @@ impl DesktopTransfers {
         self.inner.pump.refill()
     }
 
-    /// Background-only graceful exit. Restore admission if checkpointing fails;
-    /// transfers that already acknowledged pause remain paused.
+    /// Background-only graceful exit. The current lifecycle caller decides whether
+    /// to reopen admission on failure; a stale exit must not undo session loss.
     pub fn pause_for_shutdown(&self) -> Result<(), ApplicationError> {
-        let account = self.inner.active_account.load(Ordering::Acquire);
-        let result = self.suspend_account();
-        if result.is_err() {
-            self.inner.active_account.store(account, Ordering::Release);
-        }
-        result
+        self.suspend_account()
     }
 
     /// Reopen admission after an abandoned exit; saved pause intent is unchanged.

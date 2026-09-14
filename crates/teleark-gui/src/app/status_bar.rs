@@ -219,6 +219,16 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
 
 impl TeleArkApp {
     pub(super) fn shell_sync_status(&self) -> ShellSyncStatus {
+        if self.authorization_snapshot.is_some_and(|snapshot| {
+            snapshot.account_id == self.telegram_account.as_ref().map(|account| account.id)
+                && snapshot.phase == teleark_runtime::AuthorizationPhase::Checking
+        }) {
+            return ShellSyncStatus {
+                label: self.tr("session-loss-checking"),
+                tone: Tone::Amber,
+                icon: Some(IconName::Redo2),
+            };
+        }
         use dialogs::Phase as Dialog;
         let (mut id, mut tone, mut icon, count) = self
             .channel_sync_snapshot

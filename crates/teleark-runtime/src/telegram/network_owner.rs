@@ -20,10 +20,12 @@ impl Endpoint {
         generation: u64,
         bandwidth: teleark_telegram::TransferBandwidth,
         lifecycle: lifecycle::Lifecycle,
+        authorization: teleark_telegram::AuthorizationMonitor,
     ) -> Result<Self, ApplicationError> {
         Self::spawn_with(route, monitor, generation, move |receiver, mut state| {
             state.bandwidth = bandwidth;
             state.lifecycle = lifecycle;
+            state.authorization = authorization;
             telegram_loop(receiver, state)
         })
     }
@@ -152,18 +154,21 @@ impl DesktopTelegram {
         }
         let monitor = NetworkMonitor::new(&route);
         let lifecycle = lifecycle::Lifecycle::default();
+        let authorization = teleark_telegram::AuthorizationMonitor::default();
         let endpoint = Endpoint::spawn(
             route.clone(),
             monitor.clone(),
             0,
             bandwidth.clone(),
             lifecycle.clone(),
+            authorization.clone(),
         )?;
         Ok(Self {
             #[cfg(test)]
             test_vault_remote: None,
             inner: Arc::new(TelegramWorkerInner {
                 lifecycle,
+                authorization,
                 bandwidth,
                 endpoint: Mutex::new(Some(endpoint)),
                 changing: AtomicBool::new(false),
@@ -203,6 +208,37 @@ impl DesktopTelegram {
         library: &DesktopLibrary,
         route: NetworkRoute,
     ) -> Result<(), ApplicationError> {
+        self.replace_network_route(route.clone(), None, || {
+            library.set_proxy_configuration(&route)
+        })
+    }
+
+    pub fn authorization_snapshot(&self) -> teleark_telegram::AuthorizationSnapshot {
+        self.inner.authorization.snapshot()
+    }
+
+    pub fn authorization_updates(&self) -> teleark_telegram::AuthorizationUpdates {
+        self.inner.authorization.subscribe()
+    }
+
+    /// After transfer pause acknowledgments, retire the invalid connection and
+    /// reset only its session file. No logout RPC or account/library deletion.
+    pub fn forget_revoked_session(
+        &self,
+        expected: teleark_telegram::AuthorizationSnapshot,
+    ) -> Result<(), ApplicationError> {
+        self.replace_network_route(self.network_route(), Some(expected), || {
+            TelegramConnection::clear_revoked_session(&self.inner.session_path)
+                .map_err(map_telegram_error)
+        })
+    }
+
+    fn replace_network_route(
+        &self,
+        route: NetworkRoute,
+        revoked: Option<teleark_telegram::AuthorizationSnapshot>,
+        prepare: impl FnOnce() -> Result<(), ApplicationError>,
+    ) -> Result<(), ApplicationError> {
         if self
             .inner
             .changing
@@ -212,7 +248,19 @@ impl DesktopTelegram {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
         let _changing = Changing(&self.inner.changing);
+        if let Some(expected) = revoked {
+            let current = self.authorization_snapshot();
+            // Route replacements are serialized and Revoked is latched: auth
+            // callbacks cannot replace this account between validation and fencing.
+            if current.generation != expected.generation
+                || current.account_id != expected.account_id
+                || current.phase != teleark_telegram::AuthorizationPhase::Revoked
+            {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+        }
         let generation = self.inner.monitor.begin_change(&route);
+        self.inner.authorization.replace_network(generation);
         self.inner.lifecycle.publish(generation, None, None);
         *self.inner.route.lock().unwrap_or_else(|e| e.into_inner()) = route.clone();
         let old = self
@@ -230,7 +278,7 @@ impl DesktopTelegram {
             );
             return Err(error);
         }
-        if let Err(error) = library.set_proxy_configuration(&route) {
+        if let Err(error) = prepare() {
             self.inner
                 .monitor
                 .publish(generation, NetworkPhase::Blocked(ProxyFailure::Persistence));
@@ -242,6 +290,7 @@ impl DesktopTelegram {
             generation,
             self.inner.bandwidth.clone(),
             self.inner.lifecycle.clone(),
+            self.inner.authorization.clone(),
         ) {
             Ok(endpoint) => endpoint,
             Err(error) => {
@@ -251,6 +300,11 @@ impl DesktopTelegram {
                 return Err(error);
             }
         };
+        if let Some(expected) = revoked {
+            self.inner
+                .authorization
+                .complete_retirement(expected, generation);
+        }
         *self
             .inner
             .endpoint
@@ -337,6 +391,33 @@ mod tests {
     use super::*;
     use std::io::{ErrorKind, Read as _};
     use teleark_telegram::network::{ProxyConfig, ProxyProtocol};
+
+    #[test]
+    fn stale_revocation_cannot_retire_a_new_login_or_erase_its_session() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("session");
+        std::fs::write(&path, b"synthetic session sentinel").expect("fixture");
+        let telegram = DesktopTelegram::open_direct(&path).expect("owner");
+        telegram.inner.authorization.set_account(0, Some(17));
+        let mut old = telegram.authorization_snapshot();
+        old.phase = teleark_telegram::AuthorizationPhase::Revoked;
+        telegram.inner.authorization.set_account(0, Some(18));
+        let current = telegram.authorization_snapshot();
+        assert_eq!(
+            telegram
+                .forget_revoked_session(old)
+                .expect_err("stale revocation")
+                .kind(),
+            ApplicationErrorKind::Conflict
+        );
+        assert_eq!(telegram.authorization_snapshot(), current);
+        assert_eq!(telegram.network_snapshot().generation, 0);
+        assert!(telegram.inner.endpoint.lock().expect("fixture").is_some());
+        assert_eq!(
+            std::fs::read(path).expect("fixture"),
+            b"synthetic session sentinel"
+        );
+    }
 
     fn proxy_route() -> NetworkRoute {
         // Deliberately closed local port: a proxy outage cannot restore direct.

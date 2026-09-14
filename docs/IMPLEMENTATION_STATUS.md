@@ -1,5 +1,26 @@
 # Implementation status — v0.4.4
 
+## Event-driven session revocation (2026-09-15)
+
+Connection/authentication-error events now request one home-DC confirmation; idle
+sessions do not poll. Confirmed session loss blocks new work, pauses native and
+encrypted owners independently, saves recoverable progress, retires the invalid
+connection/session and returns to sign-in. The lower-left reason survives the fresh
+QR flow and clears after successful login. Failed pause or cleanup remains blocked
+and retryable. Old account/connection callbacks cannot restore or erase a new login.
+Existing task pause intent survives sign-in and restart; no stored format changes.
+See [ADR 0039](adr/0039-event-driven-session-revocation.md) for event semantics,
+retained ownership, failure handling and compatibility.
+
+Validation: all workspace targets passed (734 tests; 10 existing manual/performance
+probes ignored), plus the separate Core and i18n/doc-test gates. Formatting, full
+workspace check, strict Clippy, warning-free rustdoc and the debug build passed.
+Cargo-deny passed all policy gates with existing duplicate-dependency warnings;
+the existing `block` future-compatibility notice remains. English/light synthetic
+native previews covered 900×600 and actual full-screen, expanded activity details,
+retry back to sign-in, retained lower-left reason and blocked Settings access.
+No live phone-side Telegram session revocation was performed.
+
 ## QR login recovery and signed-out access (2026-09-14)
 
 A failed QR poll now retires the rejected token and its poll owner, preserves the

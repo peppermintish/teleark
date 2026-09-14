@@ -81,7 +81,9 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let returning = self.telegram_is_authorized();
-        let body = if self.login_proxy_open && !returning {
+        let body = if self.session_loss_pending() {
+            self.render_session_loss_body(cx)
+        } else if self.login_proxy_open && !returning {
             div()
                 .w_full()
                 .max_w(theme::SETTINGS_FORM_WIDTH)
@@ -253,30 +255,35 @@ impl TeleArkApp {
                             })),
                         )
                     })
-                    .when(!returning && !self.app_is_locked(), |header| {
-                        header.child(
-                            components::button(
-                                "account-proxy",
-                                self.tr(if self.login_proxy_open {
-                                    "account-back-to-login"
-                                } else {
-                                    "proxy-settings-title"
-                                }),
-                                Some(if self.login_proxy_open {
-                                    IconName::ArrowLeft
-                                } else {
-                                    IconName::Globe
-                                }),
-                                false,
+                    .when(
+                        !returning && !self.app_is_locked() && !self.session_loss_pending(),
+                        |header| {
+                            header.child(
+                                components::button(
+                                    "account-proxy",
+                                    self.tr(if self.login_proxy_open {
+                                        "account-back-to-login"
+                                    } else {
+                                        "proxy-settings-title"
+                                    }),
+                                    Some(if self.login_proxy_open {
+                                        IconName::ArrowLeft
+                                    } else {
+                                        IconName::Globe
+                                    }),
+                                    false,
+                                )
+                                .ghost()
+                                .debug_selector(|| "account-proxy".into())
+                                .on_click(cx.listener(
+                                    |app, _, _, cx| {
+                                        app.login_proxy_open = !app.login_proxy_open;
+                                        cx.notify();
+                                    },
+                                )),
                             )
-                            .ghost()
-                            .debug_selector(|| "account-proxy".into())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.login_proxy_open = !app.login_proxy_open;
-                                cx.notify();
-                            })),
-                        )
-                    }),
+                        },
+                    ),
             )
             .child(
                 div().flex_1().min_h_0().overflow_y_scrollbar().child(
@@ -290,7 +297,9 @@ impl TeleArkApp {
                         .child(body),
                 ),
             )
-            .child(
+            .child(if self.session_loss.is_some() {
+                self.render_session_loss_status()
+            } else {
                 div()
                     .h(px(40.0))
                     .flex_none()
@@ -305,8 +314,9 @@ impl TeleArkApp {
                         "shell-preview"
                     } else {
                         "account-private-note"
-                    })),
-            )
+                    }))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 }

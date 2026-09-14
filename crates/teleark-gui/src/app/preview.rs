@@ -115,6 +115,33 @@ impl TeleArkApp {
         };
         self.telegram_account = Some(account.clone());
         self.telegram_auth = TelegramAuthState::Authorized(account);
+        if state.starts_with("session-loss-") {
+            use session_loss::{Phase, SessionLoss};
+            self.page = Page::Account;
+            let phase = match state.as_str() {
+                "session-loss-retiring" => Phase::Retiring,
+                "session-loss-failed" => Phase::Failed,
+                "session-loss-paused" => Phase::SignedOut,
+                _ => Phase::Pausing,
+            };
+            self.session_loss = Some(SessionLoss::new(
+                teleark_runtime::AuthorizationSnapshot {
+                    generation: 1,
+                    network_generation: 0,
+                    account_id: Some(1),
+                    phase: teleark_runtime::AuthorizationPhase::Revoked,
+                },
+                phase,
+            ));
+            if phase == Phase::SignedOut {
+                self.telegram_account = None;
+                self.telegram_auth = TelegramAuthState::QrCode {
+                    deep_link: "TeleArk session recovery preview - not a login token".into(),
+                    expires_at_unix_seconds: 1_900_000_000,
+                };
+            }
+            return;
+        }
         self.telegram_chats = (1..=200)
             .map(|index| TelegramChatSummary {
                 sync_pts: None,

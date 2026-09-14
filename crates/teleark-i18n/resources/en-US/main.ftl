@@ -1702,3 +1702,12 @@ transition-pause-failed-title = Unable to finish pausing
 transition-pause-failed = TeleArk is still open. Some tasks may already be paused. Check available disk space and try again.
 
 transition-pause-retry = Retry Pause and Quit
+
+session-loss-checking = Checking Telegram session…
+session-loss-pausing = Telegram session ended · Pausing tasks…
+session-loss-retiring = Tasks paused · Returning to sign in…
+session-loss-failed = Session ended · Retry required
+session-loss-paused = Telegram session ended · Tasks paused
+session-loss-description = Your Telegram login is no longer valid. TeleArk will save task progress and return to sign in. If this step fails, retry to finish safely.
+session-loss-step-time = Current step: { $duration } since last update
+session-loss-history-omitted = { $count } earlier activity entries omitted

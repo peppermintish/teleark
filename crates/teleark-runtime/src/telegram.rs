@@ -124,6 +124,7 @@ pub struct DesktopTelegram {
 
 struct TelegramWorkerInner {
     lifecycle: lifecycle::Lifecycle,
+    authorization: teleark_telegram::AuthorizationMonitor,
     endpoint: Mutex<Option<network_owner::Endpoint>>,
     bandwidth: teleark_telegram::TransferBandwidth,
     changing: std::sync::atomic::AtomicBool,
@@ -296,6 +297,7 @@ enum LoginState {
 
 struct WorkerState {
     lifecycle: lifecycle::Lifecycle,
+    authorization: teleark_telegram::AuthorizationMonitor,
     bandwidth: teleark_telegram::TransferBandwidth,
     network_route: NetworkRoute,
     network_monitor: NetworkMonitor,
@@ -313,6 +315,7 @@ impl Default for WorkerState {
     fn default() -> Self {
         Self {
             lifecycle: lifecycle::Lifecycle::default(),
+            authorization: Default::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             network_route: NetworkRoute::Direct,
             network_monitor: NetworkMonitor::new(&NetworkRoute::Direct),
@@ -965,6 +968,11 @@ impl DesktopTelegram {
 
 impl WorkerState {
     fn record_auth_result(&mut self, result: &Result<TelegramAuthState, ApplicationError>) {
+        if self.authorization.snapshot().phase == teleark_telegram::AuthorizationPhase::Revoked {
+            // Keep the local account identity until its durable queues acknowledge
+            // pause. Late authentication replies cannot reopen a revoked session.
+            return;
+        }
         self.authorized_account_id = match result {
             Ok(TelegramAuthState::Authorized(account)) => Some(account.id),
             _ => None,
@@ -976,11 +984,14 @@ impl WorkerState {
                 .as_ref()
                 .map(|connection| connection.channel_update_signals()),
         );
+        self.authorization
+            .set_account(self.network_generation, self.authorized_account_id);
     }
 
     fn read_snapshot(&self) -> Self {
         Self {
             lifecycle: self.lifecycle.clone(),
+            authorization: self.authorization.clone(),
             network_route: self.network_route.clone(),
             network_monitor: self.network_monitor.clone(),
             network_generation: self.network_generation,
@@ -1454,6 +1465,9 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
         TelegramRequest::SignOut { reply } => {
             state.authorized_account_id = None;
             state
+                .authorization
+                .set_account(state.network_generation, None);
+            state
                 .lifecycle
                 .publish(state.network_generation, None, None);
             let result = sign_out(state).await;
@@ -1495,6 +1509,7 @@ async fn connect(
         network_route: state.network_route.clone(),
         network_monitor: state.network_monitor.clone(),
         network_generation: state.network_generation,
+        authorization_monitor: state.authorization.clone(),
     })
     .await
     .map_err(map_telegram_error)?
@@ -1685,7 +1700,11 @@ fn require_account(state: &WorkerState, account_id: i64) -> Result<(), Applicati
     // This is session-local routing identity established by successful authentication.
     // Telegram still authorizes each RPC, and private storage validates fresh remote
     // metadata/account-bound markers independently in the Telegram adapter.
-    if state.authorized_account_id != Some(account_id) {
+    let authorization = state.authorization.snapshot();
+    if state.authorized_account_id != Some(account_id)
+        || (authorization.phase == teleark_telegram::AuthorizationPhase::Revoked
+            && authorization.account_id == Some(account_id))
+    {
         return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
     }
     Ok(())
@@ -2279,6 +2298,7 @@ mod tests {
         });
         let inner = TelegramWorkerInner {
             lifecycle: lifecycle::Lifecycle::default(),
+            authorization: Default::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             endpoint: Mutex::new(Some(network_owner::Endpoint {
                 sender,

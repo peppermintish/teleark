@@ -4,7 +4,8 @@ use super::*;
 
 impl TeleArkApp {
     pub(crate) fn telegram_is_authorized(&self) -> bool {
-        matches!(&self.telegram_auth, TelegramAuthState::Authorized(account)
+        !self.session_loss_pending()
+            && matches!(&self.telegram_auth, TelegramAuthState::Authorized(account)
             if self.telegram_account.as_ref().is_some_and(|current| current.id == account.id))
     }
 
@@ -46,9 +47,10 @@ impl TeleArkApp {
             .on_action(cx.listener(|_, _: &UploadFile, _, _| {}))
             .on_action(cx.listener(|_, _: &FocusSearch, _, _| {}))
             .child(self.render_account(window, layout, cx))
-            .when(self.proxy.show_banner(), |root| {
-                root.child(self.render_network_banner(cx))
-            })
+            .when(
+                self.proxy.show_banner() && !self.session_loss_pending(),
+                |root| root.child(self.render_network_banner(cx)),
+            )
             .when(self.show_telegram_api_id_prompt, |root| {
                 root.child(screens::settings::render_telegram_api_id_prompt(self, cx))
             })
@@ -161,42 +163,7 @@ impl TeleArkApp {
                 this.update(cx, |this, cx| {
                     match result {
                         Ok(()) => {
-                            this.telegram_auth = TelegramAuthState::Unauthorized;
-                            this.telegram_activity = TelegramActivity::Idle;
-                            this.telegram_account = None;
-                            this.page = Page::Account;
-                            this.account_avatar = None;
-                            this.telegram_chats.clear();
-                            this.telegram_files.clear();
-                            this.telegram_index = None;
-                            this.selected_chat_id = None;
-                            this.storage_status = teleark_runtime::StorageChannelStatus::Missing;
-                            if let Some(progress) = this.storage_maintenance.take() {
-                                progress.cancel();
-                            }
-                            this.storage_confirmation = None;
-                            this.storage_maintenance_presentation = None;
-                            this.storage_loading = false;
-                            this.storage_error = None;
-                            this.managed_vault_files = Default::default();
-                            this.managed_health_checked = None;
-                            this.managed_upload_receipts.clear();
-                            this.managed_vault_rejected = 0;
-                            this.vault_recovery_secret = None;
-                            this.vault_locked = true;
-                            this.unlock_intent = None;
-                            this.upload_sources.clear();
-                            this.upload_source_total_bytes = 0;
-                            if let Some(progress) = this.upload_preparation_progress.take() {
-                                progress.cancel();
-                            }
-                            this.upload_selection_progress = None;
-                            this.last_channel_id = None;
-                            this.local_downloads.clear();
-                            this.telegram_file_generation =
-                                this.telegram_file_generation.wrapping_add(1);
-                            this.refresh_channel_file_table(cx);
-                            this.ensure_telegram_qr_login(cx);
+                            this.finish_telegram_sign_out(cx);
                         }
                         Err(error) => {
                             this.telegram_activity = TelegramActivity::Failed(error.kind())
@@ -207,6 +174,44 @@ impl TeleArkApp {
             }
         }));
         cx.notify();
+    }
+
+    pub(super) fn finish_telegram_sign_out(&mut self, cx: &mut Context<Self>) {
+        self.telegram_auth = TelegramAuthState::Unauthorized;
+        self.telegram_activity = TelegramActivity::Idle;
+        self.telegram_account = None;
+        self.page = Page::Account;
+        self.account_avatar = None;
+        self.telegram_chats.clear();
+        self.telegram_files.clear();
+        self.telegram_index = None;
+        self.selected_chat_id = None;
+        self.storage_status = teleark_runtime::StorageChannelStatus::Missing;
+        if let Some(progress) = self.storage_maintenance.take() {
+            progress.cancel();
+        }
+        self.storage_confirmation = None;
+        self.storage_maintenance_presentation = None;
+        self.storage_loading = false;
+        self.storage_error = None;
+        self.managed_vault_files = Default::default();
+        self.managed_health_checked = None;
+        self.managed_upload_receipts.clear();
+        self.managed_vault_rejected = 0;
+        self.vault_recovery_secret = None;
+        self.vault_locked = true;
+        self.unlock_intent = None;
+        self.upload_sources.clear();
+        self.upload_source_total_bytes = 0;
+        if let Some(progress) = self.upload_preparation_progress.take() {
+            progress.cancel();
+        }
+        self.upload_selection_progress = None;
+        self.last_channel_id = None;
+        self.local_downloads.clear();
+        self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
+        self.refresh_channel_file_table(cx);
+        self.ensure_telegram_qr_login(cx);
     }
 
     pub(crate) fn begin_telegram_login(&mut self, cx: &mut Context<Self>) {
@@ -338,7 +343,7 @@ impl TeleArkApp {
         }));
     }
 
-    fn apply_telegram_login_result(
+    pub(super) fn apply_telegram_login_result(
         &mut self,
         generation: u64,
         result: Result<TelegramAuthState, ApplicationError>,
@@ -354,6 +359,9 @@ impl TeleArkApp {
         result: Result<TelegramAuthState, ApplicationError>,
         cx: &mut Context<Self>,
     ) {
+        if self.session_loss_pending() {
+            return;
+        }
         let restoring = self.account_restoring;
         self.account_restoring = false;
         self.account_restore_retry_at = None;
@@ -361,6 +369,21 @@ impl TeleArkApp {
             Ok(state) => {
                 self.telegram_activity = TelegramActivity::Idle;
                 if let TelegramAuthState::Authorized(account) = &state {
+                    if let Some(event) = self
+                        .telegram
+                        .as_ref()
+                        .map(|telegram| telegram.authorization_snapshot())
+                        && event.phase == teleark_runtime::AuthorizationPhase::Revoked
+                        && event.account_id == Some(account.id)
+                    {
+                        // The remote can revoke between authorization and the GUI
+                        // receiving its reply. Consume the retained terminal event.
+                        self.telegram_account = Some(account.clone());
+                        self.telegram_auth = state;
+                        self.observe_authorization(event, cx);
+                        return;
+                    }
+                    self.session_loss = None;
                     self.qr_login_error = None;
                     self.login_proxy_open = false;
                     self.telegram_account = Some(account.clone());

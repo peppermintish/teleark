@@ -43,6 +43,7 @@ use teleark_storage::{
     NewNativeDownloadBatchRecord, NewNativeDownloadTaskRecord, PageCursor, RemoteFileUpsert,
     SearchQuery, SettingRecord, StorageError, TelegramIndexStateRecord, VaultMetadataRecord,
 };
+pub use teleark_telegram::{AuthorizationPhase, AuthorizationSnapshot, AuthorizationUpdates};
 pub use teleark_telegram::{TelegramAccount, TelegramChatKind};
 
 mod channel_sync;

@@ -44,7 +44,11 @@ pub use bandwidth::{
     BandwidthBudget, BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferBandwidth,
     TransferSpeedLimits,
 };
+mod authorization;
 mod connection;
+pub use authorization::{
+    AuthorizationMonitor, AuthorizationPhase, AuthorizationSnapshot, AuthorizationUpdates,
+};
 use byte_progress::UploadReader;
 pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
 
@@ -179,6 +183,7 @@ pub struct TelegramConfig {
     pub network_route: network::NetworkRoute,
     pub network_monitor: network::NetworkMonitor,
     pub network_generation: u64,
+    pub authorization_monitor: AuthorizationMonitor,
 }
 
 /// Stable error categories used by Core and frontends.
@@ -446,9 +451,19 @@ pub struct TelegramConnection {
     gateway: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
     channel_updates: ChannelUpdateSignals,
+    authorization_monitor: AuthorizationMonitor,
+    network_generation: u64,
+    authorization_task: Option<JoinHandle<()>>,
 }
 
 impl TelegramConnection {
+    /// Background-only, after every transport owner using this file is retired.
+    pub fn clear_revoked_session(path: &Path) -> Result<(), TelegramError> {
+        FileSession::open(path)
+            .and_then(|session| session.clear_authorization())
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Session))
+    }
+
     /// Opens an isolated Telegram session and starts its retained network tasks.
     pub async fn connect(config: TelegramConfig) -> Result<Self, TelegramError> {
         validate_config(&config)?;
@@ -482,11 +497,50 @@ impl TelegramConnection {
         let sync_client = Client::with_configuration(
             handle.clone(),
             grammers_client::client::ClientConfiguration {
+                retry_policy: Box::new(authorization::ObservedRetryPolicy {
+                    monitor: config.authorization_monitor.clone(),
+                    network_generation: config.network_generation,
+                    inner: Box::new(grammers_client::client::NoRetries),
+                }),
+                ..Default::default()
+            },
+        );
+        // This client deliberately does not feed its own failures back into the
+        // event source: one failed confirmation cannot start a request loop.
+        let check_client = Client::with_configuration(
+            handle.clone(),
+            grammers_client::client::ClientConfiguration {
                 retry_policy: Box::new(grammers_client::client::NoRetries),
                 ..Default::default()
             },
         );
-        let client = Client::new(handle);
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let checked_connection = disconnected.clone();
+        let authorization_task = tokio::spawn(authorization::confirm_events(
+            config.authorization_monitor.clone(),
+            config.network_generation,
+            move || {
+                let client = check_client.clone();
+                let connected = checked_connection.clone();
+                async move {
+                    let result = client
+                        .invoke(&tl::functions::updates::GetState {})
+                        .await
+                        .map(drop);
+                    if result.is_ok() {
+                        connected.store(false, Ordering::Release);
+                    }
+                    result
+                }
+            },
+        ));
+        let mut client_config = grammers_client::client::ClientConfiguration::default();
+        client_config.retry_policy = Box::new(authorization::ObservedRetryPolicy {
+            monitor: config.authorization_monitor.clone(),
+            network_generation: config.network_generation,
+            inner: client_config.retry_policy,
+        });
+        let client = Client::with_configuration(handle, client_config);
         let runner = tokio::spawn(runner.run());
         // Drain the transport continuously into bounded/coalesced channel PTS
         // hints. Durable differences, not these hints, advance the catalog.
@@ -494,12 +548,18 @@ impl TelegramConnection {
         let channel_signal = channel_updates.clone();
         let qr_login_update = Arc::new(AtomicBool::new(false));
         let drain_signal = Arc::clone(&qr_login_update);
+        let authorization_monitor = config.authorization_monitor.clone();
         let update_drain = tokio::spawn(async move {
             while let Some(update) = updates.recv().await {
                 if matches!(&update, UpdatesLike::ConnectionClosed) {
+                    if !disconnected.swap(true, Ordering::AcqRel) {
+                        authorization_monitor.request_check(config.network_generation);
+                    }
                     config
                         .network_monitor
                         .transport_closed(config.network_generation);
+                } else if matches!(&update, UpdatesLike::Updates(_)) {
+                    disconnected.store(false, Ordering::Release);
                 }
                 channel_signal.observe(&update);
                 if contains_qr_login_update(&update) {
@@ -523,6 +583,9 @@ impl TelegramConnection {
             gateway: Some(gateway.task),
             update_drain: Some(update_drain),
             channel_updates,
+            authorization_monitor: config.authorization_monitor,
+            network_generation: config.network_generation,
+            authorization_task: Some(authorization_task),
         })
     }
 
@@ -1261,6 +1324,9 @@ impl TelegramConnection {
 
     /// Gracefully stops both retained background tasks.
     pub async fn shutdown(mut self) {
+        if let Some(task) = self.authorization_task.take() {
+            task.abort();
+        }
         self.client.disconnect();
         if let Some(task) = self.gateway.take() {
             task.abort();
@@ -1656,6 +1722,9 @@ async fn prepare_partial_download(
 
 impl Drop for TelegramConnection {
     fn drop(&mut self) {
+        if let Some(task) = self.authorization_task.take() {
+            task.abort();
+        }
         self.client.disconnect();
         if let Some(task) = self.gateway.take() {
             task.abort();
@@ -2069,7 +2138,11 @@ impl TelegramConnection {
             let client = Client::with_configuration(
                 handle,
                 grammers_client::client::ClientConfiguration {
-                    retry_policy: Box::new(grammers_client::client::NoRetries),
+                    retry_policy: Box::new(authorization::ObservedRetryPolicy {
+                        monitor: self.authorization_monitor.clone(),
+                        network_generation: self.network_generation,
+                        inner: Box::new(grammers_client::client::NoRetries),
+                    }),
                     ..Default::default()
                 },
             );
@@ -2124,6 +2197,7 @@ mod tests {
             network_route: network::NetworkRoute::Direct,
             network_monitor: network::NetworkMonitor::new(&network::NetworkRoute::Direct),
             network_generation: 0,
+            authorization_monitor: Default::default(),
         })
         .expect_err("zero API ID must fail validation");
         assert_eq!(error.kind(), TelegramErrorKind::InvalidConfiguration);

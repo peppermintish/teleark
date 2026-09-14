@@ -7779,6 +7779,7 @@ dependencies = [
  "blake3",
  "getrandom 0.4.3",
  "grammers-client",
+ "grammers-mtproto",
  "grammers-mtsender",
  "grammers-session",
  "serde",

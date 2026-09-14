@@ -1675,3 +1675,12 @@ transition-pause-failed-title = 一時停止を完了できませんでした
 transition-pause-failed = TeleArk は開いたままです。一部のタスクは一時停止済みの場合があります。ディスクの空き容量を確認して再試行してください。
 
 transition-pause-retry = 一時停止して終了を再試行
+
+session-loss-checking = Telegramのログイン状態を確認中…
+session-loss-pausing = Telegramのセッション終了 · タスクを一時停止中…
+session-loss-retiring = タスクを一時停止しました · ログイン画面に戻っています…
+session-loss-failed = ログインが無効です · 再試行してください
+session-loss-paused = Telegramのセッション終了 · タスクは一時停止中
+session-loss-description = Telegramのログインが無効になりました。タスクの進行状況を保存してログイン画面に戻ります。完了できない場合は、安全にログアウトするため再試行してください。
+session-loss-step-time = 現在の段階：最終更新から { $duration }
+session-loss-history-omitted = 過去のアクティビティ { $count } 件を省略

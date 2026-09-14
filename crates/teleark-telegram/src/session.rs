@@ -97,6 +97,10 @@ pub(crate) struct FileSession {
 }
 
 impl FileSession {
+    pub(crate) fn clear_authorization(&self) -> Result<(), FileSessionError> {
+        self.mutate(|data| *data = SessionData::default())
+    }
+
     pub(crate) fn open(path: &Path) -> Result<Self, FileSessionError> {
         let data = match fs::metadata(path) {
             Ok(metadata) => {
@@ -261,6 +265,62 @@ mod tests {
             FileSession::open(&path),
             Err(FileSessionError::Format)
         ));
+        assert!(crate::TelegramConnection::clear_revoked_session(&path).is_err());
+        assert_eq!(fs::read(&path)?, br#"{"version":999}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn revoked_session_reset_is_restartable_and_failed_save_preserves_original()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("account.session");
+        let session = FileSession::open(&path)?;
+        session.mutate(|data| {
+            data.home_dc = 4;
+            for dc in data.dc_options.values_mut() {
+                dc.auth_key = Some([7; 256]); // Synthetic key, never a real session.
+            }
+        })?;
+        let original = fs::read(&path)?;
+        // Deterministic failed atomic replacement, with no permissions assumptions.
+        let temporary = path.with_extension("session.tmp");
+        fs::create_dir(&temporary)?;
+        assert!(session.clear_authorization().is_err());
+        assert_eq!(fs::read(&path)?, original);
+        fs::remove_dir(&temporary)?;
+        drop(session);
+        crate::TelegramConnection::clear_revoked_session(&path)?;
+        let reopened = FileSession::open(&path)?;
+        assert_eq!(reopened.home_dc_id()?, SessionData::default().home_dc);
+        assert!(reopened.data()?.peer_infos.is_empty());
+        assert!(
+            reopened
+                .data()?
+                .dc_options
+                .values()
+                .all(|dc| dc.auth_key.is_none())
+        );
+        crate::TelegramConnection::clear_revoked_session(&path)?;
+        let repeated = FileSession::open(&path)?;
+        assert_eq!(repeated.home_dc_id()?, reopened.home_dc_id()?);
+        assert!(repeated.data()?.peer_infos.is_empty());
+        assert!(
+            repeated
+                .data()?
+                .dc_options
+                .values()
+                .all(|dc| dc.auth_key.is_none())
+        );
+        assert_eq!(
+            repeated.data()?.updates_state,
+            SessionData::default().updates_state
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+        }
         Ok(())
     }
 }
