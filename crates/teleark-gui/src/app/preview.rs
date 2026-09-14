@@ -171,7 +171,8 @@ impl TeleArkApp {
         self.selected_chat_id = Some(9000);
         self.vault_status.configured = true;
         self.app_lock.locked = matches!(state.as_str(), "locked" | "locked-transfers");
-        self.vault_status.locked = state == "unlock";
+        self.vault_status.locked =
+            matches!(state.as_str(), "managed-key-loading" | "managed-key-error");
         self.vault_status.active_key_locked = self.vault_status.locked;
         self.vault_locked = self.vault_status.locked;
         let names = [
@@ -252,9 +253,24 @@ impl TeleArkApp {
             self.storage_maintenance = Some(teleark_runtime::StorageMaintenance::new());
             self.storage_maintenance_preview = Some(completed_storage_maintenance_preview());
         }
+        if state.starts_with("managed-key-") {
+            self.page = Page::Settings;
+            self.settings_section = SettingsSection::KeyVault;
+            self.vault_advanced_expanded = true;
+            self.vault_activity = match state.as_str() {
+                "managed-key-loading" => VaultActivity::Working,
+                "managed-key-error" => {
+                    VaultActivity::Failed(teleark_core::ApplicationErrorKind::PermissionDenied)
+                }
+                _ => VaultActivity::Idle,
+            };
+            if state == "managed-key-loading" {
+                self.vault_key_progress = Some(teleark_runtime::VaultKeyProgress::new());
+            }
+        }
         if state == "new-key" {
             self.vault_new_epoch_confirmation = true;
-            self.unlock_intent = Some(UnlockIntent::Upload);
+            self.pending_vault_action = Some(VaultAction::Upload);
             self.vault_locked = true;
             self.vault_status.locked = true;
             self.vault_status.active_key_locked = true;
@@ -672,7 +688,7 @@ impl TeleArkApp {
             "locked" => self.page = Page::Storage,
             "unlock" => {
                 self.page = Page::Storage;
-                self.unlock_intent = Some(UnlockIntent::Upload);
+                self.show_upload = true;
             }
             "proxy-ready" | "proxy-failed" | "proxy-testing" => {
                 use teleark_runtime::{NetworkPhase, NetworkSnapshot, ProxyFailure};

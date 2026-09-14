@@ -3,9 +3,11 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultKeyPhase {
     Queued,
+    Loading,
     Generating,
     WrappingPassword,
     WrappingRecovery,
+    Securing,
     Saving,
     Completed,
 }
@@ -51,10 +53,14 @@ impl VaultKeyProgress {
     pub fn snapshot(&self) -> VaultKeySnapshot {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-    pub(super) fn phase(&self, phase: VaultKeyPhase) -> Result<(), ApplicationError> {
+    pub(super) fn check_cancelled(&self) -> Result<(), ApplicationError> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
         }
+        Ok(())
+    }
+    pub(super) fn phase(&self, phase: VaultKeyPhase) -> Result<(), ApplicationError> {
+        self.check_cancelled()?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.finished && state.phase != phase {
             state.phase = phase;
@@ -65,8 +71,9 @@ impl VaultKeyProgress {
                 .elapsed()
                 .as_millis()
                 .min(u128::from(u64::MAX)) as u64;
-            // Six monotonic phases per operation; no progress samples or secret data.
-            if state.timeline.len() < 6 {
+            // A command can combine setup and rotation. Retain all transitions
+            // in that bounded sequence, including its terminal outcome.
+            if state.timeline.len() < 16 {
                 state.timeline.push((phase, millis));
             }
         }
@@ -85,7 +92,7 @@ impl VaultKeyProgress {
                 .elapsed()
                 .as_millis()
                 .min(u128::from(u64::MAX)) as u64;
-            if state.timeline.len() < 6 {
+            if state.timeline.len() < 16 {
                 state.timeline.push((VaultKeyPhase::Completed, millis));
             }
         }

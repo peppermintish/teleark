@@ -976,7 +976,7 @@ impl TeleArkApp {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.page = crate::app::Page::Storage;
                     if this.storage_channel_id().is_some() {
-                        this.request_vault_unlock(crate::app::UnlockIntent::Upload, cx);
+                        this.open_vault_action(crate::app::VaultAction::Upload, cx);
                     } else {
                         this.select_storage(crate::app::StorageView::Files, cx);
                     }
@@ -1592,13 +1592,7 @@ impl TeleArkApp {
                                 snapshot.account_id,
                                 id,
                                 control,
-                            ))
-                            || (!control
-                                && if snapshot.direction == VaultTransferDirection::Upload {
-                                    self.vault_status.active_key_locked
-                                } else {
-                                    self.vault_locked
-                                }),
+                            )),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -2945,7 +2939,6 @@ impl TeleArkApp {
         }
         if let Some(path) = vault_snapshot
             .as_ref()
-            .filter(|_| !self.vault_locked)
             .and_then(|snapshot| snapshot.session_log_path.as_ref())
             .or_else(|| {
                 runtime_snapshot
@@ -4110,7 +4103,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn locked_vault_rows_hide_names_paths_and_search_matches_but_keep_progress(
+    fn missing_key_does_not_hide_transfer_names_paths_progress_or_search(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
@@ -4124,9 +4117,9 @@ mod tests {
             let visible = item.row(app);
             app.vault_locked = true;
             let locked = item.row(app);
-            assert_ne!(locked.name, visible.name);
-            assert_ne!(locked.destination, visible.destination);
-            assert!(locked.caption.is_none());
+            assert_eq!(locked.name, visible.name);
+            assert_eq!(locked.destination, visible.destination);
+            assert_eq!(locked.caption, visible.caption);
             assert_eq!(locked.progress, visible.progress);
             assert_eq!(locked.activity, visible.activity);
             assert_eq!(locked.state, visible.state);
@@ -4137,7 +4130,7 @@ mod tests {
                 "fixture",
                 &Default::default(),
             );
-            assert!(rows.is_empty());
+            assert_eq!(rows.len(), 1);
             app.vault_locked = false;
             assert_eq!(item.row(app).name, visible.name);
         });

@@ -27,3 +27,5 @@ No persistent schema or encryption codec changes. SQLite remains read/write sche
 Deterministic tests use held transfer work to prove lock and password unlock complete independently, old queued leases remain usable, locked new admission fails and task references are released independently of the session. Additional tests cover stale unlock completion, historical-key upload restrictions, GUI task/token retention, upload draft preservation and locked file-name/path/search redaction with progress intact. Native layout verification uses synthetic preview data only; it is not live Telegram interoperability evidence.
 
 The application-facing lock is superseded by [ADR 0037](0037-application-pin-and-transfer-drain.md). Application PIN locking retains the runtime key session; cryptographic session revocation remains separate.
+
+The desktop Vault-password gate and transfer-metadata redaction are superseded by [ADR 0040](0040-automatic-device-keys-and-optional-pin.md). Keys are loaded automatically from the device store; only the optional application PIN gates the UI. Session-generation and retained-key-lease rules remain.

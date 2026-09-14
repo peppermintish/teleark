@@ -119,7 +119,7 @@ impl TeleArkApp {
         self.confirm_account_switch = false;
         self.show_account_switch = false;
         self.show_upload = false;
-        self.unlock_intent = None;
+        self.pending_vault_action = None;
         self.channel_sync_details = false;
         self.dialogs.details = false;
         self.speed_limits.open = false;

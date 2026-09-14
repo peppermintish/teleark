@@ -43,6 +43,13 @@ impl VaultSession {
         }
     }
 
+    pub(super) fn current_keys(&self, generation: u64) -> Result<KeyLease, ApplicationError> {
+        if generation != self.generation || self.closing {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        Ok(self.keys.clone())
+    }
+
     pub fn lock(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.keys.revision = self.keys.revision.wrapping_add(1);

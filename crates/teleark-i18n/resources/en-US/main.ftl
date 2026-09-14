@@ -267,7 +267,7 @@ settings-accounts = Accounts
 settings-storage = Storage
 settings-downloads = Downloads
 settings-uploads = Uploads
-settings-key-vault = Key Vault
+settings-key-vault = Encryption keys
 settings-index = Index
 settings-notifications = Notifications
 settings-appearance = Appearance
@@ -352,7 +352,7 @@ nav-all-transfers = All Transfers
 nav-completed = Completed
 nav-failed = Failed
 nav-storage = Storage
-nav-key-vault = Key Vault
+nav-key-vault = Encryption keys
 nav-settings = Settings
 
 filter-all-channels = All Channels
@@ -542,7 +542,7 @@ vault-option-compatible-parts = Compatible Parts
 vault-option-compatible-parts-description = Use 1900 MiB application parts.
 vault-option-keychain = OS Credential Store
 vault-option-keychain-description = Store the wrapping secret in the operating-system keychain.
-vault-key-loss-warning = If both the password and recovery key are lost, encrypted Telegram files cannot be recovered.
+vault-key-loss-warning = If both the system keychain entry and recovery bundle are lost, encrypted files cannot be recovered.
 vault-unlock-to-view = Unlock vault to view
 
 prototype-demo-badge = Preview build
@@ -649,7 +649,7 @@ settings-download-reveal-completed-description = Reveal the downloaded file auto
 settings-upload-title = Upload defaults
 settings-upload-description = Encrypted uploads use your private TeleArk channel.
 settings-upload-vault-managed-title = Vault-managed encrypted uploads
-settings-upload-vault-managed-description = The unlocked Vault encrypts content, names and metadata. Containers hold up to { $size } of plaintext; encryption and upload advance together in 512 KiB blocks.
+settings-upload-vault-managed-description = TeleArk automatically encrypts content, names and metadata. Containers hold up to { $size } of plaintext; encryption and upload advance together in 512 KiB blocks.
 upload-current-part-size = Current safe part limit
 upload-current-part-size-description = TeleArk currently creates encrypted plaintext parts of at most { $size }.
 settings-vault-title = Key Vault protection
@@ -786,7 +786,7 @@ storage-channel-managed-detail-title = File details
 storage-channel-managed-detail-empty = Select a managed file to inspect its package.
 vault-password-placeholder = Enter a Vault password
 vault-new-password-placeholder = Confirm the new password
-vault-recovery-placeholder = Paste the complete recovery key
+vault-recovery-placeholder = Paste the complete recovery bundle
 vault-status-not-configured = Not configured
 vault-password-generation = Password wrap v{ $generation }
 vault-operation-working = Working…
@@ -809,13 +809,13 @@ vault-recovery-export-default-name = TeleArk Recovery Bundle.txt
 vault-restore-action = Restore Key Vault
 vault-os-credential-title = OS Credential
 vault-os-credential-development-note = This feature is under development and cannot be selected yet.
-vault-error-invalid-request = Check the fields and make sure both password entries match.
-vault-error-authorization = The Vault secret is incorrect, or the Vault is locked.
+vault-error-invalid-request = Check the recovery bundle and try again.
+vault-error-authorization = The recovery bundle could not be authenticated.
 vault-error-source-missing = The selected source or remote package is unavailable.
 vault-error-permission-denied = TeleArk does not have permission to access that location.
 vault-error-network = Telegram could not complete the Vault operation. Try again.
 vault-error-not-found = The requested Vault or package was not found.
-vault-error-conflict = A Key Vault is already configured.
+vault-error-conflict = Encryption key settings changed. Retry the operation.
 vault-error-capacity = The operation exceeded a supported size or storage limit.
 vault-error-cancelled = The Vault operation was cancelled.
 vault-error-persistence = Vault data could not be safely read, verified, or saved.
@@ -1049,7 +1049,7 @@ storage-guide-raw-body = Raw Files shows the Telegram objects, including ordinar
 
 storage-guide-key-title = 4. Save your recovery key
 
-storage-guide-key-body = Keep the recovery bundle somewhere safe outside this Mac. Telegram cannot recover your encryption keys. Advanced recovery tools are in Settings → Key Vault.
+storage-guide-key-body = Keys are prepared automatically. Keep a recovery bundle outside this Mac; Telegram cannot recover your keys. Recovery tools are in Settings → Encryption keys.
 
 storage-legacy-title = Legacy Recovery
 
@@ -1417,13 +1417,13 @@ storage-phase-muting = Muting channel
 storage-phase-archiving = Archiving channel
 storage-phase-completed = Completed and verified
 vault-transfer-error-source-permission = The local source file cannot be read. Grant access or choose the file again.
-vault-health-key-unavailable = The key for this file is unavailable. Unlock its key version with the original password or recovery material.
+vault-health-key-unavailable = The key for this file is unavailable. Import its recovery bundle in Settings → Encryption keys.
 
 # File health and key epochs
 vault-epoch-confirm-action = Create new key version
-vault-epoch-lost-action = I have lost all unlock material
-vault-epoch-confirm-description = Old files cannot be decrypted without their original unlock material. Create a new key for future uploads in the same channel? Old ciphertext and wrapped key records will be preserved. Save the new recovery bundle.
-vault-epoch-preserved-description = Old key versions remain available for recovery. Unlocking a historical key does not change the key used for new uploads.
+vault-epoch-lost-action = Generate a new upload key…
+vault-epoch-confirm-description = Create a new key for future uploads in the same channel? Previous keys and encrypted files will be preserved. Files whose original key is missing still need their recovery bundle.
+vault-epoch-preserved-description = Previous keys remain available for recovery. Restoring a historical key preserves the current upload key.
 vault-epoch-historical-label = Original recovery bundle for an older key
 vault-epoch-historical-action = Unlock historical key
 vault-health-unchecked = Not checked
@@ -1436,17 +1436,17 @@ vault-health-detail = Health is based on synchronized message presence. File con
 vault-health-key-version = Key version
 vault-health-recheck = Recheck file health
 vault-health-reupload = Upload local copy again
-vault-health-unknown-size = Size unavailable until unlocked
+vault-health-unknown-size = Size unavailable until the key is recovered
 vault-health-scope-limited = The view is limited to 1,000 records or 16 MiB. A full health check continues through paginated history and retained manifests.
 
 vault-key-phase-queued = Waiting for key operation
 vault-key-phase-generating = Generating a new key version
-vault-key-phase-password = Deriving password protection
+vault-key-phase-password = Preparing local key protection
 vault-key-phase-recovery = Preparing recovery protection
 vault-key-phase-saving = Preserving old keys and saving atomically
-vault-key-phase-completed = New key version saved
+vault-key-phase-completed = Encryption keys ready
 vault-key-phase-time = Phase: { $seconds } s · Last activity: { $idle } s ago
-vault-health-check-summary = Last history check: { $count } files checked. Files without an unlocked key remain unchecked.
+vault-health-check-summary = Last history check: { $count } files checked. Files with unavailable keys remain unchecked.
 transfer-upload-saving-manifest = Saving the verified manifest locally
 
 vault-session-locked-background = File encryption keys are unavailable. Telegram synchronization and already admitted work continue.
@@ -1576,7 +1576,7 @@ transfer-recovery-saved-download = Saved download
 
 transfer-recovery-retry-guidance = This task can be retried. Resolve the cause above, then choose Retry on its row. TeleArk checks saved work before reusing it; failed tasks do not retry automatically.
 transfer-recovery-source-guidance = This upload cannot continue with the current source. Keep the original file and restore access if possible. When the file is ready, start a new upload from Upload; this stopped task remains in history.
-transfer-recovery-key-guidance = Open Settings → Key Vault and unlock the key needed by this file. If this task has no Resume or Retry action, start a new transfer after unlocking. Keep the original source and any partial download.
+transfer-recovery-key-guidance = Retry key access or import the file’s recovery bundle in Settings → Encryption keys. Then resume or retry the task. Keep the original source and any partial download.
 transfer-recovery-blocked-guidance = This task cannot resume in its current state. Resolve the cause above before starting a new transfer. Keep the original source and any partial download; a new task may need to transfer the data again.
 transfer-recovery-legacy-guidance = This saved task has no usable recovery action. Keep its record and files. A compatible app version may be needed for newer recovery data; otherwise start a new transfer. History alone does not guarantee resumable data.
 storage-guide-transfers-title = 5. Pause and resume transfers
@@ -1711,3 +1711,31 @@ session-loss-paused = Telegram session ended · Tasks paused
 session-loss-description = Your Telegram login is no longer valid. TeleArk will save task progress and return to sign in. If this step fails, retry to finish safely.
 session-loss-step-time = Current step: { $duration } since last update
 session-loss-history-omitted = { $count } earlier activity entries omitted
+
+managed-key-title = Encryption keys
+
+managed-key-description = Keys are generated automatically and protected by the system keychain. Your optional app PIN only locks TeleArk; it does not change file encryption.
+
+managed-key-preparing = Preparing encryption keys…
+
+managed-key-ready = Ready · Managed automatically
+
+managed-key-unavailable = Encryption key needs attention
+
+managed-key-unavailable-help = Retry key access in Settings → Encryption keys, or import a recovery bundle if the key is missing. Other pages remain available.
+
+managed-key-retry = Retry key access
+
+managed-key-recovery-options = Recovery options
+
+managed-key-recovery-description = Keep a recovery bundle outside this device so you can recover encrypted files if the device or its keychain is lost. Importing an older key preserves the current upload key.
+
+managed-key-show-recovery = View recovery bundle
+
+managed-key-import = Import recovery bundle
+
+managed-key-phase-loading = Reading the system keychain
+
+managed-key-phase-securing = Saving and verifying the keychain entry
+
+managed-key-store-error = The system keychain could not be accessed. Allow TeleArk access and retry in Settings → Encryption keys.

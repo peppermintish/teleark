@@ -152,44 +152,128 @@ impl TeleArkApp {
         self.apply_managed_channel_changes(cx);
     }
 
-    pub(crate) fn request_vault_unlock(&mut self, intent: UnlockIntent, cx: &mut Context<Self>) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
+    pub(crate) fn open_vault_action(&mut self, intent: VaultAction, cx: &mut Context<Self>) {
+        // Navigation and file selection never require a second unlock.
+        if intent == VaultAction::Upload {
+            self.show_upload = true;
+            self.upload_queued = false;
+        } else if !self.vault_locked {
+            self.pending_vault_action = Some(intent);
+            self.resume_pending_vault_action(cx);
+        } else {
+            self.pending_vault_action = Some(intent);
         }
-        if self.vault.is_none() && !self.visual_preview {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
-            self.unlock_intent = None;
-            cx.notify();
-            return;
-        }
-        self.sync_vault_status();
-        self.vault_key_progress = None;
-        self.vault_new_epoch_confirmation = false;
-        self.unlock_intent = Some(intent);
-        self.vault_activity = VaultActivity::Idle;
-        self.vault_advanced_expanded = false;
-        if !self.vault_locked
-            && !(intent == UnlockIntent::Upload && self.vault_status.active_key_locked)
-        {
-            self.resume_unlock_intent(cx);
+        if self.vault_status.active_key_locked {
+            self.prepare_vault_key(cx);
         }
         cx.notify();
     }
 
-    pub(crate) fn clear_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [
-            &self.vault_password,
-            &self.vault_new_password,
-            &self.vault_recovery_key,
-        ] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+    pub(crate) fn prepare_vault_key(&mut self, cx: &mut Context<Self>) {
+        if self.visual_preview || self.vault_activity == VaultActivity::Working {
+            return;
         }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        let admission_progress = progress.clone();
+        self.finish_managed_key_operation(
+            move |_| vault.submit_prepare_key(admission_progress),
+            progress,
+            false,
+            cx,
+        );
+    }
+
+    fn finish_managed_key_operation(
+        &mut self,
+        admit: impl FnOnce(
+            &Self,
+        ) -> Result<
+            teleark_runtime::VaultJob<teleark_runtime::VaultRecoverySecret>,
+            ApplicationError,
+        >,
+        progress: teleark_runtime::VaultKeyProgress,
+        reveal_recovery: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let refresh_files = !reveal_recovery || self.vault_status.active_key_locked;
+        self.vault_key_progress = Some(progress);
+        self.vault_activity = VaultActivity::Working;
+        self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let Some(entity) = this.upgrade() else { return };
+                if entity.update(cx, |this, cx| {
+                    cx.notify();
+                    this.vault_key_progress
+                        .as_ref()
+                        .is_none_or(|p| p.snapshot().finished)
+                }) {
+                    return;
+                }
+            }
+        }));
+        let generation = (
+            self.telegram_login_generation,
+            self.vault_session_generation,
+        );
+        cx.notify();
+        // Publish acknowledgment before the owner can begin crypto or Keychain I/O.
+        let job = admit(self);
+        let work = cx.background_spawn(async move { job.and_then(|job| job.wait()) });
+        self.vault_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                if generation
+                    != (
+                        this.telegram_login_generation,
+                        this.vault_session_generation,
+                    )
+                {
+                    return;
+                }
+                this.vault_key_presentation = None;
+                match result {
+                    Ok(secret) => {
+                        this.vault_activity = VaultActivity::Succeeded;
+                        this.vault_new_epoch_confirmation = false;
+                        if reveal_recovery && !secret.is_empty() && !this.app_lock.locked {
+                            this.vault_recovery_secret = Some(secret);
+                            this.recovery_visible = true;
+                            this.vault_advanced_expanded = true;
+                        }
+                        this.sync_vault_status();
+                        if refresh_files {
+                            this.cancel_managed_scan();
+                            this.resume_pending_vault_action(cx);
+                            this.scan_managed_vault_files(cx);
+                            this.resume_durable_uploads(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.vault_activity = VaultActivity::Failed(error.kind());
+                        this.pending_vault_action = None;
+                        this.sync_vault_status();
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    pub(crate) fn clear_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.vault_recovery_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     pub(crate) fn dismiss_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_vault_inputs(window, cx);
-        self.unlock_intent = None;
+        self.pending_vault_action = None;
         self.vault_new_epoch_confirmation = false;
         self.vault_key_progress = None;
         self.hide_vault_recovery_key(cx);
@@ -197,24 +281,24 @@ impl TeleArkApp {
         cx.notify();
     }
 
-    pub(crate) fn resume_unlock_intent(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn resume_pending_vault_action(&mut self, cx: &mut Context<Self>) {
         if self.vault_locked
-            || self.vault_recovery_secret.is_some()
-            || (self.unlock_intent == Some(UnlockIntent::Upload)
+            || (self.pending_vault_action == Some(VaultAction::Upload)
                 && self.vault_status.active_key_locked)
         {
             return;
         }
-        match self.unlock_intent.take() {
-            Some(UnlockIntent::Browse) if self.page == Page::LegacyRecovery => {
+        match self.pending_vault_action.take() {
+            Some(VaultAction::Browse) if self.page == Page::LegacyRecovery => {
                 self.scan_legacy_vault_files(cx)
             }
-            Some(UnlockIntent::Browse) => self.scan_managed_vault_files(cx),
-            Some(UnlockIntent::Upload) => {
+            Some(VaultAction::Browse) => self.scan_managed_vault_files(cx),
+            Some(VaultAction::Upload) => {
                 self.show_upload = true;
                 self.upload_queued = false;
             }
-            Some(UnlockIntent::Download(id)) => self.download_managed_vault_file(id, cx),
+            Some(VaultAction::QueueUpload) => self.enqueue_vault_upload(cx),
+            Some(VaultAction::Download(id)) => self.download_managed_vault_file(id, cx),
             None => {}
         }
         cx.notify();
@@ -229,118 +313,26 @@ impl TeleArkApp {
         self.vault_key_progress = None;
         self.vault_new_epoch_confirmation = true;
         self.vault_advanced_expanded = false;
-        self.unlock_intent = Some(UnlockIntent::Upload);
+        self.pending_vault_action = None;
         self.vault_activity = VaultActivity::Idle;
         cx.notify();
     }
 
-    pub(crate) fn initialize_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
-        }
-        let password = self.vault_password.read(cx).value().to_string();
-        let confirmation = self.vault_new_password.read(cx).value().to_string();
-        if password.is_empty() || password != confirmation {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
-            cx.notify();
-            return;
-        }
-        let Some(vault) = self.vault.clone() else {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
-            cx.notify();
-            return;
-        };
-        self.vault_activity = VaultActivity::Working;
-        self.vault_recovery_secret = None;
-        self.recovery_visible = false;
-        self.vault_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.vault_new_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        let new_epoch = self.vault_new_epoch_confirmation;
-        let key_progress = teleark_runtime::VaultKeyProgress::new();
-        self.vault_key_progress = new_epoch.then(|| key_progress.clone());
-        if new_epoch {
-            self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(200))
-                        .await;
-                    let Some(entity) = this.upgrade() else { return };
-                    let done = entity.update(cx, |this, cx| {
-                        cx.notify();
-                        this.vault_key_progress
-                            .as_ref()
-                            .is_none_or(|progress| progress.snapshot().finished)
-                    });
-                    if done {
-                        return;
-                    }
-                }
-            }));
-        }
-        let generation = self.telegram_login_generation;
-        let session_generation = self.vault_session_generation;
-        cx.notify();
-        let work = cx.background_spawn(async move {
-            if new_epoch {
-                vault.start_new_key_epoch_observed(password, key_progress)
-            } else {
-                vault.initialize(password)
-            }
-        });
-        self.vault_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if this.telegram_login_generation != generation
-                    || this.vault_session_generation != session_generation
-                {
-                    return;
-                }
-                this.vault_key_presentation = None;
-                match result {
-                    Ok(secret) => {
-                        this.vault_new_epoch_confirmation = false;
-                        this.managed_vault_files = Default::default();
-                        this.managed_health_checked = None;
-                        this.vault_recovery_secret = Some(secret);
-                        this.recovery_visible = true;
-                        this.vault_activity = VaultActivity::Succeeded;
-                    }
-                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
-                }
-                this.sync_vault_status();
-                cx.notify();
-            });
-        }));
-    }
-
-    pub(crate) fn unlock_vault_with_password(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
-        }
-        let password = self.vault_password.read(cx).value().to_string();
-        if password.is_empty() {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
-            cx.notify();
+    pub(crate) fn initialize_vault(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.vault_new_epoch_confirmation || self.vault_activity == VaultActivity::Working {
             return;
         }
         let Some(vault) = self.vault.clone() else {
             return;
         };
-        self.vault_activity = VaultActivity::Working;
-        self.vault_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        let work = cx.background_spawn(async move { vault.unlock_with_password(password) });
-        self.finish_vault_unit_operation(work, cx);
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        let admission_progress = progress.clone();
+        self.finish_managed_key_operation(
+            move |_| vault.submit_new_managed_key(admission_progress),
+            progress,
+            false,
+            cx,
+        );
     }
 
     pub(crate) fn unlock_vault_with_recovery(
@@ -364,61 +356,14 @@ impl TeleArkApp {
         self.vault_activity = VaultActivity::Working;
         self.vault_recovery_key
             .update(cx, |input, cx| input.set_value("", window, cx));
-        let work = cx.background_spawn(async move { vault.unlock_with_recovery(recovery) });
-        self.finish_vault_unit_operation(work, cx);
-    }
-
-    pub(crate) fn restore_vault_with_recovery(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
-        }
-        let password = self.vault_password.read(cx).value().to_string();
-        let confirmation = self.vault_new_password.read(cx).value().to_string();
-        let recovery = self.vault_recovery_key.read(cx).value().to_string();
-        if password.is_empty() || password != confirmation || recovery.is_empty() {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
-            cx.notify();
-            return;
-        }
-        let Some(vault) = self.vault.clone() else {
-            return;
-        };
-        self.vault_activity = VaultActivity::Working;
-        self.vault_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.vault_new_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.vault_recovery_key
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        let work =
-            cx.background_spawn(async move { vault.restore_with_recovery(recovery, password) });
-        self.finish_vault_unit_operation(work, cx);
-    }
-
-    pub(crate) fn change_vault_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let password = self.vault_password.read(cx).value().to_string();
-        let confirmation = self.vault_new_password.read(cx).value().to_string();
-        if password.is_empty() || password != confirmation {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::InvalidRequest);
-            cx.notify();
-            return;
-        }
-        let Some(vault) = self.vault.clone() else {
-            return;
-        };
-        self.vault_activity = VaultActivity::Working;
-        self.vault_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.vault_new_password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        let work = cx.background_spawn(async move { vault.change_password(password) });
-        self.finish_vault_unit_operation(work, cx);
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        let admission_progress = progress.clone();
+        self.finish_managed_key_operation(
+            move |_| vault.submit_recovery_import(recovery, admission_progress),
+            progress,
+            false,
+            cx,
+        );
     }
 
     pub(crate) fn rotate_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
@@ -428,38 +373,31 @@ impl TeleArkApp {
         let Some(vault) = self.vault.clone() else {
             return;
         };
-        self.vault_activity = VaultActivity::Working;
-        self.vault_recovery_secret = None;
-        self.recovery_visible = false;
-        let work = cx.background_spawn(async move { vault.rotate_recovery_key() });
-        let generation = (
-            self.telegram_login_generation,
-            self.vault_session_generation,
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        let admission_progress = progress.clone();
+        self.finish_managed_key_operation(
+            move |_| vault.submit_recovery_rotation(admission_progress),
+            progress,
+            true,
+            cx,
         );
-        self.vault_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if generation
-                    != (
-                        this.telegram_login_generation,
-                        this.vault_session_generation,
-                    )
-                {
-                    return;
-                }
-                match result {
-                    Ok(secret) => {
-                        this.vault_recovery_secret = Some(secret);
-                        this.recovery_visible = true;
-                        this.vault_activity = VaultActivity::Succeeded;
-                    }
-                    Err(error) => this.vault_activity = VaultActivity::Failed(error.kind()),
-                }
-                this.sync_vault_status();
-                cx.notify();
-            });
-        }));
+    }
+
+    pub(crate) fn show_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
+        if self.vault_activity == VaultActivity::Working {
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        let admission_progress = progress.clone();
+        self.finish_managed_key_operation(
+            move |_| vault.submit_recovery_export(admission_progress),
+            progress,
+            true,
+            cx,
+        );
     }
 
     pub(crate) fn hide_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
@@ -531,7 +469,7 @@ impl TeleArkApp {
                     this.apply_managed_channel_changes(cx);
                     this.vault_recovery_secret = None;
                     this.recovery_visible = false;
-                    this.resume_unlock_intent(cx);
+                    this.resume_pending_vault_action(cx);
                 }
                 cx.notify();
             });
@@ -540,8 +478,13 @@ impl TeleArkApp {
 
     pub(crate) fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.vault_session_generation = self.vault_session_generation.wrapping_add(1);
+        if let Some(progress) = &self.vault_key_progress {
+            progress.cancel();
+        }
+        self.vault_key_progress = None;
+        self.vault_key_presentation = None;
         self.clear_vault_inputs(window, cx);
-        self.unlock_intent = None;
+        self.pending_vault_action = None;
         self.show_upload = false;
         self.vault_new_epoch_confirmation = false;
         self.show_channel_detail = false;
@@ -571,44 +514,6 @@ impl TeleArkApp {
             .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
         self.sync_vault_status();
         cx.notify();
-    }
-
-    pub(super) fn finish_vault_unit_operation(
-        &mut self,
-        work: Task<Result<(), ApplicationError>>,
-        cx: &mut Context<Self>,
-    ) {
-        let generation = (
-            self.telegram_login_generation,
-            self.vault_session_generation,
-        );
-        self.vault_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if generation
-                    != (
-                        this.telegram_login_generation,
-                        this.vault_session_generation,
-                    )
-                {
-                    return;
-                }
-                this.vault_activity = result
-                    .map(|()| VaultActivity::Succeeded)
-                    .unwrap_or_else(|error| VaultActivity::Failed(error.kind()));
-                this.sync_vault_status();
-                if this.vault_activity == VaultActivity::Succeeded {
-                    this.cancel_managed_scan();
-                    this.resume_unlock_intent(cx);
-                    if this.page != Page::LegacyRecovery {
-                        this.scan_managed_vault_files(cx);
-                    }
-                    this.resume_durable_uploads(cx);
-                }
-                cx.notify();
-            });
-        }));
     }
 
     pub(super) fn resume_durable_uploads(&mut self, cx: &mut Context<Self>) {
@@ -824,7 +729,7 @@ impl TeleArkApp {
             return;
         }
         if self.vault_locked {
-            self.request_vault_unlock(UnlockIntent::Download(package_id), cx);
+            self.open_vault_action(VaultAction::Download(package_id), cx);
             return;
         }
         let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.active_storage_chat_id())
@@ -1111,9 +1016,8 @@ impl TeleArkApp {
             return;
         };
         if vault.status().active_key_locked {
-            self.vault_activity =
-                VaultActivity::Failed(teleark_core::ApplicationErrorKind::Authorization);
-            cx.notify();
+            self.pending_vault_action = Some(VaultAction::QueueUpload);
+            self.prepare_vault_key(cx);
             return;
         }
         self.show_upload = false;
@@ -1225,6 +1129,52 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn key_readiness_never_gates_pages_or_the_upload_picker(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            for configured in [false, true] {
+                for page in [
+                    Page::Storage,
+                    Page::Channel,
+                    Page::Transfers,
+                    Page::Settings,
+                ] {
+                    app.update(cx, |app, cx| {
+                        app.app_lock.locked = false;
+                        app.vault_locked = true;
+                        app.vault_status.configured = configured;
+                        app.vault_status.active_key_locked = true;
+                        app.vault_activity = VaultActivity::Working;
+                        app.page = page;
+                        app.settings_section = SettingsSection::KeyVault;
+                        app.vault_advanced_expanded = true;
+                        app.show_upload = false;
+                        app.pending_vault_action = Some(VaultAction::Browse);
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-locked-viewport").is_none());
+                    assert!(cx.debug_bounds("unlock-popup").is_none());
+                    assert!(cx.debug_bounds("new-key-confirmation").is_none());
+                    app.update(cx, |app, cx| app.open_vault_action(VaultAction::Upload, cx));
+                    cx.run_until_parked();
+                    let queue = cx
+                        .debug_bounds("upload-add-queue")
+                        .expect("normal queue action");
+                    assert!(queue.bottom() <= px(height));
+                    app.update(cx, |app, _| {
+                        assert_eq!(app.page, page);
+                        assert!(app.show_upload);
+                        assert!(!app.upload_in_flight);
+                        assert!(!app.vault_new_epoch_confirmation);
+                    });
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     fn folder_picker_error_is_specific_visible_and_preserves_the_upload_draft(
@@ -1444,16 +1394,26 @@ mod tests {
     }
 
     #[gpui::test]
-    fn late_unlock_callback_does_not_reopen_upload_after_manual_lock(
+    fn late_managed_key_callback_cannot_reopen_upload_or_replace_logout_status(
         cx: &mut gpui::TestAppContext,
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.unlock_intent = Some(UnlockIntent::Upload);
+                app.pending_vault_action = Some(VaultAction::Upload);
                 app.vault_activity = VaultActivity::Working;
-                let result = cx.background_spawn(async { Ok(()) });
-                app.finish_vault_unit_operation(result, cx);
+                app.finish_managed_key_operation(
+                    |view| {
+                        assert_eq!(view.vault_activity, VaultActivity::Working);
+                        assert!(view.vault_key_progress.is_some());
+                        Err(ApplicationError::new(
+                            teleark_core::ApplicationErrorKind::PermissionDenied,
+                        ))
+                    },
+                    teleark_runtime::VaultKeyProgress::new(),
+                    false,
+                    cx,
+                );
                 app.lock_vault(window, cx);
             })
         });
@@ -1461,7 +1421,7 @@ mod tests {
         app.update(cx, |app, _| {
             assert!(app.vault_locked);
             assert!(!app.show_upload);
-            assert!(app.unlock_intent.is_none());
+            assert!(app.pending_vault_action.is_none());
             assert_eq!(app.vault_activity, VaultActivity::Idle);
         });
     }
@@ -1483,7 +1443,7 @@ mod tests {
                 app.managed_scan_cancellation = Some(scan_cancel);
                 app.vault_upload_task =
                     Some(cx.spawn(async move |_, _| std::future::pending::<()>().await));
-                app.vault_password.update(cx, |input, cx| {
+                app.vault_recovery_key.update(cx, |input, cx| {
                     input.set_value("synthetic password", window, cx)
                 });
                 let generation = app.vault_session_generation;
@@ -1491,7 +1451,7 @@ mod tests {
                 assert!(app.vault_locked);
                 assert!(app.vault_status.active_key_locked);
                 assert!(app.managed_vault_files.is_empty());
-                assert!(app.vault_password.read(cx).value().is_empty());
+                assert!(app.vault_recovery_key.read(cx).value().is_empty());
                 assert!(app.vault_upload_task.is_some());
                 assert!(app.upload_in_flight);
                 assert!(app.managed_scan_loading);
@@ -1500,22 +1460,20 @@ mod tests {
         });
         assert!(!cancellation.is_cancelled());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("vault-session-locked-notice").is_some());
+        assert!(cx.debug_bounds("managed-key-status-notice").is_some());
     }
 
     #[gpui::test]
-    fn session_unlock_stays_on_current_page_and_upload_resume_requires_confirmation(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn upload_picker_opens_without_a_key_or_pin_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
         app.update(cx, |app, cx| {
             app.vault_locked = false;
             app.vault_status.active_key_locked = false;
             app.show_upload = false;
-            app.request_vault_unlock(UnlockIntent::Browse, cx);
+            app.open_vault_action(VaultAction::Browse, cx);
             assert_eq!(app.page, Page::Settings);
             assert!(!app.show_upload);
-            assert!(app.unlock_intent.is_none());
+            assert!(app.pending_vault_action.is_none());
             app.upload_sources =
                 teleark_runtime::inspect_upload_sources(&[
                     std::env::current_exe().expect("synthetic test executable")
@@ -1525,12 +1483,14 @@ mod tests {
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.lock_vault(window, cx);
-                app.request_vault_unlock(UnlockIntent::Upload, cx);
-                assert!(!app.show_upload);
+                app.open_vault_action(VaultAction::Upload, cx);
+                assert!(app.show_upload);
+                assert!(!app.vault_new_epoch_confirmation);
+                assert!(app.pending_vault_action.is_none());
                 assert_eq!(app.upload_sources.len(), 1);
                 app.vault_locked = false;
                 app.vault_status.active_key_locked = false;
-                app.resume_unlock_intent(cx);
+                app.resume_pending_vault_action(cx);
                 assert!(app.show_upload);
                 assert!(!app.upload_in_flight);
                 assert_eq!(app.upload_sources.len(), 1);

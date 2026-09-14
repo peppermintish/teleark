@@ -561,11 +561,11 @@ impl TeleArkApp {
                                 })),
                         )
                     })
-                    .when(self.vault_locked && self.vault_status.configured, |left| {
+                    .when(self.vault_status.active_key_locked, |left| {
                         left.child(
                             div()
-                                .id("vault-session-locked-notice")
-                                .debug_selector(|| "vault-session-locked-notice".into())
+                                .id("managed-key-status-notice")
+                                .debug_selector(|| "managed-key-status-notice".into())
                                 .min_w_0()
                                 .flex()
                                 .items_center()
@@ -573,14 +573,15 @@ impl TeleArkApp {
                                 .text_size(px(11.0))
                                 .text_color(theme::text_secondary())
                                 .child(Icon::new(Symbol::Lock).size(px(11.0)).flex_none())
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(self.tr("shell-vault-locked")),
-                                )
+                                .child(div().min_w_0().truncate().child(self.tr(
+                                    if self.vault_activity == VaultActivity::Working {
+                                        "managed-key-preparing"
+                                    } else {
+                                        "managed-key-unavailable"
+                                    },
+                                )))
                                 .tooltip({
-                                    let text = self.tr("vault-session-locked-background");
+                                    let text = self.tr("managed-key-unavailable-help");
                                     move |window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(text.clone())
                                             .build(window, cx)

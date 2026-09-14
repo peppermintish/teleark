@@ -85,8 +85,9 @@ pub enum Page {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum UnlockIntent {
+pub(crate) enum VaultAction {
     Browse,
+    QueueUpload,
     Upload,
     Download(u64),
 }
@@ -332,7 +333,7 @@ pub struct TeleArkApp {
     pub(crate) show_account_switch: bool,
     pub(crate) confirm_account_switch: bool,
     pub(crate) phone_login: bool,
-    pub(crate) unlock_intent: Option<UnlockIntent>,
+    pub(crate) pending_vault_action: Option<VaultAction>,
     main_focus: gpui_kit::FocusHandle,
     modal_was_open: bool,
     pub(crate) modal_focus: gpui_kit::FocusHandle,
@@ -372,9 +373,7 @@ pub struct TeleArkApp {
     pub(crate) recovery_visible: bool,
     pub(crate) vault_status: VaultStatus,
     pub(crate) vault_activity: VaultActivity,
-    pub(crate) vault_recovery_secret: Option<String>,
-    pub(crate) vault_password: Entity<InputState>,
-    pub(crate) vault_new_password: Entity<InputState>,
+    pub(crate) vault_recovery_secret: Option<teleark_runtime::VaultRecoverySecret>,
     pub(crate) vault_recovery_key: Entity<InputState>,
     pub(crate) managed_vault_files: std::sync::Arc<Vec<ManagedVaultFile>>,
     pub(crate) managed_projection: std::cell::RefCell<managed_projection::ManagedProjection>,
@@ -619,20 +618,6 @@ impl TeleArkApp {
                 )
                 .masked(true)
         });
-        let vault_password = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(
-                    localizer.translate_or_id(MessageId::new("vault-password-placeholder")),
-                )
-                .masked(true)
-        });
-        let vault_new_password = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(
-                    localizer.translate_or_id(MessageId::new("vault-new-password-placeholder")),
-                )
-                .masked(true)
-        });
         let vault_recovery_key = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(
@@ -655,37 +640,12 @@ impl TeleArkApp {
             }
         });
         let mut form_subscriptions = Vec::new();
-        for input in [&vault_password, &vault_new_password] {
-            form_subscriptions.push(cx.subscribe_in(
-                input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. })
-                        && this.unlock_intent.is_some()
-                        && this.vault_recovery_secret.is_none()
-                    {
-                        if this.vault_status.configured {
-                            this.unlock_vault_with_password(window, cx);
-                        } else {
-                            this.initialize_vault(window, cx);
-                        }
-                    }
-                },
-            ));
-        }
         form_subscriptions.push(cx.subscribe_in(
             &vault_recovery_key,
             window,
             |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. })
-                    && this.unlock_intent.is_some()
-                    && this.vault_recovery_secret.is_none()
-                {
-                    if this.vault_status.configured {
-                        this.unlock_vault_with_recovery(window, cx);
-                    } else {
-                        this.restore_vault_with_recovery(window, cx);
-                    }
+                if matches!(event, InputEvent::PressEnter { .. }) && this.page == Page::Settings {
+                    this.unlock_vault_with_recovery(window, cx);
                 }
             },
         ));
@@ -777,7 +737,7 @@ impl TeleArkApp {
             show_account_switch: false,
             confirm_account_switch: false,
             phone_login: false,
-            unlock_intent: None,
+            pending_vault_action: None,
             main_focus: cx.focus_handle(),
             modal_was_open: false,
             modal_focus: cx.focus_handle(),
@@ -820,8 +780,6 @@ impl TeleArkApp {
                 VaultActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
             },
             vault_recovery_secret: None,
-            vault_password,
-            vault_new_password,
             vault_recovery_key,
             managed_vault_files: Default::default(),
             managed_projection: Default::default(),
@@ -1224,7 +1182,7 @@ impl TeleArkApp {
         let modal_open = self.transition.is_some()
             || self.show_upload
             || self.show_telegram_api_id_prompt
-            || self.unlock_intent.is_some()
+            || self.vault_new_epoch_confirmation
             || self.confirm_account_switch;
         if modal_open != self.modal_was_open {
             window.focus(
@@ -1259,7 +1217,7 @@ impl TeleArkApp {
                 }
                 match escape_behavior(
                     window.is_fullscreen(),
-                    this.unlock_intent.is_some(),
+                    this.vault_new_epoch_confirmation,
                     this.show_upload,
                     this.show_telegram_api_id_prompt,
                     this.page == Page::Storage && this.storage_details_expanded,
@@ -1310,7 +1268,7 @@ impl TeleArkApp {
             .on_action(cx.listener(|this, _: &UploadFile, _, cx| {
                 this.page = Page::Storage;
                 if this.storage_channel_id().is_some() {
-                    this.request_vault_unlock(UnlockIntent::Upload, cx);
+                    this.open_vault_action(VaultAction::Upload, cx);
                 } else {
                     this.select_storage(StorageView::Files, cx);
                 }
@@ -1348,9 +1306,7 @@ impl TeleArkApp {
                 |root| root.child(self.render_storage_maintenance(cx)),
             )
             .when(
-                self.vault_activity == VaultActivity::Working
-                    && self.vault_key_progress.is_some()
-                    && self.unlock_intent.is_none(),
+                self.vault_key_progress.is_some() && !self.vault_new_epoch_confirmation,
                 |root| root.child(self.render_vault_key_progress(cx)),
             )
             .when(
@@ -1374,7 +1330,7 @@ impl TeleArkApp {
                 self.page == Page::Storage && self.storage_details_expanded,
                 |root| root.child(self.render_storage_details_dialog(window, cx)),
             )
-            .when(self.unlock_intent.is_some(), |root| {
+            .when(self.vault_new_epoch_confirmation, |root| {
                 root.child(self.render_unlock_dialog(layout, cx))
             })
             .when(self.show_upload, |root| {

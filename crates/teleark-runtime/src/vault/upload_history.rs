@@ -425,6 +425,7 @@ mod tests {
     }
     fn owner(temp: &Path) -> Result<VaultOwner, ApplicationError> {
         Ok(VaultOwner {
+            device_keys: device_keys::platform_store(),
             catalog: catalog::ManifestCache::default(),
             catalog_key_revision: 0,
             library: DesktopLibrary::open(temp.join("history.sqlite3"))?,

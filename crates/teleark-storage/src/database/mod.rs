@@ -213,18 +213,7 @@ FROM vault_metadata WHERE singleton_id = 1
         record: &VaultMetadataRecord,
         expected: Option<Option<([u8; 16], u32, u32)>>,
     ) -> StorageResult<bool> {
-        if record.password_wrap.len() < 124
-            || record.password_wrap.len() > 172
-            || record.recovery_wrap.len() != 88
-            || record.password_generation == 0
-            || record.recovery_generation == 0
-            || record.updated_at_unix_ms < record.created_at_unix_ms
-        {
-            return Err(StorageError::InvalidInput {
-                field: "vault_metadata",
-                reason: InputReason::InvalidCombination,
-            });
-        }
+        Self::validate_vault_metadata(record)?;
         let password_generation = i64::from(record.password_generation);
         let recovery_generation = i64::from(record.recovery_generation);
         let transaction = self.connection.transaction()?;
@@ -270,6 +259,32 @@ ON CONFLICT(singleton_id) DO UPDATE SET
         )?;
         transaction.commit()?;
         Ok(true)
+    }
+
+    fn validate_vault_metadata(record: &VaultMetadataRecord) -> StorageResult<()> {
+        if record.password_wrap.len() < 124
+            || record.password_wrap.len() > 172
+            || record.recovery_wrap.len() != 88
+            || record.password_generation == 0
+            || record.recovery_generation == 0
+            || record.updated_at_unix_ms < record.created_at_unix_ms
+        {
+            return Err(StorageError::InvalidInput {
+                field: "vault_metadata",
+                reason: InputReason::InvalidCombination,
+            });
+        }
+        Ok(())
+    }
+
+    /// Import an authenticated historical key without changing the active upload
+    /// epoch or overwriting an already known wrapper. The caller authenticates it.
+    pub fn insert_vault_key_epoch(&mut self, record: &VaultMetadataRecord) -> StorageResult<bool> {
+        Self::validate_vault_metadata(record)?;
+        Ok(self.connection.execute(
+            "INSERT INTO vault_key_epochs (vault_id,password_wrap,recovery_wrap,password_generation,recovery_generation,created_at_unix_ms,updated_at_unix_ms) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(vault_id) DO NOTHING",
+            params![record.vault_id.as_slice(), record.password_wrap, record.recovery_wrap, record.password_generation, record.recovery_generation, record.created_at_unix_ms, record.updated_at_unix_ms],
+        )? == 1)
     }
 
     /// Read one epoch by opaque identity without materializing all historical keys.

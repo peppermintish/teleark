@@ -1,6 +1,6 @@
 //! Focused upload composer; runtime owns encryption, splitting, and publication.
 use crate::{
-    app::{TeleArkApp, UnlockIntent, VaultActivity},
+    app::{TeleArkApp, VaultActivity},
     assets::Symbol,
     components,
     layout::LayoutPolicy,
@@ -348,6 +348,7 @@ pub fn render_upload_overlay(
                             .child(div().mt_2().child(app.tr("upload-source-checked"))),
                     )
                 })
+                .when(app.vault_activity == VaultActivity::Working && app.vault_key_progress.is_some(), |body| body.child(app.render_vault_key_progress(cx)))
                 .when_some(
                     super::settings::vault_activity_message(app).filter(|_| !folder_rejected),
                     |popup, (message, tone)| {
@@ -391,11 +392,7 @@ pub fn render_upload_overlay(
                 .child(
                     components::button(
                         "upload-add-queue",
-                        app.tr(if app.vault_locked || app.vault_status.active_key_locked {
-                            "vault-unlock-action"
-                        } else {
-                            "upload-add-to-queue"
-                        }),
+                        app.tr("upload-add-to-queue"),
                         Some(IconName::ArrowUp),
                         true,
                     )
@@ -409,12 +406,7 @@ pub fn render_upload_overlay(
                             || app.storage_channel_id().is_none(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if this.vault_locked || this.vault_status.active_key_locked {
-                            this.show_upload = false;
-                            this.request_vault_unlock(UnlockIntent::Upload, cx);
-                        } else {
-                            this.enqueue_vault_upload(cx);
-                        }
+                        this.enqueue_vault_upload(cx);
                     })),
                 ),
         );

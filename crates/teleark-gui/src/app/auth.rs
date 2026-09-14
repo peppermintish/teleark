@@ -200,7 +200,7 @@ impl TeleArkApp {
         self.managed_vault_rejected = 0;
         self.vault_recovery_secret = None;
         self.vault_locked = true;
-        self.unlock_intent = None;
+        self.pending_vault_action = None;
         self.upload_sources.clear();
         self.upload_source_total_bytes = 0;
         if let Some(progress) = self.upload_preparation_progress.take() {

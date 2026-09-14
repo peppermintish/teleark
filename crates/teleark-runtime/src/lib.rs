@@ -113,9 +113,9 @@ pub use transfer::{
 };
 pub use vault::{
     DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultJob, VaultKeyPhase,
-    VaultKeyProgress, VaultKeySnapshot, VaultStatus, VaultTransferControl, VaultTransferDirection,
-    VaultTransferSnapshot, VaultTransferState, VaultUploadControl, VaultUploadFailure,
-    VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
+    VaultKeyProgress, VaultKeySnapshot, VaultRecoverySecret, VaultStatus, VaultTransferControl,
+    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadControl,
+    VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
     VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
     inspect_upload_sources, inspect_upload_sources_observed,
 };
@@ -1110,6 +1110,10 @@ enum StorageRequest {
         vault_id: [u8; 16],
         reply: SyncSender<Result<Option<VaultMetadataRecord>, ApplicationError>>,
     },
+    ImportVaultKeyEpoch {
+        record: VaultMetadataRecord,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     VaultMetadata {
         reply: SyncSender<Result<Option<VaultMetadataRecord>, ApplicationError>>,
     },
@@ -1884,6 +1888,19 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                         .vault_key_epoch(vault_id)
                         .map_err(map_storage_error),
                 );
+            }
+            StorageRequest::ImportVaultKeyEpoch { record, reply } => {
+                let result = database
+                    .insert_vault_key_epoch(&record)
+                    .map_err(map_storage_error)
+                    .and_then(|inserted| {
+                        if inserted {
+                            Ok(())
+                        } else {
+                            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                        }
+                    });
+                let _ = reply.send(result);
             }
             StorageRequest::VaultMetadata { reply } => {
                 let result = database.vault_metadata().map_err(map_storage_error);

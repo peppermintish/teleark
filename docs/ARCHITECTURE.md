@@ -34,6 +34,8 @@ Dependencies point toward project-owned contracts. Traits belong at meaningful s
 
 The GPUI Kit 0.6.0 facade uses the matching gpui-pre 0.3.3 family. `application()` chooses the native platform and `init()` initializes the enabled layers. Base provides behavior/focus/accessibility; Component provides styled controls, segmented tabs, Sidebar and DataTable. Native/raw and managed/transfer lists virtualize visible rows. Presentation owners live under GUI `app/`; screen composition lives under `screens/`. Palette and geometry are centralized. [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) records the dependency and design decision.
 
+Desktop encryption keys are prepared automatically by the retained key owner after private-channel management completes. The macOS Keychain stores authenticated recovery bundles; file keys never depend on the optional application PIN. The PIN gates the whole UI, and Files, uploads, transfers and settings have no separate Vault unlock. Keychain failures remain visible and recoverable without replacing durable records. See [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md).
+
 ## Account and storage identity
 
 Startup restores an existing Telegram session and displays its avatar/name with Log In and Switch Account. Entering the workspace refreshes that account's sources before native task scheduling becomes eligible. A new session automatically starts QR login, with a secondary phone method, code and optional 2FA. Account switching requires an explicit sign-out confirmation before pausing workers and signing out. API configuration is an explicit login/settings action.

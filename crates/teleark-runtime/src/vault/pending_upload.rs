@@ -363,6 +363,7 @@ mod tests {
             DesktopTelegram::open_direct(path.join("synthetic.session")).expect("telegram");
         telegram.lifecycle().publish(1, Some(7), None);
         VaultOwner {
+            device_keys: device_keys::platform_store(),
             catalog: catalog::ManifestCache::default(),
             catalog_key_revision: 0,
             telegram,

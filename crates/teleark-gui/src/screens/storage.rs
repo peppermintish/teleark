@@ -2,7 +2,7 @@
 use crate::app::storage::StorageAction;
 use crate::assets::Symbol;
 use crate::{
-    app::{Page, StorageView, TeleArkApp, UnlockIntent},
+    app::{Page, StorageView, TeleArkApp, VaultAction},
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
@@ -94,85 +94,85 @@ impl TeleArkApp {
     ) -> AnyElement {
         let legacy = self.page == Page::LegacyRecovery;
         let ready = legacy || self.storage_status.usable_channel().is_some();
-        let header = div()
-            .h(px(76.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(components::app_mark(38.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(23.0))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(self.tr(if legacy {
-                                "storage-legacy-title"
-                            } else {
-                                "storage-nav-title"
-                            })),
+        let header =
+            div()
+                .h(px(76.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(components::app_mark(38.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(23.0))
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(self.tr(if legacy {
+                                    "storage-legacy-title"
+                                } else {
+                                    "storage-nav-title"
+                                })),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr(if legacy {
+                                    "storage-legacy-description"
+                                } else {
+                                    "storage-private-label"
+                                })),
+                        ),
+                )
+                .when(!legacy && self.storage_is_quiet(), |bar| {
+                    bar.child(
+                        components::button(
+                            "storage-expand-details",
+                            self.tr("storage-connected-title"),
+                            None,
+                            false,
+                        )
+                        .ghost()
+                        .text_xs()
+                        .text_color(theme::green())
+                        .debug_selector(|| "storage-expand-details".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.modal_focus.focus(window, cx);
+                            this.storage_details_expanded = true;
+                            cx.notify();
+                        })),
                     )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr(if legacy {
-                                "storage-legacy-description"
-                            } else {
-                                "storage-private-label"
-                            })),
-                    ),
-            )
-            .when(!legacy && self.storage_is_quiet(), |bar| {
-                bar.child(
-                    components::button(
-                        "storage-expand-details",
-                        self.tr("storage-connected-title"),
-                        None,
-                        false,
+                })
+                .child(
+                    components::icon_button(
+                        "storage-help",
+                        Symbol::Help,
+                        self.tr("storage-guide-title"),
                     )
                     .ghost()
-                    .text_xs()
-                    .text_color(theme::green())
-                    .debug_selector(|| "storage-expand-details".into())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.modal_focus.focus(window, cx);
-                        this.storage_details_expanded = true;
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_storage_guide = !this.show_storage_guide;
                         cx.notify();
                     })),
                 )
-            })
-            .child(
-                components::icon_button(
-                    "storage-help",
-                    Symbol::Help,
-                    self.tr("storage-guide-title"),
-                )
-                .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_storage_guide = !this.show_storage_guide;
-                    cx.notify();
-                })),
-            )
-            .when(ready && !legacy, |bar| {
-                bar.child(
-                    components::button(
-                        "storage-upload",
-                        self.tr("storage-channel-upload-action"),
-                        Some(IconName::Plus),
-                        true,
+                .when(ready && !legacy, |bar| {
+                    bar.child(
+                        components::button(
+                            "storage-upload",
+                            self.tr("storage-channel-upload-action"),
+                            Some(IconName::Plus),
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_vault_action(VaultAction::Upload, cx)
+                        })),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.request_vault_unlock(UnlockIntent::Upload, cx)
-                    })),
-                )
-            });
+                });
         let body = if ready {
-            let locked = self.storage_view == StorageView::Files && self.vault_locked;
             let overview = div()
                 .flex_none()
                 .flex()
@@ -185,29 +185,7 @@ impl TeleArkApp {
                     !legacy && !self.storage_is_quiet() && !self.storage_details_expanded,
                     |body| body.child(self.render_storage_controls(cx)),
                 );
-            let content = if locked {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .debug_selector(|| "storage-locked-viewport".into())
-                    .child(
-                        div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                            div()
-                                .w_full()
-                                .max_w(px(960.0))
-                                .mx_auto()
-                                .py_2()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(overview)
-                                .child(self.storage_locked_state(cx)),
-                        ),
-                    )
-                    .into_any_element()
-            } else {
+            let content = {
                 div()
                     .flex_1()
                     .min_h_0()
@@ -836,63 +814,6 @@ impl TeleArkApp {
             .into_any_element()
     }
 
-    fn storage_locked_state(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Intrinsic height: never shrink the icon or place an action outside its card.
-        components::card()
-            .flex_none()
-            .p_4()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_4()
-            .debug_selector(|| "storage-locked-card".into())
-            .child(
-                div()
-                    .size(px(44.0))
-                    .flex_none()
-                    .rounded(theme::RADIUS_MEDIUM)
-                    .bg(theme::blue_soft())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .debug_selector(|| "storage-locked-icon".into())
-                    .child(
-                        Icon::new(Symbol::Lock)
-                            .size(px(22.0))
-                            .text_color(theme::blue()),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(220.0))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(self.tr("storage-locked-title")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr("storage-channel-managed-vault-locked")),
-                    ),
-            )
-            .child(
-                components::button("storage-unlock", self.tr("vault-unlock-action"), None, true)
-                    .icon(Symbol::Lock)
-                    .debug_selector(|| "storage-unlock-action".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.request_vault_unlock(UnlockIntent::Browse, cx)
-                    })),
-            )
-            .into_any_element()
-    }
-
     fn storage_guide(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let steps = [
             (
@@ -1419,9 +1340,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn locked_repair_cards_keep_children_inside_and_actions_reachable(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
+    fn key_preparation_preserves_file_view_and_repair_actions(cx: &mut gpui_kit::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         for size in [(900.0, 600.0), (1440.0, 900.0)] {
             cx.simulate_resize(gpui_kit::size(px(size.0), px(size.1)));
@@ -1447,7 +1366,7 @@ mod tests {
                             app.storage_details_expanded = false;
                             app.storage_maintenance = None;
                             app.storage_maintenance_preview = None;
-                            app.unlock_intent = None;
+                            app.pending_vault_action = None;
                             app.vault_locked = true;
                             app.vault_status.locked = true;
                             app.vault_status.active_key_locked = true;
@@ -1462,7 +1381,7 @@ mod tests {
                         "stale discovery success must not contradict repair"
                     );
                     let viewport = cx
-                        .debug_bounds("storage-locked-viewport")
+                        .debug_bounds("storage-guide-viewport")
                         .expect("scroll viewport");
                     assert!(
                         viewport.bottom() <= px(size.1),
@@ -1493,33 +1412,14 @@ mod tests {
                         ..Default::default()
                     });
                     cx.run_until_parked();
-                    let card = cx.debug_bounds("storage-locked-card").expect("locked card");
-                    let icon = cx.debug_bounds("storage-locked-icon").expect("lock icon");
-                    let unlock = cx
-                        .debug_bounds("storage-unlock-action")
-                        .expect("unlock action");
-                    for child in [icon, unlock] {
-                        assert!(
-                            child.top() >= card.top() && child.bottom() <= card.bottom(),
-                            "child must stay within card vertically"
-                        );
-                        assert!(
-                            child.left() >= card.left() && child.right() <= card.right(),
-                            "child must stay within card horizontally"
-                        );
-                    }
-                    assert_eq!(icon.size.height, px(44.0), "lock icon must not shrink");
-                    assert!(
-                        unlock.top() >= viewport.top() && unlock.bottom() <= viewport.bottom(),
-                        "locale={locale:?} size={size:?} viewport={viewport:?} card={card:?} unlock={unlock:?}"
-                    );
-                    cx.simulate_click(unlock.center(), gpui_kit::Modifiers::default());
-                    cx.run_until_parked();
+                    assert!(cx.debug_bounds("storage-locked-card").is_none());
+                    assert!(cx.debug_bounds("storage-unlock-action").is_none());
                     app.update(cx, |app, _| {
-                        assert!(matches!(app.unlock_intent, Some(UnlockIntent::Browse)))
+                        assert!(app.pending_vault_action.is_none());
+                        assert!(!app.vault_new_epoch_confirmation);
                     });
                     app.update(cx, |app, cx| {
-                        app.unlock_intent = None;
+                        app.pending_vault_action = None;
                         app.storage_confirmation = None;
                         let channel = app.storage_status.channel().expect("bound channel").clone();
                         app.storage_status = StorageChannelStatus::Ready(channel);

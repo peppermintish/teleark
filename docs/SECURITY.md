@@ -21,9 +21,9 @@ File Key ---------------------------> frames + manifest metadata
 
 Use maintained implementations of Argon2id, AES-256-GCM, BLAKE3 and OS randomness. Master/File Keys are random 256-bit values. AES-GCM uses unique 96-bit nonces under each key and domain-separated AAD. BLAKE3 digests supplement authentication; they never replace it. Exact bytes, bounds, parameters and nonce domains are specified in [Crypto](CRYPTO_FORMAT.md) and [Manifest](MANIFEST_FORMAT.md). Never infer durable layout from Rust/Serde or implement custom cryptographic primitives.
 
-Password changes rewrap the same Master Key. A self-contained exact-version recovery bundle includes checksummed Recovery Key text and its authenticated Recovery Wrap, allowing reconstruction of local Vault metadata and a new password after database loss. Export requires an explicit protected flow; never upload the secret alongside ciphertext. Loss of every unlock path is unrecoverable.
+Desktop master and recovery keys are generated automatically using OS randomness and protected by the macOS Keychain, independently of the optional application PIN. A self-contained exact-version recovery bundle includes checksummed Recovery Key text and its authenticated Recovery Wrap, allowing reconstruction after database or device loss. The existing password-wrap codec remains readable but the desktop has no password-based Vault unlock flow. Export requires an explicit protected flow; never upload the secret alongside ciphertext. Loss of every unlock path is unrecoverable.
 
-Recovery rotation replaces the active local record, preventing ordinary unlock with its old key. It cannot revoke an exported bundle that still unwraps the same Master Key: that old bundle can still perform disaster recovery. Protect or securely destroy superseded exports. Future OS Keychain convenience must not replace offline recovery or determine durable crypto bytes; its adapter remains disabled.
+Recovery rotation replaces the active local record, preventing ordinary unlock with its old key. It cannot revoke an exported bundle that still unwraps the same Master Key: that old bundle can still perform disaster recovery. Protect or securely destroy superseded exports. The device-key adapter stores the existing authenticated recovery-bundle codec and cannot replace offline recovery. Keychain write/readback precedes SQLite commit; missing or denied access preserves existing data. See [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md) for versioned item identity, failure ordering and the incompatible desktop access-model update.
 
 ## Secret lifetime and account isolation
 
@@ -79,7 +79,7 @@ SOCKS5 password authentication and HTTP CONNECT Basic authentication do not encr
 ### Application PIN and active operations
 
 An optional installation-wide PIN gates the entire desktop UI. It is independent
-of file encryption passwords and never revokes the runtime key session: queued
+of automatically managed file encryption keys and never revokes the runtime key session: queued
 and running uploads, downloads and message/manifest synchronization continue.
 The gate clears secret input widgets and displayed recovery material, closes
 auxiliary batch windows, and restricts interaction to sign-in, account switching,

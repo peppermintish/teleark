@@ -1,5 +1,49 @@
 # Implementation status — v0.4.4
 
+## Automatic device keys and optional application PIN (2026-09-15)
+
+Private-channel management now triggers automatic OS-random key preparation on
+the retained key owner. The macOS system Keychain protects the existing
+self-contained recovery bundle, and restart loads the key automatically. The
+optional application PIN only gates the desktop interface; setting, changing or
+removing it leaves file keys and ciphertext unchanged. Files, uploads, transfer
+metadata/search and settings have no separate Vault password or unlock gate.
+Preparation, phase duration, last activity, cancellation and terminal results stay
+visible across navigation. Keychain failures expose retry/recovery guidance while
+pages and the upload picker remain reachable.
+
+Recovery viewing/export, recovery rotation and explicit new upload epochs remain
+available. Viewing a bundle does not restart synchronization or invalidate file
+projections. Importing a recovery bundle into an already initialized installation
+adds a retained historical key without replacing its active upload key. Keychain
+write/readback precedes SQLite commit; failed writes, competing commits,
+cancellation and stale logout callbacks preserve committed key authority. Secret
+job results redact Debug and zeroize on drop. The explicitly requested incompatible
+access-model update assumes no legacy data and adds no legacy-password migration
+wizard. Unexpected records are preserved and can use recovery bundles. SQLite 19,
+wrap/recovery-bundle/manifest v1 and part-container 2.0 contracts are unchanged.
+See [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md).
+
+Validation: all workspace targets passed (751 tests; 10 existing manual/performance
+probes ignored), followed by affected Runtime/GUI regression reruns (268 and 164
+passing tests). Eight new device-store regressions cover no-PIN setup, repeated
+admission, restart/file-key preservation through PIN changes, failed/unverified
+saves, missing/corrupt entries, recovery rotation/import, competing commits and
+controlled blocked read/write cancellation/logout. UI checks cover acknowledgment
+before admission, stale completion, direct page/picker access during key preparation
+and transfer metadata/search. Test-owner readiness deadlines allow 30 seconds for
+CSPRNG/KDF preparation under compilation load; the behavioral ordering uses explicit
+channels, with no speed assertions. Formatting, workspace check, strict Clippy,
+Core/i18n and warning-free rustdoc gates passed. Cargo-deny passes after updating
+the existing Rustls dependency to 0.23.45 for RUSTSEC-2026-0285; license/source policy
+is unchanged. The existing `block` future-compatibility notice remains.
+
+English/light synthetic native previews covered 900×600 and actual full-screen:
+optional PIN settings, directly accessible Files and upload, recovery controls and
+independent scrolling, plus actionable Keychain-failure feedback without a page
+lock. No real Telegram account/session or Keychain entry was used or modified.
+The system adapter is macOS-only; other desktop platforms remain unqualified.
+
 ## Completed download reservation cleanup (2026-09-15)
 
 Native downloads now remove the empty `.partial` destination reservation after

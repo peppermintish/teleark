@@ -85,7 +85,7 @@ impl TeleArkApp {
         self.clear_vault_inputs(window, cx);
         self.recovery_visible = false;
         self.vault_recovery_secret = None;
-        self.unlock_intent = None;
+        self.pending_vault_action = None;
         self.show_upload = false;
         self.channel_sync_details = false;
         self.dialogs.details = false;

@@ -1045,7 +1045,7 @@ impl TeleArkApp {
                         detail.child(
                             components::button(
                                 "unlock-file-key",
-                                self.tr("vault-unlock-action"),
+                                self.tr("managed-key-import"),
                                 None,
                                 true,
                             )
@@ -1053,7 +1053,8 @@ impl TeleArkApp {
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
                                     this.clear_vault_inputs(window, cx);
-                                    this.unlock_intent = Some(crate::app::UnlockIntent::Browse);
+                                    this.settings_section = crate::app::SettingsSection::KeyVault;
+                                    this.set_page(Page::Settings, cx);
                                     this.vault_advanced_expanded = true;
                                     this.vault_new_epoch_confirmation = false;
                                     cx.notify();
@@ -1081,7 +1082,7 @@ impl TeleArkApp {
                     )
                     .mt_2()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.request_vault_unlock(crate::app::UnlockIntent::Upload, cx)
+                        this.open_vault_action(crate::app::VaultAction::Upload, cx)
                     })),
                 )
                 .child(message_detail_row(

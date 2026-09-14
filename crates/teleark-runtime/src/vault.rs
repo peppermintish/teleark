@@ -40,6 +40,7 @@ use crate::{
 
 mod catalog;
 mod control;
+mod device_keys;
 mod health;
 mod key_progress;
 mod shutdown;
@@ -71,6 +72,23 @@ const TRANSFER_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 // With 60 MiB application parts, three workers plus the bounded reader,
 // encrypted queue, and active upload stay inside the 512 MiB transfer budget.
 const MAX_ENCRYPTION_WORKERS: u16 = 3;
+
+/// Explicit recovery export; redacted in diagnostics and erased on drop.
+#[derive(Clone)]
+pub struct VaultRecoverySecret(Zeroizing<String>);
+
+impl std::ops::Deref for VaultRecoverySecret {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for VaultRecoverySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VaultRecoverySecret([REDACTED])")
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultStatus {
@@ -397,7 +415,20 @@ struct VaultInner {
     joins: Mutex<Vec<JoinHandle<()>>>,
 }
 
+enum ManagedKeyAction {
+    Prepare,
+    NewEpoch,
+    Import(Zeroizing<String>),
+    Export,
+    RotateRecovery,
+}
+
 enum VaultCommand {
+    ManageKey {
+        action: ManagedKeyAction,
+        progress: VaultKeyProgress,
+        reply: mpsc::SyncSender<Result<VaultRecoverySecret, ApplicationError>>,
+    },
     PauseForShutdown {
         account: i64,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
@@ -517,6 +548,7 @@ enum VaultCommand {
 }
 
 struct VaultOwner {
+    device_keys: Arc<dyn device_keys::DeviceKeyStore>,
     catalog: catalog::ManifestCache,
     catalog_key_revision: u64,
     library: DesktopLibrary,
@@ -536,6 +568,14 @@ impl DesktopVault {
     pub fn new(
         telegram: DesktopTelegram,
         library: DesktopLibrary,
+    ) -> Result<Self, ApplicationError> {
+        Self::with_device_keys(telegram, library, device_keys::platform_store())
+    }
+
+    fn with_device_keys(
+        telegram: DesktopTelegram,
+        library: DesktopLibrary,
+        device_keys: Arc<dyn device_keys::DeviceKeyStore>,
     ) -> Result<Self, ApplicationError> {
         library
             .worker
@@ -561,6 +601,7 @@ impl DesktopVault {
         ] {
             let (sender, receiver) = mpsc::sync_channel(VAULT_QUEUE_CAPACITY);
             let owner = VaultOwner {
+                device_keys: device_keys.clone(),
                 catalog: catalog::ManifestCache::default(),
                 catalog_key_revision: 0,
                 library: library.clone(),
@@ -605,6 +646,61 @@ impl DesktopVault {
                 joins: Mutex::new(joins),
             }),
         })
+    }
+
+    /// Admit before spawning background work so logout can invalidate delayed completion.
+    pub fn submit_prepare_key(
+        &self,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        self.submit_managed_key(ManagedKeyAction::Prepare, progress)
+    }
+
+    /// Explicit replacement only; retains older epochs and ciphertext.
+    pub fn submit_new_managed_key(
+        &self,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        self.submit_managed_key(ManagedKeyAction::NewEpoch, progress)
+    }
+
+    pub fn submit_recovery_import(
+        &self,
+        bundle: String,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        self.submit_managed_key(ManagedKeyAction::Import(Zeroizing::new(bundle)), progress)
+    }
+
+    pub fn submit_recovery_export(
+        &self,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        self.submit_managed_key(ManagedKeyAction::Export, progress)
+    }
+
+    pub fn submit_recovery_rotation(
+        &self,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        self.submit_managed_key(ManagedKeyAction::RotateRecovery, progress)
+    }
+
+    fn submit_managed_key(
+        &self,
+        action: ManagedKeyAction,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        let observer = progress.clone();
+        let result = self.submit(|reply| VaultCommand::ManageKey {
+            action,
+            progress,
+            reply,
+        });
+        if let Err(error) = &result {
+            observer.finish(Some(error.kind()));
+        }
+        result
     }
 
     /// Background-only, works while the vault is locked and before network catalog loading.
@@ -1224,6 +1320,17 @@ impl VaultOwner {
 
     fn execute(&mut self, command: VaultCommand) {
         match command {
+            VaultCommand::ManageKey {
+                action,
+                progress,
+                reply,
+            } => {
+                let result = self
+                    .manage_key(action, &progress)
+                    .map(|text| VaultRecoverySecret(Zeroizing::new(text)));
+                progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                let _ = reply.send(result);
+            }
             VaultCommand::PauseForShutdown { account, reply } => {
                 let _ = reply.send(self.pause_saved_transfers(account));
             }
@@ -1508,6 +1615,15 @@ impl VaultOwner {
         password: &str,
         progress: &VaultKeyProgress,
     ) -> Result<String, ApplicationError> {
+        self.create_key_epoch_persisted(password, progress, false)
+    }
+
+    fn create_key_epoch_persisted(
+        &mut self,
+        password: &str,
+        progress: &VaultKeyProgress,
+        managed: bool,
+    ) -> Result<String, ApplicationError> {
         progress.phase(VaultKeyPhase::Generating)?;
         if let Some(worker) = &self.health_worker {
             worker.cancel();
@@ -1546,6 +1662,12 @@ impl VaultOwner {
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
+        let recovery_text = Zeroizing::new(encode_recovery_bundle(&recovery_key, &recovery_wrap));
+        if managed {
+            progress.phase(VaultKeyPhase::Securing)?;
+            self.save_device_key(&record, &recovery_text)?;
+            self.check_key_generation()?;
+        }
         progress.phase(VaultKeyPhase::Saving)?;
         self.library.worker.save_vault_metadata(
             record.clone(),
@@ -1557,13 +1679,12 @@ impl VaultOwner {
                 )
             }),
         )?;
-        let recovery_text = encode_recovery_bundle(&recovery_key, &recovery_wrap);
         self.record = Some(record);
         self.master_key = Some(Arc::new(master_key));
         self.historical_key = None;
         self.catalog.clear();
         self.refresh_status();
-        Ok(recovery_text)
+        Ok(recovery_text.to_string())
     }
 
     fn unlock_password(&mut self, password: &str) -> Result<(), ApplicationError> {
@@ -1637,6 +1758,15 @@ impl VaultOwner {
         recovery_bundle: &str,
         new_password: &str,
     ) -> Result<(), ApplicationError> {
+        self.restore_recovery_persisted(recovery_bundle, new_password, None)
+    }
+
+    fn restore_recovery_persisted(
+        &mut self,
+        recovery_bundle: &str,
+        new_password: &str,
+        progress: Option<&VaultKeyProgress>,
+    ) -> Result<(), ApplicationError> {
         if self.record.is_some() {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
@@ -1665,6 +1795,12 @@ impl VaultOwner {
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         };
+        if let Some(progress) = progress {
+            progress.phase(VaultKeyPhase::Securing)?;
+            self.save_device_key(&record, recovery_bundle)?;
+            self.check_key_generation()?;
+            progress.phase(VaultKeyPhase::Saving)?;
+        }
         self.library.worker.save_vault_metadata(
             record.clone(),
             self.record.as_ref().map(|old| {
@@ -1725,6 +1861,13 @@ impl VaultOwner {
     }
 
     fn rotate_recovery(&mut self) -> Result<String, ApplicationError> {
+        self.rotate_recovery_persisted(None)
+    }
+
+    fn rotate_recovery_persisted(
+        &mut self,
+        progress: Option<&VaultKeyProgress>,
+    ) -> Result<String, ApplicationError> {
         let master = self
             .master_key
             .as_ref()
@@ -1751,6 +1894,13 @@ impl VaultOwner {
         record.recovery_wrap = wrapped.encode();
         record.recovery_generation = generation;
         record.updated_at_unix_ms = now_unix_ms()?;
+        let bundle = Zeroizing::new(encode_recovery_bundle(&recovery_key, &wrapped));
+        if let Some(progress) = progress {
+            progress.phase(VaultKeyPhase::Securing)?;
+            self.save_device_key(&record, &bundle)?;
+            self.check_key_generation()?;
+            progress.phase(VaultKeyPhase::Saving)?;
+        }
         self.library.worker.save_vault_metadata(
             record.clone(),
             self.record.as_ref().map(|old| {
@@ -1763,7 +1913,7 @@ impl VaultOwner {
         )?;
         self.record = Some(record);
         self.refresh_status();
-        Ok(encode_recovery_bundle(&recovery_key, &wrapped))
+        Ok(bundle.to_string())
     }
 
     fn scan(
@@ -2140,6 +2290,7 @@ impl VaultOwner {
 
     fn upload_worker(&self) -> Self {
         Self {
+            device_keys: self.device_keys.clone(),
             catalog: catalog::ManifestCache::default(),
             catalog_key_revision: self.catalog_key_revision,
             library: self.library.clone(),
@@ -4543,6 +4694,7 @@ mod tests {
         telegram.lifecycle().publish(1, Some(7), None);
         let master = Arc::new(VaultMasterKey::from_bytes([17; 32]));
         let mut owner = VaultOwner {
+            device_keys: device_keys::platform_store(),
             catalog: catalog::ManifestCache::default(),
             catalog_key_revision: 0,
             telegram,
@@ -4875,6 +5027,7 @@ mod tests {
             let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3"))?;
             assert_eq!(library.storage_channel_id(100)?, None);
             let mut owner = VaultOwner {
+                device_keys: device_keys::platform_store(),
                 catalog: catalog::ManifestCache::default(),
                 catalog_key_revision: 0,
                 telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
@@ -5043,6 +5196,7 @@ mod tests {
         ] {
             let library = DesktopLibrary::open(temp.path().join("library.sqlite3"))?;
             let mut owner = VaultOwner {
+                device_keys: device_keys::platform_store(),
                 catalog: catalog::ManifestCache::default(),
                 catalog_key_revision: 0,
                 telegram: DesktopTelegram::open_direct(temp.path().join("test.session"))?,
@@ -5313,6 +5467,7 @@ mod tests {
             })?;
         ready.recv()?;
         let mut owner = VaultOwner {
+            device_keys: device_keys::platform_store(),
             catalog: catalog::ManifestCache::default(),
             catalog_key_revision: 0,
             library: DesktopLibrary::open(temp.path().join("health.db"))?,

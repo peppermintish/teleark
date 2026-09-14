@@ -239,7 +239,7 @@ settings-accounts = アカウント
 settings-storage = ストレージ
 settings-downloads = ダウンロード
 settings-uploads = アップロード
-settings-key-vault = キー保管庫
+settings-key-vault = 暗号化キー
 settings-index = インデックス
 settings-notifications = 通知
 settings-appearance = 外観
@@ -324,7 +324,7 @@ nav-all-transfers = すべての転送
 nav-completed = 完了
 nav-failed = 失敗
 nav-storage = ストレージ
-nav-key-vault = キー保管庫
+nav-key-vault = 暗号化キー
 nav-settings = 設定
 
 filter-all-channels = すべてのチャンネル
@@ -514,7 +514,7 @@ vault-option-compatible-parts = 互換パート
 vault-option-compatible-parts-description = 1900 MiB のアプリケーションパートを使用します。
 vault-option-keychain = OS 資格情報ストア
 vault-option-keychain-description = ラッピングシークレットを OS のキーチェーンに保存します。
-vault-key-loss-warning = パスワードと復旧キーの両方を失うと、Telegram の暗号化ファイルは復元できません。
+vault-key-loss-warning = キーチェーンのキーと復元バンドルの両方を失うと、暗号化ファイルは復元できません。
 vault-unlock-to-view = 保管庫を解除して表示
 
 prototype-demo-badge = プレビュー版
@@ -621,7 +621,7 @@ settings-download-reveal-completed-description = 検証に成功したファイ�
 settings-upload-title = アップロードの既定値
 settings-upload-description = 暗号化アップロードには専用の TeleArk 非公開チャンネルを使用します。
 settings-upload-vault-managed-title = キー保管庫で管理する暗号化アップロード
-settings-upload-vault-managed-description = 解除済みの保管庫で内容・名前・メタデータを暗号化します。コンテナの平文上限は { $size }、暗号化と送信は 512 KiB ブロック単位で進みます。
+settings-upload-vault-managed-description = TeleArk は内容、名前、メタデータを自動暗号化します。各コンテナの平文上限は { $size } で、512 KiB ブロック単位で暗号化とアップロードが進みます。
 upload-current-part-size = 現在の安全なパート上限
 upload-current-part-size-description = TeleArk は現在、最大 { $size } の暗号化平文パートを作成します。
 settings-vault-title = Key Vault の保護
@@ -758,7 +758,7 @@ storage-channel-managed-detail-title = ファイル詳細
 storage-channel-managed-detail-empty = 管理対象ファイルを選択してパッケージを確認してください。
 vault-password-placeholder = Vault パスワードを入力
 vault-new-password-placeholder = 新しいパスワードを再入力
-vault-recovery-placeholder = 復旧キー全体を貼り付け
+vault-recovery-placeholder = 完全な復元バンドルを貼り付け
 vault-status-not-configured = 未設定
 vault-password-generation = パスワードラップ v{ $generation }
 vault-operation-working = 処理中…
@@ -781,13 +781,13 @@ vault-recovery-export-default-name = TeleArk 復旧バンドル.txt
 vault-restore-action = Key Vault を復元
 vault-os-credential-title = OS Credential
 vault-os-credential-development-note = この機能は開発中のため、まだ選択できません。
-vault-error-invalid-request = 入力内容と、2 つのパスワードが一致していることを確認してください。
-vault-error-authorization = Vault のシークレットが正しくないか、Vault がロックされています。
+vault-error-invalid-request = 復元バンドルを確認して再試行してください。
+vault-error-authorization = 復元バンドルを認証できませんでした。
 vault-error-source-missing = 選択したソースまたはリモートパッケージを利用できません。
 vault-error-permission-denied = TeleArk にはその場所へアクセスする権限がありません。
 vault-error-network = Telegram が Vault 操作を完了できませんでした。再試行してください。
 vault-error-not-found = 指定された Vault またはパッケージが見つかりません。
-vault-error-conflict = Key Vault はすでに設定されています。
+vault-error-conflict = 暗号化キーの設定が変更されました。再試行してください。
 vault-error-capacity = 操作が対応サイズまたは保存上限を超えました。
 vault-error-cancelled = Vault 操作はキャンセルされました。
 vault-error-persistence = Vault データを安全に読み取り、検証、保存できませんでした。
@@ -1021,7 +1021,7 @@ storage-guide-raw-body = 元のファイルには通常のアップロード、�
 
 storage-guide-key-title = 4. 復旧キーを保存
 
-storage-guide-key-body = 復旧バンドルをこの Mac 以外の安全な場所に保存してください。Telegram は暗号鍵を復旧できません。高度な復旧ツールは「設定 → Key Vault」にあります。
+storage-guide-key-body = キーは自動的に準備されます。この Mac 以外に復元バンドルを保管してください。Telegram はキーを復元できません。復元ツールは設定 → 暗号化キーにあります。
 
 storage-legacy-title = 旧バージョンの復元
 
@@ -1390,13 +1390,13 @@ storage-phase-muting = チャンネルをミュート中
 storage-phase-archiving = チャンネルをアーカイブ中
 storage-phase-completed = 完了・検証済み
 vault-transfer-error-source-permission = ローカルの元ファイルを読み取れません。アクセスを許可するか、ファイルを再選択してください。
-vault-health-key-unavailable = このファイルの鍵を利用できません。元のパスワードまたは復元情報で対応する鍵を解除してください。
+vault-health-key-unavailable = このファイルのキーを利用できません。設定 → 暗号化キーで対応する復元バンドルをインポートしてください。
 
 # File health and key epochs
 vault-epoch-confirm-action = 新しい鍵を作成
-vault-epoch-lost-action = 解除情報をすべて紛失した
-vault-epoch-confirm-description = 元の解除情報がなければ古いファイルは復号できません。同じチャンネルへの今後のアップロード用に新しい鍵を作成しますか？古い暗号文と暗号化された鍵の記録は保持されます。新しい復元情報を保存してください。
-vault-epoch-preserved-description = 古い鍵は復元用に保持されます。過去の鍵を解除しても、新規アップロードの鍵は変わりません。
+vault-epoch-lost-action = 新しいアップロードキーを生成…
+vault-epoch-confirm-description = 同じチャンネルの今後のアップロード用に新しいキーを生成しますか？以前のキーと暗号化ファイルは保持されます。元のキーがないファイルには対応する復元バンドルが必要です。
+vault-epoch-preserved-description = 以前のキーは復元用に保持されます。履歴キーを復元しても現在のアップロードキーは保持されます。
 vault-epoch-historical-label = 過去の鍵の元の復元情報
 vault-epoch-historical-action = 過去の鍵を解除
 vault-health-unchecked = 未確認
@@ -1409,17 +1409,17 @@ vault-health-detail = 状態は同期済みメッセージの存在に基づき�
 vault-health-key-version = 鍵のバージョン
 vault-health-recheck = ファイルの状態を再確認
 vault-health-reupload = ローカルのコピーを再アップロード
-vault-health-unknown-size = 解除するまでサイズは不明
+vault-health-unknown-size = キーの復元後にサイズを確認できます
 vault-health-scope-limited = 表示は 1,000 件または 16 MiB までです。完全な状態確認では、ページごとの履歴と保持済みマニフェストを引き続き確認します。
 
 vault-key-phase-queued = 鍵の処理を待機中
 vault-key-phase-generating = 新しい鍵を生成中
-vault-key-phase-password = パスワード保護を導出中
+vault-key-phase-password = ローカルキーの保護を準備中
 vault-key-phase-recovery = 復元用の保護を準備中
 vault-key-phase-saving = 古い鍵を保持して一括保存中
-vault-key-phase-completed = 新しい鍵を保存しました
+vault-key-phase-completed = 暗号化キーの準備が完了しました
 vault-key-phase-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
-vault-health-check-summary = 前回の履歴確認：{ $count } 件を確認しました。鍵を解除していないファイルは未確認です。
+vault-health-check-summary = 前回の履歴チェック：{ $count } 件を確認しました。キーを利用できないファイルは未確認です。
 transfer-upload-saving-manifest = 検証済みマニフェストをローカルに保存中
 
 vault-session-locked-background = ファイルの暗号化キーが利用できません。Telegramの同期と受け付け済みの処理は続行します。
@@ -1549,7 +1549,7 @@ transfer-recovery-saved-download = 保存済みのダウンロード
 
 transfer-recovery-retry-guidance = このタスクは再試行できます。上記の原因を解消してから、タスク行で再試行を選択してください。保存済みの進捗は検証後に再利用されます。失敗したタスクは自動では再試行されません。
 transfer-recovery-source-guidance = 現在の元ファイルではアップロードを続行できません。元ファイルを保持し、可能であればアクセスを復旧してください。準備ができたら「アップロード」から新しいタスクを開始してください。停止したタスクは履歴に残ります。
-transfer-recovery-key-guidance = 「設定 → キー保管庫」で、このファイルに必要なキーを解除してください。再開や再試行の操作がない場合は、解除後に新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。
+transfer-recovery-key-guidance = 設定 → 暗号化キーでアクセスを再試行するか、対応する復元バンドルをインポートしてからタスクを再開・再試行してください。元のファイルと部分ダウンロードは保持してください。
 transfer-recovery-blocked-guidance = このタスクは現在の状態では再開できません。上記の原因を解消してから新しい転送を開始してください。元ファイルと未完了のダウンロードを保持してください。新しいタスクでは再転送が必要になる場合があります。
 transfer-recovery-legacy-guidance = この保存済みタスクには利用可能な復旧操作がありません。記録とファイルを保持してください。新しい復旧データには対応するアプリのバージョンが必要な場合があります。それ以外は新しい転送を開始してください。履歴があっても再開できるとは限りません。
 storage-guide-transfers-title = 5. 転送の一時停止と再開
@@ -1684,3 +1684,31 @@ session-loss-paused = Telegramのセッション終了 · タスクは一時停�
 session-loss-description = Telegramのログインが無効になりました。タスクの進行状況を保存してログイン画面に戻ります。完了できない場合は、安全にログアウトするため再試行してください。
 session-loss-step-time = 現在の段階：最終更新から { $duration }
 session-loss-history-omitted = 過去のアクティビティ { $count } 件を省略
+
+managed-key-title = 暗号化キー
+
+managed-key-description = キーは自動生成され、システムのキーチェーンで保護されます。任意のアプリ PIN は TeleArk のロック専用で、ファイル暗号化には影響しません。
+
+managed-key-preparing = 暗号化キーを準備中…
+
+managed-key-ready = 準備完了 · 自動管理
+
+managed-key-unavailable = 暗号化キーの確認が必要です
+
+managed-key-unavailable-help = 設定 → 暗号化キーで再試行するか、キーがない場合は復元バンドルをインポートしてください。他の画面は引き続き使用できます。
+
+managed-key-retry = キーへのアクセスを再試行
+
+managed-key-recovery-options = 復元オプション
+
+managed-key-recovery-description = デバイスやキーチェーンを失った場合に備え、復元バンドルを別の場所に保管してください。古いキーをインポートしても現在のアップロードキーは保持されます。
+
+managed-key-show-recovery = 復元バンドルを表示
+
+managed-key-import = 復元バンドルをインポート
+
+managed-key-phase-loading = システムキーチェーンを読み取り中
+
+managed-key-phase-securing = キーチェーンの項目を保存・検証中
+
+managed-key-store-error = システムキーチェーンにアクセスできません。TeleArk のアクセスを許可し、設定 → 暗号化キーで再試行してください。

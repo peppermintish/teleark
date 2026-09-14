@@ -74,7 +74,7 @@ impl TransferItem {
     pub(super) fn row(&self, app: &TeleArkApp) -> TransferRow {
         #[cfg(test)]
         MATERIALIZED_ROWS.set(MATERIALIZED_ROWS.get() + 1);
-        let mut row = match self {
+        match self {
             Self::Preview(row) => (**row).clone(),
             Self::Native(row, child) => app.transfer_row_from_snapshot(row, *child),
             Self::NativeBatch(id, rows) => {
@@ -91,16 +91,7 @@ impl TransferItem {
                     &rows.iter().map(Arc::as_ref).collect::<Vec<_>>(),
                 )
                 .unwrap_or_else(|| app.transfer_row_from_vault_snapshot(first)),
-        };
-        if app.vault_locked && (row.vault_transfer_id.is_some() || row.vault_batch_id.is_some()) {
-            row.name = app.tr("vault-locked-file");
-            row.caption = None;
-            row.destination = app.tr("vault-locked-detail");
-            if let Some(batch) = row.batch_summary.as_mut() {
-                batch.file_names.clear();
-            }
         }
-        row
     }
 
     pub(super) fn key(&self, index: usize) -> u64 {
@@ -227,10 +218,6 @@ impl TransferItem {
         let query = terms.query;
         if query.is_empty() {
             return true;
-        }
-        if app.vault_locked && matches!(self, Self::Vault(..) | Self::VaultBatch(..)) {
-            return terms.vault_source
-                || app.tr("vault-locked-file").to_lowercase().contains(query);
         }
         let source_matches = |chat| {
             terms.sources.get(&chat).copied().unwrap_or_else(|| {

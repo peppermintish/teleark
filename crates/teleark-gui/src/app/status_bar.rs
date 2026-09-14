@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn status_lock_and_rates_share_one_row_in_both_themes(cx: &mut TestAppContext) {
+    fn key_status_and_rates_share_one_row_in_both_themes(cx: &mut TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
         for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
             cx.simulate_resize(size(px(width), px(height)));
@@ -562,13 +562,14 @@ mod tests {
                         app.channel_sync_snapshot = Some(snapshot);
                         app.vault_locked = true;
                         app.vault_status.configured = true;
+                        app.vault_status.active_key_locked = true;
                         cx.notify();
                     })
                 });
                 cx.run_until_parked();
                 let status = cx.debug_bounds("global-sync-details").expect("status");
                 let locked = cx
-                    .debug_bounds("vault-session-locked-notice")
+                    .debug_bounds("managed-key-status-notice")
                     .expect("inline lock");
                 let disk = cx.debug_bounds("status-disk-space").expect("disk on right");
                 let download = cx.debug_bounds("shell-download-rate").expect("download");

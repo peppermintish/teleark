@@ -132,6 +132,7 @@ impl TeleArkApp {
         }
         self.page = Page::LegacyRecovery;
         self.select_storage(StorageView::Files, cx);
+        self.open_vault_action(VaultAction::Browse, cx);
     }
 
     pub(crate) fn load_selected_telegram_files(&mut self, append: bool, cx: &mut Context<Self>) {

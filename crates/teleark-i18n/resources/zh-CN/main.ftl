@@ -239,7 +239,7 @@ settings-accounts = 账号管理
 settings-storage = 存储设置
 settings-downloads = 下载设置
 settings-uploads = 上传设置
-settings-key-vault = 密钥与密码
+settings-key-vault = 加密密钥
 settings-index = 索引设置
 settings-notifications = 通知
 settings-appearance = 外观
@@ -324,7 +324,7 @@ nav-all-transfers = 全部传输
 nav-completed = 已完成
 nav-failed = 失败
 nav-storage = 存储
-nav-key-vault = 密钥库
+nav-key-vault = 加密密钥
 nav-settings = 设置
 
 filter-all-channels = 全部频道
@@ -514,7 +514,7 @@ vault-option-compatible-parts = 兼容分片
 vault-option-compatible-parts-description = 使用 1900 MiB 应用分片。
 vault-option-keychain = 系统凭据存储
 vault-option-keychain-description = 将包装密钥保存在操作系统钥匙串中。
-vault-key-loss-warning = 如果密码和恢复密钥均丢失，Telegram 中的加密文件将无法恢复。
+vault-key-loss-warning = 如果系统钥匙串中的密钥和恢复包都丢失，加密文件将无法恢复。
 vault-unlock-to-view = 解锁密钥库后查看
 
 prototype-demo-badge = 预览版
@@ -621,7 +621,7 @@ settings-download-reveal-completed-description = 文件校验成功后自动在�
 settings-upload-title = 上传默认设置
 settings-upload-description = 加密上传使用你的 TeleArk 私有频道。
 settings-upload-vault-managed-title = 由密钥保管库管理的加密上传
-settings-upload-vault-managed-description = 已解锁的密钥库加密内容、名称及元数据。每个容器最多保存 { $size } 明文，加密和上传以 512 KiB 块同步推进。
+settings-upload-vault-managed-description = TeleArk 自动加密内容、名称和元数据。每个容器最多包含 { $size } 明文；加密和上传以 512 KiB 块同步推进。
 upload-current-part-size = 当前安全分片上限
 upload-current-part-size-description = TeleArk 当前生成的加密明文分片最大为 { $size }。
 settings-vault-title = 密钥库保护
@@ -758,7 +758,7 @@ storage-channel-managed-detail-title = 文件详情
 storage-channel-managed-detail-empty = 选择一个受管理文件以查看其软件包。
 vault-password-placeholder = 输入密钥库密码
 vault-new-password-placeholder = 再次输入新密码
-vault-recovery-placeholder = 粘贴完整的恢复密钥
+vault-recovery-placeholder = 粘贴完整恢复包
 vault-status-not-configured = 尚未配置
 vault-password-generation = 密码包裹 v{ $generation }
 vault-operation-working = 正在处理…
@@ -781,13 +781,13 @@ vault-recovery-export-default-name = TeleArk 恢复包.txt
 vault-restore-action = 恢复密钥库
 vault-os-credential-title = OS Credential
 vault-os-credential-development-note = 本功能正在开发中，目前不可选择。
-vault-error-invalid-request = 请检查输入，并确保两次输入的密码一致。
-vault-error-authorization = 密钥库密码或恢复密钥不正确，或者密钥库仍处于锁定状态。
+vault-error-invalid-request = 请检查恢复包后重试。
+vault-error-authorization = 恢复包验证失败。
 vault-error-source-missing = 所选源文件或远端软件包不可用。
 vault-error-permission-denied = TeleArk 没有访问该位置的权限。
 vault-error-network = Telegram 未能完成密钥库操作，请重试。
 vault-error-not-found = 找不到请求的密钥库或软件包。
-vault-error-conflict = 已经配置了密钥库。
+vault-error-conflict = 加密密钥设置已变更，请重试。
 vault-error-capacity = 此操作超出了支持的大小或存储限制。
 vault-error-cancelled = 密钥库操作已取消。
 vault-error-persistence = 无法安全读取、验证或保存密钥库数据。
@@ -1021,7 +1021,7 @@ storage-guide-raw-body = 原始文件模式显示 Telegram 中的普通上传、
 
 storage-guide-key-title = 4. 保存恢复密钥
 
-storage-guide-key-body = 请将恢复资料安全保存在这台 Mac 之外。Telegram 无法恢复你的加密密钥。高级恢复工具位于“设置 → 密钥库”。
+storage-guide-key-body = 密钥自动准备。请在此 Mac 之外保存恢复包；Telegram 无法恢复密钥。恢复工具位于设置 → 加密密钥。
 
 storage-legacy-title = 旧版文件恢复
 
@@ -1390,13 +1390,13 @@ storage-phase-muting = 正在静音频道
 storage-phase-archiving = 正在归档频道
 storage-phase-completed = 已完成并验证
 vault-transfer-error-source-permission = 无法读取本地源文件。请授予访问权限或重新选择文件。
-vault-health-key-unavailable = 此文件的密钥不可用。请使用原密码或恢复材料解锁对应密钥版本。
+vault-health-key-unavailable = 此文件的密钥不可用。请在设置 → 加密密钥中导入对应恢复包。
 
 # File health and key epochs
 vault-epoch-confirm-action = 创建新密钥版本
-vault-epoch-lost-action = 所有解锁材料都已丢失
-vault-epoch-confirm-description = 没有原解锁材料就无法解密旧文件。是否在同一频道为后续上传创建新密钥？旧密文和加密密钥记录将保留。请保存新的恢复包。
-vault-epoch-preserved-description = 旧密钥版本保留用于恢复。解锁历史密钥不会改变新上传所用的密钥。
+vault-epoch-lost-action = 生成新的上传密钥…
+vault-epoch-confirm-description = 为同一频道的后续上传生成新密钥？原密钥与加密文件将保留。原密钥已丢失的文件仍需对应恢复包。
+vault-epoch-preserved-description = 原密钥将保留用于恢复。恢复历史密钥不会更换当前上传密钥。
 vault-epoch-historical-label = 旧密钥的原恢复包
 vault-epoch-historical-action = 解锁历史密钥
 vault-health-unchecked = 未检查
@@ -1409,17 +1409,17 @@ vault-health-detail = 健康状态根据已同步的消息存在性判断；还�
 vault-health-key-version = 密钥版本
 vault-health-recheck = 重新检查文件健康
 vault-health-reupload = 重新上传本地副本
-vault-health-unknown-size = 解锁前无法获取大小
+vault-health-unknown-size = 恢复密钥后可查看大小
 vault-health-scope-limited = 视图最多显示 1,000 条记录或 16 MiB 的目录。完整健康检查会继续分页检查历史及保留的清单。
 
 vault-key-phase-queued = 等待密钥操作
 vault-key-phase-generating = 正在生成新密钥版本
-vault-key-phase-password = 正在派生密码保护
+vault-key-phase-password = 正在准备本地密钥保护
 vault-key-phase-recovery = 正在准备恢复保护
 vault-key-phase-saving = 正在保留旧密钥并原子保存
-vault-key-phase-completed = 新密钥版本已保存
+vault-key-phase-completed = 加密密钥已就绪
 vault-key-phase-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
-vault-health-check-summary = 最近一次历史检查：已检查 { $count } 个文件。未解锁密钥的文件仍未检查。
+vault-health-check-summary = 最近一次历史检查：已检查 { $count } 个文件。密钥不可用的文件尚未检查。
 transfer-upload-saving-manifest = 正在保存已验证清单到本地
 
 vault-session-locked-background = 文件加密密钥尚不可用。Telegram 同步和已接收的后台任务继续运行。
@@ -1549,7 +1549,7 @@ transfer-recovery-saved-download = 已保存的下载任务
 
 transfer-recovery-retry-guidance = 此任务可以重试。处理上述原因后，在任务行选择“重试”。TeleArk 会先检查已保存的进度再复用；失败任务不会自动重试。
 transfer-recovery-source-guidance = 当前源文件无法用于继续此上传。请保留原文件，并尽可能恢复访问。文件准备好后，从“上传”开始新任务；此停止的任务会保留在历史记录中。
-transfer-recovery-key-guidance = 打开“设置 → 密钥库”，解锁此文件所需的密钥。如果任务没有“继续”或“重试”操作，请在解锁后开始新传输。保留原始源文件和任何未完成的下载文件。
+transfer-recovery-key-guidance = 请在设置 → 加密密钥中重试读取密钥或导入对应恢复包，然后继续或重试任务。请保留原始文件及下载临时文件。
 transfer-recovery-blocked-guidance = 此任务目前无法继续。请先处理上述原因，再开始新传输。保留原始源文件和任何未完成的下载文件；新任务可能需要重新传输数据。
 transfer-recovery-legacy-guidance = 此历史任务没有可用的恢复操作。请保留记录和文件。较新版本的恢复数据可能需要兼容的应用版本；否则请开始新传输。存在历史记录并不代表数据可以续传。
 storage-guide-transfers-title = 5. 暂停和继续传输
@@ -1684,3 +1684,31 @@ session-loss-paused = Telegram 登录已失效 · 任务已暂停
 session-loss-description = 当前 Telegram 登录已失效。TeleArk 将保存任务进度并返回登录页。如未能完成，请重试以安全退出登录。
 session-loss-step-time = 当前阶段：距离上次更新 { $duration }
 session-loss-history-omitted = 已省略 { $count } 条较早的活动记录
+
+managed-key-title = 加密密钥
+
+managed-key-description = 密钥自动安全生成，由系统钥匙串保护。应用 PIN 可选，仅用于锁定 TeleArk，不影响文件加密。
+
+managed-key-preparing = 正在准备加密密钥…
+
+managed-key-ready = 已就绪 · 自动管理
+
+managed-key-unavailable = 加密密钥需要处理
+
+managed-key-unavailable-help = 请在设置 → 加密密钥中重试读取；若密钥缺失，可导入恢复包。其他页面仍可使用。
+
+managed-key-retry = 重试读取密钥
+
+managed-key-recovery-options = 恢复选项
+
+managed-key-recovery-description = 请在此设备之外保存恢复包，以便设备或钥匙串丢失后恢复加密文件。导入旧密钥不会更换当前上传密钥。
+
+managed-key-show-recovery = 查看恢复包
+
+managed-key-import = 导入恢复包
+
+managed-key-phase-loading = 正在读取系统钥匙串
+
+managed-key-phase-securing = 正在保存并验证钥匙串记录
+
+managed-key-store-error = 无法访问系统钥匙串。请允许 TeleArk 访问后，在设置 → 加密密钥中重试。

@@ -25,6 +25,8 @@ fail on overflow, so a retry cannot accidentally select a retired instance even
 if the RNG repeats. This changes the derived content key. Indexed nonces are
 unique within that key; sending existing ciphertext again is not encryption.
 
+The desktop access model is now defined by [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md): automatic OS-random keys, system Keychain storage and an optional application-only PIN. The password-wrap primitive and bytes below are unchanged; new desktop records use a discarded random wrapping password, and users never enter it. Master/File/Recovery keys remain independently generated. This change introduces no new encrypted file codec or reinterpretation of existing bytes.
+
 ## Primitive suite
 
 Suite ID `1` consists of:
