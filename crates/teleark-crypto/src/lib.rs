@@ -50,3 +50,22 @@ pub const FORMAT_MINOR: u16 = 0;
 pub const CRYPTO_SUITE_ID: u16 = 1;
 /// Part-index plus frame-index nonce strategy identifier.
 pub const NONCE_STRATEGY_ID: u16 = 1;
+
+/// Whether this binary can use CPU acceleration for both AES and GCM multiplication.
+/// Runtime detection reflects the RustCrypto backend requirements, not a speed estimate.
+#[must_use]
+pub fn aes256gcm_hardware_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::is_x86_feature_detected!("aes") && std::is_x86_feature_detected!("pclmulqdq")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("aes")
+            && std::arch::is_aarch64_feature_detected!("pmull")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}

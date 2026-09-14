@@ -239,3 +239,25 @@ A format upgrade must authenticate source data, use fresh encryption identities 
 ## Retained key epochs
 
 Schema 15 changes local key-record retention, not the cryptographic formats. Existing manifest v1 `vault_id` identifies the key epoch; password/recovery wrap generations remain independent counters inside that epoch. An unauthenticated, bounded header hint is used only for key selection, followed by normal complete manifest authentication. New upload epochs preserve old wrapped records and ciphertext. See [ADR 0025](adr/0025-fixed-channel-and-retained-key-epochs.md).
+
+
+## Aligned part codec 2.0
+
+New streaming uploads use part codec **2.0**, independently of the unchanged
+manifest/wrap codecs (1.0). The 96-byte header carries major=2 and minor=0.
+Readers retain codec 1.0 with its original frame geometry. Existing ciphertext
+is never rewritten during an upgrade; unsupported versions fail closed.
+
+The frame plaintext maximum is 524,256 bytes (512 KiB minus a 16-byte frame
+header and a 16-byte AES-GCM tag). The first frame additionally reserves the
+96-byte part header, accepting at most 524,160 plaintext bytes. Thus each full
+encoded block, including its headers/tag, occupies exactly one 524,288-byte
+Telegram upload part. Only the final block can be shorter. Empty containers
+retain one authenticated final frame. Frame count is
+`ceil((plaintext_length + 96) / 524256)`. The header digest in AEAD associated
+data binds the version and geometry; changing a version cannot reinterpret
+existing authenticated bytes. The content-key derivation and indexed nonce
+remain domain separated by package and fresh part instance.
+
+The encoder reuses one bounded frame buffer. CPU support for AES and carryless
+multiplication is detected at runtime for the settings capability display.

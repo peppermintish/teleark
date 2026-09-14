@@ -83,6 +83,8 @@ impl PartInstanceRegistry {
 /// Canonical public application-part header.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartHeader {
+    /// Part codec major version. Version 2 aligns AEAD frames to upload parts.
+    pub format_major: u16,
     pub package_id: [u8; 16],
     pub part_instance_id: PartInstanceId,
     pub part_index: u32,
@@ -109,6 +111,7 @@ impl PartHeader {
     ) -> Result<Self, CryptoError> {
         let frame_count = expected_frame_count(plaintext_length, frame_plaintext_max)?;
         let header = Self {
+            format_major: FORMAT_MAJOR,
             package_id,
             part_instance_id,
             part_index,
@@ -123,7 +126,41 @@ impl PartHeader {
         Ok(header)
     }
 
+    /// Opt into the streaming codec; legacy v1 headers retain their original geometry.
+    pub fn aligned(mut self, limits: PartLimits) -> Result<Self, CryptoError> {
+        self.format_major = 2;
+        self.frame_plaintext_max = 512 * 1024 - 32;
+        self.frame_count = self.expected_frame_count()?;
+        self.validate(limits)?;
+        Ok(self)
+    }
+
+    fn expected_frame_count(&self) -> Result<u32, CryptoError> {
+        let length = if self.format_major == 2 {
+            self.plaintext_length
+                .checked_add(PART_HEADER_LENGTH as u64)
+                .ok_or(CryptoError::ArithmeticOverflow {
+                    field: "aligned frame count",
+                })?
+        } else {
+            self.plaintext_length
+        };
+        expected_frame_count(length, self.frame_plaintext_max)
+    }
+
     pub fn validate(&self, limits: PartLimits) -> Result<(), CryptoError> {
+        if !matches!(self.format_major, 1 | 2) {
+            return Err(CryptoError::UnsupportedVersion {
+                format: FormatKind::Part,
+                major: self.format_major,
+                minor: 0,
+            });
+        }
+        if self.format_major == 2 && self.frame_plaintext_max != 512 * 1024 - 32 {
+            return Err(CryptoError::InvalidField {
+                field: "aligned frame size",
+            });
+        }
         if self.part_count == 0 || self.part_count > limits.max_parts_per_package {
             return Err(CryptoError::InvalidLayout {
                 violation: LayoutViolation::InvalidPartCount,
@@ -169,8 +206,7 @@ impl PartHeader {
                 violation: LayoutViolation::OutOfRange,
             });
         }
-        let expected_frames =
-            expected_frame_count(self.plaintext_length, self.frame_plaintext_max)?;
+        let expected_frames = self.expected_frame_count()?;
         if self.frame_count != expected_frames || self.frame_count > limits.max_frames_per_part {
             return Err(CryptoError::InvalidLayout {
                 violation: LayoutViolation::InvalidFrameCount,
@@ -205,7 +241,7 @@ impl PartHeader {
     pub fn encode(&self) -> [u8; PART_HEADER_LENGTH] {
         let mut output = [0_u8; PART_HEADER_LENGTH];
         output[..8].copy_from_slice(PART_MAGIC);
-        output[8..10].copy_from_slice(&FORMAT_MAJOR.to_be_bytes());
+        output[8..10].copy_from_slice(&self.format_major.to_be_bytes());
         output[10..12].copy_from_slice(&FORMAT_MINOR.to_be_bytes());
         output[12..16].copy_from_slice(&(PART_HEADER_LENGTH as u32).to_be_bytes());
         output[16..32].copy_from_slice(&self.package_id);
@@ -235,7 +271,7 @@ impl PartHeader {
         }
         let major = u16_at(bytes, 8, "part major version")?;
         let minor = u16_at(bytes, 10, "part minor version")?;
-        if major != FORMAT_MAJOR || minor != FORMAT_MINOR {
+        if !matches!(major, 1 | 2) || minor != FORMAT_MINOR {
             return Err(CryptoError::UnsupportedVersion {
                 format: FormatKind::Part,
                 major,
@@ -265,6 +301,7 @@ impl PartHeader {
             });
         }
         let header = Self {
+            format_major: major,
             package_id: array_at(bytes, 16, "part package ID")?,
             part_instance_id: PartInstanceId(array_at(bytes, 32, "part instance ID")?),
             part_index: u32_at(bytes, 48, "part index")?,
@@ -355,6 +392,7 @@ pub fn encrypt_part_cancellable(
     encoded_hasher.update(&header_bytes);
     let mut remaining = header.plaintext_length;
 
+    let mut buffer = Zeroizing::new(Vec::with_capacity(header.frame_plaintext_max as usize));
     for frame_index in 0..header.frame_count {
         if cancelled() {
             return Err(CryptoError::Cancelled);
@@ -365,7 +403,7 @@ pub fn encrypt_part_cancellable(
             usize::try_from(plaintext_length).map_err(|_| CryptoError::ArithmeticOverflow {
                 field: "frame allocation length",
             })?;
-        let mut buffer = Zeroizing::new(vec![0_u8; allocation_length]);
+        buffer.resize(allocation_length, 0);
         read_exact(source, &mut buffer, "part plaintext frame")?;
         if cancelled() {
             return Err(CryptoError::Cancelled);
@@ -554,13 +592,19 @@ fn expected_frame_length(
     remaining: u64,
     is_final: bool,
 ) -> Result<u32, CryptoError> {
+    let frame_max = header.frame_plaintext_max
+        - if header.format_major == 2 && remaining == header.plaintext_length {
+            PART_HEADER_LENGTH as u32
+        } else {
+            0
+        };
     if !is_final {
-        if remaining < u64::from(header.frame_plaintext_max) {
+        if remaining < u64::from(frame_max) {
             return Err(CryptoError::InvalidLayout {
                 violation: LayoutViolation::InvalidFrameLength,
             });
         }
-        return Ok(header.frame_plaintext_max);
+        return Ok(frame_max);
     }
     u32::try_from(remaining).map_err(|_| CryptoError::ArithmeticOverflow {
         field: "final frame length",
@@ -697,6 +741,76 @@ mod tests {
             panic!("test encryption failed: {error}");
         }
         encoded
+    }
+
+    #[test]
+    fn aligned_frames_match_upload_boundaries_and_preserve_legacy_reader() {
+        for length in [0, 1, 524_160, 524_161, 1_048_416, 1_048_417, 2_000_000] {
+            let data = vec![0x5a; length];
+            let header = PartHeader::new(
+                [7; 16],
+                PartInstanceId([8; 16]),
+                0,
+                1,
+                length as u64,
+                0,
+                length as u64,
+                8 * 1024 * 1024,
+                PartLimits::default(),
+            )
+            .expect("header")
+            .aligned(PartLimits::default())
+            .expect("aligned");
+            let mut encoded = Vec::new();
+            let key = FileKey::from_bytes([9; 32]);
+            encrypt_part(
+                &mut Cursor::new(&data),
+                &mut encoded,
+                &header,
+                &key,
+                PartLimits::default(),
+                &mut AeadUsageRegistry::new(),
+            )
+            .expect("encrypt");
+            assert_eq!(&encoded[8..12], &[0, 2, 0, 0]);
+            for index in 0..header.frame_count {
+                let offset = if index == 0 {
+                    96
+                } else {
+                    index as usize * 512 * 1024
+                };
+                assert_eq!(
+                    u32::from_be_bytes(encoded[offset..offset + 4].try_into().expect("index")),
+                    index
+                );
+                let payload =
+                    u32::from_be_bytes(encoded[offset + 4..offset + 8].try_into().expect("length"))
+                        as usize;
+                if index + 1 < header.frame_count {
+                    assert_eq!(offset + 32 + payload, (index as usize + 1) * 512 * 1024);
+                }
+            }
+            let mut clear = Vec::new();
+            decrypt_part(
+                &mut Cursor::new(&encoded),
+                &mut clear,
+                &key,
+                PartLimits::default(),
+            )
+            .expect("decrypt v2");
+            assert_eq!(clear, data);
+            let mut corrupt = encoded.clone();
+            corrupt[8..10].copy_from_slice(&1u16.to_be_bytes());
+            assert!(
+                decrypt_part(
+                    &mut Cursor::new(corrupt),
+                    &mut Vec::new(),
+                    &key,
+                    PartLimits::default()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
