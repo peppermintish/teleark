@@ -10,7 +10,7 @@ The cooperative generic engine advances through bounded steps. Its scheduler req
 
 ## Connected native downloads
 
-Managed destination allocation checks both the filesystem and the indexed native-history destination column, across all task states and accounts. A deleted output does not free its historical path; a fresh download receives a numbered path and a new task while preserving prior history. Allocation is bounded to 10,000 candidates and fails closed on storage errors. This is candidate selection, not an atomic reservation; insertion constraints and final no-overwrite publication still reject concurrent collisions.
+Managed destination allocation checks both the filesystem and the indexed native-history destination column, across all task states and accounts. A deleted output does not free its historical path; a fresh download receives a numbered path and a new task while preserving prior history. Allocation is bounded to 10,000 candidates and fails closed on storage errors. Managed allocation atomically creates an empty `<destination>.partial` reservation shared by native and encrypted owners; insertion constraints and final no-overwrite publication also reject concurrent collisions.
 
 Requests carry positive account/chat/message identity and a runtime-allocated non-overwriting destination under managed Downloads. The adapter validates the actual account and refetches source identity before transport. Schema 9 records account scope; [Data model](DATA_MODEL.md) specifies one-time legacy attribution. Unknown/other-account work cannot enqueue, resume or retry. Switching pauses eligible work, waits up to 30 seconds for retained workers to release requests/partials, then signs out; failure leaves a visible error rather than switching under active work.
 
@@ -19,6 +19,21 @@ Native states are Queued, Running, Paused, Completed, Failed and Cancelled. Resu
 The adapter fills 1 MiB logical parts using hard-limit-compatible 512 KiB Telegram requests and writes out of order at explicit offsets. A private sibling partial and `TARKDPM1` bitmap record completed ranges. The exact format remains [ADR 0009](adr/0009-transfer-part-map-and-session-log.md): big-endian magic/header, fixed logical part size, total length, part count, bitmap length and valid trailing bits. Reject malformed/inconsistent/trailing data; never infer completion from a sparse file's length.
 
 Pause/interruption and retryable failures retain only a valid partial/bitmap pair with completed data. Zero-progress, corrupt, incomplete, nonretryable and cancelled artifacts are removed. Completion requires every bit, exact expected byte length, flush/sync and atomic no-replace publication. Native verification is byte-count/finalization safety, not cryptographic content authentication.
+
+Successful native publication also releases its empty `<destination>.partial`
+reservation before reporting Completed. The native transport's hidden partial and
+bitmap remain separate from this admission marker. Cleanup checks for a regular,
+zero-length marker and a regular final output matching the task's expected size;
+nonempty encrypted partials, symlinks, missing/changed outputs and recoverable
+native work stay intact. Deletion synchronizes the parent directory. Cleanup errors
+are logged without invalidating the completed user file. At startup, a retained
+reservation-cleanup worker retries markers from up to 10,000 restored completed
+records, independently of startup, SQL, new downloads and explicit cancellation
+cleanup; it does not scan user directories, redownload files or run a recurring
+sweep. Omitted historical records are outside this maintenance pass. A cancel
+arriving during completion cleanup keeps its cancelled outcome instead of being
+overwritten by a late Completed callback. Persistent schemas and partial codecs
+are unchanged.
 
 History persists task/batch identity, original message metadata, progress/timing, attempts, verification and structured failure. A batch inserts its header and all children atomically. Startup normalizes interrupted Running rows to Queued, then schedules eligible account work only after account entry/source refresh. Terminal task deletion requires confirmation and removes owned history/log/partial/bitmap artifacts, never a completed user file. Bulk commands have a retained cancellable owner and surface partial failures.
 

@@ -1,5 +1,28 @@
 # Implementation status — v0.4.4
 
+## Completed download reservation cleanup (2026-09-15)
+
+Native downloads now remove the empty `.partial` destination reservation after
+publishing their final output. Previously native transport cleaned its separate
+hidden partial/bitmap but left the allocation marker behind. Only regular empty
+markers with present, regular outputs of the expected size are eligible; nonempty
+partials, symlinks and incomplete/recoverable files remain untouched. Completion
+cleanup stays on the download worker, outside snapshot locks. Cleanup failures
+retain the successful user file and are retried against restored completed history
+by a retained reservation-cleanup worker at startup. The pass covers up to 10,000
+restored completed records independently of startup, SQL, new downloads and explicit
+cancellation cleanup, without directory walks or periodic polling. Late completion
+callbacks cannot overwrite cancellation received during filesystem cleanup.
+Paused tasks retain their reservation and resume data. No schema or codec changes.
+
+Validation: 260 Runtime, 79 Telegram and 59 Transfer tests passed (398 total; five
+existing manual/performance probes ignored). Regressions use real temporary files,
+the managed destination allocator, fake transport, injected cleanup failure and
+controlled blocking. They cover publication cleanup, restart repair without
+redownload, preservation of paused recovery/outputs/symlinks, worker isolation and
+late cancellation. Formatting, affected-crate strict Clippy and the debug app build
+passed. No live Telegram download or cleanup of the user's existing files was run.
+
 ## Sync-status and unified activity history (2026-09-15)
 
 The lower-left synchronization status is clickable again in the authorized, unlocked

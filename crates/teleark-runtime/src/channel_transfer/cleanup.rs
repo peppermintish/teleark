@@ -19,6 +19,7 @@ pub struct ChannelDownloadCleanup {
 }
 
 pub(super) struct CleanupContext {
+    pub completed_reservations: Vec<(u64, PathBuf, u64)>,
     pub backend: Arc<dyn ChannelDownloadBackend>,
     pub snapshots: Arc<TransferSnapshots<ChannelDownloadSnapshot>>,
     pub controls: Arc<Mutex<BTreeMap<u64, Arc<AtomicU8>>>>,
@@ -45,6 +46,7 @@ pub(super) struct CleanupOwner {
     sender: mpsc::SyncSender<Command>,
     _control: JoinHandle<()>,
     _worker: JoinHandle<()>,
+    _reservation_worker: Option<JoinHandle<()>>,
 }
 
 fn persistence(_: impl std::fmt::Debug) -> ApplicationError {
@@ -61,7 +63,7 @@ fn cleanup_io(error: std::io::Error) -> ApplicationError {
     })
 }
 
-fn sync_cleanup_directory(destination: &Path) -> Result<(), ApplicationError> {
+pub(super) fn sync_cleanup_directory(destination: &Path) -> Result<(), ApplicationError> {
     let mut parent = destination.parent().ok_or_else(conflict)?;
     loop {
         // A user may have removed the entire output directory while the app
@@ -78,13 +80,40 @@ fn sync_cleanup_directory(destination: &Path) -> Result<(), ApplicationError> {
 }
 
 impl CleanupOwner {
-    pub fn start(context: CleanupContext) -> Result<Self, ApplicationError> {
+    pub fn start(mut context: CleanupContext) -> Result<Self, ApplicationError> {
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_DOWNLOAD_QUEUE_CAPACITY);
         let (work_sender, work_receiver) = mpsc::sync_channel::<Work>(1);
         let completion = sender.clone();
         let backend = context.backend.clone();
         let scheduled = context.scheduled.clone();
         let shutdown = context.shutdown.clone();
+        let completed_reservations = std::mem::take(&mut context.completed_reservations);
+        let reservation_worker = if completed_reservations.is_empty() {
+            None
+        } else {
+            let backend = backend.clone();
+            let shutdown = shutdown.clone();
+            Some(
+                thread::Builder::new()
+                    .name("teleark-download-reservations".into())
+                    .spawn(move || {
+                        // A slow legacy output volume must not stall startup, SQL,
+                        // current downloads, or explicit cancellation cleanup.
+                        for (id, destination, expected_bytes) in completed_reservations {
+                            if shutdown.load(Ordering::Acquire) {
+                                return;
+                            }
+                            release_completed_reservation(
+                                backend.as_ref(),
+                                id,
+                                &destination,
+                                expected_bytes,
+                            );
+                        }
+                    })
+                    .map_err(persistence)?,
+            )
+        };
         let worker = thread::Builder::new()
             .name("teleark-download-cleanup-files".into())
             .spawn(move || {
@@ -166,6 +195,7 @@ impl CleanupOwner {
             sender,
             _control: control,
             _worker: worker,
+            _reservation_worker: reservation_worker,
         })
     }
 

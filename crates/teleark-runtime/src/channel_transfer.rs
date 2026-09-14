@@ -34,6 +34,7 @@ use crate::{
 };
 
 mod cleanup;
+mod reservation;
 pub use cleanup::{ChannelDownloadCleanup, ChannelDownloadCleanupPhase};
 mod history_retention;
 use history_retention::{HistoryRetention, bound_lifecycle, compact_idle_replays};
@@ -304,6 +305,14 @@ trait ChannelDownloadBackend: Send + Sync + 'static {
         destination: &Path,
         observer: Arc<dyn DownloadObserver>,
     ) -> Result<(), ApplicationError>;
+
+    fn release_completed_reservation(
+        &self,
+        destination: &Path,
+        expected_bytes: u64,
+    ) -> Result<(), ApplicationError> {
+        reservation::release_completed(destination, expected_bytes)
+    }
 
     fn discard_partial(&self, _destination: &Path) -> Result<(), ApplicationError> {
         Ok(())
@@ -650,9 +659,19 @@ impl DesktopTransfers {
         );
         let transfer_log_directory = library.managed_directories()?.logs.join("Transfers");
         let mut snapshots = Vec::with_capacity(restored.len());
+        let mut completed_reservations = Vec::new();
         let mut controls = BTreeMap::new();
         for record in restored {
             let mut snapshot = snapshot_from_record(record);
+            if snapshot.state == ChannelDownloadState::Completed
+                && completed_reservations.len() < teleark_storage::NATIVE_DOWNLOAD_HISTORY_LIMIT
+            {
+                completed_reservations.push((
+                    snapshot.id,
+                    snapshot.destination.clone(),
+                    snapshot.size_bytes,
+                ));
+            }
             let session_log_path =
                 transfer_log_directory.join(format!("native-download-{}.jsonl", snapshot.id));
             if session_log_path.is_file() {
@@ -719,6 +738,7 @@ impl DesktopTransfers {
             })
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))?;
         let cleanup_owner = cleanup::CleanupOwner::start(cleanup::CleanupContext {
+            completed_reservations,
             backend: backend.clone(),
             snapshots: snapshots.clone(),
             controls: controls.clone(),
@@ -1971,14 +1991,28 @@ fn complete_download(
     finished_at_unix_ms: Option<i64>,
 ) {
     let DownloadRetirementOwner {
+        backend,
         state,
         control,
         library,
         snapshot,
-        ..
     } = owner;
+    // Native transport publishes its own hidden partial. The separate, shared
+    // destination reservation is no longer needed once the output is complete.
+    // Keep this filesystem work outside the retirement lock and before Completed.
+    release_completed_reservation(
+        backend,
+        snapshot.id,
+        &snapshot.destination,
+        snapshot.size_bytes,
+    );
     let average_bytes_per_second = average_rate(snapshot.size_bytes, duration_ms);
     let completed = state.retire(control, snapshot.id, |current| {
+        // Cancellation can arrive while the final reservation cleanup waits on
+        // the filesystem. Its owner has already projected/persisted that intent.
+        if control.load(Ordering::Acquire) == CONTROL_CANCELLED {
+            return;
+        }
         current.state = ChannelDownloadState::Completed;
         current.verification = ChannelDownloadVerification::SizeChecked;
         current.transferred_bytes = current.size_bytes;
@@ -1995,9 +2029,11 @@ fn complete_download(
             failure_kind: None,
         });
     });
-    if let Some(completed) = completed
-        && let Err(error) = persist_snapshot(library, &completed)
-    {
+    let Some(completed) = completed.filter(|row| row.state == ChannelDownloadState::Completed)
+    else {
+        return;
+    };
+    if let Err(error) = persist_snapshot(library, &completed) {
         tracing::error!(
             event = "transfer.download.completion_checkpoint_failed",
             task_id = snapshot.id,
@@ -2017,6 +2053,24 @@ fn complete_download(
         verification = "telegram_declared_size",
         "native Telegram download completed"
     );
+}
+
+fn release_completed_reservation(
+    backend: &dyn ChannelDownloadBackend,
+    id: u64,
+    destination: &Path,
+    expected_bytes: u64,
+) {
+    if let Err(error) = backend.release_completed_reservation(destination, expected_bytes) {
+        // A cleanup error cannot invalidate the published user file. Restored
+        // completed history retries this maintenance on the next startup.
+        tracing::warn!(
+            event = "transfer.download.completed_reservation_cleanup_failed",
+            task_id = id,
+            error_kind = ?error.kind(),
+            "completed download reservation cleanup will be retried at startup"
+        );
+    }
 }
 
 struct DownloadRetirementOwner<'a> {
@@ -2594,8 +2648,12 @@ mod tests {
     #[test]
     fn real_worker_publishes_live_progress_and_persistent_completion() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let destination = directory.path().join("archive.zip");
         let library = library(&directory);
+        let destination = library
+            .next_download_destination("archive.zip")
+            .expect("reserved output");
+        let reservation = destination.with_file_name("archive.zip.partial");
+        assert_eq!(fs::metadata(&reservation).expect("reservation").len(), 0);
         let backend = Arc::new(FakeBackend {
             outcome: Ok(()),
             calls: StdMutex::new(Vec::new()),
@@ -2606,6 +2664,10 @@ mod tests {
             .expect("enqueue");
         let snapshot = wait_for_terminal(&transfers, id);
         assert_eq!(snapshot.state, ChannelDownloadState::Completed);
+        assert!(
+            !reservation.exists(),
+            "completed native output releases its admission marker"
+        );
         assert_eq!(snapshot.transferred_bytes, 14);
         assert_eq!(
             snapshot.verification,
@@ -2628,6 +2690,273 @@ mod tests {
         assert_eq!(restored[0].id, id);
         assert_eq!(restored[0].state, ChannelDownloadState::Completed);
         assert_eq!(restored[0].transferred_bytes, 14);
+    }
+
+    #[test]
+    fn completed_reservation_cleanup_failure_preserves_output_and_retries_at_startup() {
+        struct CleanupBackend {
+            download: FakeBackend,
+            attempts: AtomicUsize,
+            repaired: mpsc::SyncSender<()>,
+        }
+        impl ChannelDownloadBackend for CleanupBackend {
+            fn download(
+                &self,
+                account: Option<i64>,
+                chat: i64,
+                message: i64,
+                destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                self.download
+                    .download(account, chat, message, destination, observer)
+            }
+            fn release_completed_reservation(
+                &self,
+                destination: &Path,
+                bytes: u64,
+            ) -> Result<(), ApplicationError> {
+                if self.attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    return Err(ApplicationError::new(
+                        ApplicationErrorKind::PermissionDenied,
+                    ));
+                }
+                reservation::release_completed(destination, bytes)?;
+                self.repaired.send(()).expect("repair notification");
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().expect("fixture");
+        let library = library(&root);
+        let destination = library
+            .next_download_destination("archive.zip")
+            .expect("output");
+        let marker = destination.with_file_name("archive.zip.partial");
+        let (repaired, repair) = mpsc::sync_channel(1);
+        let backend = Arc::new(CleanupBackend {
+            download: FakeBackend {
+                outcome: Ok(()),
+                calls: StdMutex::new(Vec::new()),
+            },
+            attempts: AtomicUsize::new(0),
+            repaired,
+        });
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("enqueue");
+        assert_eq!(
+            wait_for_terminal(&transfers, id).state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(
+            fs::read(&destination).expect("published output"),
+            b"telegram bytes"
+        );
+        assert!(
+            marker.exists(),
+            "injected cleanup failure retains the marker"
+        );
+        drop(transfers);
+        let restored = DesktopTransfers::with_backend(backend.clone(), library).expect("restart");
+        repair
+            .recv_timeout(Duration::from_secs(5))
+            .expect("startup repair");
+        assert!(!marker.exists());
+        assert_eq!(
+            fs::read(&destination).expect("preserved output"),
+            b"telegram bytes"
+        );
+        assert_eq!(
+            restored.snapshots().expect("history")[0].state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(
+            backend.download.calls.lock().expect("calls").len(),
+            1,
+            "repair does not redownload"
+        );
+    }
+
+    #[test]
+    fn blocked_startup_reservation_cleanup_does_not_block_new_downloads() {
+        struct BlockingCleanup {
+            download: FakeBackend,
+            old_output: PathBuf,
+            entered: mpsc::SyncSender<()>,
+            release: StdMutex<mpsc::Receiver<()>>,
+            repaired: mpsc::SyncSender<()>,
+        }
+        impl ChannelDownloadBackend for BlockingCleanup {
+            fn download(
+                &self,
+                account: Option<i64>,
+                chat: i64,
+                message: i64,
+                destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                if destination
+                    .file_name()
+                    .is_some_and(|name| name == "cancel.zip")
+                {
+                    self.entered.send(()).expect("cancellable transfer entered");
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while observer.control() == DownloadControl::Continue {
+                        assert!(Instant::now() < deadline, "cancel must signal the writer");
+                        thread::yield_now();
+                    }
+                    return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                }
+                self.download
+                    .download(account, chat, message, destination, observer)
+            }
+            fn release_completed_reservation(
+                &self,
+                destination: &Path,
+                bytes: u64,
+            ) -> Result<(), ApplicationError> {
+                let blocked = destination == self.old_output
+                    || destination
+                        .file_name()
+                        .is_some_and(|name| name == "late.zip");
+                if blocked {
+                    self.entered.send(()).expect("entered");
+                    self.release
+                        .lock()
+                        .expect("gate")
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("released");
+                }
+                reservation::release_completed(destination, bytes)?;
+                if blocked {
+                    self.repaired.send(()).expect("repaired");
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().expect("fixture");
+        let library = library(&root);
+        let old_output = library
+            .next_download_destination("old.zip")
+            .expect("old output");
+        let marker = old_output.with_file_name("old.zip.partial");
+        let transfers = test_transfers(
+            Arc::new(FakeBackend {
+                outcome: Ok(()),
+                calls: StdMutex::new(Vec::new()),
+            }),
+            library.clone(),
+        )
+        .expect("worker");
+        let id = transfers
+            .enqueue_channel_download(request(old_output.clone()))
+            .expect("enqueue");
+        wait_for_terminal(&transfers, id);
+        drop(transfers);
+        fs::write(&marker, b"").expect("legacy empty reservation");
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let (repaired, repair) = mpsc::sync_channel(1);
+        let transfers = test_transfers(
+            Arc::new(BlockingCleanup {
+                download: FakeBackend {
+                    outcome: Ok(()),
+                    calls: StdMutex::new(Vec::new()),
+                },
+                old_output: old_output.clone(),
+                entered,
+                release: StdMutex::new(gate),
+                repaired,
+            }),
+            library.clone(),
+        )
+        .expect("startup does not wait for filesystem repair");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("repair entered");
+        let new_output = library
+            .next_download_destination("new.zip")
+            .expect("new output");
+        let id = transfers
+            .enqueue_channel_download(request(new_output.clone()))
+            .expect("new task");
+        assert_eq!(
+            wait_for_terminal(&transfers, id).state,
+            ChannelDownloadState::Completed
+        );
+        assert_eq!(
+            fs::read(new_output).expect("independent output"),
+            b"telegram bytes"
+        );
+        assert!(marker.exists(), "old filesystem operation is still blocked");
+        let cancel_output = library
+            .next_download_destination("cancel.zip")
+            .expect("cancel output");
+        let cancel_id = transfers
+            .enqueue_channel_download(request(cancel_output))
+            .expect("cancellable task");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancellable transfer entered");
+        transfers
+            .cancel(cancel_id)
+            .expect("cancellation cleanup is independent of legacy repair");
+        assert_eq!(
+            transfers.snapshot_state(cancel_id).expect("cancelled"),
+            ChannelDownloadState::Cancelled
+        );
+        assert!(
+            marker.exists(),
+            "legacy repair remains blocked after cancellation finishes"
+        );
+        release.send(()).expect("release repair");
+        repair
+            .recv_timeout(Duration::from_secs(5))
+            .expect("repair finishes");
+        assert!(!marker.exists());
+        assert_eq!(fs::read(old_output).expect("old output"), b"telegram bytes");
+
+        let late_output = library
+            .next_download_destination("late.zip")
+            .expect("late output");
+        let id = transfers
+            .enqueue_channel_download(request(late_output.clone()))
+            .expect("late task");
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("completion cleanup entered");
+        let cancelling = transfers.clone();
+        let cancel = thread::spawn(move || cancelling.cancel(id));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while transfers.snapshot_state(id).expect("state") != ChannelDownloadState::Cancelled {
+            assert!(
+                Instant::now() < deadline,
+                "cancel intent must precede filesystem settlement"
+            );
+            thread::yield_now();
+        }
+        release.send(()).expect("release completion cleanup");
+        repair
+            .recv_timeout(Duration::from_secs(5))
+            .expect("completion cleanup finishes");
+        cancel
+            .join()
+            .expect("cancel owner")
+            .expect("cancel settled");
+        let cancelled = wait_for_terminal(&transfers, id);
+        assert_eq!(cancelled.state, ChannelDownloadState::Cancelled);
+        assert!(
+            !cancelled
+                .events
+                .iter()
+                .any(|event| event.kind == ChannelDownloadEventKind::Completed),
+            "late completion must not overwrite cancellation"
+        );
+        assert_eq!(
+            fs::read(late_output).expect("published file survives cancellation"),
+            b"telegram bytes"
+        );
     }
 
     #[test]
@@ -3164,7 +3493,10 @@ mod tests {
             discarded: AtomicUsize::new(0),
         });
         let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
-        let destination = directory.path().join("retained.zip");
+        let destination = library
+            .next_download_destination("retained.zip")
+            .expect("reserved output");
+        let marker = destination.with_file_name("retained.zip.partial");
         let id = transfers
             .enqueue_channel_download(request(destination.clone()))
             .expect("enqueue");
@@ -3193,6 +3525,12 @@ mod tests {
         );
         drop(transfers);
         let restarted = test_transfers(backend, library).expect("restart");
+        assert_eq!(
+            fs::metadata(&marker)
+                .expect("paused reservation survives restart")
+                .len(),
+            0
+        );
         restarted.activate_pending_downloads().expect("scheduler");
         assert_eq!(
             restarted.snapshot_state(id).expect("saved pause"),
