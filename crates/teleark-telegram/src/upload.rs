@@ -198,13 +198,11 @@ impl TelegramConnection {
             },
         )
         .await?;
+        if let Some(observer) = &options.observer {
+            observer.observe(ByteTransferEvent::WaitingForSeal);
+        }
         // The producer must close only after source validation and durable spool sealing.
-        if stream.blocks.recv().await.is_some() {
-            return Err(TelegramError::new(TelegramErrorKind::SourceMissing));
-        }
-        if stream.sealed.await != Ok(true) {
-            return Err(TelegramError::new(TelegramErrorKind::SourceMissing));
-        }
+        finish_stream(&mut stream).await?;
         if let Some(observer) = &options.observer {
             observer.observe(ByteTransferEvent::SendingMessage);
         }
@@ -249,6 +247,13 @@ impl TelegramConnection {
     }
 }
 
+async fn finish_stream(stream: &mut UploadStream) -> Result<(), TelegramError> {
+    if stream.blocks.recv().await.is_some() || (&mut stream.sealed).await != Ok(true) {
+        return Err(TelegramError::new(TelegramErrorKind::SourceMissing));
+    }
+    Ok(())
+}
+
 fn missing_temporary_parts(error: &InvocationError) -> bool {
     matches!(error,InvocationError::Rpc(rpc) if rpc.code==400 &&
         (matches!(rpc.name.as_str(),"FILE_PART_MISSING"|"FILE_PARTS_INVALID"|"FILE_ID_INVALID") ||
@@ -279,7 +284,28 @@ where
         })
         .sum::<u64>();
     let mut dirty = 0;
+    if let Some(observer) = observer {
+        observer.observe(ByteTransferEvent::UploadPlan {
+            parts: count as u32,
+            total: stream.total_bytes,
+        });
+        for (index, done) in stream.checkpoint.acknowledged.iter().enumerate() {
+            if *done {
+                observer.observe(ByteTransferEvent::PartAcknowledged {
+                    index: index as u32,
+                    bytes: acknowledged_bytes,
+                    total: stream.total_bytes,
+                });
+            }
+        }
+    }
     loop {
+        if let Some(observer) = observer {
+            observer.observe(ByteTransferEvent::UploadQueue {
+                queued: stream.blocks.len() as u16,
+                active: inflight.len() as u16,
+            });
+        }
         if received == count && inflight.is_empty() {
             break;
         }
@@ -290,14 +316,16 @@ where
                     .map_err(|_| TelegramError::new(TelegramErrorKind::Network))??;
                 stream.checkpoint.acknowledged[index] = true;
                 acknowledged_bytes += bytes.len() as u64;
-                if let Some(observer) = observer { observer.observe(ByteTransferEvent::Uploading {bytes:acknowledged_bytes,total:stream.total_bytes}); }
+                if let Some(observer) = observer { observer.observe(ByteTransferEvent::PartAcknowledged {index:index as u32,bytes:acknowledged_bytes,total:stream.total_bytes}); }
                 let _ = stream.recycled.try_send(bytes);
                 dirty += 1;
                 if dirty >= 8 || acknowledged_bytes == stream.total_bytes {
+                    if let Some(observer) = observer { observer.observe(ByteTransferEvent::SavingCheckpoint); }
                     let checkpoint = stream.checkpoint.clone(); let path = stream.checkpoint_path.clone();
                     tokio::task::spawn_blocking(move || checkpoint.save(&path)).await
                         .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?.map_err(map_io)?;
                     dirty = 0;
+                    if let Some(observer) = observer { observer.observe(ByteTransferEvent::CheckpointSaved); }
                 }
             }
             bytes = stream.blocks.recv(), if received < count && inflight.len() < usize::from(parallel) => {
@@ -380,6 +408,129 @@ mod tests {
             )
             .expect("valid");
             assert!(saved.acknowledged.iter().all(|done| *done));
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_part_does_not_stop_other_parts_and_unsealed_source_never_publishes() {
+        let directory = tempfile::tempdir().expect("spool");
+        let (sender, blocks) = mpsc::channel(2);
+        let (recycled, _) = mpsc::channel(4);
+        let (seal, sealed) = tokio::sync::oneshot::channel();
+        let checkpoint =
+            UploadCheckpoint::new(5 * UPLOAD_PART_BYTES as u64, 100).expect("identity");
+        let mut stream = UploadStream {
+            total_bytes: checkpoint.total_bytes,
+            blocks,
+            recycled,
+            sealed,
+            checkpoint,
+            checkpoint_path: directory.path().join("upload"),
+        };
+        let producer = tokio::spawn(async move {
+            for _ in 0..5 {
+                sender.send(vec![1; UPLOAD_PART_BYTES]).await.expect("send");
+            }
+            let _ = seal.send(false);
+        });
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            save_parts(&mut stream, 2, None, |index, bytes| {
+                let completed = completed.clone();
+                let release = release.clone();
+                async move {
+                    if index == 0 {
+                        release.notified().await;
+                        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 4);
+                    } else if completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 3 {
+                        release.notify_one();
+                    }
+                    Ok((index, bytes))
+                }
+            }),
+        )
+        .await
+        .expect("healthy parts must run while first part blocks")
+        .expect("saved");
+        producer.await.expect("producer");
+        assert!(
+            finish_stream(&mut stream).await.is_err(),
+            "all RPC acknowledgements still cannot publish unsealed ciphertext"
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_part_failure_cancels_retained_inflight_work() {
+        struct Active(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Active {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let directory = tempfile::tempdir().expect("spool");
+        let (sender, blocks) = mpsc::channel(2);
+        let (recycled, _) = mpsc::channel(4);
+        let (_, sealed) = tokio::sync::oneshot::channel();
+        let checkpoint =
+            UploadCheckpoint::new(2 * UPLOAD_PART_BYTES as u64, 100).expect("identity");
+        let mut stream = UploadStream {
+            total_bytes: checkpoint.total_bytes,
+            blocks,
+            recycled,
+            sealed,
+            checkpoint,
+            checkpoint_path: directory.path().join("upload"),
+        };
+        for _ in 0..2 {
+            sender.send(vec![1; UPLOAD_PART_BYTES]).await.expect("send");
+        }
+        drop(sender);
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let result = save_parts(&mut stream, 2, None, |index, _bytes| {
+            let active = active.clone();
+            let barrier = barrier.clone();
+            async move {
+                active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _guard = Active(active);
+                barrier.wait().await;
+                if index == 0 {
+                    std::future::pending::<()>().await;
+                }
+                Err(TelegramError::new(TelegramErrorKind::Authorization))
+            }
+        })
+        .await;
+        assert_eq!(
+            result.expect_err("fatal").kind(),
+            TelegramErrorKind::Authorization
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no detached part task"
+        );
+    }
+
+    #[test]
+    fn temporary_part_expiry_uses_structured_rpc_codes_only() {
+        for (code, name, expected) in [
+            (400, "FILE_PART_MISSING", true),
+            (400, "FILE_PART_9_MISSING", true),
+            (400, "FILE_ID_INVALID", true),
+            (401, "FILE_PART_MISSING", false),
+            (400, "RANDOM_ID_DUPLICATE", false),
+        ] {
+            let error = InvocationError::Rpc(grammers_mtsender::RpcError {
+                code,
+                name: name.into(),
+                value: None,
+                caused_by: None,
+            });
+            assert_eq!(missing_temporary_parts(&error), expected);
         }
     }
 

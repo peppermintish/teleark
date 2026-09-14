@@ -27,8 +27,9 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `upload_encrypt_metadata` | retained legacy boolean | `true` |
 | `upload_speed_limit_bytes_per_second` | unsigned 64-bit integer; `0` means unlimited | `0` |
 | `download_speed_limit_bytes_per_second` | unsigned 64-bit integer; `0` means unlimited | `0` |
-| `download_throughput_strategy` | `balanced` or `max_throughput` | `balanced` |
-| `transfer_soft_limit_policy` | `respect`, `adaptive_override`, or `ignore` | `adaptive_override` |
+| `download_throughput_strategy` | retained legacy: `balanced` or `max_throughput`; inactive | `balanced` |
+| `transfer_soft_limit_policy` | retained legacy: `respect`, `adaptive_override`, or `ignore`; inactive | `adaptive_override` |
+| `manual_transfer_v1` | nine comma-separated integers, order and bounds below | `3,10,2,2,4,3,8,2,4` |
 | `lock_vault_when_hidden` | boolean | `true` |
 | `index_batch_size` | `200`, `500`, or `1000` | `1000` |
 | `notify_download_completed` | boolean | `true` |
@@ -77,13 +78,9 @@ manifest metadata and use the runtime's conservative 60 MiB plaintext-part
 ceiling. Those protections are presented only in the TeleArk upload
 flow; Settings no longer exposes inactive controls that would imply otherwise.
 
-`transfer_soft_limit_policy` affects only official conservative guidance, never
-Telegram protocol limits or structured FloodWait deadlines. `respect` refuses
-to cross a known soft active-file limit, `adaptive_override` probes across it
-and keeps the change only when measured goodput justifies it, and `ignore`
-allows the normal probe order to cross it. Every conflict is a typed controller
-decision and a session-log event. Missing older values adopt the recommended
-`adaptive_override` default.
+The two legacy profile/advisory keys are retained and validated for compatibility,
+but no production transfer reads them to choose parameters. Settings exposes
+manual controls and the existing shared byte-per-second caps.
 
 The managed root is not a permission grant. The runtime creates only its
 `Downloads`, `Cache`, and `Logs` children, validates requested filenames, refuses path
@@ -92,16 +89,28 @@ instead of replacing an existing file. Candidates also skip destinations retaine
 the platform application-data directory so changing this preference cannot
 move files that are open by live workers.
 
-`download_throughput_strategy` is an additive v1 key, independent of the soft
-active-file policy. Missing legacy values retain Balanced (P4–24); older readers
-ignore the new key. Max Throughput starts native downloads at P4 (search range P1–64) and probes
-with one-second settling for strong gains and five-second confirmation otherwise:
-initial steps up to 16 shrink near a measured
-throughput/error boundary, down to one part. The preference is captured once
-when a native task starts/resumes/retries; it does not change an already running
-owner or the encrypted Vault pipeline. Unknown values fail as structured
-persistence errors. Tests cover literal legacy rows, invalid values, and a
-Max Throughput save/reopen round trip. See ADRs [0010](adr/0010-native-download-throughput-strategy.md) and [0011](adr/0011-adaptive-native-probe-refinement.md).
+`manual_transfer_v1` independently versions the manual parameter tuple. In order:
+
+| Parameter | Default | Inclusive bounds |
+| --- | ---: | ---: |
+| Upload files | 3 | 1–8 |
+| Concurrent 512 KiB upload parts per file | 10 | 2–64 |
+| Shared upload MTProto connections | 2 | 1–8 |
+| Ready ciphertext queue blocks per file | 2 | 1–16 |
+| Upload part attempts, including the first | 4 | 1–10 |
+| Download files, shared by native/Vault owners | 3 | 1–8 |
+| Concurrent download logical parts per file | 8 | 1–64 |
+| Shared download MTProto connections | 2 | 1–8 |
+| Download part attempts, including the first | 4 | 1–10 |
+
+Missing tuples automatically adopt these defaults, including skipped upgrades;
+existing keys and encrypted bytes are not reinterpreted. All nine values validate
+and save transactionally. Malformed tuples remain intact and fail loading. A new
+incompatible tuple needs a new versioned key and migration. Running part pipelines
+capture their settings at admission; a changed download file limit wakes pending
+owners and limits new admissions without cancelling existing work. Upload window
+admission captures the selected file limit. Server deadlines and fixed protocol
+framing are constraints, not automatically tuned user parameters.
 
 `channel_sidebar_width` is an additive version-1 setting. Older databases use
 208 without rewriting existing values; older readers ignore the new suffix.

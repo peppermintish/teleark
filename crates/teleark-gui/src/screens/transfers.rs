@@ -37,6 +37,7 @@ use crate::{
 mod batch_style;
 mod batch_window;
 mod projection;
+mod upload_activity;
 #[cfg(test)]
 use crate::mock::transfers;
 use batch_style::BatchRowPosition;
@@ -149,6 +150,64 @@ impl TeleArkApp {
         self.expanded_transfer_batches.insert(vault_batch_key(80));
         self.page = crate::app::Page::Transfers;
         self.nav_selection = "nav-uploads";
+    }
+
+    pub(crate) fn preview_upload_pipeline(&mut self) {
+        self.preview_upload_history();
+        let mut snapshot = (*self.vault_transfer_view.items[1]).clone();
+        snapshot.state = VaultTransferState::Running;
+        snapshot.restored = false;
+        snapshot.telemetry.parameters = TransferControlParameters {
+            transfer_connection_count: 2,
+            inflight_rpcs_per_connection: 15,
+            active_file_count: 3,
+            inflight_parts_per_file: 10,
+            encryption_worker_count: 1,
+            encrypted_part_queue_depth: 2,
+        };
+        let mut activity = VaultUploadActivity::new(VaultUploadPhase::Uploading);
+        activity.started = std::time::Instant::now() - std::time::Duration::from_secs(8);
+        activity.last_activity = std::time::Instant::now();
+        activity.queued = 2;
+        activity.active = 10;
+        activity.bytes = 20 * 512 * 1024;
+        activity.total = 60 * 1024 * 1024;
+        activity.uploaded_bytes = 70 * 1024 * 1024;
+        activity.parts = (0..40)
+            .map(|index| teleark_runtime::VaultUploadPart {
+                state: if index < 20 {
+                    teleark_runtime::VaultUploadPartState::Acknowledged
+                } else if index < 30 {
+                    teleark_runtime::VaultUploadPartState::Uploading
+                } else {
+                    teleark_runtime::VaultUploadPartState::Queued
+                },
+                attempt: 1,
+            })
+            .collect();
+        activity.events = (0..40)
+            .map(|index| teleark_runtime::VaultUploadEvent {
+                at: activity.started + std::time::Duration::from_millis(index * 200),
+                phase: VaultUploadPhase::Uploading,
+                part: Some(index as u32 / 2),
+                acknowledged: index % 2 == 1,
+                attempt: 1,
+                wait_millis: 0,
+            })
+            .collect();
+        activity.samples = (1..=8)
+            .map(|index| teleark_runtime::VaultUploadSample {
+                elapsed_millis: index * 1000,
+                interval_millis: 1000,
+                bytes_per_second: (index % 3 + 1) * 512 * 1024,
+            })
+            .collect();
+        snapshot.upload_activity = Some(activity);
+        let row = self.transfer_row_from_vault_snapshot(&snapshot);
+        self.focused_transfer_key = Some(transfer_selection_key(&row, 0));
+        self.preview_transfer_rows = vec![row];
+        self.vault_transfer_view.items = vec![std::sync::Arc::new(snapshot)].into();
+        self.vault_transfer_view.omitted_items = 0;
     }
 
     pub(crate) fn preview_recovery_failure(&mut self) {
@@ -2780,7 +2839,7 @@ impl TeleArkApp {
                 }),
             ));
         }
-        if let Some(telemetry) = telemetry.as_ref() {
+        if let Some(telemetry) = telemetry.as_ref().filter(|_| !upload) {
             let parameters = telemetry.parameters;
             details.extend([
                 (
@@ -3190,6 +3249,14 @@ impl TeleArkApp {
                                 .child(div().text_color(theme::text_secondary()).child(guidance)),
                         )
                     })
+                    .when_some(
+                        vault_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.upload_activity.as_ref()),
+                        |details, activity| {
+                            details.child(self.render_upload_activity(activity, active, cx))
+                        },
+                    )
                     .children(
                         details
                             .into_iter()
@@ -3228,9 +3295,16 @@ impl TeleArkApp {
                                     .child(verification),
                             ),
                     )
-                    .when_some(telemetry, |details, telemetry| {
-                        details.child(self.render_transfer_telemetry(telemetry, active, cx))
-                    })
+                    .when_some(
+                        telemetry.filter(|_| {
+                            vault_snapshot.as_ref().is_none_or(|snapshot| {
+                                snapshot.direction != VaultTransferDirection::Upload
+                            })
+                        }),
+                        |details, telemetry| {
+                            details.child(self.render_transfer_telemetry(telemetry, active, cx))
+                        },
+                    )
                     .when_some(runtime_snapshot, |details, snapshot| {
                         let events = snapshot.events.iter().enumerate().map(|(index, event)| {
                             let label = self.tr(match event.kind {
@@ -3673,6 +3747,7 @@ fn transfer_state(state: ChannelDownloadState) -> TransferState {
 
 fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
     match phase {
+        VaultUploadPhase::RestartingUnsealed => "upload-phase-restarting-unsealed",
         VaultUploadPhase::RestartingExpired => "transfer-upload-restarting-expired",
         VaultUploadPhase::UpgradingUpload => "transfer-upload-upgrading",
         VaultUploadPhase::CheckingStorage => "transfer-upload-checking-storage",
@@ -3680,6 +3755,7 @@ fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
         VaultUploadPhase::CheckingSource => "transfer-upload-checking-source",
         VaultUploadPhase::SavingRecovery => "transfer-upload-saving-recovery",
         VaultUploadPhase::Preparing => "transfer-upload-reading-encrypting",
+        VaultUploadPhase::SealingSpool => "transfer-upload-sealing",
         VaultUploadPhase::WaitingForTelegram => "transfer-upload-waiting-telegram",
         VaultUploadPhase::Uploading => "transfer-upload-sending-bytes",
         VaultUploadPhase::SendingMessage => "transfer-upload-confirming-message",

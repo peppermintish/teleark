@@ -989,3 +989,317 @@ fn cancelled_upload_and_download_remain_terminal_after_restart() {
         );
     }
 }
+
+#[test]
+fn default_three_files_are_work_conserving_and_fresh_parts_have_no_readback() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, _library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let sources = (0..4)
+        .map(|index| {
+            let path = dir.path().join(format!("parallel-{index}.bin"));
+            std::fs::write(&path, vec![index as u8; 128 * 1024]).expect("source");
+            path
+        })
+        .collect();
+    let (entered, release) = remote.concurrent_upload_gate(4);
+    let work = vault.submit_upload_files(7, 11, sources).expect("batch");
+    for _ in 0..3 {
+        entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("three files enter transport before a completion");
+    }
+    assert!(entered.try_recv().is_err(), "fourth file stays queued");
+    release.send(()).expect("one finishes");
+    entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("fourth fills the free slot while two remain blocked");
+    for _ in 0..3 {
+        release.send(()).expect("finish");
+    }
+    assert_eq!(work.wait().expect("batch").completed_count, 4);
+    let summaries = remote.summaries();
+    assert!(
+        remote.downloads().iter().all(|id| summaries
+            .iter()
+            .find(|row| row.message_id == *id)
+            .is_some_and(|row| row.caption == crate::transfer::MANIFEST_CAPTION)),
+        "fresh content parts must never be read back"
+    );
+}
+
+#[test]
+fn lost_ciphertext_burns_identity_before_new_encryption_after_restart() {
+    upload_transport_restart_with_spool_loss(false, false);
+}
+
+#[test]
+fn unfinished_v1_upload_automatically_restarts_as_aligned_v2() {
+    upload_transport_restart_with_spool_loss(true, false);
+}
+
+#[test]
+fn unsealed_manifest_reservation_retires_file_key_before_any_new_encryption() {
+    upload_transport_restart_with_spool_loss(false, true);
+}
+
+fn upload_transport_restart_with_spool_loss(legacy: bool, unsealed: bool) {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let source = dir.path().join("lost-spool.bin");
+    let bytes = vec![33u8; 1024 * 1024];
+    std::fs::write(&source, &bytes).expect("source");
+    let (entered, release) = remote.gate(GateKind::UploadPart, 0);
+    let work = vault
+        .submit_upload_files(7, 11, vec![source])
+        .expect("batch");
+    entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("transport");
+    let id = vault
+        .transfers()
+        .iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("row")
+        .id;
+    vault
+        .submit_transfer_control(7, id, control::VaultUploadControl::Pause)
+        .expect("pause")
+        .wait()
+        .expect("saved pause");
+    release.send(()).expect("release");
+    assert_eq!(work.wait().expect("batch").paused_count, 1);
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let before = db.vault_parts(7, id, None, 1).expect("parts").remove(0);
+    let original = crate::VaultPartRecovery::decode(&before.identity).expect("identity");
+    let root = library
+        .database_path
+        .with_extension("upload-spool")
+        .join("7")
+        .join(id.to_string());
+    let prefix = crate::transfer::streaming::spool_prefix(&root, &before.identity);
+    std::fs::write(
+        prefix.with_extension("ciphertext"),
+        b"interrupted or corrupted ciphertext",
+    )
+    .expect("simulate loss");
+    drop(vault);
+    drop(library);
+    drop(db);
+    if legacy || unsealed {
+        // Persist the genuine historical v1 header geometry, without creating
+        // ciphertext. The new process must detect and upgrade this reservation.
+        let mut db = Database::open(dir.path().join("catalog.sqlite")).expect("database");
+        let record = db.vault_job(7, id).expect("job").expect("saved");
+        let mut lease = teleark_storage::VaultJobLease {
+            account_id: 7,
+            id,
+            generation: record.generation,
+        };
+        for (state, transition) in [
+            (
+                VaultJobState::Paused,
+                teleark_storage::VaultJobTransition::Resume,
+            ),
+            (
+                VaultJobState::Queued,
+                teleark_storage::VaultJobTransition::Start,
+            ),
+        ] {
+            assert!(
+                db.transition_vault_job(lease, state, transition, 1, None)
+                    .expect("transition")
+            );
+        }
+        lease.generation += 1;
+        if unsealed {
+            assert!(
+                db.reserve_vault_manifest(
+                    lease,
+                    &teleark_storage::VaultManifestOutbox {
+                        codec_version: 1,
+                        commitment: [77; 32],
+                        random_id: 817,
+                        envelope: None,
+                        message_id: None,
+                    }
+                )
+                .expect("unsealed commitment")
+            );
+        }
+        let mut historical = original.clone();
+        let header = &original.header;
+        historical.header = teleark_crypto::PartHeader::new(
+            header.package_id,
+            header.part_instance_id,
+            header.part_index,
+            header.part_count,
+            header.logical_file_size,
+            header.plaintext_offset,
+            header.plaintext_length,
+            8 * 1024 * 1024,
+            teleark_crypto::PartLimits::default(),
+        )
+        .expect("v1 header");
+        if legacy {
+            assert!(
+                db.replace_unpublished_vault_part(
+                    lease,
+                    before.part_index,
+                    &before.identity,
+                    &historical.encode().expect("codec"),
+                )
+                .expect("old reservation")
+            );
+        }
+        for (state, transition) in [
+            (
+                VaultJobState::Running,
+                teleark_storage::VaultJobTransition::RequestPause,
+            ),
+            (
+                VaultJobState::Pausing,
+                teleark_storage::VaultJobTransition::AcknowledgePause,
+            ),
+        ] {
+            assert!(
+                db.transition_vault_job(lease, state, transition, 1, None)
+                    .expect("transition")
+            );
+        }
+    }
+    let (vault, library) = open(dir.path(), &remote);
+    vault.unlock_with_password(PASSWORD.into()).expect("unlock");
+    let file = vault
+        .submit_resume_upload(7, id)
+        .expect("resume")
+        .wait()
+        .expect("completed");
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let after = db.vault_parts(7, id, None, 1).expect("parts").remove(0);
+    let replaced = crate::VaultPartRecovery::decode(&after.identity).expect("new identity");
+    assert_eq!(replaced.header.format_major, 2);
+    if legacy || unsealed {
+        assert_ne!(replaced.header.package_id, original.header.package_id);
+        let row = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("row");
+        assert!(
+            row.upload_activity
+                .as_ref()
+                .expect("activity")
+                .events
+                .iter()
+                .any(|event| event.phase
+                    == if unsealed {
+                        VaultUploadPhase::RestartingUnsealed
+                    } else {
+                        VaultUploadPhase::UpgradingUpload
+                    })
+        );
+    } else {
+        assert_eq!(replaced.header.package_id, original.header.package_id);
+        assert_eq!(
+            u128::from_be_bytes(original.header.part_instance_id.0).checked_add(1),
+            Some(u128::from_be_bytes(replaced.header.part_instance_id.0))
+        );
+    }
+    assert_ne!(
+        original.publication_random_id,
+        replaced.publication_random_id
+    );
+    assert!(after.receipt.is_some());
+    assert!(!prefix.with_extension("ciphertext").exists());
+    assert_eq!(remote.objects(), 2);
+    assert_eq!(file.logical_name, "lost-spool.bin");
+    let package = crate::transfer::package_id_from_bytes(
+        db.vault_job(7, id).expect("job").expect("saved").package_id,
+    )
+    .expect("package")
+    .get();
+    let output = vault.download_file(7, 11, package).expect("download");
+    assert_eq!(std::fs::read(output).expect("plaintext"), bytes);
+}
+
+#[test]
+fn restart_recovers_three_upload_files_concurrently() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let sources = (0..3)
+        .map(|index| {
+            let path = dir.path().join(format!("resume-{index}.bin"));
+            std::fs::write(&path, vec![index as u8; 1024]).expect("source");
+            path
+        })
+        .collect();
+    let (entered, release) = remote.concurrent_upload_gate(3);
+    let work = vault.submit_upload_files(7, 11, sources).expect("batch");
+    for _ in 0..3 {
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("parallel upload");
+    }
+    let ids = vault
+        .transfers()
+        .iter()
+        .filter(|row| row.direction == VaultTransferDirection::Upload)
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 3);
+    for &id in &ids {
+        vault
+            .submit_transfer_control(7, id, control::VaultUploadControl::Pause)
+            .expect("pause")
+            .wait()
+            .expect("saved");
+    }
+    for _ in 0..3 {
+        release.send(()).expect("release");
+    }
+    assert_eq!(work.wait().expect("batch").paused_count, 3);
+    drop(vault);
+    drop(library);
+    let mut db = Database::open(dir.path().join("catalog.sqlite")).expect("database");
+    for &id in &ids {
+        let record = db.vault_job(7, id).expect("job").expect("context");
+        assert!(
+            db.transition_vault_job(
+                teleark_storage::VaultJobLease {
+                    account_id: 7,
+                    id,
+                    generation: record.generation
+                },
+                VaultJobState::Paused,
+                teleark_storage::VaultJobTransition::Resume,
+                1,
+                None
+            )
+            .expect("queued at interruption")
+        );
+    }
+    drop(db);
+    let (vault, _) = open(dir.path(), &remote);
+    vault.unlock_with_password(PASSWORD.into()).expect("unlock");
+    let (entered, release) = remote.concurrent_upload_gate(3);
+    let work = vault
+        .submit_resume_queued_transfers(7)
+        .expect("resume queue");
+    for _ in 0..3 {
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("three restored files enter before any completion");
+    }
+    for _ in 0..3 {
+        release.send(()).expect("finish");
+    }
+    let report = work.wait().expect("recovered");
+    assert_eq!(report.resumed, 3);
+    assert_eq!(report.failed, 0);
+}

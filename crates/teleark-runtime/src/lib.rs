@@ -69,8 +69,12 @@ pub use vault_recovery::{
     RecoveryContextError, VaultPartRecovery, VaultPendingUploadContext, VaultRecoveryContext,
     VaultRecoveryDirection,
 };
+mod download_slots;
 mod vault_progress;
-pub use vault_progress::{VaultUploadActivity, VaultUploadPhase};
+pub use vault_progress::{
+    VaultUploadActivity, VaultUploadEvent, VaultUploadPart, VaultUploadPartState, VaultUploadPhase,
+    VaultUploadSample,
+};
 
 pub use channel_transfer::{
     ChannelDownloadCleanup, ChannelDownloadCleanupPhase, ChannelDownloadEvent,
@@ -371,6 +375,7 @@ pub fn classify_file(path: &Path) -> FileKind {
 /// Ready-to-use local library facade for desktop frontends.
 #[derive(Clone)]
 pub struct DesktopLibrary {
+    pub(crate) download_slots: Arc<download_slots::DownloadSlots>,
     service: Arc<LibraryService<StorageWorker>>,
     worker: StorageWorker,
     database_path: Arc<PathBuf>,
@@ -391,10 +396,13 @@ impl DesktopLibrary {
         prepare_database_parent(path)?;
         let worker = StorageWorker::open(path.to_owned())?;
         let bandwidth = teleark_telegram::TransferBandwidth::default();
+        let download_slots = Arc::new(download_slots::DownloadSlots::new(3));
         if let Ok(preferences) = worker.preferences() {
             bandwidth.set_limits(preferences.speed_limits);
+            download_slots.set_limit(preferences.transfer_tuning.download_tasks);
         }
         Ok(Self {
+            download_slots,
             bandwidth,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
@@ -416,10 +424,13 @@ impl DesktopLibrary {
         prepare_database_parent(&path)?;
         let worker = StorageWorker::open_with_progress(path.clone(), progress)?;
         let bandwidth = teleark_telegram::TransferBandwidth::default();
+        let download_slots = Arc::new(download_slots::DownloadSlots::new(3));
         if let Ok(preferences) = worker.preferences() {
             bandwidth.set_limits(preferences.speed_limits);
+            download_slots.set_limit(preferences.transfer_tuning.download_tasks);
         }
         Ok(Self {
+            download_slots,
             bandwidth,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
@@ -524,9 +535,11 @@ impl DesktopLibrary {
         // Filesystem preparation belongs to this background caller, not the
         // shared SQL actor. Failed preparation leaves persisted settings intact.
         prepare_managed_directories(&self.database_path, preferences)?;
-        self.worker
-            .set_preferences(preferences.clone(), self.bandwidth.clone())?;
-        Ok(())
+        self.worker.set_preferences(
+            preferences.clone(),
+            self.bandwidth.clone(),
+            self.download_slots.clone(),
+        )
     }
 
     /// Lock-bounded snapshots; no SQL or network request on presentation paths.
@@ -1005,6 +1018,7 @@ enum StorageRequest {
     SetPreferences {
         preferences: DesktopPreferences,
         bandwidth: teleark_telegram::TransferBandwidth,
+        download_slots: Arc<download_slots::DownloadSlots>,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     NativeDownloadDestinationInUse {
@@ -1263,9 +1277,11 @@ impl StorageWorker {
         &self,
         preferences: DesktopPreferences,
         bandwidth: teleark_telegram::TransferBandwidth,
+        download_slots: Arc<download_slots::DownloadSlots>,
     ) -> Result<(), ApplicationError> {
         self.request("set_preferences", |reply| StorageRequest::SetPreferences {
             bandwidth,
+            download_slots,
             preferences,
             reply,
         })
@@ -1674,12 +1690,14 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             StorageRequest::SetPreferences {
                 preferences,
                 bandwidth,
+                download_slots,
                 reply,
             } => {
                 let result = store_preferences(&mut database, &preferences);
                 // Commit order and active-policy order are identical, even for concurrent callers.
                 if result.is_ok() {
                     bandwidth.set_limits(preferences.speed_limits);
+                    download_slots.set_limit(preferences.transfer_tuning.download_tasks);
                 }
                 let _ = reply.send(result);
             }

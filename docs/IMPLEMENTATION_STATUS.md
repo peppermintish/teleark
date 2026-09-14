@@ -1,5 +1,35 @@
 # Implementation status — v0.4.4
 
+## Streaming uploads and manual concurrency (2026-09-14)
+
+The production Vault upload path now encrypts one wire-aligned block at a time,
+reuses bounded buffers, concurrently saves parts and accepts locally sealed
+content plus Telegram publication receipts without routine content read-back.
+Default concurrency is three files × ten 512 KiB parts, with two shared upload
+connections and a two-block ready queue. The settings UI exposes bounded manual
+upload/download limits and AES256-GCM CPU capability; old profile/advisory keys
+are retained only for compatibility. Native/Vault downloads share the file gate
+and use selected part/connection/attempt values.
+
+Part/manifest readers support 1.0 and 2.0; new writes use 2.0, while wraps, recovery
+bundles and local recovery envelopes stay v1. Recovery replays sealed ciphertext;
+partial/corrupt local preparation advances the saved instance before reencoding.
+At 24 hours, or for unfinished v1 uploads, automatic restart replaces package/File
+Key transactionally; sealed manifest outboxes can finish from existing bytes.
+The upload inspector shows acknowledgement-rate intervals, 512 KiB part states,
+retry waits and bounded replay with omission counts and sanitized logs.
+
+Focused evidence includes ten concurrent RPCs, three blocked file uploads and
+work-conserving refill, zero normal content read-backs, immutable spool replay,
+lost-spool instance retirement, old/new frozen crypto fixtures and transactional
+restart rollback. All eight source gates passed for the working tree (702 tests)
+and the isolated task snapshot (673 tests); each excludes ten existing manual
+performance probes. Final GUI/strict Clippy checks cover the layout cleanup.
+Native English/light review covers 900×600 and actual macOS full-screen, manual
+limits, AES-GCM capability, the 24-hour guide and independently scrolling upload
+activity. Credentialed Telegram throughput/multi-DC tests are not implied.
+See [ADR 0036](adr/0036-streaming-upload-and-manual-concurrency.md).
+
 ## Vault upload preparation metadata fix (2026-09-14)
 
 Vault uploads no longer fail solely because filesystem metadata-change time changes

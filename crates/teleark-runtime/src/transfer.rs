@@ -129,6 +129,7 @@ pub trait RemoteObjectStore {
 
 /// Real Telegram implementation of the byte-store boundary.
 pub struct TelegramObjectStore {
+    tuning: Option<teleark_telegram::TransferTuning>,
     observer: Option<Arc<dyn teleark_telegram::ByteTransferObserver>>,
     cancellation: Option<crate::TelegramScanCancellation>,
     account_id: i64,
@@ -147,11 +148,16 @@ impl TelegramObjectStore {
             cancellation: None,
             observer: None,
             manifest_catalog: None,
+            tuning: None,
         }
     }
 }
 
 impl TelegramObjectStore {
+    pub(crate) fn with_tuning(mut self, tuning: teleark_telegram::TransferTuning) -> Self {
+        self.tuning = Some(tuning);
+        self
+    }
     pub(crate) fn with_manifest_catalog(mut self, catalog: Vec<RemoteByteObject>) -> Self {
         self.manifest_catalog = Some(catalog);
         self
@@ -284,9 +290,26 @@ impl RemoteObjectStore for TelegramObjectStore {
                 self.chat_id,
                 message_id,
                 self.cancellation.clone(),
-                self.observer.clone(),
+                Some(Arc::new(TunedByteObserver {
+                    tuning: self.tuning.unwrap_or_default(),
+                    observer: self.observer.clone(),
+                })),
             )
             .map_err(map_application_error)
+    }
+}
+struct TunedByteObserver {
+    tuning: teleark_telegram::TransferTuning,
+    observer: Option<Arc<dyn teleark_telegram::ByteTransferObserver>>,
+}
+impl teleark_telegram::ByteTransferObserver for TunedByteObserver {
+    fn observe(&self, event: teleark_telegram::ByteTransferEvent) {
+        if let Some(observer) = &self.observer {
+            observer.observe(event);
+        }
+    }
+    fn transfer_tuning(&self) -> teleark_telegram::TransferTuning {
+        self.tuning
     }
 }
 
@@ -336,9 +359,11 @@ pub(crate) struct PartEncryptionPlan {
 }
 
 pub(crate) struct PreparedEncryptedPart {
+    #[cfg(test)]
     pub(crate) key: RemotePartKey,
     pub(crate) encoded: Vec<u8>,
     pub(crate) manifest_part: ManifestPart,
+    #[cfg(test)]
     pub(crate) plaintext_digest: ContentDigest,
 }
 
@@ -577,8 +602,10 @@ impl<S> EncryptedRemoteTransport<S> {
             return Err(TransferError::ManifestCorrupted);
         }
         Ok(PreparedEncryptedPart {
+            #[cfg(test)]
             key: plan.key,
             encoded,
+            #[cfg(test)]
             plaintext_digest,
             manifest_part: ManifestPart {
                 part_index: plan.key.part_index.get(),
@@ -1774,6 +1801,16 @@ pub(crate) fn map_application_error(error: ApplicationError) -> TransferError {
 fn map_crypto_error(error: CryptoError) -> TransferError {
     match error {
         CryptoError::Cancelled => TransferError::Cancelled,
+        CryptoError::Io { kind, .. } => match kind {
+            std::io::ErrorKind::StorageFull => TransferError::DiskFull,
+            std::io::ErrorKind::PermissionDenied => TransferError::PermissionDenied,
+            std::io::ErrorKind::NotFound => TransferError::SourceMissing,
+            std::io::ErrorKind::UnexpectedEof => TransferError::SourceChanged,
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::Interrupted => {
+                TransferError::Cancelled
+            }
+            _ => TransferError::Database,
+        },
         CryptoError::AuthenticationFailed => TransferError::AuthenticationFailed,
         CryptoError::UnsupportedVersion { major, .. } => {
             TransferError::UnsupportedManifestVersion {

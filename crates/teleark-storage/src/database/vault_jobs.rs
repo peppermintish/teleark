@@ -129,7 +129,8 @@ impl VaultJobTransition {
 pub struct VaultPartRecord {
     pub part_index: u32,
     /// Runtime-versioned AEAD reservation or authenticated download identity.
-    /// Once committed it cannot be changed, including after cancellation/retry.
+    /// Receipted identities are immutable. Unreceipted upload reservations can
+    /// only be atomically retired before allocating fresh encryption material.
     pub identity: Vec<u8>,
     /// Authenticated remote receipt or fsynced local extent evidence.
     pub receipt: Option<Vec<u8>>,
@@ -402,6 +403,7 @@ impl Database {
         previous: &[u8],
         replacement: &VaultJobRecord,
     ) -> StorageResult<bool> {
+        validate_admission(replacement)?;
         if replacement.account_id != lease.account_id
             || replacement.id != lease.id
             || replacement.context_version != 1
@@ -412,8 +414,8 @@ impl Database {
         }
         self.durable_vault_write(|tx| {
             let id=unsigned_to_sql("vault_job.id",lease.id)?;
-            let changed=tx.execute("UPDATE vault_transfer_jobs SET package_id=?5,context=?6,created_at=?7,updated_at=?7 WHERE account_id=?1 AND id=?2 AND generation=?3 AND context=?4 AND context_version=1 AND state='queued' AND direction='upload'",
-                params![lease.account_id,id,unsigned_to_sql("vault_job.generation",lease.generation)?,previous,replacement.package_id,replacement.context,replacement.created_at_unix_ms])?;
+            let changed=tx.execute("UPDATE vault_transfer_jobs SET package_id=?5,context=?6,created_at=?7,updated_at=?7 WHERE account_id=?1 AND id=?2 AND generation=?3 AND context=?4 AND context_version=1 AND state='queued' AND direction='upload' AND chat_id=?8",
+                params![lease.account_id,id,unsigned_to_sql("vault_job.generation",lease.generation)?,previous,replacement.package_id,replacement.context,replacement.created_at_unix_ms,replacement.chat_id])?;
             if changed!=1 {return Ok(false);}
             tx.execute("DELETE FROM vault_transfer_parts WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;
             tx.execute("DELETE FROM vault_manifest_outbox WHERE account_id=?1 AND task_id=?2",params![lease.account_id,id])?;

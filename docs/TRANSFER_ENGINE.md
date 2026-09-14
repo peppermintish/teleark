@@ -24,39 +24,79 @@ History persists task/batch identity, original message metadata, progress/timing
 
 Shutdown persists the latest observed progress and signals cancellation without waiting indefinitely for another network chunk. A blocked worker may detach for prompt process exit; the private part map remains restart authority.
 
-## Adaptive policy and retries
+## Manual concurrency and retries
 
-`AdaptiveTransferController` measures goodput over real capabilities:
+Production owners use `TransferTuning` and a fixed-parameter telemetry controller.
+No Balanced/Max Throughput profile, throughput probe, BDP rule or memory-pressure
+heuristic changes user-selected values. Legacy adaptive algorithms remain only
+for compatibility/test coverage; ADR0036 supersedes their production policy.
+Defaults and bounds are in [Preferences](PREFERENCES_FORMAT.md).
 
-| Symbol | Parameter |
-| --- | --- |
-| C / W | Connections / inflight RPCs per connection |
-| F / P | Active files / inflight logical parts per file |
-| E / Qe | Encryption workers / encrypted-part queue depth |
+Uploads run three files concurrently, each with ten asynchronous 512 KiB
+`upload.saveBigFilePart` requests. Independent retained MTProto sender pools share
+the authenticated session and mandatory network gateway, with two connections
+per direction by default; cloning a Client alone would not create connections.
+RPCs are assigned round-robin across the selected direction's pools. Connections
+are shared across tasks rather than multiplied by each file. No encryption worker,
+checkpoint write or thread join runs on the UI or network reactor.
 
-Memory is globally budgeted across plaintext, encrypted, inflight and writer queues. Pressure reduces concurrency. Estimated BDP and target inflight bytes (1.75× BDP) are diagnostics/input, not reasons to roll back useful goodput. Probe one eligible parameter at a time and retain before/probed/after/reason for replay. Never invent media-DC lanes or concurrency the adapter cannot expose.
+One producer per file reads/encrypts a frame, writes the immutable ciphertext to
+its bounded spool and hands the reusable buffer to a queue of two ready blocks.
+The consumer owns at most the configured concurrent part requests and returns
+buffers for reuse. Backpressure bounds production; no whole plaintext container
+is retained. Internal result windows also retain at most 128 recent completed
+manifests / 16 MiB. All hard maxima bound the session even with the largest manual
+settings; setting high limits can deliberately consume more memory and is not a
+promise of higher throughput. MTProto owns additional bounded in-flight wire copies.
 
-Balanced native downloads use P4–24 and two-second settling. Max Throughput starts at P4, searches P1–64 and grows by at most current P and 16. Fine probes need 1% gain, coarse probes 3%; strong gains settle after one second, weak gains receive a fresh five-second confirmation. Failed probes narrow an upper interval to one-part precision. Downward probes search skipped peaks and settle for five seconds; losses over 0.5% roll back. Boundaries/lower searches are revisited on a 60-second cadence. [ADR 0011](adr/0011-adaptive-native-probe-refinement.md) governs exact policy and supersedes ADR 0010 numerical tuning.
+Native and Vault downloads share the user-selected file gate. Native workers and
+Vault download owners have retained bounded pools separate from upload execution.
+Both native and bounded encrypted-object reads use the selected part, connection
+and attempt limits. Native logical parts remain 1 MiB, split into protocol reads;
+this preserves their existing download bitmap codec. Vault downloads authenticate
+complete application containers as before.
 
-Balanced allows four attempts per part; Max Throughput allows eight. Network backoff starts at 250 ms and caps at eight seconds. Delayed parts stay in a bounded queue while healthy reads continue. Max Throughput tolerates three isolated retries per ten seconds; a burst rolls back an upward probe or halves P, with a ten-second cooldown. Server waits reduce P immediately and suppress probes through the deadline plus cooldown.
+Part attempts use structured errors, 60-second request timeouts and bounded
+exponential retry backoff. Direction-wide FloodWait gates honor the entire server
+deadline and never shorten it; healthy in-flight requests may finish. There is no
+concurrency reduction or increased limit in response to a retry. A failed upload
+part cancels that stream's retained RPC tasks; independent files remain runnable.
+Byte rate caps continue to apply across tasks through the shared budgets.
 
-Every protocol chunk checks a shared connection-owned native FloodWait gate. A new deadline can extend but never shorten it; already-sent requests may finish. Server waits are never capped by network-backoff policy. The gate survives native task changes in that connection, but not process restart or independent connections. Authorization/integrity/source failures do not blindly retry.
-
-`Respect`, `AdaptiveOverride` and `Ignore` govern advisory active-file guidance only. They never override protocol limits or server deadlines. Throughput strategy is captured at task start/resume/retry independently of this policy. Native limits remain 64 logical MiB parts and the controller's 512 MiB budget. Synthetic capacity models are regression tests, not real bandwidth benchmarks.
+The upload inspector prioritizes acknowledged-byte rate intervals, a 512 KiB
+part map, queued/active work, last activity, retry deadlines and a bounded timeline.
+Up to 128 events and 96 rate samples remain in memory, with truncation counts;
+samples coalesce to at most four per second plus container boundaries. Restored
+acknowledgements are excluded from new throughput. Logs use the existing bounded
+background writer and disclose dropped records; logging cannot block transport.
+100% still requires message/manifest publication and local persistence.
 
 ## Connected encrypted storage
 
-New uploads validate the account's bound, currently owned private TeleArk channel before touching plaintext/keys. Saved Messages is available only as an explicit legacy recovery source. The Vault owner alone retains the unlocked Master Key and serializes create/unlock/lock/rewrap/recovery and transfer requests.
+New uploads validate the account's bound, currently owned private TeleArk channel before touching plaintext/keys. Saved Messages is available only as an explicit legacy recovery source. Retained operation leases carry the required key to independent background owners; key operations remain serialized.
 
-Upload uses one source-identity-checked pass: reader and whole-file BLAKE3 → bounded encryption pool → bounded encrypted-part queue → uploader. Following-part encryption overlaps upload. The desktop ceiling is 60 MiB plaintext per part with 8 MiB frames and a 64 MiB encoded-object bound; the 1900 MiB compatibility target still needs larger streaming transport. Each part is re-downloaded and verified before the final authenticated manifest is published. Source mutation fails with structured `SourceChanged` and cannot create a manifest mixing versions.
+Upload first acknowledges preparation and hashes source bytes with bounded
+buffers. A streaming encryption pass checks each container digest against that
+admission, overlaps encryption with part RPCs and checks source identity again
+before manifest publication. Normal content uploads are accepted from local sealed
+hashes plus Telegram's publication receipt, with **no content read-back**. Only
+ambiguous publication recovery or legacy receipt reconstruction reads a bounded
+remote candidate. The small authoritative manifest keeps its publication
+verification. See [recovery records](VAULT_TRANSFER_RECOVERY.md) for the 24-hour
+window, immutable ciphertext replay and safe retirement.
 
 Managed scanning considers at most 1,000 exact-caption candidates. Manifest discovery merges indexed exact-caption matches with exact matches from the latest 512 messages read directly from Telegram history. Candidates are deduplicated by message ID, recent observations win, and the newest 1,000 candidates remain within the existing bound. This avoids waiting for search visibility after publication; ordinary part reconciliation does not add a history scan. Both sources still require the same manifest download, AEAD authentication, name and strict layout validation. Names/captions classify candidates only; authentication and strict layout validation establish a logical file. A scan owns cancellation through GUI/runtime/Telegram and a 30-second deadline per request. Cancellation terminates recovery instead of counting as a rejected manifest. Identity checks are bounded to ten seconds. GUI loading state is independent of key operations; stale account/source results are rejected.
 
 Restore authenticates the manifest/File Key, validates locators/ranges, downloads and verifies encoded parts, authenticates each frame, writes one controlled private partial, verifies part/whole plaintext BLAKE3, flushes and atomically publishes without overwrite. Generic integration tests recover with a fresh SQLite database and no caller-supplied File Key/layout, then prove byte equality.
 
-Multi-file upload accepts at most 128 nonempty files. Runtime preflight deduplicates canonical source paths, checks cumulative size and preserves original names; each queued item rechecks size/mtime before encryption. The same retained Vault owner executes one item at a time, revalidating account/channel and key prerequisites for each. Source-specific failures can continue; authorization, permission and network failures stop new work in that batch. A shared cancellation flag stops at file boundaries, so a current file can finish and remaining items become Cancelled. The GUI retains failed/cancelled selections for explicit resubmission. Snapshots expose actual batch membership, queued time and per-file outcomes; they do not invent network capabilities.
+Multi-file uploads use bounded 128-file scheduling windows. Runtime preflight deduplicates canonical source paths, checks cumulative size and preserves original names; each queued item rechecks size/mtime before encryption. A work-conserving pool executes the selected number of items concurrently, revalidating account/channel and key prerequisites for each. Source-specific failures can continue; authorization, permission and network failures stop new work in that batch. A shared cancellation flag stops at file boundaries, so admitted files can finish and remaining items become Cancelled. The GUI retains failed/cancelled selections for explicit resubmission. Snapshots expose batch membership, queued time and per-file outcomes. `VaultUploadReport.completed_count` reports every success; `completed` contains only recent receipts (128 files / 16 MiB), backed by the durable authenticated catalog.
 
-Vault task snapshots/controls are memory-only, retaining at most 256 recent members and evicting whole terminal batches so their displayed counts do not silently shrink: there is no mid-file encrypted pause/cancel/retry/priority/restart-resume UI yet. Lock requests do not revoke keys already held by a running transfer; switching accounts waits for Vault completion. Interruption before manifest publication may leave orphan ciphertext. Scan cancellation does not imply transfer cancellation. Empty-file desktop upload, durable encrypted lifecycle, orphan cleanup and complete restart-time AEAD-identity hydration remain open.
+Vault snapshots retain bounded recent history while durable jobs, controls,
+part reservations/receipts and manifest outboxes support pause/cancel/retry and
+restart recovery. See the recovery contract for exact supported states. Locking
+does not revoke admitted operation keys. Empty desktop uploads, orphan cleanup,
+and credentialed multi-DC/throughput qualification remain separate work.
+
 
 ## Local availability and disk space
 

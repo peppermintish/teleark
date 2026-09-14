@@ -1043,37 +1043,76 @@ impl TelegramConnection {
                 total: expected as u64,
             });
         }
-        let mut bytes = Vec::with_capacity(expected);
-        let chunk_size = self.bandwidth.download.download_chunk_size();
-        let mut download = self
-            .client
-            .iter_download(&file.document)
-            .chunk_size(chunk_size as i32);
-        while bytes.len() < expected {
-            self.bandwidth
-                .download
-                .acquire(chunk_size.min(expected - bytes.len()))
-                .await;
-            let Some(chunk) = download.next().await.map_err(map_invocation)? else {
-                break;
-            };
-            let next = bytes
-                .len()
-                .checked_add(chunk.len())
-                .ok_or_else(|| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
-            if next > MAX_TRANSFER_OBJECT_BYTES || next > expected {
-                return Err(TelegramError::new(TelegramErrorKind::LimitExceeded));
+        let tuning = observer.map_or_else(
+            TransferTuning::default,
+            ByteTransferObserver::transfer_tuning,
+        );
+        if !tuning.validate() {
+            return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
+        }
+        let clients = self
+            .transfer_clients(false, tuning.download_connections)
+            .await;
+        // Allocate/zero the bounded object on a blocking owner, away from the reactor.
+        let mut bytes = tokio::task::spawn_blocking(move || vec![0u8; expected])
+            .await
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?;
+        let mut next = 0usize;
+        let mut received = 0usize;
+        let mut inflight = JoinSet::new();
+        while received < expected {
+            while next < expected && inflight.len() < usize::from(tuning.download_parts) {
+                let offset = next;
+                let length = (expected - next).min(DOWNLOAD_PART_SIZE_BYTES as usize);
+                next += length;
+                let index = offset as u64 / DOWNLOAD_PART_SIZE_BYTES;
+                let client = clients[index as usize % clients.len()].clone();
+                let document = file.document.clone();
+                let flood_gate = self.download_flood_gate.clone();
+                let bandwidth = self.bandwidth.download.clone();
+                inflight.spawn(async move {
+                    for attempt in 1..=u32::from(tuning.download_attempts) {
+                        let result = download_logical_part(
+                            client.clone(),
+                            document.clone(),
+                            index,
+                            offset as u64,
+                            length as u64,
+                            flood_gate.clone(),
+                            bandwidth.clone(),
+                        )
+                        .await;
+                        match result {
+                            Ok(part) => return Ok(part),
+                            Err(error) => {
+                                let Some(delay) = download_part_retry_delay(
+                                    &error,
+                                    attempt,
+                                    u32::from(tuning.download_attempts),
+                                ) else {
+                                    return Err(error);
+                                };
+                                tokio::time::sleep(delay).await;
+                            }
+                        }
+                    }
+                    Err(TelegramError::new(TelegramErrorKind::Network))
+                });
             }
-            bytes.extend_from_slice(&chunk);
+            let part = inflight
+                .join_next()
+                .await
+                .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?
+                .map_err(|_| TelegramError::new(TelegramErrorKind::Network))??;
+            let offset = part.offset_bytes as usize;
+            bytes[offset..offset + part.bytes.len()].copy_from_slice(&part.bytes);
+            received += part.bytes.len();
             if let Some(observer) = observer {
                 observer.observe(ByteTransferEvent::Downloading {
-                    bytes: bytes.len() as u64,
+                    bytes: received as u64,
                     total: expected as u64,
                 });
             }
-        }
-        if bytes.len() != expected {
-            return Err(TelegramError::new(TelegramErrorKind::Network));
         }
         Ok(bytes)
     }
@@ -1355,9 +1394,9 @@ async fn download_logical_part(
         bandwidth
             .acquire(chunk_size.min(expected_length - bytes.len()))
             .await;
-        let chunk = download
-            .next()
+        let chunk = tokio::time::timeout(Duration::from_secs(60), download.next())
             .await
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Network))?
             .map_err(|error| {
                 let error = map_invocation(error);
                 if let Some(delay) = error.retry_after() {
@@ -2001,6 +2040,55 @@ async fn list_dialogs_with_client(
     Ok(chats)
 }
 
+struct TransferPool {
+    upload: bool,
+    client: Client,
+    runner: JoinHandle<()>,
+    drain: JoinHandle<()>,
+}
+impl Drop for TransferPool {
+    fn drop(&mut self) {
+        self.client.disconnect();
+        self.runner.abort();
+        self.drain.abort();
+    }
+}
+impl TelegramConnection {
+    async fn transfer_clients(&self, upload: bool, count: u16) -> Vec<Client> {
+        let mut pools = self.transfer_pools.lock().await;
+        while pools.iter().filter(|p| p.upload == upload).count() < usize::from(count.clamp(1, 8)) {
+            let SenderPool {
+                runner,
+                handle,
+                mut updates,
+            } = sender_pool(
+                Arc::clone(&self.session),
+                self.api_id,
+                self.gateway_url.clone(),
+            );
+            let client = Client::with_configuration(
+                handle,
+                grammers_client::client::ClientConfiguration {
+                    retry_policy: Box::new(grammers_client::client::NoRetries),
+                    ..Default::default()
+                },
+            );
+            pools.push(TransferPool {
+                upload,
+                client,
+                runner: tokio::spawn(runner.run()),
+                drain: tokio::spawn(async move { while updates.recv().await.is_some() {} }),
+            });
+        }
+        pools
+            .iter()
+            .filter(|p| p.upload == upload)
+            .take(usize::from(count.clamp(1, 8)))
+            .map(|p| p.client.clone())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2551,54 +2639,5 @@ mod tests {
                 );
             }
         });
-    }
-}
-
-struct TransferPool {
-    upload: bool,
-    client: Client,
-    runner: JoinHandle<()>,
-    drain: JoinHandle<()>,
-}
-impl Drop for TransferPool {
-    fn drop(&mut self) {
-        self.client.disconnect();
-        self.runner.abort();
-        self.drain.abort();
-    }
-}
-impl TelegramConnection {
-    async fn transfer_clients(&self, upload: bool, count: u16) -> Vec<Client> {
-        let mut pools = self.transfer_pools.lock().await;
-        while pools.iter().filter(|p| p.upload == upload).count() < usize::from(count.clamp(1, 8)) {
-            let SenderPool {
-                runner,
-                handle,
-                mut updates,
-            } = sender_pool(
-                Arc::clone(&self.session),
-                self.api_id,
-                self.gateway_url.clone(),
-            );
-            let client = Client::with_configuration(
-                handle,
-                grammers_client::client::ClientConfiguration {
-                    retry_policy: Box::new(grammers_client::client::NoRetries),
-                    ..Default::default()
-                },
-            );
-            pools.push(TransferPool {
-                upload,
-                client,
-                runner: tokio::spawn(runner.run()),
-                drain: tokio::spawn(async move { while updates.recv().await.is_some() {} }),
-            });
-        }
-        pools
-            .iter()
-            .filter(|p| p.upload == upload)
-            .take(usize::from(count.clamp(1, 8)))
-            .map(|p| p.client.clone())
-            .collect()
     }
 }

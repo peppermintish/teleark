@@ -744,6 +744,36 @@ mod tests {
     }
 
     #[test]
+    fn aligned_v2_frozen_fixture() {
+        let header = header().aligned(PartLimits::default()).expect("aligned");
+        let mut encoded = Vec::new();
+        encrypt_part(
+            &mut Cursor::new(b"bounded frame payload"),
+            &mut encoded,
+            &header,
+            &FileKey::from_bytes([3; 32]),
+            PartLimits::default(),
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("encrypt");
+        let fixture = include_str!("../tests/vectors/crypto_v2/aligned_part.txt");
+        assert_eq!(hex(&encoded), fixture_value(fixture, "encoded_hex"));
+        assert_eq!(
+            hex(blake3::hash(&encoded).as_bytes()),
+            fixture_value(fixture, "encoded_blake3")
+        );
+        let mut decoded = Vec::new();
+        decrypt_part(
+            &mut Cursor::new(&encoded),
+            &mut decoded,
+            &FileKey::from_bytes([3; 32]),
+            PartLimits::default(),
+        )
+        .expect("decode");
+        assert_eq!(decoded, b"bounded frame payload");
+    }
+
+    #[test]
     fn aligned_frames_match_upload_boundaries_and_preserve_legacy_reader() {
         for length in [0, 1, 524_160, 524_161, 1_048_416, 1_048_417, 2_000_000] {
             let data = vec![0x5a; length];

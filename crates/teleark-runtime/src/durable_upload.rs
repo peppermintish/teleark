@@ -7,7 +7,9 @@ use std::num::NonZeroI64;
 use teleark_core::{AccountId, PartIndex, TransferError};
 use teleark_crypto::{OsRandom, RandomSource, VaultMasterKey};
 use teleark_storage::{Database, VaultJobLease, VaultJobState, VaultPartRecord};
-use teleark_transfer::{Blake3Digest, DigestPort, RemoteObject, RemotePartKey};
+#[cfg(test)]
+use teleark_transfer::{Blake3Digest, DigestPort};
+use teleark_transfer::{RemoteObject, RemotePartKey};
 
 /// Binds an authenticated upload context and one execution generation. Source
 /// admission/revalidation belongs to the source owner; this worker checks each
@@ -343,9 +345,12 @@ impl<S: ReservedPublicationStore> DurableUploadParts<S> {
                     .map_err(|_| TransferError::KeyUnavailable)?;
                 let random_id = NonZeroI64::new(i64::from_le_bytes(bytes))
                     .ok_or(TransferError::KeyUnavailable)?;
-                let replacement = self
-                    .transport
-                    .reserve_part_identity(key, digest, random_id)?;
+                let replacement = self.transport.replacement_part_identity(
+                    key,
+                    &reservation,
+                    digest,
+                    random_id,
+                )?;
                 let encoded = replacement
                     .encode()
                     .map_err(|_| TransferError::ManifestCorrupted)?;

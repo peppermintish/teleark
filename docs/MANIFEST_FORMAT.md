@@ -1,6 +1,6 @@
 # TeleArk Manifest Format
 
-Format: **implemented version 1**. `teleark-crypto` seals/opens and strictly
+Format: **read 1.0 and 2.0; new desktop writes 2.0**. `teleark-crypto` seals/opens and strictly
 validates the manifest. Runtime publishes it after verified parts, discovers it
 by a common remote caption and recovers the File Key/layout/locators. Deterministic
 integration tests restore exact contents with a fresh SQLite database.
@@ -62,7 +62,7 @@ The version-1 envelope is:
 
 ```text
 magic                       8 bytes   ASCII "TARKMAN\0"
-format_major                u16       1
+format_major                u16       1 or 2
 format_minor                u16       0
 public_header_length        u32
 encrypted_metadata_length   u64       ciphertext bytes, excluding 16-byte tag
@@ -93,7 +93,7 @@ The deterministic CBOR public header uses unsigned integer keys; symbolic names 
 | 10 | `crypto_suite_id` | unsigned 16-bit; suite `1` |
 | 11 | `file_key_wrap` | nested required map described below |
 | 12 | `master_key_generation` | unsigned 32-bit |
-| 13 | `flags` | unsigned 32-bit; all v1 bits currently zero/required understood |
+| 13 | `flags` | unsigned 32-bit; v1 exactly 0, v2 exactly 1 (aligned part frames); other values rejected |
 
 `file_key_wrap` contains wrap algorithm ID, wrapped File Key ciphertext (32 bytes for suite 1), GCM tag (16 bytes), and any explicitly required generation/derivation metadata. The version-1 derivation and zero nonce are defined in `CRYPTO_FORMAT.md`; nonce/key rules are not inferred from field absence.
 
@@ -206,3 +206,22 @@ acceptance test now creates a fresh SQLite database, recovers through the
 authenticated remote Manifest without a caller-supplied File Key/layout,
 downloads/decrypts, and proves the recovered BLAKE3/plaintext exactly matches
 the original.
+
+## Aligned manifest 2.0 and automatic upgrades
+
+Envelope major 2 is authenticated with the exact prefix/public header, and requires
+`flags=1` and `frame_plaintext_max=524256`. Every contained part must use part
+codec 2.0. Its frame count is `ceil((plaintext_length+96)/524256)`; encoded length
+remains `96 + plaintext_length + 32*frame_count`. A v1 envelope requires flags0
+and preserves its original geometry. Cross-version header/flag/part combinations
+are rejected before being accepted as a logical file. Frozen v2 fixtures accompany
+the unchanged v1 fixtures under `tests/vectors/{crypto_v2,manifest_v2}`.
+
+The discovery name/caption suffix `v1` remains the **discovery convention** for
+both codec versions, allowing existing indexed discovery to find v2 objects.
+Only the authenticated envelope declares the codec version. Old completed
+packages remain byte-for-byte unchanged. Unfinished v1 uploads without a sealed
+manifest automatically restart with a new package/File Key and aligned frames;
+a sealed legacy manifest outbox can still finish with its original immutable
+bytes. There is no mixed v1/v2 package and no source reencryption under a saved
+instance. See [ADR 0036](adr/0036-streaming-upload-and-manual-concurrency.md).

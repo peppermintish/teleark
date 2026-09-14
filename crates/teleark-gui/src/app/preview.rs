@@ -491,6 +491,10 @@ impl TeleArkApp {
             rows.push(row);
         }
         self.preview_transfer_rows = rows;
+        if state == "upload-pipeline" {
+            self.preview_upload_pipeline();
+            return;
+        }
         if state == "upload-history" {
             self.preview_upload_history();
         }

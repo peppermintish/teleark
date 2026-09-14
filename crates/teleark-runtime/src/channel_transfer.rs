@@ -1555,28 +1555,6 @@ fn validate_batch_size(size: usize) -> Result<(), ApplicationError> {
     Ok(())
 }
 
-struct DownloadSlots {
-    active: Mutex<usize>,
-    changed: std::sync::Condvar,
-}
-struct DownloadSlot<'a>(&'a DownloadSlots);
-impl Drop for DownloadSlot<'_> {
-    fn drop(&mut self) {
-        let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
-        *active -= 1;
-        self.0.changed.notify_all();
-    }
-}
-impl DownloadSlots {
-    fn acquire(&self, limit: usize) -> DownloadSlot<'_> {
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        while *active >= limit {
-            active = self.changed.wait(active).unwrap_or_else(|e| e.into_inner());
-        }
-        *active += 1;
-        DownloadSlot(self)
-    }
-}
 fn transfer_loop(
     receiver: mpsc::Receiver<TransferCommand>,
     backend: Arc<dyn ChannelDownloadBackend>,
@@ -1587,10 +1565,6 @@ fn transfer_loop(
     pump: Arc<QueuePump>,
 ) {
     let receiver = Arc::new(Mutex::new(receiver));
-    let slots = DownloadSlots {
-        active: Mutex::new(0),
-        changed: std::sync::Condvar::new(),
-    };
     thread::scope(|scope| {
         for _ in 0..8 {
             let receiver = receiver.clone();
@@ -1600,10 +1574,9 @@ fn transfer_loop(
             let shutdown = shutdown.clone();
             let library = library.clone();
             let pump = pump.clone();
-            let slots = &slots;
             scope.spawn(move || {
                 download_worker(
-                    receiver, backend, snapshots, scheduled, shutdown, library, pump, slots,
+                    receiver, backend, snapshots, scheduled, shutdown, library, pump,
                 )
             });
         }
@@ -1618,18 +1591,13 @@ fn download_worker(
     shutdown: Arc<AtomicBool>,
     library: DesktopLibrary,
     pump: Arc<QueuePump>,
-    slots: &DownloadSlots,
 ) {
     loop {
         let command = { receiver.lock().unwrap_or_else(|e| e.into_inner()).recv() };
         let Ok(command) = command else {
             break;
         };
-        let limit = library
-            .preferences()
-            .map(|p| usize::from(p.transfer_tuning.download_tasks))
-            .unwrap_or(1);
-        let _slot = slots.acquire(limit);
+        let _slot = library.download_slots.acquire();
         match command {
             TransferCommand::Download {
                 mut snapshot,

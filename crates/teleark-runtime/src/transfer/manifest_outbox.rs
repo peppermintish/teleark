@@ -105,6 +105,25 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                     .ok_or(TransferError::ManifestCorrupted)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let saved_outbox = database
+            .vault_manifest_outbox(lease.account_id, lease.id)
+            .map_err(|_| TransferError::Database)?;
+        // A sealed historical manifest is already immutable. Preserve its
+        // authenticated codec geometry instead of interpreting it as a new write.
+        let (frame_plaintext_max, flags) = match saved_outbox
+            .as_ref()
+            .and_then(|outbox| outbox.envelope.as_ref())
+        {
+            Some(envelope) => {
+                let opened = open_manifest(envelope, master, ManifestLimits::default())
+                    .map_err(map_crypto_error)?;
+                (
+                    opened.public_header.frame_plaintext_max,
+                    opened.public_header.flags,
+                )
+            }
+            None => (FRAME_PLAINTEXT_BYTES, 1),
+        };
         let public = ManifestPublicHeader {
             package_id: self.package_bytes,
             vault_id: context.vault_id,
@@ -116,12 +135,12 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                 .part_sizes
                 .first()
                 .ok_or(TransferError::ManifestCorrupted)?,
-            frame_plaintext_max: FRAME_PLAINTEXT_BYTES,
+            frame_plaintext_max,
             nonce_strategy_id: NONCE_STRATEGY_ID,
             crypto_suite_id: CRYPTO_SUITE_ID,
             file_key_wrap: context.file_key_wrap.clone(),
             master_key_generation: context.master_key_generation,
-            flags: 1,
+            flags,
         };
         let metadata = ManifestMetadata {
             logical_name: request.logical_name,
@@ -137,10 +156,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
         let limits = ManifestLimits::default();
         let commitment =
             manifest_content_commitment(&public, &metadata, limits).map_err(map_crypto_error)?;
-        let outbox = match database
-            .vault_manifest_outbox(lease.account_id, lease.id)
-            .map_err(|_| TransferError::Database)?
-        {
+        let outbox = match saved_outbox {
             Some(saved) => saved,
             None => {
                 let mut random = [0; 8];

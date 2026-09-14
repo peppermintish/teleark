@@ -1409,7 +1409,7 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => Err(ApplicationError::new(ApplicationErrorKind::Cancelled)),
-                    result = tokio::time::timeout(Duration::from_secs(30), operation) => result.unwrap_or_else(|_| Err(ApplicationError::new(ApplicationErrorKind::Network))),
+                    result = operation => result,
                 }
             } else {
                 operation.await

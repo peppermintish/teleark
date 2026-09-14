@@ -744,3 +744,78 @@ fn recovery_history_keeps_old_live_jobs_ahead_of_new_terminal_history() -> Stora
     assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     Ok(())
 }
+
+#[test]
+fn ciphertext_rotation_and_expired_restart_are_fenced_and_atomic() -> StorageResult<()> {
+    let mut db = Database::open_in_memory()?;
+    let original = job(1, VaultJobDirection::Upload);
+    db.admit_vault_job(&original)?;
+    step(
+        &mut db,
+        1,
+        0,
+        VaultJobState::Queued,
+        VaultJobTransition::Start,
+    )?;
+    db.reserve_vault_part(
+        lease(1, 1),
+        &VaultPartRecord {
+            part_index: 0,
+            identity: b"old".to_vec(),
+            receipt: None,
+        },
+    )?;
+    assert!(!db.replace_unpublished_vault_part(lease(1, 0), 0, b"old", b"new")?);
+    assert!(!db.replace_unpublished_vault_part(lease(1, 1), 0, b"foreign", b"new")?);
+    assert!(db.replace_unpublished_vault_part(lease(1, 1), 0, b"old", b"new")?);
+    assert!(!db.replace_unpublished_vault_part(lease(1, 1), 0, b"old", b"new")?);
+    db.confirm_vault_part(lease(1, 1), 0, b"receipt")?;
+    assert!(!db.replace_unpublished_vault_part(lease(1, 1), 0, b"new", b"later")?);
+    step(
+        &mut db,
+        1,
+        1,
+        VaultJobState::Running,
+        VaultJobTransition::RequestPause,
+    )?;
+    step(
+        &mut db,
+        1,
+        1,
+        VaultJobState::Pausing,
+        VaultJobTransition::AcknowledgePause,
+    )?;
+    step(
+        &mut db,
+        1,
+        1,
+        VaultJobState::Paused,
+        VaultJobTransition::Resume,
+    )?;
+    let mut replacement = original.clone();
+    replacement.package_id = [9; 16];
+    replacement.context = vec![9, 8, 7];
+    replacement.created_at_unix_ms = 200;
+    replacement.updated_at_unix_ms = 200;
+    assert!(!db.restart_vault_upload(lease(1, 0), &original.context, &replacement)?);
+    db.connection.execute_batch("CREATE TEMP TRIGGER fail_restart BEFORE DELETE ON vault_transfer_parts BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;")?;
+    assert!(
+        db.restart_vault_upload(lease(1, 1), &original.context, &replacement)
+            .is_err()
+    );
+    assert_eq!(
+        db.vault_job(7, 1)?.expect("original").context,
+        original.context
+    );
+    assert_eq!(db.vault_parts(7, 1, None, 10)?.len(), 1);
+    db.connection.execute_batch("DROP TRIGGER fail_restart;")?;
+    assert!(db.restart_vault_upload(lease(1, 1), &original.context, &replacement)?);
+    assert!(!db.restart_vault_upload(lease(1, 1), &original.context, &replacement)?);
+    assert_eq!(
+        db.vault_job(7, 1)?.expect("replacement").context,
+        replacement.context
+    );
+    assert!(db.vault_parts(7, 1, None, 10)?.is_empty());
+    assert!(!db.confirm_vault_part(lease(1, 1), 0, b"stale")?);
+    Ok(())
+}

@@ -8,6 +8,13 @@ use std::{
 };
 use teleark_telegram::{TransferTuning, UPLOAD_PART_BYTES, UploadCheckpoint, UploadStream};
 
+fn map_spool_error(error: std::io::Error) -> TransferError {
+    match error.kind() {
+        std::io::ErrorKind::StorageFull => TransferError::DiskFull,
+        std::io::ErrorKind::PermissionDenied => TransferError::PermissionDenied,
+        _ => TransferError::Database,
+    }
+}
 pub(crate) fn spool_prefix(root: &Path, identity: &[u8]) -> PathBuf {
     root.join(blake3::hash(identity).to_hex().as_str())
 }
@@ -76,6 +83,37 @@ pub(crate) fn reusable_spool(
     }
     hasher.finalize().as_bytes() == &seal.encoded_blake3
 }
+fn load_checkpoint(
+    path: &Path,
+    total: u64,
+    now: u64,
+    sealed: bool,
+) -> Result<UploadCheckpoint, TransferError> {
+    match File::open(path) {
+        Ok(file) => {
+            let mut bytes = Vec::with_capacity(193);
+            file.take(193)
+                .read_to_end(&mut bytes)
+                .map_err(map_spool_error)?;
+            // Newer checkpoint codecs remain intact; do not downgrade them.
+            if bytes.starts_with(b"TARKUP") && bytes.get(..8) != Some(b"TARKUP01") {
+                return Err(TransferError::ManifestCorrupted);
+            }
+            if let Some(checkpoint) = UploadCheckpoint::decode(&bytes, total) {
+                if sealed && checkpoint.resumable(now) {
+                    return Ok(checkpoint);
+                }
+            } else {
+                std::fs::rename(path, path.with_extension("upload-corrupt"))
+                    .map_err(map_spool_error)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(TransferError::Database),
+    }
+    UploadCheckpoint::new(total, now).map_err(|_| TransferError::KeyUnavailable)
+}
+
 fn save_seal(
     prefix: &Path,
     identity: &[u8],
@@ -91,12 +129,12 @@ fn save_seal(
     let mut file = private_file(&prefix.with_extension("seal-pending"), false)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|_| TransferError::Database)?;
+        .map_err(map_spool_error)?;
     std::fs::rename(
         prefix.with_extension("seal-pending"),
         prefix.with_extension("seal"),
     )
-    .map_err(|_| TransferError::Database)
+    .map_err(map_spool_error)
 }
 fn private_file(path: &Path, exclusive: bool) -> Result<File, TransferError> {
     let mut options = std::fs::OpenOptions::new();
@@ -111,7 +149,7 @@ fn private_file(path: &Path, exclusive: bool) -> Result<File, TransferError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path).map_err(|_| TransferError::Database)
+    options.open(path).map_err(map_spool_error)
 }
 struct PipeWriter {
     file: File,
@@ -248,16 +286,13 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             .as_millis()
             .min(u64::MAX as u128) as u64;
         let checkpoint_path = prefix.with_extension("upload");
-        let checkpoint = std::fs::read(&checkpoint_path)
-            .ok()
-            .and_then(|bytes| UploadCheckpoint::decode(&bytes, plan.expected_encoded_size))
-            .filter(|checkpoint| saved.is_some() && checkpoint.resumable(now))
-            .map(Ok)
-            .unwrap_or_else(|| UploadCheckpoint::new(plan.expected_encoded_size, now))
-            .map_err(|_| TransferError::Database)?;
-        checkpoint
-            .save(&checkpoint_path)
-            .map_err(|_| TransferError::Database)?;
+        let checkpoint = load_checkpoint(
+            &checkpoint_path,
+            plan.expected_encoded_size,
+            now,
+            saved.is_some(),
+        )?;
+        checkpoint.save(&checkpoint_path).map_err(map_spool_error)?;
         let original_file_id = checkpoint.file_id;
         let replay_checkpoint_path = checkpoint_path.clone();
         let replay_source = source.to_owned();
@@ -340,7 +375,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                         writer
                             .flush()
                             .and_then(|()| writer.file.sync_all())
-                            .map_err(|_| TransferError::Database)?;
+                            .map_err(map_spool_error)?;
                         save_seal(&prefix_worker, &identity, &summary)?;
                         Ok(summary)
                     }
@@ -348,7 +383,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                 let _ = seal_sender.send(result.is_ok());
                 result
             })
-            .map_err(|_| TransferError::Database)?;
+            .map_err(map_spool_error)?;
         // This is a retained background transfer owner, never the UI/network reactor.
         let result = self.store.upload_stream_reserved(
             &self.name(key),
@@ -359,6 +394,11 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             tuning,
         );
         let summary = producer.join().map_err(|_| TransferError::Database)?;
+        if let Err(error) = &summary
+            && !matches!(error, TransferError::Cancelled)
+        {
+            return Err(error.clone());
+        }
         if result.is_err()
             && allow_restart
             && summary.is_ok()
@@ -413,5 +453,58 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                 locator_extension: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn temporary_checkpoints_preserve_newer_bytes_and_recover_corruption_without_nonce_work() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("part.upload");
+        let checkpoint = UploadCheckpoint::new(512 * 1024, 100).expect("identity");
+        checkpoint.save(&path).expect("save");
+        assert_eq!(
+            load_checkpoint(&path, 512 * 1024, 101, true)
+                .expect("resume")
+                .file_id,
+            checkpoint.file_id
+        );
+        assert_ne!(
+            load_checkpoint(
+                &path,
+                512 * 1024,
+                100 + teleark_telegram::UPLOAD_RESUME_WINDOW_MS,
+                true
+            )
+            .expect("expired")
+            .file_id,
+            checkpoint.file_id
+        );
+        assert_ne!(
+            load_checkpoint(&path, 512 * 1024, 101, false)
+                .expect("unsealed")
+                .file_id,
+            checkpoint.file_id
+        );
+        let mut newer = checkpoint.encode();
+        newer[7] = b'2';
+        std::fs::write(&path, &newer).expect("future");
+        assert!(load_checkpoint(&path, 512 * 1024, 101, true).is_err());
+        assert_eq!(std::fs::read(&path).expect("preserved"), newer);
+        let mut corrupt = checkpoint.encode();
+        corrupt[32] ^= 1;
+        std::fs::write(&path, &corrupt).expect("corrupt");
+        assert_ne!(
+            load_checkpoint(&path, 512 * 1024, 101, true)
+                .expect("recover")
+                .file_id,
+            checkpoint.file_id
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("upload-corrupt")).expect("original"),
+            corrupt
+        );
     }
 }

@@ -83,6 +83,11 @@ impl TeleArkApp {
                 SettingsSection::KeyVault,
             ),
             (
+                IconName::ArrowUp,
+                "settings-uploads",
+                SettingsSection::Uploads,
+            ),
+            (
                 IconName::ArrowDown,
                 "settings-downloads",
                 SettingsSection::Downloads,
@@ -128,12 +133,6 @@ impl TeleArkApp {
                 )
                 .when(self.settings_advanced_expanded, |nav| {
                     nav.child(self.settings_nav_item(
-                        IconName::ArrowUp,
-                        self.tr("settings-uploads"),
-                        SettingsSection::Uploads,
-                        cx,
-                    ))
-                    .child(self.settings_nav_item(
                         IconName::Search,
                         self.tr("settings-indexing"),
                         SettingsSection::Indexing,
@@ -749,6 +748,7 @@ impl TeleArkApp {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .text_sm()
@@ -835,12 +835,18 @@ impl TeleArkApp {
                         None,
                         false,
                     )
-                    .disabled(if increment {
-                        values[index] >= maximum
-                    } else {
-                        values[index] <= minimum
-                    })
+                    .disabled(
+                        self.preference_persistence == PreferencePersistence::Saving
+                            || if increment {
+                                values[index] >= maximum
+                            } else {
+                                values[index] <= minimum
+                            },
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.preference_persistence == PreferencePersistence::Saving {
+                            return;
+                        }
                         let mut values = this.preferences.transfer_tuning.values();
                         values[index] = if increment {
                             values[index].saturating_add(1).min(maximum)

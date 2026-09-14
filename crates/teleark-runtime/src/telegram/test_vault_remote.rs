@@ -34,13 +34,20 @@ struct State {
     validations: Vec<bool>,
     fail_once: Option<GateKind>,
 }
+struct ConcurrentGate {
+    remaining: usize,
+    entered: mpsc::SyncSender<()>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+}
 pub(crate) struct TestVaultRemote {
+    concurrent_gate: Mutex<Option<ConcurrentGate>>,
     state: Mutex<State>,
     gate: Mutex<Option<Gate>>,
 }
 impl TestVaultRemote {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
+            concurrent_gate: Mutex::new(None),
             state: Mutex::new(State::default()),
             gate: Mutex::new(None),
         })
@@ -67,7 +74,37 @@ impl TestVaultRemote {
         assert!(previous.is_none(), "one bounded test gate");
         (ready, release)
     }
+    pub(crate) fn concurrent_upload_gate(
+        &self,
+        count: usize,
+    ) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, ready) = mpsc::sync_channel(count);
+        let (release, wait) = mpsc::channel();
+        *self.concurrent_gate.lock().expect("gate") = Some(ConcurrentGate {
+            remaining: count,
+            entered,
+            release: Arc::new(Mutex::new(wait)),
+        });
+        (ready, release)
+    }
     fn cross_gate(&self, kind: GateKind) -> Result<(), ApplicationError> {
+        let concurrent = if kind == GateKind::UploadPart {
+            let mut gate = self.concurrent_gate.lock().expect("gate");
+            gate.as_mut().filter(|gate| gate.remaining > 0).map(|gate| {
+                gate.remaining -= 1;
+                (gate.entered.clone(), gate.release.clone())
+            })
+        } else {
+            None
+        };
+        if let Some((entered, release)) = concurrent {
+            entered.send(()).expect("test observer");
+            release
+                .lock()
+                .expect("gate release")
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))?;
+        }
         let gate = {
             let mut slot = self.gate.lock().expect("gate");
             if let Some(gate) = slot.as_mut()

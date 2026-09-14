@@ -2,6 +2,65 @@
 
 Status: DesktopVault uploads and downloads persist recovery context, support mid-file pause/cancel/retry, and dispatch eligible work after restart and unlock. Native cancellation retains a durable cleanup obligation. Legacy summaries without recovery context remain viewable but cannot be resumed. The evidence and limits below describe synthetic transport tests and native macOS UI review; no live Telegram or other-platform qualification is implied.
 
+## Streaming upload recovery (2026-09-14)
+
+New uploads use aligned part/manifest codecs 2.0 and the existing context,
+reservation, receipt and outbox envelopes. Key wraps/recovery bundles stay v1.
+A full encrypted frame including its framing is one 512 KiB Telegram upload part;
+the last frame can be shorter. Application containers remain at most 60 MiB
+plaintext. The following policy supersedes historical reconstruct-and-read-back
+upload descriptions in earlier ADRs and acceptance notes.
+
+An upload attempt has a **24-hour** recovery window from its context creation
+clock. A backwards clock or an age of at least 24 hours causes an automatic fresh
+package and File Key before any new encryption, clearing the superseded part/outbox
+ledger in the same transaction. Source/key material remains available and the
+source is checked again. Initial queued-at history is preserved. Paused work still
+requires Resume. A sealed manifest outbox represents finalization of already
+published documents and can finish without the original source after this window.
+Telegram can expire temporary parts earlier; this policy does not promise server
+retention. Structured missing-part errors reset only the temporary upload ID and
+allow one immediate replay of existing ciphertext.
+
+Each container has a private spool below the database-adjacent `upload-spool`
+directory, scoped by account/task and BLAKE3 of the committed reservation:
+
+| Suffix | Version / meaning |
+| --- | --- |
+| `.ciphertext` | exact part-codec bytes, <=64 MiB; create-new, never overwritten for encryption |
+| `.seal` | exactly192 bytes: header96, plaintext hash32, encoded hash32, BLAKE3(identity + preceding160 bytes)32 |
+| `.upload` | `TARKUP01`8, file ID i64 LE, start time u64 LE, length u64 LE, one 0/1 byte per protocol part, BLAKE3 of preceding bytes32 |
+
+Spool files are0600 and task directories0700. Encryption writes a bounded block
+to disk and forwards it to the bounded transport queue. A seal is published only
+after the source digest matches and ciphertext has been flushed/synced; sendMedia
+waits for that seal. ACK maps are atomically replaced after eight acknowledgements
+or the final one on a blocking owner. A crash may lose recent bits and cause
+idempotent retransmission of the same bytes, never nonce reuse. Newer checkpoint
+magic stays intact and fails closed; a corrupted v1 map is retained as
+`.upload-corrupt` while a new temporary file ID is allocated.
+
+A valid sealed spool is length/hash checked only during recovery, then replayed
+without encryption. If local preparation was interrupted or the spool is missing
+or corrupt, the current container restarts: its saved 128-bit instance ID advances
+without wrap in a fenced transaction, deriving a new content key. The old ID can
+never be selected again for that part; overflow fails closed. Only after this
+commit is the old partial spool removed. Fully published containers retain their
+receipts and tiny summaries; their large local ciphertext is released.
+
+Normal part publication uses its locally sealed digest and the confirmed Telegram
+message ID, with no remote content read-back. A sealed but unreceipted publication
+can require bounded search/hash reconciliation, and legacy receipts without local
+summaries require one authenticated read. The small authoritative manifest retains
+its separate verification. Restart never encrypts with a saved retired identity.
+
+Unfinished v1 reservations without a sealed manifest restart automatically under
+new package/key identities and codec2, with an upgrade phase in the event timeline.
+Completed v1 files and sealed v1 manifest outboxes retain the old reader and exact
+bytes. Transactions preserve the old context/parts on failed or stale upgrades;
+SQL failure/rollback, saved-key recovery, new/old fixtures and skipped old jobs are
+covered by deterministic tests. No manual exports or reset are required.
+
 ## Context version 1
 
 Stored in schema-17 `vault_transfer_jobs.context`, with `context_version=1`. Integers are little-endian. Exact length is required; trailing bytes are rejected. The final 32 bytes are BLAKE3 of all preceding bytes, for accidental corruption detection, not a substitute for AEAD authentication. Raw master/file keys and Telegram sessions are never serialized.
@@ -23,7 +82,7 @@ Stored in schema-17 `vault_transfer_jobs.context`, with `context_version=1`. Int
 
 The fixed header before the filename length is 143 bytes. Unix paths use tag1 and native bytes, preserving non-UTF-8 names. Windows paths use tag2 and UTF-16LE units, preserving native names without lossy Unicode conversion. Paths must be absolute and cannot contain NUL. Foreign platform tags are rejected intact; no inferred path substitution occurs.
 
-Upload fields after the source path: filesystem identity u128, source size u64, modification units u64, revision u64, full-source BLAKE3-256. Source size must equal the job size. Before reusing an encryption identity, the runtime must verify the actual source bytes against the protected digest; unchanged metadata alone is insufficient.
+Upload fields after the source path: filesystem identity u128, source size u64, modification units u64, revision u64, full-source BLAKE3-256. Source size must equal the job size. Before resuming, the runtime verifies actual source bytes against the protected digest; unchanged metadata alone is insufficient. Encryption identities are never reused for encoding.
 
 Vault source screening compares the canonical path, filesystem identity, size and
 content modification time. The stored revision remains Unix ctime (metadata-change
@@ -51,20 +110,30 @@ Stored as immutable `vault_transfer_parts.identity`, exactly 180 bytes:
 | --- | --- |
 | Magic | 8 ASCII bytes `TARKVP01` |
 | Version | u32 little-endian, exactly 1 |
-| Part header | existing 96-byte version-1 crypto header, retaining its big-endian encoding |
+| Part header | 96-byte independently versioned crypto header (v1/v2), big-endian |
 | Plaintext digest | BLAKE3-256, 32 bytes |
 | Publication random ID | nonzero i64 little-endian |
 | Checksum | BLAKE3-256 of the first148 bytes |
 
-Header decoding applies the crypto crate's canonical limits, algorithms, layout and reserved-field checks. The account/task scope comes from the parent ledger record. Before execution, the runtime must additionally compare the header's package/layout against its admitted context. Part instance/nonce identity and publication ID are reserved before encryption or remote publication; a retry cannot replace the stored reservation. Ciphertext/cache durability, exact-byte validation and remote publication reconciliation must be integrated before these records support production resume. A cancelled send can have an unknown remote outcome and must not be blindly resent.
+Header decoding applies canonical limits, algorithms, layout and reserved-field
+checks. The account/task scope comes from the parent ledger record. The runtime
+compares package/layout against the admitted context. A reservation is committed
+before its one encryption attempt; the retirement operation above is the only way
+to replace an unreceipted identity. Receipted identities are immutable.
 
 ## Reserved publication transport integration
 
-The transport exposes `reserve_part_identity` and `resume_reserved_part`. The execution owner must commit the reservation before calling resume. Resume validates the complete part layout and plaintext digest before encrypting with the original identity, then reconciles exact ciphertext among bounded caption candidates. A saturated candidate result fails closed. Missing candidates use `ReservedPublicationStore`, which requires an explicit nonzero publication ID and has no ordinary-upload fallback. Verified receipts require matching encoded size, ciphertext digest, authenticated plaintext and layout. A restart can reconstruct the same bytes without retaining a live encryption object.
+`stream_reserved_source` consumes an already committed reservation. It validates
+source digests while streaming, waits for durable sealing and commits a confirmed
+publication receipt. Saved ciphertext is replayed without encoding. Caption
+reconciliation runs only for ambiguous recovery, with bounded candidates and exact
+ciphertext hashes. Saturated searches fail closed. The legacy reconstructing
+helpers remain compiled only in tests for v1 transport compatibility scenarios.
 
-Telegram's [sendMedia contract](https://core.telegram.org/method/messages.sendMedia) defines `random_id` for deduplication and documents `RANDOM_ID_DUPLICATE` as a server error without a receipt. Runtime retains that response as ambiguous and must reconcile it; it is not successful completion. Do not assume an undocumented deduplication retention window. The exact-byte reconciliation remains required.
-
-Deterministic transport tests cover lost receipts followed by reconstruction, delayed search with stable-ID replay, source/layout changes rejected before remote work and corrupt remote bytes rejected before manifest recording. These are transport tests, not proof of DesktopVault startup or persistent owner integration. Ciphertext caching and full cancellation coverage remain to be qualified; the ledger-backed part executor is described below.
+Telegram's [sendMedia contract](https://core.telegram.org/method/messages.sendMedia)
+uses `random_id` for deduplication. `RANDOM_ID_DUPLICATE` is ambiguous without a
+receipt; Runtime reconciles it and never labels that error successful. No assumed
+server deduplication window substitutes for verified publication evidence.
 
 ## Upload part receipt version 1
 
@@ -76,9 +145,13 @@ SQLite close/reopen integration tests cover durable reservation visibility befor
 
 ## Desktop upload path
 
-The connected upload path now scans the source with a1MiB buffer to establish full-file and per-part digests, checks its filesystem identity again, and durably admits the wrapped key/package/source context before reserving encryption jobs. Source verification publishes byte counts in a distinct phase and never increases uploaded-byte progress. Saving recovery information has its own localized phase. Each encryption job is an opaque Send value with no database/transport owner; its result retains the task generation and context digest. The sender rechecks the lease after queueing and only commits verified receipts. Existing bounded crypto workers and queues remain in use.
-
-Source bytes are checked against the admitted per-part digest before encryption and the full digest/identity again before manifest publication. The final ledger state is written after manifest verification and local inventory/health persistence. A ledger write failure still runs visible task failure/session-log finalization. Queued restart dispatch is now connected after unlock. Pending-batch admission, download recovery and independent controls are described in their sections below. Real Telegram transport is outside the synthetic acceptance evidence.
+Source admission hashes with a bounded buffer and publishes its own progress
+before saving wrapped-key recovery context. Each file then has one retained
+streaming crypto producer and the user-selected parallel RPC window. Three file
+owners run by default, filling a released slot while other files remain blocked.
+Checkpoint work and joins stay off the UI/network reactors. Source identity and
+the admitted per-container hashes must match before manifest publication. Ledger
+completion follows manifest verification and local inventory persistence.
 
 ## Queued restart dispatch and explicit resume entry
 
@@ -467,3 +540,8 @@ running Rust destructors, both after a durable first extent and after publicatio
 but before terminal persistence. Reopening the database advances the execution
 generation, re-verifies local bytes, fetches only a missing extent and accepts an
 already-published verified output without another remote download.
+
+If a manifest commitment exists without its sealed envelope, recovery retires the
+package and File Key before any new encryption. An interrupted seal is never
+recomputed with the same key/nonce. A saved v1 or v2 envelope is replayed unchanged,
+including its authenticated version and frame geometry.

@@ -1662,6 +1662,44 @@ mod tests {
     }
 
     #[test]
+    fn aligned_v2_manifest_fixture_and_version_binding() {
+        let (master, file, mut public, mut metadata) = sample();
+        public.flags = 1;
+        public.frame_plaintext_max = 524256;
+        for part in &mut metadata.parts {
+            part.frame_count = 1;
+            part.encoded_length =
+                PART_CONTAINER_HEADER_LENGTH + FRAME_RECORD_OVERHEAD + part.plaintext_length;
+        }
+        let encoded = seal_manifest(
+            &public,
+            &metadata,
+            &file,
+            ManifestLimits::default(),
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("v2 seal");
+        let fixture = include_str!("../tests/vectors/manifest_v2/aligned_manifest.txt");
+        assert_eq!(hex(&encoded), fixture_value(fixture, "encoded_hex"));
+        assert_eq!(
+            hex(blake3::hash(&encoded).as_bytes()),
+            fixture_value(fixture, "encoded_blake3")
+        );
+        let opened =
+            open_manifest(&encoded, &master, ManifestLimits::default()).expect("v2 reader");
+        assert_eq!(opened.public_header, public);
+        assert_eq!(opened.metadata, metadata);
+        for version in [0u16, 1, 3] {
+            let mut changed = encoded.clone();
+            changed[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(open_manifest(&changed, &master, ManifestLimits::default()).is_err());
+        }
+        let (_, mut legacy) = sealed();
+        legacy[8..10].copy_from_slice(&2u16.to_be_bytes());
+        assert!(open_manifest(&legacy, &master, ManifestLimits::default()).is_err());
+    }
+
+    #[test]
     fn canonical_unicode_manifest_roundtrip_is_deterministic() {
         let (master, file, public, metadata) = sample();
         let first = match seal_manifest(
@@ -1861,7 +1899,7 @@ mod tests {
     #[test]
     fn unsupported_version_suite_flags_and_length_claims_fail_safely() {
         let (master, mut bytes) = sealed();
-        bytes[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        bytes[8..10].copy_from_slice(&3_u16.to_be_bytes());
         assert!(matches!(
             open_manifest(&bytes, &master, ManifestLimits::default()),
             Err(CryptoError::UnsupportedVersion { .. })
@@ -1880,7 +1918,7 @@ mod tests {
             Err(CryptoError::UnsupportedSuite { suite_id: 99 })
         ));
         public.crypto_suite_id = CRYPTO_SUITE_ID;
-        public.flags = 1;
+        public.flags = 2;
         assert!(matches!(
             seal_manifest(
                 &public,

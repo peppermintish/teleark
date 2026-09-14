@@ -1,6 +1,6 @@
 # TeleArk Crypto Format
 
-Format: **implemented version 1**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
+Format: **part/manifest readers 1.0 and 2.0; new desktop writes 2.0; key wraps and recovery bundles remain 1.0**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
 ## Goals and boundaries
 
@@ -8,9 +8,22 @@ The format provides bounded-memory authenticated encryption for very large logic
 
 It does not hide ciphertext size, part count, upload timing, account/channel relationships, or traffic patterns. It does not encrypt native Telegram files outside Vault mode and does not replace secure endpoint/credential handling.
 
-Application parts (target default 1900 MiB plaintext) are distinct from crypto frames (proposed default 8 MiB plaintext) and MTProto upload parts. Implementations stream frames; they must not allocate an application part or create giant plaintext/ciphertext temporary part files.
+The desktop groups encrypted data into containers of at most 60 MiB plaintext
+(64 MiB encoded transport ceiling). Container size is distinct from the wire
+block: one authenticated encryption frame, including its framing, occupies one
+512 KiB Telegram upload part. The final block can be shorter. A retained producer
+streams through one reusable plaintext frame buffer into a bounded ciphertext
+queue and a private, bounded per-container recovery spool. No full plaintext
+container is prepared in memory. The codec still reads older container/frame
+geometries within its original limits.
 
-The implementation streams through caller-owned `Read`/`Write` values, allocates at most one bounded frame buffer at a time, uses explicit binary/CBOR codecs, and rejects hostile length/layout claims before large allocation. The desktop now composes these primitives behind a retained Vault owner and a connected private-channel upload/recovery path. Each fresh package writer tracks its AEAD identities; encrypted restart support still needs hydration from every existing wrap/manifest/part identity before any identity can be reused.
+Fresh encryption is performed once per reserved instance. A sealed ciphertext
+spool is replayed verbatim; source changes fail admission. If a spool is missing,
+partial or corrupt, the ledger advances that part's 128-bit instance ID before
+any encryption. Initial IDs are random; replacements increment the saved ID and
+fail on overflow, so a retry cannot accidentally select a retired instance even
+if the RNG repeats. This changes the derived content key. Indexed nonces are
+unique within that key; sending existing ciphertext again is not encryption.
 
 ## Primitive suite
 
@@ -98,7 +111,7 @@ Wrap the File Key with AES-256-GCM using a zero nonce and AAD containing the dom
 
 ## Content keys and nonce construction
 
-Every fresh encryption run of an application part receives a random 16-byte `part_instance_id`. It is stored in the part header and authenticated manifest descriptor. Generate it with the production CSPRNG, reject a duplicate within a package, and never reuse an existing instance ID for a fresh source read/encoding attempt.
+The first encryption run of an application part receives a random 16-byte `part_instance_id`; retirement advances that ID without wrapping. It is stored in the part header and authenticated manifest descriptor. Generate it with the production CSPRNG, reject a duplicate within a package, and never reuse an existing instance ID for a fresh source read/encoding attempt.
 
 Derive one AES content key per part instance:
 
@@ -243,8 +256,8 @@ Schema 15 changes local key-record retention, not the cryptographic formats. Exi
 
 ## Aligned part codec 2.0
 
-New streaming uploads use part codec **2.0**, independently of the unchanged
-manifest/wrap codecs (1.0). The 96-byte header carries major=2 and minor=0.
+New streaming uploads use part and manifest codecs **2.0**. Key-wrap and recovery
+bundle codecs remain **1.0**. The 96-byte header carries major=2 and minor=0.
 Readers retain codec 1.0 with its original frame geometry. Existing ciphertext
 is never rewritten during an upgrade; unsupported versions fail closed.
 

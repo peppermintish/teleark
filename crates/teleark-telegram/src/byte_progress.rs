@@ -4,11 +4,27 @@ use std::{
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
-/// Ephemeral object activity. Upload bytes have been read by the transport;
-/// they are not server acknowledgements or cryptographic verification evidence.
+/// Ephemeral bounded activity. `Uploading` is legacy transport-read progress;
+/// `PartAcknowledged` reports server-confirmed ciphertext, not message publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ByteTransferEvent {
     WaitingForUpload,
+    UploadPlan {
+        parts: u32,
+        total: u64,
+    },
+    UploadQueue {
+        queued: u16,
+        active: u16,
+    },
+    PartAcknowledged {
+        index: u32,
+        bytes: u64,
+        total: u64,
+    },
+    SavingCheckpoint,
+    CheckpointSaved,
+    WaitingForSeal,
     Uploading {
         bytes: u64,
         total: u64,
@@ -33,6 +49,9 @@ pub enum ByteTransferEvent {
 /// block on I/O or retain buffers, filenames, captions or credentials.
 pub trait ByteTransferObserver: Send + Sync {
     fn observe(&self, event: ByteTransferEvent);
+    fn transfer_tuning(&self) -> crate::TransferTuning {
+        crate::TransferTuning::default()
+    }
 }
 
 pub(crate) struct UploadReader<'a> {

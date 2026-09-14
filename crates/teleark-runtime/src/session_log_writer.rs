@@ -201,7 +201,34 @@ pub(crate) struct SessionLogWriter {
     oversized: bool,
 }
 
+/// Cloneable bounded diagnostic ingress; it never performs filesystem work.
+#[derive(Clone)]
+pub(crate) struct SessionLogSink {
+    sink: Arc<BackgroundLog>,
+    destination: Option<Arc<dyn Destination>>,
+}
+impl SessionLogSink {
+    pub(crate) fn record(&self, record: String) {
+        if let Some(destination) = &self.destination
+            && record.len() <= MAX_RECORD_BYTES
+        {
+            self.sink.submit(Record {
+                destination: destination.clone(),
+                bytes: record.into_bytes(),
+            });
+            return;
+        }
+        self.sink.omit();
+    }
+}
 impl SessionLogWriter {
+    pub(crate) fn event_sink(&self) -> SessionLogSink {
+        SessionLogSink {
+            sink: self.sink.clone(),
+            destination: self.destination.clone(),
+        }
+    }
+
     pub(crate) fn new(file: Option<File>) -> Self {
         Self {
             sink: BackgroundLog::global(),

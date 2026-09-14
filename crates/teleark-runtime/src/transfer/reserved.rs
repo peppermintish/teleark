@@ -6,6 +6,16 @@ use std::num::NonZeroI64;
 /// Store capability required by durable uploads. There is deliberately no
 /// fallback to ordinary upload, which could allocate a different message ID.
 pub trait ReservedPublicationStore: RemoteObjectStore {
+    #[cfg(not(test))]
+    fn upload_stream_reserved(
+        &mut self,
+        name: &str,
+        caption: &str,
+        stream: teleark_telegram::UploadStream,
+        random_id: NonZeroI64,
+        tuning: teleark_telegram::TransferTuning,
+    ) -> Result<RemoteByteObject, UploadError>;
+    #[cfg(test)]
     fn upload_stream_reserved(
         &mut self,
         name: &str,
@@ -77,7 +87,8 @@ impl ReservedPublicationStore for TelegramObjectStore {
 
 impl<S> EncryptedRemoteTransport<S> {
     /// Reserve once, then commit the returned identity to durable storage
-    /// before calling resume_reserved_part. Never replace a saved identity.
+    /// before starting its one encryption attempt. Retirement allocates a new
+    /// instance and is committed separately before another attempt.
     pub fn reserve_part_identity(
         &mut self,
         key: RemotePartKey,
@@ -90,6 +101,31 @@ impl<S> EncryptedRemoteTransport<S> {
             plaintext_blake3: plaintext_digest.0,
             publication_random_id: random_id.get(),
         })
+    }
+
+    /// Advance a retired instance monotonically. Even an RNG collision cannot
+    /// select any earlier instance for this part; overflow fails closed.
+    pub(crate) fn replacement_part_identity(
+        &self,
+        key: RemotePartKey,
+        previous: &VaultPartRecovery,
+        digest: ContentDigest,
+        random_id: NonZeroI64,
+    ) -> Result<VaultPartRecovery, TransferError> {
+        self.restore_reserved_plan(key, previous)?;
+        if previous.plaintext_blake3 != digest.0 {
+            return Err(TransferError::SourceChanged);
+        }
+        if random_id.get() == previous.publication_random_id {
+            return Err(TransferError::KeyUnavailable);
+        }
+        let next = u128::from_be_bytes(previous.header.part_instance_id.0)
+            .checked_add(1)
+            .ok_or(TransferError::KeyUnavailable)?;
+        let mut replacement = previous.clone();
+        replacement.header.part_instance_id = teleark_crypto::PartInstanceId(next.to_be_bytes());
+        replacement.publication_random_id = random_id.get();
+        Ok(replacement)
     }
 
     /// Reconstruct the exact ciphertext, reconcile remote publication, and
@@ -614,6 +650,143 @@ mod tests {
             media_kind: MediaKind::Document,
             whole_plaintext_blake3: *blake3::hash(b"data").as_bytes(),
         }
+    }
+
+    #[test]
+    fn sealed_v1_manifest_replays_original_bytes_after_upgrade() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("jobs.sqlite");
+        let (mut db, lease, master) = admitted(&path);
+        let context = crate::VaultRecoveryContext::from_record(
+            &db.vault_job(1, 9).expect("job").expect("saved"),
+        )
+        .expect("context");
+        let key = context.file_key(&master).expect("file key");
+        let header = PartHeader::new(
+            context.package_id,
+            teleark_crypto::PartInstanceId([61; 16]),
+            0,
+            1,
+            4,
+            0,
+            4,
+            8 * 1024 * 1024,
+            PartLimits::default(),
+        )
+        .expect("v1 header");
+        let mut bytes = Vec::new();
+        let summary = teleark_crypto::encrypt_part(
+            &mut &b"data"[..],
+            &mut bytes,
+            &header,
+            &key,
+            PartLimits::default(),
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("old ciphertext");
+        let mut store = Store::default();
+        let name = remote_part_name(&context.package_id, 0);
+        let object = store
+            .upload_reserved(
+                &name,
+                "synthetic v1 part",
+                bytes,
+                NonZeroI64::new(51).expect("id"),
+            )
+            .expect("old object");
+        let public = ManifestPublicHeader {
+            package_id: context.package_id,
+            vault_id: context.vault_id,
+            manifest_generation: 1,
+            created_at_unix_ms: 100,
+            logical_file_size: 4,
+            part_count: 1,
+            application_part_target: 4,
+            frame_plaintext_max: 8 * 1024 * 1024,
+            nonce_strategy_id: NONCE_STRATEGY_ID,
+            crypto_suite_id: CRYPTO_SUITE_ID,
+            file_key_wrap: context.file_key_wrap.clone(),
+            master_key_generation: 1,
+            flags: 0,
+        };
+        let metadata = ManifestMetadata {
+            logical_name: "fixture.bin".into(),
+            relative_path: None,
+            mime_type: None,
+            media_kind: MediaKind::Document,
+            whole_plaintext_blake3: *blake3::hash(b"data").as_bytes(),
+            parts: vec![ManifestPart {
+                part_index: 0,
+                part_instance_id: header.part_instance_id.0,
+                plaintext_offset: 0,
+                plaintext_length: 4,
+                encoded_length: object.encoded_size,
+                frame_count: 1,
+                plaintext_blake3: summary.plaintext_blake3,
+                encoded_ciphertext_blake3: summary.encoded_blake3,
+                remote_locator: RemoteLocator {
+                    account_id: 1,
+                    chat_id: 3,
+                    message_id: object.object_id as i64,
+                    remote_name: name,
+                    locator_version: 1,
+                    locator_extension: None,
+                },
+            }],
+            logical_timestamps: None,
+            source_metadata: vec![],
+            format_extensions: vec![],
+        };
+        let limits = ManifestLimits::default();
+        let commitment = teleark_crypto::manifest_content_commitment(&public, &metadata, limits)
+            .expect("commitment");
+        assert!(
+            db.reserve_vault_manifest(
+                lease,
+                &teleark_storage::VaultManifestOutbox {
+                    codec_version: 1,
+                    commitment,
+                    random_id: 52,
+                    envelope: None,
+                    message_id: None,
+                }
+            )
+            .expect("reserve")
+        );
+        let envelope = seal_manifest(
+            &public,
+            &metadata,
+            &key,
+            limits,
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("v1 manifest");
+        assert!(
+            db.save_vault_manifest_envelope(lease, &envelope)
+                .expect("seal")
+        );
+        drop(db);
+        let mut db = teleark_storage::Database::open(&path).expect("reopen");
+        let mut worker = crate::DurableUploadParts::open(&db, lease, store.clone(), &master)
+            .expect("upgraded worker");
+        assert!(
+            worker
+                .resume_saved_manifest(&mut db, &master)
+                .expect("resume old bytes")
+                .is_some()
+        );
+        assert_eq!(
+            db.vault_manifest_outbox(1, 9)
+                .expect("outbox")
+                .expect("saved")
+                .envelope,
+            Some(envelope)
+        );
+        assert_eq!(
+            store.0.borrow().uploads,
+            2,
+            "one old part, one replayed manifest"
+        );
     }
 
     #[test]
