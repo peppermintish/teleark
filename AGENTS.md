@@ -2,10 +2,9 @@
 
 Build a mature, reliable product. Complete authorized work, make routine implementation decisions, and preserve unrelated changes. Consult [technical references](docs/ARCHITECTURE.md#technical-references) as needed; no compulsory reading sequence. Define completion through working behavior and evidence; maturity labels and mandatory third-party audits are not delivery prerequisites.
 
-## Local agent memory and development environment
+## Local development environment
 
-- Use the Git-ignored `.agent-memory/` directory for temporary coding-agent notes and handoffs. Read `.agent-memory/README.md` when present, verify stale notes against the working tree, and update concise checkpoints after meaningful work. Keep decisions, affected paths, checks and next steps; prune obsolete detail. Shared contracts and durable project decisions belong in tracked documentation.
-- Use the Git-ignored `.env.local` for local development credentials and environment overrides; `.env.example` may contain Telegram’s officially published TEST ONLY application identifiers, with source attribution and test-only usage instructions; never put personal credentials in it. Preserve existing local values. Read credentials through the scoped shell environment described in [Development](docs/DEVELOPMENT.md#local-agent-memory-and-development-environment), only when the task needs them. Keep local files private (`0700` for the memory directory, `0600` for notes and environment files).
+- Use the Git-ignored `.env.local` for local development credentials and environment overrides; `.env.example` may contain Telegram’s officially published TEST ONLY application identifiers, with source attribution and test-only usage instructions; never put personal credentials in it. Preserve existing local values. Read credentials through the scoped shell environment described in [Development](docs/DEVELOPMENT.md#local-development-environment), only when the task needs them. Keep local environment files private (`0600`).
 - Never copy credential values into notes, source, fixtures, command arguments, logs or responses. Do not print local environment files or dump the environment; disable shell tracing before loading them. Verify ignore rules and inspect staged paths before committing; never force-add these local files. Ordinary tests and UI previews keep using synthetic data.
 
 ## Make background work visible

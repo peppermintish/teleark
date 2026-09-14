@@ -6,9 +6,6 @@
 
 /dist/
 
-# Coding-agent scratch memory (local to this checkout).
-/.agent-memory/
-
 # Local development environment files; commit only the public example template.
 /.env
 /.env.local
