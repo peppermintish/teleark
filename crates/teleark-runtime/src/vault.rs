@@ -42,6 +42,7 @@ mod catalog;
 mod control;
 mod health;
 mod key_progress;
+mod shutdown;
 use control::UploadControls;
 pub use control::VaultUploadControl;
 pub use control::VaultUploadControl as VaultTransferControl;
@@ -392,10 +393,15 @@ struct VaultInner {
     session: Arc<Mutex<VaultSession>>,
     transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
+    upload_controls: UploadControls,
     joins: Mutex<Vec<JoinHandle<()>>>,
 }
 
 enum VaultCommand {
+    PauseForShutdown {
+        account: i64,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
     StopUploadBatch {
         account: i64,
         batch: u64,
@@ -595,6 +601,7 @@ impl DesktopVault {
                 session,
                 transfers,
                 active_upload_batch,
+                upload_controls,
                 joins: Mutex::new(joins),
             }),
         })
@@ -1087,7 +1094,9 @@ impl DesktopVault {
         drop(session);
         let queue = if matches!(
             envelope.command,
-            VaultCommand::ControlUpload { .. } | VaultCommand::StopUploadBatch { .. }
+            VaultCommand::ControlUpload { .. }
+                | VaultCommand::StopUploadBatch { .. }
+                | VaultCommand::PauseForShutdown { .. }
         ) {
             &self.inner.control_sender
         } else if matches!(
@@ -1215,6 +1224,9 @@ impl VaultOwner {
 
     fn execute(&mut self, command: VaultCommand) {
         match command {
+            VaultCommand::PauseForShutdown { account, reply } => {
+                let _ = reply.send(self.pause_saved_transfers(account));
+            }
             VaultCommand::StopUploadBatch {
                 account,
                 batch,
@@ -1968,6 +1980,14 @@ impl VaultOwner {
         // publish every running file and terminal result.
         let scheduling_result = (|| -> Result<(), ApplicationError> {
             for plans in plans.chunks(VAULT_UPLOAD_WINDOW) {
+                if self.upload_controls.exit_pause.is_requested() {
+                    self.pause_saved_transfers(account_id)?;
+                    for _ in plans {
+                        progress.record_paused();
+                    }
+                    report.paused_count += plans.len();
+                    continue;
+                }
                 let batch_id = plans[0].batch_id;
                 *self
                     .active_upload_batch
@@ -3372,7 +3392,8 @@ impl VaultOwner {
             .transpose()?;
         let mut store =
             TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id)
-                .with_tuning(self.library.preferences()?.transfer_tuning);
+                .with_tuning(self.library.preferences()?.transfer_tuning)
+                .with_cancellation(self.upload_controls.exit_pause.cancellation());
         if let Some(registration) = &preflight_registration {
             store = store.with_cancellation(registration.cancellation.clone());
         }
@@ -3419,6 +3440,9 @@ impl VaultOwner {
             active,
             self.historical_key.as_ref(),
         )?;
+        if self.upload_controls.exit_pause.is_requested() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
         let logical_name = recovered.manifest.metadata.logical_name.clone();
         let size_bytes = recovered.manifest.public_header.logical_file_size;
         let part_count = recovered.manifest.public_header.part_count;

@@ -12,7 +12,11 @@ pub enum VaultUploadControl {
 type UploadControlEntries = BTreeMap<(i64, u64), (u64, crate::TelegramScanCancellation)>;
 
 #[derive(Clone, Default)]
-pub(super) struct UploadControls(Arc<Mutex<UploadControlEntries>>);
+pub(super) struct UploadControls {
+    entries: Arc<Mutex<UploadControlEntries>>,
+    pub(super) exit_pause: Arc<super::shutdown::ExitPause>,
+}
+
 pub(super) struct UploadRegistration {
     owner: UploadControls,
     lease: VaultJobLease,
@@ -22,7 +26,7 @@ pub(super) struct UploadRegistration {
 impl UploadControls {
     pub fn register(&self, lease: VaultJobLease) -> Result<UploadRegistration, ApplicationError> {
         let mut entries = self
-            .0
+            .entries
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         if entries.contains_key(&(lease.account_id, lease.id)) {
@@ -45,7 +49,7 @@ impl UploadControls {
     }
     fn cancel(&self, lease: VaultJobLease) -> Result<bool, ApplicationError> {
         let entries = self
-            .0
+            .entries
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         let cancellation = entries
@@ -89,7 +93,7 @@ impl UploadControls {
 }
 impl Drop for UploadRegistration {
     fn drop(&mut self) {
-        if let Ok(mut entries) = self.owner.0.lock() {
+        if let Ok(mut entries) = self.owner.entries.lock() {
             let key = (self.lease.account_id, self.lease.id);
             if entries
                 .get(&key)
@@ -108,6 +112,10 @@ impl VaultOwner {
         &self,
         lease: VaultJobLease,
     ) -> Result<UploadRegistration, ApplicationError> {
+        if self.upload_controls.exit_pause.is_requested() {
+            self.control_upload(lease.account_id, lease.id, VaultUploadControl::Pause)?;
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
         let lifecycle = self.telegram.lifecycle();
         let (revision, account, _) = lifecycle.snapshot();
         if account != Some(lease.account_id) {
@@ -141,7 +149,7 @@ impl VaultOwner {
         let mut db = Database::open(self.library.database_path.as_ref()).map_err(persistence)?;
         let registered = self
             .upload_controls
-            .0
+            .entries
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
             .keys()

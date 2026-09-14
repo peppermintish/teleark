@@ -945,7 +945,9 @@ impl DesktopTransfers {
     pub fn pause(&self, id: u64) -> Result<(), ApplicationError> {
         if !matches!(
             self.snapshot_state(id)?,
-            ChannelDownloadState::Queued | ChannelDownloadState::Running
+            ChannelDownloadState::Queued
+                | ChannelDownloadState::Running
+                | ChannelDownloadState::Paused
         ) {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
@@ -1213,6 +1215,22 @@ impl DesktopTransfers {
         self.inner.pump.refill()
     }
 
+    /// Background-only graceful exit. Restore admission if checkpointing fails;
+    /// transfers that already acknowledged pause remain paused.
+    pub fn pause_for_shutdown(&self) -> Result<(), ApplicationError> {
+        let account = self.inner.active_account.load(Ordering::Acquire);
+        let result = self.suspend_account();
+        if result.is_err() {
+            self.inner.active_account.store(account, Ordering::Release);
+        }
+        result
+    }
+
+    /// Reopen admission after an abandoned exit; saved pause intent is unchanged.
+    pub fn abandon_shutdown(&self, account: i64) {
+        self.inner.active_account.store(account, Ordering::Release);
+    }
+
     /// Pause active work and wait for its retained workers to close partial files before logout.
     pub fn suspend_account(&self) -> Result<(), ApplicationError> {
         self.inner.active_account.store(0, Ordering::Release);
@@ -1222,7 +1240,9 @@ impl DesktopTransfers {
             .fold(Vec::new(), |mut ids, snapshot| {
                 if matches!(
                     snapshot.state,
-                    ChannelDownloadState::Queued | ChannelDownloadState::Running
+                    ChannelDownloadState::Queued
+                        | ChannelDownloadState::Running
+                        | ChannelDownloadState::Paused
                 ) {
                     ids.push(snapshot.id);
                 }
@@ -1230,7 +1250,12 @@ impl DesktopTransfers {
             })
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         for id in active {
-            self.pause(id)?;
+            if let Err(error) = self.pause(id)
+                && (error.kind() != ApplicationErrorKind::Conflict
+                    || !is_terminal(self.snapshot_state(id)?))
+            {
+                return Err(error);
+            }
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -3101,6 +3126,91 @@ mod tests {
             .collect::<Vec<_>>();
         identities.sort_unstable();
         assert_eq!(identities, [(100, 200), (101, 201)]);
+    }
+
+    #[test]
+    fn graceful_exit_pauses_native_workers_and_retains_partial_files_after_restart() {
+        struct ExitBackend {
+            started: mpsc::Sender<()>,
+            discarded: AtomicUsize,
+        }
+        impl ChannelDownloadBackend for ExitBackend {
+            fn download(
+                &self,
+                _: Option<i64>,
+                _: i64,
+                _: i64,
+                destination: &Path,
+                observer: Arc<dyn DownloadObserver>,
+            ) -> Result<(), ApplicationError> {
+                fs::write(destination.with_extension("partial"), b"saved part")
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+                observer.progressed(4);
+                let _ = self.started.send(());
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if observer.control() != DownloadControl::Continue {
+                        return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                    }
+                    assert!(Instant::now() < deadline, "exit must signal the worker");
+                    thread::yield_now();
+                }
+            }
+            fn discard_partial(&self, _: &Path) -> Result<(), ApplicationError> {
+                self.discarded.fetch_add(1, AtomicOrdering::Relaxed);
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = library(&directory);
+        let (started, ready) = mpsc::channel();
+        let backend = Arc::new(ExitBackend {
+            started,
+            discarded: AtomicUsize::new(0),
+        });
+        let transfers = test_transfers(backend.clone(), library.clone()).expect("worker");
+        let destination = directory.path().join("retained.zip");
+        let id = transfers
+            .enqueue_channel_download(request(destination.clone()))
+            .expect("enqueue");
+        ready
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker started");
+        transfers
+            .pause_for_shutdown()
+            .expect("durable pause and settlement");
+        assert!(
+            transfers
+                .inner
+                .scheduled
+                .lock()
+                .expect("workers")
+                .is_empty()
+        );
+        assert_eq!(
+            transfers.snapshot_state(id).expect("state"),
+            ChannelDownloadState::Paused
+        );
+        assert_eq!(backend.discarded.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(
+            fs::read(destination.with_extension("partial")).expect("retained bytes"),
+            b"saved part"
+        );
+        drop(transfers);
+        let restarted = test_transfers(backend, library).expect("restart");
+        restarted.activate_pending_downloads().expect("scheduler");
+        assert_eq!(
+            restarted.snapshot_state(id).expect("saved pause"),
+            ChannelDownloadState::Paused
+        );
+        assert!(
+            restarted
+                .inner
+                .scheduled
+                .lock()
+                .expect("workers")
+                .is_empty()
+        );
     }
 
     #[test]

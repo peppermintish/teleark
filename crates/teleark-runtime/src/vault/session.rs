@@ -14,6 +14,7 @@ pub(super) struct VaultSession {
     generation: u64,
     keys: KeyLease,
     pub status: VaultStatus,
+    pub closing: bool,
     pub pending_transfers: Arc<AtomicUsize>,
 }
 
@@ -32,6 +33,7 @@ impl VaultSession {
     pub fn new(record: Option<VaultMetadataRecord>) -> Self {
         Self {
             generation: 0,
+            closing: false,
             pending_transfers: Arc::new(AtomicUsize::new(0)),
             status: status_for(record.as_ref(), true),
             keys: KeyLease {
@@ -53,6 +55,9 @@ impl VaultSession {
     }
 
     pub fn admit(&self, command: VaultCommand) -> Result<VaultEnvelope, ApplicationError> {
+        if self.closing && (command.is_transfer() || command.is_scan()) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
         let needs_active = (command.is_transfer()
             && !matches!(
                 command,
