@@ -219,41 +219,51 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
 
 impl TeleArkApp {
     pub(super) fn shell_sync_status(&self) -> ShellSyncStatus {
-        let (id, tone, icon, count) = if self.account_restoring {
-            (
-                "shell-sync-connecting",
-                Tone::Blue,
-                Some(IconName::Redo2),
-                0,
-            )
-        } else if self.library_sync_loading {
-            ("shell-sync-active", Tone::Blue, Some(IconName::Redo2), 0)
-        } else if self.library_sync_error.is_some() {
-            (
-                "shell-sync-attention",
-                Tone::Amber,
-                Some(IconName::TriangleAlert),
-                0,
-            )
-        } else if let Some(snapshot) = &self.channel_sync_snapshot {
-            channel_status(snapshot)
-        } else {
-            use dialogs::Phase as Dialog;
-            match self.dialogs.phase() {
-                Dialog::RestoringUploads | Dialog::Reading | Dialog::Saving => {
-                    ("shell-sync-active", Tone::Blue, Some(IconName::Redo2), 0)
-                }
-                Dialog::Waiting => ("shell-sync-waiting", Tone::Amber, Some(IconName::Pause), 0),
-                Dialog::Failed => (
-                    "shell-sync-attention",
-                    Tone::Amber,
-                    Some(IconName::TriangleAlert),
-                    0,
-                ),
-                Dialog::Cancelled => ("shell-sync-paused", Tone::Neutral, Some(IconName::Pause), 0),
-                _ => ("shell-sync-ready", Tone::Neutral, None, 0),
-            }
-        };
+        use dialogs::Phase as Dialog;
+        let (mut id, mut tone, mut icon, count) = self
+            .channel_sync_snapshot
+            .as_ref()
+            .map(channel_status)
+            .unwrap_or(("shell-sync-ready", Tone::Neutral, None, 0));
+        let attention = tone == Tone::Amber && matches!(icon, Some(IconName::TriangleAlert))
+            || self.library_sync_error.is_some()
+            || self.dialogs.phase() == Dialog::Failed;
+        let other_active =
+            self.library_sync_loading || self.account_restoring || self.dialogs.active();
+        let active = count > 0 || matches!(icon, Some(IconName::Redo2)) || other_active;
+        if attention {
+            id = if active && count > 0 {
+                "shell-sync-active-attention"
+            } else if active {
+                "shell-sync-working-attention"
+            } else {
+                "shell-sync-attention"
+            };
+            tone = Tone::Amber;
+            icon = Some(IconName::TriangleAlert);
+        } else if other_active {
+            id = if self.account_restoring {
+                "shell-sync-connecting"
+            } else if self.dialogs.phase() == Dialog::Waiting && !self.library_sync_loading {
+                "shell-sync-waiting"
+            } else if count == 0 {
+                "shell-sync-active"
+            } else {
+                id
+            };
+            tone = if self.dialogs.phase() == Dialog::Waiting {
+                Tone::Amber
+            } else {
+                Tone::Blue
+            };
+            icon = Some(IconName::Redo2);
+        } else if self.channel_sync_snapshot.is_none() {
+            id = match self.dialogs.phase() {
+                Dialog::Complete => "shell-sync-complete",
+                Dialog::Cancelled => "shell-sync-paused",
+                _ => id,
+            };
+        }
         ShellSyncStatus {
             label: self.tr_with(
                 id,

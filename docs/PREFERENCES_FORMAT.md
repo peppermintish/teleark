@@ -30,7 +30,7 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `download_throughput_strategy` | retained legacy: `balanced` or `max_throughput`; inactive | `balanced` |
 | `transfer_soft_limit_policy` | retained legacy: `respect`, `adaptive_override`, or `ignore`; inactive | `adaptive_override` |
 | `manual_transfer_v1` | nine comma-separated integers, order and bounds below | `3,10,2,2,4,3,8,2,4` |
-| `lock_vault_when_hidden` | boolean | `true` |
+| `lock_vault_when_hidden` | retired and ignored | none |
 | `index_batch_size` | `200`, `500`, or `1000` | `1000` |
 | `notify_download_completed` | boolean | `true` |
 | `notify_download_failed` | boolean | `true` |
@@ -175,13 +175,7 @@ unknown download accounts. The assignment and marker commit atomically before
 a configured connection is returned. See [Data model](DATA_MODEL.md) for schema
 9 compatibility and unknown-provenance behavior.
 
-`lock_vault_when_hidden` is a deprecated version-1 boolean setting. Readers and
-writers preserve existing values for compatibility, but the current desktop
-session policy no longer uses it to lock on inactivity or navigation. New
-preferences default it to false. Explicit locking, account exit and process
-exit end session access; already admitted background work keeps its own bounded
-key lease. Existing bytes are not reinterpreted and no key/manifest/database
-migration is needed. See [ADR 0026](adr/0026-session-unlock-and-task-key-leases.md).
+`lock_vault_when_hidden` is retired and ignored. Application PIN configuration is independent of desktop preference saves.
 
 ## Network proxy policy: version 1
 
@@ -195,3 +189,20 @@ The SQLite `settings` key `network.proxy` stores a JSON object, independently ve
 `address` is a numeric socket address such as `127.0.0.1:1080` or `[::1]:8080`, with nonzero port and no unspecified/multicast IP. Hostnames are unsupported. Authentication fields are strings, each at most 255 UTF-8 bytes; an empty username requires an empty password. HTTP usernames cannot contain `:`. Unknown versions/modes/fields, invalid values and objects over 8,192 bytes fail closed. Writers first validate the existing record and preserve unsupported or corrupt bytes. The setting update is transactional; schema upgrades preserve all other data/keys and are restartable.
 
 Synthetic compatibility fixtures live in `crates/teleark-runtime/src/fixtures/proxy-v1-*.json`. JSON field order is insignificant. Proxy authentication is stored in the protected local SQLite database, which is not encrypted; masked editor fields and sanitized diagnostics never imply encrypted-at-rest credentials. Password buffers in proxy configurations are zeroized on drop. [ADR 0024](adr/0024-fail-closed-proxy-routing.md) specifies route switching and failure behavior.
+
+## Channel directory restart cache
+
+The account-scoped channel directory has its own version-1 cache codec in the settings table; it is not a preference field or a Telegram cursor. [ADR 0031](adr/0031-automatic-account-synchronization.md#bounds-and-compatibility) specifies header/page keys, bounds, atomic replacement, automatic legacy fallback and unsupported-version preservation. SQLite and existing preference formats retain their meanings.
+
+
+## Application PIN envelope v1
+
+The optional `application.pin` row is separate from `preferences.v1.*`. Absence
+means no application lock. The JSON object has integer `version: 1` and byte-array
+`verifier`, an existing v1 authenticated password-wrap encoding of a disposable
+random key. It contains no PIN or file encryption key. See
+[ADR 0037](adr/0037-application-pin-and-transfer-drain.md) and the synthetic
+[v1 fixture](../crates/teleark-runtime/src/fixtures/app-pin-v1.json).
+Current readers/writers support only envelope v1. Malformed/newer records are
+preserved and keep the access gate closed. Settings saves do not rewrite the PIN;
+PIN changes use a separate serialized compare-and-replace operation.

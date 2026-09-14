@@ -76,6 +76,22 @@ An enabled proxy is mandatory for all TeleArk network sockets, including Telegra
 
 SOCKS5 password authentication and HTTP CONNECT Basic authentication do not encrypt the connection to the proxy. Telegram payload protection remains MTProto's responsibility. Proxy credentials are local protected SQLite settings, not OS-keychain storage, and must never enter logs or support bundles. Tests/previews use synthetic credentials and loopback peers only.
 
-### Session locking with active operations
+### Application PIN and active operations
 
-Explicit locking revokes new Vault key admission and clears visible secret inputs. Already admitted encrypted transfers and scans retain at most two operation-scoped key references until completion/cancellation, including their internal retries. Lock is therefore a presentation and new-access boundary, not immediate erasure of keys required by ongoing work. Locked transfer views hide decrypted names, paths and name-search matches while retaining progress and supported stop controls. Account exit and process exit are separate lifecycle operations. See [ADR 0026](adr/0026-session-unlock-and-task-key-leases.md).
+An optional installation-wide PIN gates the entire desktop UI. It is independent
+of file encryption passwords and never revokes the runtime key session: queued
+and running uploads, downloads and message/manifest synchronization continue.
+The gate clears secret input widgets and displayed recovery material, closes
+auxiliary batch windows, and restricts interaction to sign-in, account switching,
+proxy configuration and native window/quit controls. Account changes do not reset
+the PIN. This is an application access boundary, not an OS or memory-erasure
+boundary; a user with write access to application storage can remove its settings.
+
+The versioned PIN verifier wraps only a disposable random key using the existing
+Argon2/password-wrap primitive. PIN creation/verification and storage run off the
+UI thread after visible acknowledgment. Current-PIN checks protect changing or
+disabling it; failed saves preserve the verifier and corrupt/newer records fail
+closed. See [ADR 0037](adr/0037-application-pin-and-transfer-drain.md) for the record,
+rate limit, callback fences and transfer drain behavior. Runtime Vault session
+revocation remains an account-lifecycle and cryptographic-access operation, as
+described in [ADR 0026](adr/0026-session-unlock-and-task-key-leases.md).

@@ -854,6 +854,7 @@ impl TeleArkApp {
                     return;
                 }
                 this.vault_download_in_flight = false;
+                this.advance_transition(cx);
                 let key_activity = this.vault_activity;
                 this.vault_activity = match result {
                     Ok(_) => VaultActivity::Succeeded,
@@ -1001,6 +1002,7 @@ impl TeleArkApp {
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
                 this.upload_preparing = false;
+                this.advance_transition(cx);
                 this.upload_preparation_presentation = None;
                 if let Some(progress) = &this.upload_preparation_progress {
                     progress.finish(
@@ -1183,6 +1185,7 @@ impl TeleArkApp {
                     return;
                 }
                 this.upload_in_flight = false;
+                this.advance_transition(cx);
                 this.upload_selection_presentation = None;
                 let key_activity = this.vault_activity;
                 match result {

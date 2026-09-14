@@ -474,7 +474,7 @@ impl TeleArkApp {
         )
     }
 
-    pub(super) fn sync_event_time(&self, at: std::time::Instant) -> SharedString {
+    pub(crate) fn sync_event_time(&self, at: std::time::Instant) -> SharedString {
         teleark_i18n::format::format_unix_millis(
             self.locale(),
             self.sync_time_anchor.unix_millis(at),
@@ -493,35 +493,94 @@ impl TeleArkApp {
     }
 
     pub(super) fn sync_history_rows(&self) -> Vec<sync_history::HistoryRow> {
-        let Some(snapshot) = &self.channel_sync_snapshot else {
-            return Vec::new();
+        let mut rows = Vec::new();
+        let source = |id: Option<i64>| -> SharedString {
+            if id.is_some() && id == self.storage_channel_id() {
+                return self
+                    .storage_status
+                    .channel()
+                    .map(|c| c.name.clone().into())
+                    .unwrap_or_else(|| self.tr("managed-watch-title"));
+            }
+            id.and_then(|id| self.telegram_chats.iter().find(|c| c.id == id))
+                .map(|c| c.name.clone().into())
+                .unwrap_or_else(|| self.tr("global-sync-account"))
         };
-        let sources = self
-            .telegram_chats
-            .iter()
-            .map(|chat| (chat.id, &chat.name))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        snapshot
-            .events
-            .iter()
-            .rev()
-            .map(|event| sync_history::HistoryRow {
-                title: self.tr(if event.phase == ChannelSyncPhase::Idle {
-                    "sync-event-completed"
-                } else {
-                    sync_phase_id(event.phase)
-                }),
-                time: self.sync_event_time(event.at),
-                tone: sync_tone(event.phase),
-                source: event.chat_id.and_then(|id| sources.get(&id)).map_or_else(
-                    || self.tr("global-sync-account"),
-                    |name| (*name).clone().into(),
-                ),
-                error: event
-                    .failure
-                    .map_or_else(|| "".into(), |error| self.application_error_message(error)),
-            })
-            .collect()
+        if let Some(snapshot) = &self.channel_sync_snapshot {
+            for event in &snapshot.events {
+                rows.push((
+                    self.sync_time_anchor.unix_millis(event.at),
+                    sync_history::HistoryRow {
+                        title: self.tr(if event.phase == ChannelSyncPhase::Idle {
+                            "sync-event-completed"
+                        } else {
+                            sync_phase_id(event.phase)
+                        }),
+                        time: self.sync_event_time(event.at),
+                        tone: sync_tone(event.phase),
+                        source: source(event.chat_id),
+                        error: event
+                            .failure
+                            .map_or_else(|| "".into(), |e| self.application_error_message(e)),
+                    },
+                ));
+            }
+            if let Some(watch) = &snapshot.managed_watch {
+                for change in &watch.changes {
+                    let kind = match change.kind {
+                        teleark_runtime::ManagedChannelChangeKind::Edited => "managed-watch-edited",
+                        teleark_runtime::ManagedChannelChangeKind::Deleted => {
+                            "managed-watch-deleted"
+                        }
+                        teleark_runtime::ManagedChannelChangeKind::Gap => "managed-watch-gap",
+                    };
+                    rows.push((
+                        change.observed_at_unix_ms,
+                        sync_history::HistoryRow {
+                            title: if change.message_id > 0 {
+                                self.tr_with(
+                                    "sync-private-event",
+                                    MessageArgs::new()
+                                        .with("kind", self.tr(kind).to_string())
+                                        .with(
+                                            "message",
+                                            format_integer(self.locale(), change.message_id as u64),
+                                        ),
+                                )
+                            } else {
+                                self.tr(kind)
+                            },
+                            time: teleark_i18n::format::format_unix_millis(
+                                self.locale(),
+                                change.observed_at_unix_ms,
+                            )
+                            .into(),
+                            tone: components::Tone::Amber,
+                            source: source(snapshot.managed_chat_id),
+                            error: "".into(),
+                        },
+                    ));
+                }
+            }
+        }
+        for (phase, error, at) in &self.dialogs.history {
+            rows.push((
+                self.sync_time_anchor.unix_millis(*at),
+                sync_history::HistoryRow {
+                    title: self.tr(dialogs::phase_id(*phase)),
+                    time: self.sync_event_time(*at),
+                    tone: if error.is_some() {
+                        components::Tone::Amber
+                    } else {
+                        components::Tone::Neutral
+                    },
+                    source: self.tr("global-sync-account"),
+                    error: error.map_or_else(|| "".into(), |e| self.application_error_message(e)),
+                },
+            ));
+        }
+        rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
     fn render_sync_summary(&self) -> AnyElement {
@@ -907,25 +966,31 @@ impl TeleArkApp {
                     }
                 }
             }
-            body = body
-                .child(sync_section_title(self.tr("sync-recent-events"))) // The locked GPUI cache does not replay accessibility nodes.
-                // Keep controls discoverable when assistive technology is active.
-                .child(if window.is_a11y_active() {
-                    div()
-                        .w_full()
-                        .h(px(history_height))
-                        .child(history)
-                        .into_any_element()
-                } else {
-                    history.cached(history_style).into_any_element()
-                });
             if snapshot.events.is_empty() {
                 body = body.child(self.tr("sync-no-events"));
             }
-            if snapshot.dropped_events > 0 || snapshot.overflow_signals > 0 {
+            if snapshot.dropped_events > 0
+                || snapshot.overflow_signals > 0
+                || snapshot
+                    .managed_watch
+                    .as_ref()
+                    .is_some_and(|w| w.omitted_changes() > 0)
+            {
                 body = body.child(self.tr("sync-older-events"));
             }
         }
+        body = body
+            .child(sync_section_title(self.tr("sync-recent-events"))) // The locked GPUI cache does not replay accessibility nodes.
+            // Keep controls discoverable when assistive technology is active.
+            .child(if window.is_a11y_active() {
+                div()
+                    .w_full()
+                    .h(px(history_height))
+                    .child(history)
+                    .into_any_element()
+            } else {
+                history.cached(history_style).into_any_element()
+            });
         components::inspector_panel("channel-sync-inspector", theme::SYNC_INSPECTOR_WIDTH)
             .debug_selector(|| "channel-sync-inspector".into())
             .absolute()
@@ -1434,6 +1499,15 @@ pub(super) mod tests {
                 .center();
             cx.simulate_click(details, gpui::Modifiers::default());
             cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("channel-sync-inspector").is_none(),
+                "status is display-only"
+            );
+            app.update(cx, |app, cx| {
+                app.channel_sync_details = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
             let inspector = cx
                 .debug_bounds("channel-sync-inspector")
                 .expect("separate inspector");
@@ -1663,6 +1737,16 @@ pub(super) mod tests {
                         .expect("warning while locked");
                     assert!(alert.left() >= px(0.0) && alert.right() <= px(900.0));
                     cx.simulate_click(alert.center(), gpui::Modifiers::default());
+                    cx.run_until_parked();
+                    assert!(
+                        cx.debug_bounds("channel-sync-inspector").is_none(),
+                        "private status is display-only too"
+                    );
+                    app.update(cx, |app, cx| {
+                        app.channel_sync_details = true;
+                        app.channel_sync_private_expanded = true;
+                        cx.notify();
+                    });
                     cx.run_until_parked();
                     app.update(cx, |app, _| {
                         assert_eq!(app.page, page, "details preserve navigation");

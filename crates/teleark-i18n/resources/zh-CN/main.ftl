@@ -625,10 +625,7 @@ settings-upload-vault-managed-description = 已解锁的密钥库加密内容、
 upload-current-part-size = 当前安全分片上限
 upload-current-part-size-description = TeleArk 当前生成的加密明文分片最大为 { $size }。
 settings-vault-title = 密钥库保护
-settings-vault-description = 控制本地加密材料何时锁定。
-settings-vault-lock-when-hidden = TeleArk 失去活动状态时锁定
-settings-vault-lock-when-hidden-description = 切换页面会保持解锁状态。离开应用窗口时会锁定；正在运行的传输可能使用已持有的密钥完成。
-settings-vault-lock-now-action = 立即锁定密钥库
+settings-vault-description = 管理文件加密密钥和恢复。在通用设置中配置应用 PIN。
 settings-index-title = Telegram 索引
 settings-index-description = 选择 TeleArk 每次频道索引请求扫描的消息数量。
 settings-index-batch-option = { $count } 条消息
@@ -980,7 +977,6 @@ shell-disk-summary = 可用 { $free } · TeleArk 已用 { $used }
 
 vault-unlock-action = 解锁密钥库
 
-vault-lock-action = 锁定密钥库
 
 unlock-return-note = 解锁本次会话后，可浏览文件、查看提示，再决定下一步操作。
 
@@ -1318,7 +1314,7 @@ proxy-settings-title = 网络代理
 proxy-settings-description = 通过 SOCKS5 或 HTTP CONNECT 代理传输 TeleArk 的全部网络流量。代理故障时绝不会自动直连。
 proxy-enable = 使用代理
 proxy-disable = 关闭代理（允许直连）
-proxy-apply-note = 点击应用后保存并生效。旧连接会先关闭，中断的传输可恢复。只有显式关闭代理并应用后才允许直连。
+proxy-apply-note = 点击应用以保存更改。连接将在正在进行的传输结束后切换；您可取消待执行的更改。仅在明确关闭代理并应用后才允许直连。
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = 代理 IP 地址
@@ -1358,8 +1354,6 @@ proxy-history-expand = 展开保留的事件
 proxy-history-collapse = 仅显示最近 8 条
 proxy-timeline-truncated = 已省略更早的事件：{ $count } 条
 
-proxy-timing = 阶段耗时：{ $elapsed } · 最近网络事件：{ $activity } 前
-proxy-event-row = { $elapsed } 前 · { $phase }
 
 proxy-phase-test-queued = 代理测试已排队 · 等待网络执行名额
 
@@ -1425,7 +1419,7 @@ vault-key-phase-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $i
 vault-health-check-summary = 最近一次历史检查：已检查 { $count } 个文件。未解锁密钥的文件仍未检查。
 transfer-upload-saving-manifest = 正在保存已验证清单到本地
 
-vault-session-locked-background = 已锁定。已提交的传输和同步任务继续在后台运行。
+vault-session-locked-background = 文件加密密钥尚不可用。Telegram 同步和已接收的后台任务继续运行。
 vault-session-unlock-policy = 同一账户会话解锁一次。切换页面或离开窗口不会锁定密钥库；可随时手动锁定，已提交任务继续运行。
 vault-locked-file = 加密文件 · 已锁定
 vault-locked-detail = 解锁后查看
@@ -1535,7 +1529,7 @@ shell-sync-waiting = 等待同步
 shell-sync-paused = 同步已暂停
 shell-sync-attention = 同步需要处理
 shell-sync-details = 查看同步活动
-shell-vault-locked = 已锁定 · 后台任务继续运行
+shell-vault-locked = 需要解锁加密密钥
 
 shell-sync-queued = 同步已排队
 
@@ -1614,3 +1608,39 @@ upload-history-omitted = 已省略更早历史：{ $events } 个事件，{ $samp
 upload-timeline-recent = 显示最近 12 个事件；回放可查看保留的较早事件。
 
 upload-phase-restarting-unsealed = 清单加密曾中断，正在以新密钥安全重启
+
+# Whole-application access gate and transfer-safe lifecycle actions.
+app-pin-title = 应用锁
+app-pin-description = 使用可选的 6–12 位数字 PIN 保护应用访问。此 PIN 独立于文件加密密码。
+app-pin-enabled = 已启用 PIN
+app-pin-disabled = 未启用 PIN · 应用不上锁
+app-pin-current = 当前 PIN
+app-pin-new = 新 PIN（6–12 位数字）
+app-pin-confirm = 确认新 PIN
+app-pin-save = 保存 PIN
+app-pin-disable = 关闭 PIN
+app-pin-lock = 锁定应用
+app-pin-checking = 正在验证 PIN…
+app-pin-saving = 正在验证并保存 PIN 设置…
+app-pin-saved = PIN 设置已保存
+app-pin-incorrect = PIN 不正确，请重试。
+app-pin-format = 请输入 6–12 位数字。
+app-pin-mismatch = 两次输入的新 PIN 不一致。
+app-pin-rate-limited = 尝试次数过多，请等待 30 秒后重试。
+app-pin-save-failed = 无法保存 PIN 设置，现有保护未更改。请重试。
+app-pin-load-failed = 无法读取 PIN 设置。请重启后重试；应用保持锁定。
+app-lock-enter = 输入 PIN 进入应用
+app-lock-unlock = 登入
+app-lock-background = 同步、上传和下载在后台继续运行。
+app-lock-back = 返回登入页面
+transition-quit = 退出 TeleArk？
+transition-account = 切换账户？
+transition-proxy = 应用代理配置？
+transition-description = 仍有传输任务正在进行。可等待任务结束后继续，或取消本次操作以继续使用应用。已暂停任务会保留已保存的进度。
+transition-waiting = 正在等待传输和文件准备结束。后台任务继续运行，您可随时取消这项待执行操作。
+transition-wait = 等待结束后继续
+proxy-fixed-timing = 阶段开始：{ $phase } · 最近事件：{ $activity }
+proxy-event-time = { $time } · { $phase }
+sync-log-open = 同步活动与日志
+sync-private-event = { $kind } · 消息 { $message }
+shell-sync-working-attention = 同步中 · 需要处理

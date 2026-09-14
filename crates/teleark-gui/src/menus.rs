@@ -52,6 +52,17 @@ pub(crate) fn application_menus(localizer: &Localizer) -> Vec<Menu> {
     ]
 }
 
+pub(crate) fn menus_for_access(localizer: &Localizer, locked: bool) -> Vec<Menu> {
+    let mut menus = application_menus(localizer);
+    if locked {
+        // Keep Quit and native window controls; workspace commands have no lock-screen role.
+        menus[0].items.drain(..3);
+        #[cfg(target_os = "macos")]
+        menus[1].items.clear();
+    }
+    menus
+}
+
 #[cfg(test)]
 mod tests {
     use teleark_i18n::SupportedLocale;

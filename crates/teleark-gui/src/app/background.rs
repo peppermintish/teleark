@@ -113,6 +113,7 @@ impl TeleArkApp {
                         {
                             app.native_transfer_view = view;
                             app.start_transfer_clock(cx);
+                            app.advance_transition(cx);
                             cx.notify();
                         }
                     });
@@ -138,6 +139,7 @@ impl TeleArkApp {
                         {
                             app.vault_transfer_view = view;
                             app.start_transfer_clock(cx);
+                            app.advance_transition(cx);
                             cx.notify();
                         }
                     });

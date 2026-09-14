@@ -73,7 +73,6 @@ fn main() {
                     return;
                 }
             };
-            cx.on_action(quit);
             cx.on_action(minimize_window);
             cx.on_action(toggle_fullscreen);
             cx.on_action(zoom_window);
@@ -118,10 +117,6 @@ fn main() {
                 }
             }
         });
-}
-
-fn quit(_: &Quit, cx: &mut App) {
-    cx.quit();
 }
 
 fn should_quit_after_window_close(open_window_count: usize) -> bool {

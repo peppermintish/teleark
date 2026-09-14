@@ -73,7 +73,9 @@ impl Render for BatchWindow {
             return div().into_any_element();
         };
         owner.update(cx, |app, cx| {
-            if app.telegram_account.as_ref().map(|account| account.id) != self.account {
+            if app.app_is_locked()
+                || app.telegram_account.as_ref().map(|account| account.id) != self.account
+            {
                 window.remove_window();
                 return div().into_any_element();
             }

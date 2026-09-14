@@ -113,3 +113,15 @@ git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
 ## Task completion checkpoints
 
 After completing and validating each repository task, commit only its changes and create an annotated Git tag (for example `fix/YYYYMMDD-short-description`). Preserve unrelated pending work; do not push commits or tags without a request. Use English/light-only previews at 900×600 and actual native full-screen for visual changes.
+
+
+### Application PIN preview
+
+`--preview-ui --preview-state=locked --locale=en-US --window-size=900x600` shows
+the whole-application PIN surface (`--preview-state=locked-transfers` adds a
+synthetic active upload for lifecycle prompt checks) while background projections remain
+available. `--preview-state=unlock` continues to exercise file-key setup/recovery,
+which is independent of the application PIN. Review the locked proxy editor and
+account-switch prompt at 900×600 and native full-screen, then review General →
+Application lock and Network proxy → Sync activity and logs. Sync footer clicks
+must not open an inspector. Previews never save a PIN to real application state.

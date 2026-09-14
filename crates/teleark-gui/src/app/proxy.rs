@@ -36,7 +36,6 @@ pub(crate) struct ProxyUi {
     pub history_expanded: bool,
     task: Option<Task<()>>,
     updates: Option<Task<()>>,
-    clock: Option<Task<()>>,
 }
 
 impl ProxyUi {
@@ -96,7 +95,6 @@ impl ProxyUi {
             history_expanded: false,
             task: None,
             updates: None,
-            clock: None,
         }
     }
 
@@ -135,33 +133,8 @@ impl TeleArkApp {
                 let Some(this) = this.upgrade() else { break };
                 this.update(cx, |this, cx| {
                     this.proxy.snapshot = Some(snapshot);
-                    this.start_proxy_clock(cx);
                     cx.notify();
                 });
-            }
-        }));
-    }
-
-    fn start_proxy_clock(&mut self, cx: &mut Context<Self>) {
-        if self.proxy.clock.is_some() || !self.proxy.waiting() {
-            return;
-        }
-        self.proxy.clock = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Some(this) = this.upgrade() else { break };
-                let active = this.update(cx, |this, cx| {
-                    cx.notify();
-                    if this.proxy.waiting() {
-                        true
-                    } else {
-                        this.proxy.clock = None;
-                        false
-                    }
-                });
-                if !active {
-                    break;
-                }
             }
         }));
     }
@@ -201,6 +174,18 @@ impl TeleArkApp {
         if self.proxy.action.busy() || self.proxy.load_failed {
             return;
         }
+        if self.proxy_draft(cx).is_err() {
+            self.proxy.invalid = true;
+            cx.notify();
+            return;
+        }
+        self.request_transition(super::lifecycle::TransitionAction::ApplyProxy, cx);
+    }
+
+    pub(super) fn apply_proxy_after_drain(&mut self, cx: &mut Context<Self>) {
+        if self.proxy.action.busy() || self.proxy.load_failed {
+            return;
+        }
         let route = match self.proxy_draft(cx) {
             Ok(route) => route,
             Err(()) => {
@@ -236,7 +221,6 @@ impl TeleArkApp {
         self.channel_sync_task = None;
         self.telegram_activity = TelegramActivity::Working;
         cx.notify();
-        self.start_proxy_clock(cx);
         let work = cx.background_spawn(async move {
             telegram.apply_network_route(&library, route.clone())?;
             if route.is_proxy() {
@@ -283,7 +267,6 @@ impl TeleArkApp {
         self.proxy.started = Instant::now();
         self.proxy.test_elapsed = None;
         cx.notify();
-        self.start_proxy_clock(cx);
         let work = cx.background_spawn(async move { telegram.test_proxy() });
         self.proxy.task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;

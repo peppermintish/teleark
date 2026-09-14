@@ -368,8 +368,32 @@ impl TeleArkApp {
 
         let active_content = match self.settings_section {
             SettingsSection::About => self.render_about(cx),
-            SettingsSection::General => language.into_any_element(),
-            SettingsSection::Network => self.render_proxy_settings(layout, cx),
+            SettingsSection::General => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(self.render_app_pin_settings(cx))
+                .child(language)
+                .into_any_element(),
+            SettingsSection::Network => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    components::button(
+                        "settings-sync-log",
+                        self.tr("sync-log-open"),
+                        Some(IconName::Info),
+                        false,
+                    )
+                    .debug_selector(|| "settings-sync-log".into())
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.channel_sync_details = true;
+                        cx.notify();
+                    })),
+                )
+                .child(self.render_proxy_settings(layout, cx))
+                .into_any_element(),
             SettingsSection::Accounts => div()
                 .flex()
                 .flex_col()
@@ -898,26 +922,16 @@ impl TeleArkApp {
                         .child(
                             components::button(
                                 "settings-vault-main",
-                                self.tr(if self.vault_locked {
-                                    "vault-unlock-action"
-                                } else {
-                                    "settings-vault-lock-now-action"
-                                }),
+                                self.tr("vault-unlock-action"),
                                 None,
                                 true,
                             )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if this.vault_locked {
-                                        this.request_vault_unlock(
-                                            crate::app::UnlockIntent::Browse,
-                                            cx,
-                                        );
-                                    } else {
-                                        this.lock_vault(window, cx);
-                                    }
-                                },
-                            )),
+                            .disabled(!self.vault_locked)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.vault_locked {
+                                    this.request_vault_unlock(crate::app::UnlockIntent::Browse, cx);
+                                }
+                            })),
                         ),
                 )
                 .child(
@@ -1138,18 +1152,6 @@ impl TeleArkApp {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.rotate_vault_recovery_key(cx);
                             })),
-                        )
-                        .child(
-                            components::button(
-                                "settings-lock-vault-now",
-                                self.tr("settings-vault-lock-now-action"),
-                                Some(IconName::EyeOff),
-                                true,
-                            )
-                            .disabled(working)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.lock_vault(window, cx)),
-                            ),
                         ),
                 )
             },

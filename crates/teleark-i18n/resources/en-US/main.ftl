@@ -653,10 +653,7 @@ settings-upload-vault-managed-description = The unlocked Vault encrypts content,
 upload-current-part-size = Current safe part limit
 upload-current-part-size-description = TeleArk currently creates encrypted plaintext parts of at most { $size }.
 settings-vault-title = Key Vault protection
-settings-vault-description = Control when locally held encryption material is locked.
-settings-vault-lock-when-hidden = Lock when TeleArk becomes inactive
-settings-vault-lock-when-hidden-description = Switching pages keeps the vault unlocked. Switching away from the window locks it; running transfers may finish with their retained keys.
-settings-vault-lock-now-action = Lock Key Vault now
+settings-vault-description = Manage file encryption keys and recovery. Configure the application PIN in General settings.
 settings-index-title = Telegram indexing
 settings-index-description = Choose how many messages TeleArk scans in each channel indexing request.
 settings-index-batch-option = { $count } messages
@@ -1008,7 +1005,6 @@ shell-disk-summary = { $free } free · { $used } used by TeleArk
 
 vault-unlock-action = Unlock Vault
 
-vault-lock-action = Lock Vault
 
 unlock-return-note = Unlock for this session to browse files, review notices, and choose your next action.
 
@@ -1345,7 +1341,7 @@ proxy-settings-title = Network proxy
 proxy-settings-description = Route all TeleArk network traffic through a SOCKS5 or HTTP CONNECT proxy. A proxy failure never enables direct access.
 proxy-enable = Use proxy
 proxy-disable = Disable proxy (direct access)
-proxy-apply-note = Apply to save these changes. Existing connections will close first; interrupted transfers remain recoverable. Direct access is allowed only after you explicitly disable the proxy and apply.
+proxy-apply-note = Apply to save these changes. Active transfers finish before connections change; you can cancel the pending change. Direct access requires explicitly disabling the proxy and applying.
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = Proxy IP address
@@ -1385,8 +1381,6 @@ proxy-history-expand = Show retained events
 proxy-history-collapse = Show latest 8 events
 proxy-timeline-truncated = Earlier events omitted: { $count }
 
-proxy-timing = Phase: { $elapsed } · Last network event: { $activity } ago
-proxy-event-row = { $elapsed } ago · { $phase }
 
 proxy-phase-test-queued = Proxy test queued · waiting for its network slot
 
@@ -1452,7 +1446,7 @@ vault-key-phase-time = Phase: { $seconds } s · Last activity: { $idle } s ago
 vault-health-check-summary = Last history check: { $count } files checked. Files without an unlocked key remain unchecked.
 transfer-upload-saving-manifest = Saving the verified manifest locally
 
-vault-session-locked-background = Locked. Submitted transfers and synchronization continue in the background.
+vault-session-locked-background = File encryption keys are unavailable. Telegram synchronization and already admitted work continue.
 vault-session-unlock-policy = Unlock once per account session. Switching pages or leaving the window does not lock the Vault. Lock manually when needed; submitted tasks keep running.
 vault-locked-file = Encrypted file — locked
 vault-locked-detail = Unlock to view
@@ -1562,7 +1556,7 @@ shell-sync-waiting = Waiting to sync
 shell-sync-paused = Sync paused
 shell-sync-attention = Sync needs attention
 shell-sync-details = View synchronization activity
-shell-vault-locked = Locked · background work continues
+shell-vault-locked = Encryption key needed
 
 shell-sync-queued = Sync queued
 
@@ -1641,3 +1635,39 @@ upload-history-omitted = Earlier history omitted: { $events } events, { $samples
 upload-timeline-recent = Showing the latest 12 events. Replay opens earlier retained events.
 
 upload-phase-restarting-unsealed = Restarting safely after interrupted manifest encryption
+
+# Whole-application access gate and transfer-safe lifecycle actions.
+app-pin-title = Application lock
+app-pin-description = Use an optional 6–12 digit PIN to protect access to this application. This PIN is separate from file encryption passwords.
+app-pin-enabled = PIN enabled
+app-pin-disabled = PIN disabled · Application does not lock
+app-pin-current = Current PIN
+app-pin-new = New PIN (6–12 digits)
+app-pin-confirm = Confirm new PIN
+app-pin-save = Save PIN
+app-pin-disable = Disable PIN
+app-pin-lock = Lock application
+app-pin-checking = Checking PIN…
+app-pin-saving = Verifying and saving PIN settings…
+app-pin-saved = PIN settings saved
+app-pin-incorrect = Incorrect PIN. Try again.
+app-pin-format = Enter 6–12 digits.
+app-pin-mismatch = The new PIN entries do not match.
+app-pin-rate-limited = Too many attempts. Wait 30 seconds before trying again.
+app-pin-save-failed = Could not save PIN settings. Existing protection is unchanged. Retry.
+app-pin-load-failed = PIN settings could not be read. Restart to retry; the application remains locked.
+app-lock-enter = Enter your PIN to sign in
+app-lock-unlock = Sign in
+app-lock-background = Sync, uploads and downloads continue in the background.
+app-lock-back = Back to sign in
+transition-quit = Quit TeleArk?
+transition-account = Switch account?
+transition-proxy = Apply proxy configuration?
+transition-description = Transfers are still active. Wait for them to finish before continuing, or cancel this action to keep working. Paused tasks retain their saved progress.
+transition-waiting = Waiting for transfers and file preparation to finish. Background work continues. You can cancel this pending action at any time.
+transition-wait = Wait, then continue
+proxy-fixed-timing = Phase started: { $phase } · Last event: { $activity }
+proxy-event-time = { $time } · { $phase }
+sync-log-open = Sync activity and logs
+sync-private-event = { $kind } · Message { $message }
+shell-sync-working-attention = Syncing · needs attention

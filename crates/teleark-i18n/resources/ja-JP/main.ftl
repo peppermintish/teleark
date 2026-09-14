@@ -625,10 +625,7 @@ settings-upload-vault-managed-description = 解除済みの保管庫で内容・
 upload-current-part-size = 現在の安全なパート上限
 upload-current-part-size-description = TeleArk は現在、最大 { $size } の暗号化平文パートを作成します。
 settings-vault-title = Key Vault の保護
-settings-vault-description = ローカルの暗号化情報をロックするタイミングを制御します。
-settings-vault-lock-when-hidden = TeleArk が非アクティブになったときにロック
-settings-vault-lock-when-hidden-description = ページを切り替えても解除状態を維持します。ウィンドウから離れるとロックします。進行中の転送は保持済みの鍵で完了する場合があります。
-settings-vault-lock-now-action = Key Vault を今すぐロック
+settings-vault-description = ファイルの暗号化キーと復元を管理します。アプリのPINは一般設定で設定できます。
 settings-index-title = Telegram の索引作成
 settings-index-description = チャンネルの索引リクエストごとに TeleArk が走査するメッセージ数を選択します。
 settings-index-batch-option = { $count } 件のメッセージ
@@ -980,7 +977,6 @@ shell-disk-summary = 空き { $free } · TeleArk 使用 { $used }
 
 vault-unlock-action = Vault のロックを解除
 
-vault-lock-action = Vault をロック
 
 unlock-return-note = このセッションを解除して、ファイルと通知を確認し、次の操作を選べます。
 
@@ -1318,7 +1314,7 @@ proxy-settings-title = ネットワークプロキシ
 proxy-settings-description = TeleArk のすべての通信を SOCKS5 または HTTP CONNECT プロキシ経由にします。障害時も直接接続には切り替わりません。
 proxy-enable = プロキシを使用
 proxy-disable = 無効にする（直接接続を許可）
-proxy-apply-note = 適用すると保存され、先に既存の接続を閉じます。中断した転送は復旧できます。直接接続は、明示的に無効にして適用した場合のみ許可します。
+proxy-apply-note = 適用すると設定を保存します。進行中の転送が完了してから接続を変更します。待機中の変更はキャンセルできます。直接接続にはプロキシを明示的に無効にして適用する必要があります。
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = プロキシの IP アドレス
@@ -1358,8 +1354,6 @@ proxy-history-expand = 保持しているイベントを表示
 proxy-history-collapse = 最新8件のみ表示
 proxy-timeline-truncated = 省略した過去のイベント：{ $count } 件
 
-proxy-timing = 段階の経過：{ $elapsed } · 最後の通信イベント：{ $activity } 前
-proxy-event-row = { $elapsed } 前 · { $phase }
 
 proxy-phase-test-queued = プロキシテスト待機中 · 通信枠の空きを待っています
 
@@ -1425,7 +1419,7 @@ vault-key-phase-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $i
 vault-health-check-summary = 前回の履歴確認：{ $count } 件を確認しました。鍵を解除していないファイルは未確認です。
 transfer-upload-saving-manifest = 検証済みマニフェストをローカルに保存中
 
-vault-session-locked-background = ロック中です。送信済みの転送と同期はバックグラウンドで続行します。
+vault-session-locked-background = ファイルの暗号化キーが利用できません。Telegramの同期と受け付け済みの処理は続行します。
 vault-session-unlock-policy = アカウントのセッションごとに一度解除します。画面切り替えやウインドウから離れてもロックしません。手動でロックしても送信済みの処理は続行します。
 vault-locked-file = 暗号化ファイル · ロック中
 vault-locked-detail = 解除して表示
@@ -1535,7 +1529,7 @@ shell-sync-waiting = 同期待機中
 shell-sync-paused = 同期一時停止中
 shell-sync-attention = 同期の確認が必要
 shell-sync-details = 同期アクティビティを表示
-shell-vault-locked = ロック中 · バックグラウンド処理は継続
+shell-vault-locked = 暗号化キーが必要
 
 shell-sync-queued = 同期待ち
 
@@ -1614,3 +1608,39 @@ upload-history-omitted = 以前の履歴を省略：イベント { $events } 件
 upload-timeline-recent = 直近 12 件を表示。リプレイで保持されている以前のイベントを確認できます。
 
 upload-phase-restarting-unsealed = マニフェスト暗号化の中断後、新しい鍵で安全に再開中
+
+# Whole-application access gate and transfer-safe lifecycle actions.
+app-pin-title = アプリロック
+app-pin-description = 任意の6〜12桁のPINでアプリへのアクセスを保護します。ファイル暗号化のパスワードとは別です。
+app-pin-enabled = PINは有効です
+app-pin-disabled = PINは無効です · アプリはロックされません
+app-pin-current = 現在のPIN
+app-pin-new = 新しいPIN（6〜12桁）
+app-pin-confirm = 新しいPINを確認
+app-pin-save = PINを保存
+app-pin-disable = PINを無効にする
+app-pin-lock = アプリをロック
+app-pin-checking = PINを確認中…
+app-pin-saving = PIN設定を確認して保存中…
+app-pin-saved = PIN設定を保存しました
+app-pin-incorrect = PINが違います。もう一度入力してください。
+app-pin-format = 6〜12桁の数字を入力してください。
+app-pin-mismatch = 新しいPINの入力が一致しません。
+app-pin-rate-limited = 試行回数が多すぎます。30秒待ってから再試行してください。
+app-pin-save-failed = PIN設定を保存できませんでした。既存の保護は維持されています。再試行してください。
+app-pin-load-failed = PIN設定を読み取れませんでした。再起動して再試行してください。アプリはロックされたままです。
+app-lock-enter = PINを入力してサインイン
+app-lock-unlock = サインイン
+app-lock-background = 同期、アップロード、ダウンロードはバックグラウンドで続行します。
+app-lock-back = サインインに戻る
+transition-quit = TeleArkを終了しますか？
+transition-account = アカウントを切り替えますか？
+transition-proxy = プロキシ設定を適用しますか？
+transition-description = 転送中のタスクがあります。完了まで待つか、この操作をキャンセルして作業を続けてください。一時停止中のタスクは保存済みの進捗を保持します。
+transition-waiting = 転送とファイルの準備が完了するまで待機しています。バックグラウンド処理は続行します。この待機中の操作はいつでもキャンセルできます。
+transition-wait = 完了を待って続行
+proxy-fixed-timing = フェーズ開始: { $phase } · 最終イベント: { $activity }
+proxy-event-time = { $time } · { $phase }
+sync-log-open = 同期の状況とログ
+sync-private-event = { $kind } · メッセージ { $message }
+shell-sync-working-attention = 同期中 · 確認が必要

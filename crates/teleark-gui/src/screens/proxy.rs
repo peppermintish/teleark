@@ -66,22 +66,10 @@ impl TeleArkApp {
                 (s.phase_started, s.last_activity)
             });
         self.tr_with(
-            "proxy-timing",
+            "proxy-fixed-timing",
             MessageArgs::new()
-                .with(
-                    "elapsed",
-                    format_duration_millis(
-                        self.localizer.locale(),
-                        phase.elapsed().as_millis() as u64,
-                    ),
-                )
-                .with(
-                    "activity",
-                    format_duration_millis(
-                        self.localizer.locale(),
-                        activity.elapsed().as_millis() as u64,
-                    ),
-                ),
+                .with("phase", self.sync_event_time(phase).to_string())
+                .with("activity", self.sync_event_time(activity).to_string()),
         )
     }
 
@@ -357,16 +345,10 @@ impl TeleArkApp {
                         .text_color(theme::text_secondary())
                         .child(
                             self.tr_with(
-                                "proxy-event-row",
+                                "proxy-event-time",
                                 MessageArgs::new()
                                     .with("phase", self.tr(phase_id(event.phase)).to_string())
-                                    .with(
-                                        "elapsed",
-                                        format_duration_millis(
-                                            self.localizer.locale(),
-                                            event.at.elapsed().as_millis() as u64,
-                                        ),
-                                    ),
+                                    .with("time", self.sync_event_time(event.at).to_string()),
                             ),
                         ),
                 );

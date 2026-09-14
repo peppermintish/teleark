@@ -27,3 +27,5 @@ One-second metadata coalescing occurs only after a metadata event. Failure retri
 No persistent schema, encrypted codec, recovery format or settings version changes. Completion timestamps are transient snapshot metadata. Supported automatic upgrade paths are unchanged. Existing unrelated pending work is preserved.
 
 Deterministic checks cover zero idle app notifications with an open waiting inspector, fixed timestamps and virtualized history, completion preservation across history eviction and failures, stale manifest completions, navigation retaining scan cancellation handles and rows, revisioned empty caches, differences creating no polling or unchanged writes, delivery postponing silence recovery and PTS-only changes causing no sidebar revision. Native review uses synthetic data, English, 900×600 and actual full-screen mode in both themes. Final executed results are recorded in Implementation Status.
+
+[ADR 0037](0037-application-pin-and-transfer-drain.md) supersedes the status-bar entry point: status is display-only and Network settings opens the merged activity timeline.

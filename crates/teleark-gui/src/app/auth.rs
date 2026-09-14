@@ -52,15 +52,9 @@ impl TeleArkApp {
         if !self.confirm_account_switch || self.telegram_activity == TelegramActivity::Working {
             return;
         }
-        if self.upload_in_flight
-            || self.vault_download_in_flight
-            || self
-                .vault
-                .as_ref()
-                .is_some_and(DesktopVault::has_active_transfers)
-        {
+        if self.transition_has_work() {
             self.show_account_switch = true;
-            cx.notify();
+            self.request_transition(super::lifecycle::TransitionAction::SwitchAccount, cx);
             return;
         }
         self.confirm_account_switch = false;
@@ -87,6 +81,7 @@ impl TeleArkApp {
         let Some(telegram) = self.telegram.clone() else {
             if self.visual_preview {
                 self.telegram_account = None;
+                self.page = Page::Account;
                 self.account_avatar = None;
                 self.reset_telegram_login(window, cx);
             }
@@ -114,6 +109,7 @@ impl TeleArkApp {
                             this.telegram_auth = TelegramAuthState::Unauthorized;
                             this.telegram_activity = TelegramActivity::Idle;
                             this.telegram_account = None;
+                            this.page = Page::Account;
                             this.account_avatar = None;
                             this.telegram_chats.clear();
                             this.telegram_files.clear();

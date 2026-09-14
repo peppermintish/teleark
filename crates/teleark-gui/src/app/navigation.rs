@@ -147,29 +147,17 @@ impl TeleArkApp {
                     )
                 },
             )
-            .child(
-                components::icon_button(
-                    "shell-vault",
-                    if self.vault_locked {
-                        Symbol::Lock
-                    } else {
-                        Symbol::Unlock
-                    },
-                    self.tr(if self.vault_locked {
-                        "vault-unlock-action"
-                    } else {
-                        "vault-lock-action"
-                    }),
+            .when(self.app_lock.record.is_some(), |bar| {
+                bar.child(
+                    components::icon_button(
+                        "shell-app-lock",
+                        Symbol::Lock,
+                        self.tr("app-pin-lock"),
+                    )
+                    .ghost()
+                    .on_click(cx.listener(|app, _, window, cx| app.lock_application(window, cx))),
                 )
-                .ghost()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this.vault_locked {
-                        this.request_vault_unlock(UnlockIntent::Browse, cx);
-                    } else {
-                        this.lock_vault(window, cx);
-                    }
-                })),
-            )
+            })
             .when(window.is_fullscreen(), |bar| {
                 bar.child(
                     components::icon_button(
@@ -492,7 +480,10 @@ impl TeleArkApp {
                     .items_center()
                     .gap_2()
                     .child(
-                        components::compact_button("shell-channel-sync", "", None, false)
+                        div()
+                            .id("shell-channel-sync")
+                            .flex()
+                            .items_center()
                             .child(
                                 div()
                                     .flex()
@@ -511,14 +502,11 @@ impl TeleArkApp {
                                     })
                                     .child(div().truncate().child(status.label.clone())),
                             )
-                            .ghost()
                             .h(px(24.0))
                             .px_1()
                             .max_w(px(240.0))
                             .flex_none()
                             .overflow_hidden()
-                            .accessibility_label(status.label)
-                            .tooltip(self.tr("shell-sync-details"))
                             .debug_selector(move || {
                                 if preparation {
                                     "dialogs-status"
@@ -526,15 +514,7 @@ impl TeleArkApp {
                                     "global-sync-details"
                                 }
                                 .into()
-                            })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                if preparation {
-                                    app.dialogs.details = !app.dialogs.details;
-                                } else {
-                                    app.channel_sync_details = !app.channel_sync_details;
-                                }
-                                cx.notify();
-                            })),
+                            }),
                     )
                     .when_some(rates.cleanup, |left, (id, phase)| {
                         let label = self.tr(match phase {
@@ -609,20 +589,11 @@ impl TeleArkApp {
                     })
                     .when_some(self.managed_change_warning(), |left, warning| {
                         left.child(
-                            components::icon_button(
-                                "managed-watch-alert",
-                                IconName::TriangleAlert,
-                                warning,
-                            )
-                            .size(px(22.0))
-                            .ghost()
-                            .text_color(theme::amber())
-                            .debug_selector(|| "managed-watch-alert".into())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.channel_sync_details = true;
-                                app.channel_sync_private_expanded = true;
-                                cx.notify();
-                            })),
+                            components::list_summary("managed-watch-alert", warning.to_string())
+                                .debug_selector(|| "managed-watch-alert".into())
+                                .min_w_0()
+                                .max_w(px(180.0))
+                                .text_color(theme::amber()),
                         )
                     }),
             )

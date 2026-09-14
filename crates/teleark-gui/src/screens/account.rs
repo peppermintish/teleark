@@ -251,18 +251,20 @@ impl TeleArkApp {
                                     .child("TeleArk"),
                             ),
                     )
-                    .child(
-                        components::button(
-                            "account-preferences",
-                            self.tr("settings-title"),
-                            Some(IconName::Settings),
-                            false,
+                    .when(!self.app_is_locked(), |header| {
+                        header.child(
+                            components::button(
+                                "account-preferences",
+                                self.tr("settings-title"),
+                                Some(IconName::Settings),
+                                false,
+                            )
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_page(crate::app::Page::Settings, cx)
+                            })),
                         )
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_page(crate::app::Page::Settings, cx)
-                        })),
-                    ),
+                    }),
             )
             .child(
                 div().flex_1().min_h_0().overflow_y_scrollbar().child(

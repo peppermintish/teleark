@@ -70,6 +70,8 @@ pub use vault_recovery::{
     RecoveryContextError, VaultPartRecovery, VaultPendingUploadContext, VaultRecoveryContext,
     VaultRecoveryDirection,
 };
+mod app_pin;
+pub use app_pin::AppPinRecord;
 mod download_slots;
 mod vault_progress;
 pub use vault_progress::{
@@ -150,7 +152,6 @@ pub struct DesktopPreferences {
     pub transfer_soft_limit_policy: SoftLimitPolicy,
     pub speed_limits: TransferSpeedLimits,
     pub download_throughput_strategy: DownloadThroughputStrategy,
-    pub lock_vault_when_hidden: bool,
     pub index_batch_size: u16,
     pub notify_download_completed: bool,
     pub notify_download_failed: bool,
@@ -177,7 +178,6 @@ impl Default for DesktopPreferences {
             transfer_soft_limit_policy: SoftLimitPolicy::AdaptiveOverride,
             speed_limits: TransferSpeedLimits::default(),
             download_throughput_strategy: DownloadThroughputStrategy::Balanced,
-            lock_vault_when_hidden: false,
             index_batch_size: 1_000,
             notify_download_completed: true,
             notify_download_failed: true,
@@ -1006,6 +1006,14 @@ enum StorageRequest {
         id: LogicalFileId,
         reply: SyncSender<Result<bool, ApplicationError>>,
     },
+    AppPin {
+        reply: SyncSender<Result<Option<AppPinRecord>, ApplicationError>>,
+    },
+    ReplaceAppPin {
+        expected: Option<AppPinRecord>,
+        next: Option<AppPinRecord>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     LocaleOverride {
         reply: SyncSender<Result<Option<String>, ApplicationError>>,
     },
@@ -1684,6 +1692,20 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             StorageRequest::Delete { id, reply } => {
                 let _ = reply.send(database.delete_logical_file(id).map_err(map_storage_error));
             }
+            StorageRequest::AppPin { reply } => {
+                let result = database
+                    .setting(app_pin::SETTING_KEY)
+                    .map_err(map_storage_error)
+                    .and_then(|setting| setting.map(|s| AppPinRecord::decode(s.value)).transpose());
+                let _ = reply.send(result);
+            }
+            StorageRequest::ReplaceAppPin {
+                expected,
+                next,
+                reply,
+            } => {
+                let _ = reply.send(app_pin::replace(&mut database, expected, next));
+            }
             StorageRequest::LocaleOverride { reply } => {
                 let result = database
                     .setting(LOCALE_OVERRIDE_SETTING_KEY)
@@ -2271,9 +2293,6 @@ fn load_preferences(database: &Database) -> Result<DesktopPreferences, Applicati
                     _ => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
                 };
             }
-            "lock_vault_when_hidden" => {
-                preferences.lock_vault_when_hidden = parse_bool_setting(&setting.value)?;
-            }
             "index_batch_size" => {
                 preferences.index_batch_size = setting
                     .value
@@ -2403,10 +2422,6 @@ fn store_preferences(
         (
             "transfer_soft_limit_policy",
             transfer_soft_limit_policy.to_owned(),
-        ),
-        (
-            "lock_vault_when_hidden",
-            bool_setting(preferences.lock_vault_when_hidden),
         ),
         ("index_batch_size", preferences.index_batch_size.to_string()),
         (
@@ -2848,7 +2863,6 @@ mod tests {
                 download: 5 * 1024 * 1024,
             },
             download_throughput_strategy: DownloadThroughputStrategy::MaxThroughput,
-            lock_vault_when_hidden: false,
             index_batch_size: 500,
             notify_download_completed: false,
             notify_download_failed: false,

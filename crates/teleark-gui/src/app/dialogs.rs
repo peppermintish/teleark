@@ -27,7 +27,8 @@ pub(crate) struct DialogLoad {
     attempt: u8,
     generation: u64,
     changed: Option<std::time::Instant>,
-    history: std::collections::VecDeque<(Phase, Option<ApplicationErrorKind>, std::time::Instant)>,
+    pub(super) history:
+        std::collections::VecDeque<(Phase, Option<ApplicationErrorKind>, std::time::Instant)>,
     started: Option<std::time::Instant>,
     cancellation: teleark_runtime::TelegramScanCancellation,
 }
@@ -76,7 +77,7 @@ fn retry_delay(attempt: u8, kind: ApplicationErrorKind) -> Option<Duration> {
         ))
     .then(|| Duration::from_secs(2_u64 << attempt))
 }
-fn phase_id(phase: Phase) -> &'static str {
+pub(super) fn phase_id(phase: Phase) -> &'static str {
     match phase {
         Phase::RestoringUploads => "transfer-history-restoring",
         Phase::Idle | Phase::Reading => "dialogs-reading",
@@ -696,6 +697,15 @@ mod tests {
                 .expect("visible on Transfers");
             assert!(status.size.width > px(0.0));
             cx.simulate_click(status.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("dialogs-inspector").is_none(),
+                "status is display-only"
+            );
+            app.update(cx, |app, cx| {
+                app.dialogs.details = true;
+                cx.notify();
+            });
             cx.run_until_parked();
             assert!(cx.debug_bounds("dialogs-inspector").is_some());
             let action = cx

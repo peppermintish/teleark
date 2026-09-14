@@ -80,7 +80,6 @@ impl TeleArkApp {
         };
         self.preferences.appearance = appearance;
         theme::apply_appearance(appearance, window, cx);
-        self.preferences.lock_vault_when_hidden = false;
         self.volume_space = Some(teleark_runtime::VolumeSpace {
             available_bytes: 248 * 1024 * 1024 * 1024,
             total_bytes: 1024 * 1024 * 1024 * 1024,
@@ -130,7 +129,8 @@ impl TeleArkApp {
         self.storage_notice = Some("storage-auto-found");
         self.selected_chat_id = Some(9000);
         self.vault_status.configured = true;
-        self.vault_status.locked = state == "locked" || state == "unlock";
+        self.app_lock.locked = matches!(state.as_str(), "locked" | "locked-transfers");
+        self.vault_status.locked = state == "unlock";
         self.vault_status.active_key_locked = self.vault_status.locked;
         self.vault_locked = self.vault_status.locked;
         let names = [
@@ -511,7 +511,7 @@ impl TeleArkApp {
             }
             "speed-limits" => self.preview_speed_limits(window, cx),
             "returning" => self.page = Page::Account,
-            "upload-progress" | "session-active" => {
+            "upload-progress" | "session-active" | "locked-transfers" => {
                 self.page = Page::Transfers;
                 self.nav_selection = "nav-uploads";
                 self.upload_in_flight = true;

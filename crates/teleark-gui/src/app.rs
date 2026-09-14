@@ -1,3 +1,4 @@
+mod app_lock;
 mod auth;
 mod background;
 mod browser;
@@ -5,6 +6,7 @@ mod channel_layout;
 mod channel_sync;
 mod dialogs;
 mod library;
+mod lifecycle;
 mod local_files;
 mod managed_projection;
 mod navigation;
@@ -233,6 +235,7 @@ pub struct AppStartup {
 }
 
 pub struct RuntimeConfiguration {
+    app_pin: Result<Option<teleark_runtime::AppPinRecord>, teleark_core::ApplicationErrorKind>,
     network_route: Result<teleark_runtime::NetworkRoute, teleark_core::ApplicationErrorKind>,
     credential_status: Result<
         Option<teleark_runtime::TelegramCredentialsStatus>,
@@ -247,6 +250,10 @@ impl RuntimeConfiguration {
         telegram: &Result<DesktopTelegram, ApplicationError>,
     ) -> Self {
         Self {
+            app_pin: library
+                .as_ref()
+                .map_err(|e| e.kind())
+                .and_then(|library| library.app_pin().map_err(|e| e.kind())),
             network_route: library
                 .as_ref()
                 .map_err(|e| e.kind())
@@ -287,6 +294,9 @@ pub(crate) enum VaultActivity {
 }
 
 pub struct TeleArkApp {
+    pub(crate) app_lock: app_lock::AppLockUi,
+    pub(crate) transition: Option<lifecycle::Transition>,
+    main_window: gpui_kit::AnyWindowHandle,
     pub(crate) proxy: proxy::ProxyUi,
     pub(crate) page: Page,
     pub(crate) storage_status: teleark_runtime::StorageChannelStatus,
@@ -538,6 +548,7 @@ impl TeleArkApp {
         } = runtime;
         let configuration =
             configuration.unwrap_or_else(|| RuntimeConfiguration::read(&library, &telegram));
+        let app_lock = app_lock::AppLockUi::new(configuration.app_pin, visual_preview, window, cx);
         let proxy = proxy::ProxyUi::new(configuration.network_route, visual_preview, window, cx);
         let credential_status = configuration.credential_status;
         let (configured_telegram_api_id, telegram_credential_source, telegram_api_id_persistence) =
@@ -721,6 +732,9 @@ impl TeleArkApp {
                 recovery_generation: None,
             });
         let mut app = Self {
+            app_lock,
+            transition: None,
+            main_window: window.window_handle(),
             proxy,
             page,
             storage_status: teleark_runtime::StorageChannelStatus::Missing,
@@ -958,6 +972,17 @@ impl TeleArkApp {
             ],
         };
         app._subscriptions.extend(form_subscriptions);
+        let pin_input = app.app_lock.pin.clone();
+        app._subscriptions.push(cx.subscribe_in(
+            &pin_input,
+            window,
+            |app, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) && app.app_is_locked() {
+                    app.submit_app_pin(app_lock::PinOperation::Unlock, window, cx);
+                }
+            },
+        ));
+        app.install_lifecycle(window, cx);
         if app.library.is_some() && matches!(app.page, Page::Library | Page::FileDetail) {
             app.refresh_library(cx);
         }
@@ -1177,7 +1202,8 @@ impl TeleArkApp {
                         f32::from(*width)
                     }),
             );
-        let modal_open = self.show_upload
+        let modal_open = self.transition.is_some()
+            || self.show_upload
             || self.show_telegram_api_id_prompt
             || self.unlock_intent.is_some()
             || self.confirm_account_switch;
@@ -1317,9 +1343,10 @@ impl TeleArkApp {
             .when(self.dialogs.details, |root| {
                 root.child(self.render_dialog_details(cx))
             })
-            .when(self.confirm_account_switch, |root| {
-                root.child(self.render_account_switch_dialog(cx))
-            })
+            .when(
+                self.confirm_account_switch && self.transition.is_none(),
+                |root| root.child(self.render_account_switch_dialog(cx)),
+            )
             .when(
                 self.page == Page::Storage && self.storage_details_expanded,
                 |root| root.child(self.render_storage_details_dialog(window, cx)),
@@ -1553,7 +1580,12 @@ pub(crate) mod test_support {
 }
 
 impl Render for TeleArkApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_access_menus(cx);
+        self.schedule_pin_work(window, cx);
+        if self.app_is_locked() {
+            return self.render_app_lock_screen(window, cx);
+        }
         if !self.channel_sync_details {
             self.sync_history = None;
             self.sync_inspector = None;
@@ -1579,5 +1611,9 @@ impl Render for TeleArkApp {
                     .clone();
                 root.child(inspector)
             })
+            .when(self.transition.is_some(), |root| {
+                root.child(self.render_transition_dialog(cx))
+            })
+            .into_any_element()
     }
 }

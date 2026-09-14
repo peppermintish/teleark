@@ -1,5 +1,20 @@
 # Implementation status — v0.4.4
 
+## Application PIN and uninterrupted background work (2026-09-14)
+
+Application Lock now replaces the whole workspace with a PIN sign-in page and
+retains synchronization, encryption-key sessions and transfer owners. PINs are
+optional, independent of file encryption passwords, and installation-wide.
+Locked access is limited to sign-in, account switching and proxy configuration;
+auxiliary transfer windows and workspace shortcuts cannot expose the workspace.
+Quit/Close, account switching and proxy application share a cancellable,
+event-driven wait-for-transfers gate. Existing recoverable work is preserved.
+The bottom synchronization status is display-only. Network settings opens a
+merged timeline containing directory, ordinary/private channel, manifest and
+private-change events with fixed timestamps and revision-based rebuilding.
+See [ADR 0037](adr/0037-application-pin-and-transfer-drain.md).
+
+
 ## Streaming uploads and manual concurrency (2026-09-14)
 
 The production Vault upload path now encrypts one wire-aligned block at a time,
