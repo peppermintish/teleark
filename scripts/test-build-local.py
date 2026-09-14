@@ -1,5 +1,6 @@
 """Synthetic regression checks; never read the checkout's private environment."""
 import os
+import sys
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,13 +14,15 @@ class LocalBuildTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / 'scripts').mkdir()
-        shutil.copy(Path(__file__).with_name('build-local.sh'), self.root / 'scripts')
+        for source in Path(__file__).parent.iterdir():
+            if source.suffix in ('.sh', '.py'):
+                shutil.copy(source, self.root / 'scripts')
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         cargo = self.bin / 'cargo'
         cargo.write_text('''#!/bin/bash
 set -eu
-test "$*" = 'build --release -p teleark-gui --bin teleark --locked'
+test "$*" = "${TEST_CARGO_ACTION:-build} --release -p teleark-gui --bin teleark --locked"
 test "$TELEARK_DISTRIBUTION_TELEGRAM_API_ID" = 12345
 test "$TELEARK_DISTRIBUTION_TELEGRAM_API_HASH" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf invoked > cargo-called
@@ -72,5 +75,51 @@ exit "${TEST_CARGO_EXIT:-0}"
         self.assertEqual(self.run_build().returncode, 7)
 
 
+    def test_run_uses_cargo_run_and_propagates_failure(self):
+        self.config()
+        self.env['TEST_CARGO_ACTION'] = 'run'
+        for exit_code in ('0', '7'):
+            self.env['TEST_CARGO_EXIT'] = exit_code
+            result = subprocess.run([str(self.root / 'scripts/run.sh')],
+                                    cwd=self.bin, env=self.env, capture_output=True)
+            self.assertEqual(result.returncode, int(exit_code))
+        self.assertTrue((self.root / 'cargo-called').exists())
+
+    def test_every_script_dry_run_has_no_side_effects(self):
+        # Sourcing this synthetic config would leave a visible marker and fail.
+        (self.root / '.env.local').write_text('touch config-sourced; exit 91\n')
+        before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+        for script in sorted((self.root / 'scripts').iterdir()):
+            with self.subTest(script=script.name):
+                prefix = [sys.executable] if script.suffix == '.py' else ['bash']
+                result = subprocess.run(prefix + [str(script), '--dry-run'],
+                                        cwd=self.root, env=self.env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('Would', result.stdout)
+                self.assertEqual(before, sorted(str(p.relative_to(self.root))
+                                               for p in self.root.rglob('*')))
+
+    def test_packaging_dry_run_preserves_custom_paths(self):
+        result = subprocess.run(['bash', str(self.root / 'scripts/package-macos.sh'),
+                                 'missing binary', 'output app', '--dry-run'],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('missing binary -> output app', result.stdout)
+        self.assertFalse((self.root / 'output app').exists())
+
+    def test_unknown_options_fail_before_loading_config(self):
+        for script in ('build-local.sh', 'run.sh', 'package-macos.sh'):
+            result = subprocess.run(['bash', str(self.root / 'scripts' / script),
+                                     '--unknown'], cwd=self.root, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / 'cargo-called').exists())
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if '--dry-run' in sys.argv:
+        if sys.argv[1:] != ['--dry-run']:
+            raise SystemExit('Usage: python3 scripts/test-build-local.py [--dry-run]')
+        print('Would run synthetic script regression tests in temporary directories; no real credentials, build or app launch.')
+    else:
+        unittest.main()

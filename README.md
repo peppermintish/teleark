@@ -52,8 +52,10 @@ Edit `.env.local` and replace both sample values with your application's API ID 
 After configuring `.env.local`, copy and run this single command to build and launch:
 
 ```bash
-scripts/build-local.sh && ./target/release/teleark
+scripts/run.sh
 ```
+
+This command loads and validates `.env.local`, builds the release version and launches TeleArk after a successful build.
 
 To build without launching:
 
@@ -64,6 +66,19 @@ scripts/build-local.sh
 The helper loads `.env.local`, validates both values and rejects the public sample API ID. Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time**, so supply them on each build and rebuild after changing them. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
 
 Source only your trusted local configuration and keep it out of logs and packages. Embedded application identifiers are extractable from binaries. On Windows, use Git Bash with native Windows Rust and restrict the file with Windows permissions as well.
+
+### Script dry runs
+
+Add `--dry-run` to preview what each script would do without loading credentials, building, launching, packaging or running tests:
+
+```bash
+scripts/run.sh --dry-run
+scripts/build-local.sh --dry-run
+scripts/package-macos.sh --dry-run
+python3 scripts/test-build-local.py --dry-run
+```
+
+For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-run path/to/teleark path/to/TeleArk.app`. Dry runs describe the planned operations; they do not validate local credentials or installed tools.
 
 ### First launch
 

@@ -2,6 +2,24 @@
 # Build a local release using only the trusted, private repository configuration.
 set +x
 set -euo pipefail
+dry_run=false
+run=false
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) dry_run=true ;;
+    --run) run=true ;;
+    *) echo "Usage: scripts/build-local.sh [--run] [--dry-run]" >&2; exit 2 ;;
+  esac
+done
+command=(cargo build --release -p teleark-gui --bin teleark --locked)
+if "$run"; then
+  command=(cargo run --release -p teleark-gui --bin teleark --locked)
+fi
+if "$dry_run"; then
+  echo 'Would load and validate repository .env.local (without displaying values).'
+  printf 'Would execute: %s\n' "${command[*]}"
+  exit 0
+fi
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repository_root"
 if [[ ! -f .env.local ]]; then
@@ -25,4 +43,4 @@ if [[ "$api_id" == 17349 ]]; then
   exit 1
 fi
 echo "Building release with .env.local application identifiers."
-cargo build --release -p teleark-gui --bin teleark --locked
+"${command[@]}"

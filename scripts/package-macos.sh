@@ -1,8 +1,26 @@
 #!/bin/bash
 # Assemble an unsigned app bundle. Run cargo build before invoking this script.
 set -euo pipefail
-binary="${1:-target/release/teleark}"
-destination="${2:-dist/TeleArk.app}"
+dry_run=false
+paths=()
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) dry_run=true ;;
+    --*) echo "Usage: scripts/package-macos.sh [--dry-run] [binary] [destination]" >&2; exit 2 ;;
+    *) paths+=("$argument") ;;
+  esac
+done
+if (( ${#paths[@]} > 2 )); then
+  echo "Usage: scripts/package-macos.sh [--dry-run] [binary] [destination]" >&2
+  exit 2
+fi
+binary="${paths[0]:-target/release/teleark}"
+destination="${paths[1]:-dist/TeleArk.app}"
+if "$dry_run"; then
+  printf 'Would assemble unsigned app: %s -> %s\n' "$binary" "$destination"
+  echo 'Would copy the binary, Info.plist and licenses; generate icons with sips/iconutil; validate with plutil.'
+  exit 0
+fi
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 test -f "$binary"
 mkdir -p "$destination/Contents/MacOS" "$destination/Contents/Resources"
