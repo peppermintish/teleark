@@ -49,16 +49,10 @@ chmod 600 .env.local
 
 Edit `.env.local` and replace both sample values with your application's API ID and API Hash from [Telegram's API development panel](https://my.telegram.org/apps). [`.env.example`](.env.example) is a template containing public **TEST ONLY** identifiers; it is never a fallback build configuration. Local environment files are Git-ignored.
 
-Build and launch with the configuration scoped to this shell command:
+After configuring `.env.local`, copy and run this single command to build and launch:
 
 ```bash
-(
-  set +x
-  set -a
-  . ./.env.local || exit 1
-  set +a
-  cargo run -r -p teleark-gui --bin teleark --locked
-)
+(set +x; set -a; . ./.env.local || exit 1; set +a; cargo run -r -p teleark-gui --bin teleark --locked)
 ```
 
 To build without launching:
