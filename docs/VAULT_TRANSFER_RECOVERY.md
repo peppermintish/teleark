@@ -25,6 +25,18 @@ The fixed header before the filename length is 143 bytes. Unix paths use tag1 an
 
 Upload fields after the source path: filesystem identity u128, source size u64, modification units u64, revision u64, full-source BLAKE3-256. Source size must equal the job size. Before reusing an encryption identity, the runtime must verify the actual source bytes against the protected digest; unchanged metadata alone is insufficient.
 
+Vault source screening compares the canonical path, filesystem identity, size and
+content modification time. The stored revision remains Unix ctime (metadata-change
+time), which can change after permission or extended-attribute updates without a
+content write. A revision change alone therefore does not reject admission,
+preparation, finalization or resume. Full-source hashing, immutable per-part digests,
+and remote ciphertext/AEAD verification remain required. Resume checks the saved
+whole digest before restoring encryption work; even same-size content changes with
+a restored modification time are rejected before nonce reuse. Both context and
+pending-source codecs remain read/write v1, including the original revision bytes;
+existing saved contexts and reservations are retained without conversion. See
+[ADR 0035](adr/0035-vault-source-metadata-validation.md).
+
 Download fields after the destination path: positive manifest message ID i64, manifest-envelope BLAKE3-256, complete plaintext BLAKE3-256. The runtime must authenticate the exact manifest, validate its package/part layout and key scope, and revalidate any retained local extents before skipping work. The persisted absolute destination must be honored with non-overwriting publication.
 
 `VaultRecoveryContext::from_record` compares account, task, chat, package, direction and creation timestamp against the separate immutable database columns before exposing the decoded context. File-key unwrapping authenticates the existing package/vault/generation binding. A checksum is not a key or an authorization check. UI and execution owners still need their own expected account/generation guards.

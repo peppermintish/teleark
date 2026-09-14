@@ -255,7 +255,7 @@ fn reserved_header_recovers_identical_ciphertext_and_rejects_invalid_bytes() {
 }
 
 #[test]
-fn resumed_source_requires_unchanged_identity_path_and_full_content() {
+fn resumed_source_requires_same_file_and_content_but_allows_metadata_revision() {
     let context = fixture();
     let VaultRecoveryDirection::Upload {
         source,
@@ -273,12 +273,24 @@ fn resumed_source_requires_unchanged_identity_path_and_full_content() {
     changed_identity.revision += 1;
     assert_eq!(
         context.verify_upload_source(source, changed_identity, *source_blake3),
-        Err(teleark_core::TransferError::SourceChanged)
+        Ok(())
     );
+    for field in 0..3 {
+        let mut replacement = changed_identity;
+        match field {
+            0 => replacement.filesystem_id += 1,
+            1 => replacement.size_bytes += 1,
+            _ => replacement.modified_at_units += 1,
+        }
+        assert_eq!(
+            context.verify_upload_source(source, replacement, *source_blake3),
+            Err(teleark_core::TransferError::SourceChanged)
+        );
+    }
     let mut changed_hash = *source_blake3;
     changed_hash[0] ^= 1;
     assert_eq!(
-        context.verify_upload_source(source, *identity, changed_hash),
+        context.verify_upload_source(source, changed_identity, changed_hash),
         Err(teleark_core::TransferError::SourceChanged)
     );
     assert_eq!(

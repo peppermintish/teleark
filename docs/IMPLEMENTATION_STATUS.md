@@ -1,5 +1,23 @@
 # Implementation status — v0.4.4
 
+## Vault upload preparation metadata fix (2026-09-14)
+
+Vault uploads no longer fail solely because filesystem metadata-change time changes
+while queued, hashing, sending or resuming. Source path, native file identity, size
+and content modification time remain checked, together with the complete source
+hash, immutable part digests and authenticated remote verification. Existing v1
+recovery bytes and reservations remain unchanged. Previously blocked jobs retain
+their terminal state; a newly selected upload uses the corrected preparation path.
+Synthetic regressions cover metadata-only updates during preparation/transport and
+restart, authenticated download of the original bytes, and same-size modified content
+with restored mtime being rejected before any publication or reservation replacement.
+
+Validation: all eight source gates passed with 683 workspace tests and 10 existing
+manual probes ignored. The isolated task passed formatting, strict Runtime Clippy
+and 228 Runtime tests (2 existing manual probes ignored). The metadata-only native
+regression fails with the original code and passes with this fix. No live Telegram
+uploads were performed during verification.
+
 ## Automatic Vault sync after unlock (2026-09-14)
 
 Unlock remains a local key operation. Its success is preserved while the managed

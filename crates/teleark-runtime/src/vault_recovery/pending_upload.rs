@@ -108,7 +108,7 @@ impl VaultPendingUploadContext {
             return Err(TransferError::ManifestCorrupted);
         };
         if self.source != *source
-            || self.identity != *identity
+            || !upload_source_metadata_matches(self.identity, *identity)
             || self.identity.size_bytes != executable.size_bytes
         {
             return Err(TransferError::SourceChanged);
@@ -281,7 +281,7 @@ mod tests {
         let pending = fixture();
         let original = super::super::tests::fixture();
         pending.verify_executable(&original).expect("same source");
-        for field in 0..11 {
+        for field in 0..12 {
             let mut changed = original.clone();
             match field {
                 0 => changed.account_id += 1,
@@ -302,7 +302,8 @@ mod tests {
                     match field {
                         8 => *source = source.with_file_name("replacement.bin"),
                         9 => identity.filesystem_id += 1,
-                        _ => identity.revision += 1,
+                        10 => identity.modified_at_units += 1,
+                        _ => identity.size_bytes += 1,
                     }
                 }
             }
@@ -311,6 +312,13 @@ mod tests {
                 "field {field}"
             );
         }
+        let mut metadata_only = original.clone();
+        if let VaultRecoveryDirection::Upload { identity, .. } = &mut metadata_only.direction {
+            identity.revision += 1;
+        }
+        pending
+            .verify_executable(&metadata_only)
+            .expect("ctime alone is not a content change");
     }
 
     #[test]

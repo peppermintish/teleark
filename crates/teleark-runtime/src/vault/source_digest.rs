@@ -96,6 +96,42 @@ fn map_io(error: std::io::Error) -> TransferError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn metadata_changes_during_hashing_preserve_full_and_part_content_checks() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use teleark_transfer::{NativeFileSystem, SourceId, SourcePort as _};
+        let dir = tempfile::tempdir().expect("directory");
+        let source = dir.path().join("metadata.bin");
+        std::fs::write(&source, b"abcdef").expect("source");
+        let mut files = NativeFileSystem::new();
+        files
+            .register_source(SourceId(1), &source)
+            .expect("source handle");
+        let before = files.source_identity(SourceId(1)).expect("before");
+        let digests = inspect(
+            &source,
+            &[2, 4],
+            |completed, _| {
+                if completed == 2 {
+                    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+                        .expect("metadata-only change between reads");
+                }
+                Ok(())
+            },
+            || false,
+        )
+        .expect("hash completes");
+        let after = files.source_identity(SourceId(1)).expect("after");
+        assert_ne!(before.revision, after.revision);
+        assert!(crate::vault_recovery::upload_source_metadata_matches(
+            before, after
+        ));
+        assert_eq!(digests.whole.0, *blake3::hash(b"abcdef").as_bytes());
+        assert_eq!(digests.parts[0].0, *blake3::hash(b"ab").as_bytes());
+        assert_eq!(digests.parts[1].0, *blake3::hash(b"cdef").as_bytes());
+    }
+
     #[test]
     fn cancellation_is_checked_each_read_independently_of_progress_throttling() {
         use std::cell::Cell;

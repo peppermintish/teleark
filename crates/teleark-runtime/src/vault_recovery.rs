@@ -11,6 +11,20 @@ const MAX_CONTEXT: usize = 2 * 1024 * 1024;
 const MAX_PATH: usize = 64 * 1024;
 const MAX_NAME: usize = 4096;
 
+/// Vault source screening, not content authentication. Unix `revision` is
+/// ctime, which also changes for permissions/extended attributes without a
+/// content write. Keep recording it in v1 contexts, but do not reject a file on
+/// that field alone. Canonical paths are checked separately; full-source and
+/// per-part digests remain mandatory before any persisted nonce is reused.
+pub(crate) fn upload_source_metadata_matches(
+    saved: SourceIdentity,
+    current: SourceIdentity,
+) -> bool {
+    saved.filesystem_id == current.filesystem_id
+        && saved.size_bytes == current.size_bytes
+        && saved.modified_at_units == current.modified_at_units
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryContextError {
     Invalid,
@@ -124,7 +138,7 @@ impl VaultRecoveryContext {
             return Err(teleark_core::TransferError::ManifestCorrupted);
         };
         if source != path
-            || *saved_identity != identity
+            || !upload_source_metadata_matches(*saved_identity, identity)
             || self.size_bytes != identity.size_bytes
             || *source_blake3 != digest
         {

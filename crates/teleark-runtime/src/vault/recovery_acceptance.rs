@@ -11,6 +11,67 @@ fn open(path: &std::path::Path, remote: &Arc<TestVaultRemote>) -> (DesktopVault,
     (vault, library)
 }
 
+#[cfg(unix)]
+#[test]
+fn metadata_only_changes_during_preparation_and_transport_preserve_authenticated_upload() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let source = dir.path().join("metadata.bin");
+    let bytes = vec![0x5a; 64 * 1024];
+    std::fs::write(&source, &bytes).expect("source");
+    let original = std::fs::metadata(&source).expect("metadata");
+    let (entered, release) = remote.gate(GateKind::Validation, 0);
+    let work = vault
+        .submit_upload_files(7, 11, vec![source.clone()])
+        .expect("upload");
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("saved queue");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+        .expect("metadata-only update");
+    let changed = std::fs::metadata(&source).expect("changed metadata");
+    assert_eq!(original.ino(), changed.ino());
+    assert_eq!(original.len(), changed.len());
+    assert_eq!(
+        original.modified().expect("original mtime"),
+        changed.modified().expect("current mtime")
+    );
+    assert_ne!(
+        (original.ctime(), original.ctime_nsec()),
+        (changed.ctime(), changed.ctime_nsec())
+    );
+    let (sending, finish) = remote.gate(GateKind::UploadPart, 0);
+    release.send(()).expect("release preparation");
+    if sending.recv_timeout(Duration::from_secs(30)).is_err() {
+        panic!("metadata changes must reach transport: {:?}", work.wait());
+    }
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640))
+        .expect("metadata changes while upload is blocked");
+    finish.send(()).expect("release transport");
+    let report = work.wait().expect("batch");
+    assert_eq!(report.completed_count, 1);
+    let id = vault
+        .transfers()
+        .iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("upload row")
+        .id;
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let saved = db.vault_job(7, id).expect("job").expect("completed job");
+    assert_eq!(saved.state, VaultJobState::Completed);
+    let package = crate::transfer::package_id_from_bytes(saved.package_id)
+        .expect("package")
+        .get();
+    let downloaded = vault
+        .download_file(7, 11, package)
+        .expect("authenticated download");
+    assert_eq!(std::fs::read(downloaded).expect("plaintext"), bytes);
+    assert_eq!(remote.objects(), 2, "exactly one part and manifest");
+}
+
 #[test]
 fn account_replacement_interrupts_retained_upload_and_preserves_retry() {
     let dir = tempfile::tempdir().expect("directory");
@@ -616,6 +677,59 @@ fn network_failed_upload_retries_same_task_after_restart() {
 }
 
 #[test]
+fn resumed_upload_rejects_changed_bytes_even_when_size_and_mtime_are_preserved() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let source = dir.path().join("changed.bin");
+    std::fs::write(&source, b"original").expect("source");
+    remote.fail_once(GateKind::UploadPart);
+    assert!(vault.upload_file(7, 11, source.clone()).is_err());
+    let id = vault
+        .transfers()
+        .iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("failed row")
+        .id;
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let saved = db.vault_job(7, id).expect("job").expect("saved");
+    let parts = db.vault_parts(7, id, None, 256).expect("reservations");
+    assert_eq!(parts.len(), 1);
+    let modified = std::fs::metadata(&source)
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    std::fs::write(&source, b"replaced").expect("same-length change");
+    std::fs::File::options()
+        .write(true)
+        .open(&source)
+        .expect("source handle")
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("restore mtime");
+    let result = vault
+        .submit_resume_upload(7, id)
+        .expect("resume request")
+        .wait();
+    assert_eq!(
+        result.expect_err("changed bytes rejected").kind(),
+        ApplicationErrorKind::SourceChanged
+    );
+    assert_eq!(remote.objects(), 0, "changed bytes must not reach Telegram");
+    let failed = db.vault_job(7, id).expect("job").expect("retained");
+    assert_eq!(failed.state, VaultJobState::Blocked);
+    assert_eq!(
+        failed.context, saved.context,
+        "retain original source/key context"
+    );
+    assert_eq!(
+        db.vault_parts(7, id, None, 256)
+            .expect("original reservations"),
+        parts
+    );
+}
+
+#[test]
 fn network_failed_download_retries_same_task_after_restart() {
     network_failure_restart(GateKind::DownloadPart);
 }
@@ -684,6 +798,12 @@ fn network_failure_restart(failure: GateKind) {
     }
     if failure == GateKind::ManifestAcknowledgment {
         std::fs::remove_file(&source).expect("remove synthetic source after saved manifest");
+    }
+    #[cfg(unix)]
+    if matches!(failure, GateKind::UploadPart | GateKind::PartAcknowledgment) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+            .expect("metadata-only change before restart with persisted reservations");
     }
 
     drop(vault);

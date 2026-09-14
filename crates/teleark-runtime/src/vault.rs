@@ -2551,7 +2551,12 @@ impl VaultOwner {
             let source_identity = files
                 .source_identity(source_id)
                 .map_err(map_transfer_error)?;
-            if queued.is_some_and(|plan| plan.pending.identity != source_identity) {
+            if queued.is_some_and(|plan| {
+                !crate::vault_recovery::upload_source_metadata_matches(
+                    plan.pending.identity,
+                    source_identity,
+                )
+            }) {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
             let observer = Arc::new(VaultUploadObserver::new(
@@ -2572,11 +2577,12 @@ impl VaultOwner {
                 },
             )
             .map_err(map_transfer_error)?;
-            if files
-                .source_identity(source_id)
-                .map_err(map_transfer_error)?
-                != source_identity
-            {
+            if !crate::vault_recovery::upload_source_metadata_matches(
+                source_identity,
+                files
+                    .source_identity(source_id)
+                    .map_err(map_transfer_error)?,
+            ) {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
             let master = self
@@ -2891,11 +2897,12 @@ impl VaultOwner {
                     .finalize()
                     .as_bytes(),
             );
-            if files
-                .source_identity(source_id)
-                .map_err(map_transfer_error)?
-                != source_identity
-            {
+            if !crate::vault_recovery::upload_source_metadata_matches(
+                source_identity,
+                files
+                    .source_identity(source_id)
+                    .map_err(map_transfer_error)?,
+            ) {
                 return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
             }
             if whole_digest != source_digests.whole {
