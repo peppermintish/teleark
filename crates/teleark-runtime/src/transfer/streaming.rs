@@ -459,6 +459,166 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StreamingProbe {
+        prefix: PathBuf,
+        interrupt: bool,
+        blocks_received: usize,
+    }
+
+    impl RemoteObjectStore for StreamingProbe {
+        fn search_exact_caption(
+            &mut self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<RemoteByteObject>, TransferError> {
+            panic!("fresh streaming upload must not search remote content");
+        }
+
+        fn upload(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: Vec<u8>,
+        ) -> Result<RemoteByteObject, UploadError> {
+            panic!("fresh streaming upload must not buffer a whole container");
+        }
+
+        fn download(&mut self, _: u64) -> Result<Vec<u8>, TransferError> {
+            panic!("fresh streaming upload must not read back remote content");
+        }
+    }
+
+    impl ReservedPublicationStore for StreamingProbe {
+        fn upload_reserved(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: Vec<u8>,
+            _: std::num::NonZeroI64,
+        ) -> Result<RemoteByteObject, UploadError> {
+            panic!("the reserved publication must use the streaming path");
+        }
+
+        fn upload_stream_reserved(
+            &mut self,
+            name: &str,
+            _: &str,
+            mut stream: UploadStream,
+            _: std::num::NonZeroI64,
+            tuning: TransferTuning,
+        ) -> Result<RemoteByteObject, UploadError> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("test receiver");
+            let first = runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(30), stream.blocks.recv())
+                    .await
+                    .expect("the first block must arrive without completing encryption")
+                    .expect("first encrypted block")
+            });
+            assert_eq!(first.len(), UPLOAD_PART_BYTES);
+            // Keep the consumer stopped after its first receive. The bounded
+            // queue allows only ready blocks plus the producer's pending write,
+            // regardless of how long the producer runs before these assertions.
+            let spooled = std::fs::metadata(self.prefix.with_extension("ciphertext"))
+                .expect("active spool")
+                .len();
+            assert!(spooled <= (u64::from(tuning.upload_queue) + 2) * UPLOAD_PART_BYTES as u64);
+            assert!(spooled < stream.total_bytes);
+            assert!(!self.prefix.with_extension("seal").exists());
+            self.blocks_received = 1;
+            if self.interrupt {
+                return Err(UploadError::Definite(TransferError::Network));
+            }
+            let mut received = first.len() as u64;
+            let _ = stream.recycled.try_send(first);
+            while let Some(block) = stream.blocks.blocking_recv() {
+                let expected = (stream.total_bytes - received).min(UPLOAD_PART_BYTES as u64);
+                assert_eq!(block.len() as u64, expected);
+                received += block.len() as u64;
+                self.blocks_received += 1;
+                let _ = stream.recycled.try_send(block);
+            }
+            assert_eq!(received, stream.total_bytes);
+            assert_eq!(stream.sealed.blocking_recv(), Ok(true));
+            Ok(RemoteByteObject {
+                object_id: 1,
+                name: name.into(),
+                encoded_size: received,
+            })
+        }
+    }
+
+    #[test]
+    fn first_512_kib_block_reaches_upload_before_60_mib_container_is_encrypted() {
+        for interrupt in [false, true] {
+            let dir = tempfile::tempdir().expect("directory");
+            let source = dir.path().join("source");
+            let mut file = File::create(&source).expect("source");
+            let block = vec![0x5a; UPLOAD_PART_BYTES];
+            let mut digest = blake3::Hasher::new();
+            let total = encrypted_part_plaintext_limit();
+            for _ in 0..total / UPLOAD_PART_BYTES as u64 {
+                file.write_all(&block).expect("synthetic content");
+                digest.update(&block);
+            }
+            drop(file);
+            let key = RemotePartKey {
+                account_id: AccountId::new(9),
+                package_id: PackageId::new(11),
+                part_index: PartIndex::new(0),
+            };
+            let mut transport = EncryptedRemoteTransport::new(
+                StreamingProbe {
+                    prefix: PathBuf::new(),
+                    interrupt,
+                    blocks_received: 0,
+                },
+                key.account_id,
+                99,
+                key.package_id,
+                FileKey::from_bytes([7; 32]),
+                total,
+                vec![total],
+            )
+            .expect("transport");
+            let reservation = transport
+                .reserve_part_identity(
+                    key,
+                    ContentDigest(*digest.finalize().as_bytes()),
+                    std::num::NonZeroI64::new(42).expect("publication id"),
+                )
+                .expect("reservation");
+            let identity = reservation.encode().expect("recovery identity");
+            transport.store.prefix = spool_prefix(dir.path(), &identity);
+            let result = transport.stream_reserved_source(
+                key,
+                &reservation,
+                &identity,
+                &source,
+                dir.path(),
+                None,
+                TransferTuning::default(),
+            );
+            if interrupt {
+                assert!(result.is_err(), "a dropped consumer must stop its producer");
+                assert_eq!(transport.store.blocks_received, 1);
+            } else {
+                let object = result.expect("streamed publication");
+                assert_eq!(
+                    object.encoded_size,
+                    reservation
+                        .header
+                        .expected_encoded_length()
+                        .expect("encoded size")
+                );
+                assert_eq!(transport.store.blocks_received, 121);
+            }
+        }
+    }
+
     #[test]
     fn temporary_checkpoints_preserve_newer_bytes_and_recover_corruption_without_nonce_work() {
         let dir = tempfile::tempdir().expect("directory");

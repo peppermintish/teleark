@@ -1,5 +1,25 @@
 # Implementation status — v0.4.4
 
+## Upload byte-count scope (2026-09-15)
+
+The upload activity line now explicitly labels acknowledged encrypted bytes as
+the **current container**. A 60 MiB plaintext container appears as approximately
+62.9 MB in decimal display units, including its small framing overhead; that
+denominator is not the size of an encryption frame. Production continues to stream
+512 KiB wire blocks through the bounded queue. Source checking and other phase
+counts retain their own scope. No codec, persistence or transfer behavior changes.
+
+A deterministic production-path regression holds the consumer after the first
+512 KiB block, verifies that the 60 MiB container is still unsealed and the spool
+cannot exceed the bounded queue plus two blocks, then exercises both completion
+and consumer failure with producer termination. GUI tests distinguish container
+counts from other phases and retain collapsed-batch/terminal coverage. Runtime,
+Telegram, GUI and i18n tests passed (533 tests; seven existing probes ignored),
+along with formatting, strict affected-crate Clippy and a debug build.
+English/light synthetic previews passed at 900×600 and actual native full-screen,
+including primary actions and independent inspector scrolling. No credentialed
+Telegram upload or installed release replacement was performed.
+
 ## Automatic device keys and optional application PIN (2026-09-15)
 
 Private-channel management now triggers automatic OS-random key preparation on

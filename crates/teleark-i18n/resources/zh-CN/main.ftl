@@ -1223,6 +1223,7 @@ transfer-upload-verifying-bytes = 正在回读并校验
 transfer-upload-publishing-manifest = 正在发布文件清单
 transfer-upload-activity-elapsed = { $phase } · 已耗时 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 已耗时 { $elapsed }
+transfer-upload-activity-container-bytes = { $phase } · 当前容器：{ $done } / { $total } · 已耗时 { $elapsed }
 transfer-upload-waiting-telegram = 正在等待 Telegram
 
 channel-sync-local-only = 本地缓存

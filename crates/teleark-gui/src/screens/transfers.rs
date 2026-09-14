@@ -508,7 +508,11 @@ impl TeleArkApp {
             );
         if activity.total > 0 {
             self.tr_with(
-                "transfer-upload-activity-bytes",
+                if activity.phase == VaultUploadPhase::Uploading {
+                    "transfer-upload-activity-container-bytes"
+                } else {
+                    "transfer-upload-activity-bytes"
+                },
                 args.with("done", format_bytes(self.locale(), activity.bytes))
                     .with("total", format_bytes(self.locale(), activity.total)),
             )
@@ -4422,6 +4426,14 @@ mod tests {
                 let row = app.transfer_row_from_vault_snapshot(&active);
                 assert_eq!(row.progress, 50.0);
                 assert_eq!(row.activity, Some(app.tr(upload_phase_message_id(phase))));
+                assert_eq!(
+                    row.activity_detail
+                        .as_ref()
+                        .expect("phase detail")
+                        .contains("Current container"),
+                    phase == VaultUploadPhase::Uploading,
+                    "only upload byte counts describe the current container"
+                );
                 let batch = app
                     .transfer_row_from_vault_batch(1, &[&completed, &active])
                     .expect("batch row");

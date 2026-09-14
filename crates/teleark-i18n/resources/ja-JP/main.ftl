@@ -1223,6 +1223,7 @@ transfer-upload-verifying-bytes = 再ダウンロード・検証中
 transfer-upload-publishing-manifest = ファイル一覧情報を公開中
 transfer-upload-activity-elapsed = { $phase } · 経過 { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
+transfer-upload-activity-container-bytes = { $phase } · 現在のコンテナ：{ $done } / { $total } · 経過 { $elapsed }
 transfer-upload-waiting-telegram = Telegram の応答待ち
 
 channel-sync-local-only = ローカルキャッシュ

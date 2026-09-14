@@ -627,7 +627,7 @@ impl TeleArkApp {
                 row.activity = Some(self.tr("transfer-upload-sending-bytes"));
                 row.activity_detail = Some(
                     self.tr_with(
-                        "transfer-upload-activity-bytes",
+                        "transfer-upload-activity-container-bytes",
                         MessageArgs::new()
                             .with(
                                 "phase",

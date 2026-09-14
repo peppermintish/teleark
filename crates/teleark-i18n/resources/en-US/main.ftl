@@ -1250,6 +1250,7 @@ transfer-upload-verifying-bytes = Reading back and verifying
 transfer-upload-publishing-manifest = Publishing file manifest
 transfer-upload-activity-elapsed = { $phase } · Elapsed { $elapsed }
 transfer-upload-activity-bytes = { $phase } · { $done } / { $total } · Elapsed { $elapsed }
+transfer-upload-activity-container-bytes = { $phase } · Current container: { $done } / { $total } · Elapsed { $elapsed }
 transfer-upload-waiting-telegram = Waiting for Telegram
 
 channel-sync-local-only = Local cache
