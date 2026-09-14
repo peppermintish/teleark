@@ -80,9 +80,14 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let returning = self.telegram_account.is_some()
-            && matches!(self.telegram_auth, TelegramAuthState::Authorized(_));
-        let body = if returning {
+        let returning = self.telegram_is_authorized();
+        let body = if self.login_proxy_open && !returning {
+            div()
+                .w_full()
+                .max_w(theme::SETTINGS_FORM_WIDTH)
+                .child(self.render_proxy_settings(layout, cx))
+                .into_any_element()
+        } else if returning {
             div()
                 .w(px(400.0))
                 .flex()
@@ -234,7 +239,7 @@ impl TeleArkApp {
                                     .child("TeleArk"),
                             ),
                     )
-                    .when(!self.app_is_locked(), |header| {
+                    .when(returning && !self.app_is_locked(), |header| {
                         header.child(
                             components::button(
                                 "account-preferences",
@@ -245,6 +250,30 @@ impl TeleArkApp {
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_page(crate::app::Page::Settings, cx)
+                            })),
+                        )
+                    })
+                    .when(!returning && !self.app_is_locked(), |header| {
+                        header.child(
+                            components::button(
+                                "account-proxy",
+                                self.tr(if self.login_proxy_open {
+                                    "account-back-to-login"
+                                } else {
+                                    "proxy-settings-title"
+                                }),
+                                Some(if self.login_proxy_open {
+                                    IconName::ArrowLeft
+                                } else {
+                                    IconName::Globe
+                                }),
+                                false,
+                            )
+                            .ghost()
+                            .debug_selector(|| "account-proxy".into())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.login_proxy_open = !app.login_proxy_open;
+                                cx.notify();
                             })),
                         )
                     }),

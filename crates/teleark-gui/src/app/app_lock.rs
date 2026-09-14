@@ -163,12 +163,10 @@ impl TeleArkApp {
     }
 
     pub(super) fn sync_access_menus(&mut self, cx: &mut Context<Self>) {
-        if self.app_lock.menus_locked != self.app_is_locked() {
-            self.app_lock.menus_locked = self.app_is_locked();
-            cx.set_menus(crate::menus::menus_for_access(
-                &self.localizer,
-                self.app_is_locked(),
-            ));
+        let restricted = self.app_is_locked() || !self.telegram_is_authorized();
+        if self.app_lock.menus_locked != restricted {
+            self.app_lock.menus_locked = restricted;
+            cx.set_menus(crate::menus::menus_for_access(&self.localizer, restricted));
         }
     }
 

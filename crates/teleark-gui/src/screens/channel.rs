@@ -639,9 +639,18 @@ impl TeleArkApp {
     ) -> AnyElement {
         let credentials_enabled = telegram_login_controls_enabled(self.configured_telegram_api_id);
         let working = self.telegram_activity == crate::app::TelegramActivity::Working;
-        let target_size = if layout.is_compact() { 228.0 } else { 300.0 };
+        let failed = matches!(self.telegram_activity, TelegramActivity::Failed(_));
+        let target_size = if layout.is_compact() {
+            if self.qr_login_error.is_some() {
+                160.0
+            } else {
+                228.0
+            }
+        } else {
+            300.0
+        };
         let qr_link = qr_deep_link.or_else(|| {
-            self.visual_preview
+            (self.visual_preview && !working && !failed)
                 .then_some("TeleArk UI preview - not a login token")
         });
         let qr = if !credentials_enabled {
@@ -659,7 +668,8 @@ impl TeleArkApp {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(if self.telegram_error_message().is_some() {
+                .debug_selector(|| "account-qr-placeholder".into())
+                .child(if failed {
                     Icon::new(IconName::TriangleAlert)
                         .size(px(40.0))
                         .text_color(theme::text_secondary())
@@ -670,9 +680,12 @@ impl TeleArkApp {
                 .child(
                     div()
                         .text_sm()
+                        .text_center()
                         .text_color(theme::text_secondary())
-                        .child(self.tr(if self.telegram_error_message().is_some() {
+                        .child(self.tr(if failed {
                             "account-qr-unavailable"
+                        } else if self.qr_login_error.is_some() {
+                            "account-qr-refreshing"
                         } else {
                             "account-qr-loading"
                         })),
@@ -733,24 +746,39 @@ impl TeleArkApp {
             .items_center()
             .gap_3()
             .child(panel)
-            .when_some(self.telegram_error_message(), |body, message| {
-                body.child(error_banner(message))
-            })
-            .when(
-                !self.phone_login && self.telegram_error_message().is_some() && credentials_enabled,
-                |body| {
+            .when_some(
+                self.telegram_error_message().or_else(|| {
+                    self.qr_login_error
+                        .map(|kind| self.application_error_message(kind))
+                }),
+                |body, message| {
                     body.child(
-                        components::button(
-                            "account-qr-retry",
-                            self.tr("common-retry"),
-                            None,
-                            false,
-                        )
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.begin_telegram_qr_login(cx))),
+                        div()
+                            .debug_selector(|| "account-login-error".into())
+                            .child(error_banner(message)),
                     )
                 },
             )
+            .when(
+                !working && !failed && qr_deep_link.is_some() && self.qr_login_error.is_some(),
+                |body| {
+                    body.child(
+                        div()
+                            .text_sm()
+                            .text_center()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("account-qr-refreshed")),
+                    )
+                },
+            )
+            .when(!self.phone_login && failed && credentials_enabled, |body| {
+                body.child(
+                    components::button("account-qr-retry", self.tr("common-retry"), None, false)
+                        .ghost()
+                        .debug_selector(|| "account-qr-retry".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_telegram_qr_login(cx))),
+                )
+            })
             .child(
                 gpui_kit::component::button::Button::new("account-login-method")
                     .ghost()
@@ -790,7 +818,7 @@ impl TeleArkApp {
                         .child(
                             components::button(
                                 "telegram-open-api-settings",
-                                self.tr("telegram-api-id-open-settings-action"),
+                                self.tr("telegram-configure-api-action"),
                                 Some(IconName::Settings),
                                 false,
                             )

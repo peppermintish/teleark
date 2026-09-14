@@ -12,6 +12,13 @@ bypasses the gate. The locked surface permits sign-in, account switching and pro
 configuration. Workspace menus/shortcuts and auxiliary batch windows are removed
 from the locked presentation. Native window controls and Quit remain available.
 
+The same workspace restriction also applies before Telegram authorization, even
+without an application PIN. Signed-out users can sign in (including optional API
+setup) or edit the proxy without opening Settings or rendering the workspace shell.
+An account record alone does not grant access: it must match the current authorized
+Telegram state. QR polling errors retain their typed feedback while a fresh token is
+requested, and login-generation checks discard replies from abandoned attempts.
+
 This explicitly supersedes the application-facing locking decision in ADR 0026
 and the lock indicator in ADR 0034. Vault password/recovery operations still
 control cryptographic access to encrypted files; they are not application PINs.

@@ -397,6 +397,8 @@ pub struct TeleArkApp {
     pub(crate) locale_persistence: LocalePersistence,
     pub(crate) telegram_auth: TelegramAuthState,
     pub(crate) telegram_activity: TelegramActivity,
+    pub(crate) qr_login_error: Option<teleark_core::ApplicationErrorKind>,
+    pub(crate) login_proxy_open: bool,
     pub(crate) dialogs: dialogs::DialogLoad,
     dialogs_task: Option<Task<()>>,
     pub(crate) telegram_account: Option<TelegramAccount>,
@@ -837,6 +839,8 @@ impl TeleArkApp {
             system_locale: locale_startup.system_locale,
             locale_persistence,
             telegram_auth: TelegramAuthState::Disconnected,
+            qr_login_error: None,
+            login_proxy_open: false,
             telegram_activity: if telegram.is_ok() {
                 TelegramActivity::Idle
             } else {
@@ -1016,6 +1020,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if page != Page::Account && !self.telegram_is_authorized() {
+            return;
+        }
         self.channel_history_armed = false;
         self.show_transfer_detail = false;
         self.pending_transfer_delete = None;
@@ -1594,6 +1601,9 @@ impl Render for TeleArkApp {
         self.schedule_pin_work(window, cx);
         if self.app_is_locked() {
             return self.render_app_lock_screen(window, cx);
+        }
+        if !self.telegram_is_authorized() {
+            return self.render_signed_out_screen(window, cx);
         }
         if !self.channel_sync_details {
             self.sync_history = None;

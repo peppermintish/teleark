@@ -102,9 +102,16 @@ impl TeleArkApp {
                     Some(IconName::Settings),
                     false,
                 )
+                .debug_selector(|| "network-proxy-settings".into())
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.page = Page::Settings;
-                    this.settings_section = SettingsSection::Network;
+                    if this.app_is_locked() {
+                        this.app_lock.show_proxy = true;
+                    } else if !this.telegram_is_authorized() {
+                        this.login_proxy_open = true;
+                    } else {
+                        this.set_page(Page::Settings, cx);
+                        this.set_settings_section(SettingsSection::Network, cx);
+                    }
                     cx.notify();
                 })),
             )

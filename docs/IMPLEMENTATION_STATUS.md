@@ -1,5 +1,27 @@
 # Implementation status — v0.4.4
 
+## QR login recovery and signed-out access (2026-09-14)
+
+A failed QR poll now retires the rejected token and its poll owner, preserves the
+typed error on the login page, and immediately starts a fresh QR export. The
+replacement code resumes normal polling; a successful second scan enters Storage.
+A failed replacement exposes Retry without an automatic request loop. Login method,
+proxy and account generations reject stale replies, including code/password replies.
+
+Without an authorized Telegram account, the main window exposes only sign-in and
+the proxy editor. Settings, About, workspace navigation, upload/search shortcuts and
+native workspace menus are gated. Network-error actions open the same proxy editor;
+the optional Telegram API setup remains part of sign-in, without exposing Settings.
+Existing application PIN protection remains independent. No persisted format changes.
+
+Validation: 155 GUI tests and 21 i18n/catalog tests passed; three existing manual GUI
+performance probes were ignored. Affected-crate strict Clippy, formatting and the
+debug build passed. English/light synthetic reviews cover 900×600 and actual native
+full-screen login, error/replacement QR and proxy editing, including compact scrolling
+and blocked workspace shortcuts. `--preview-state=login-refreshing` and
+`login-refreshed` reproduce the recovery presentation with synthetic tokens.
+Real phone cancellation and live Telegram rescanning were not exercised.
+
 ## Application PIN and uninterrupted background work (2026-09-14)
 
 Application Lock now replaces the whole workspace with a PIN sign-in page and

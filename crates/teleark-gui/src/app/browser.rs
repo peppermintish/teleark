@@ -50,6 +50,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_channel(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        if !self.telegram_is_authorized() {
+            return;
+        }
         self.last_channel_id = Some(chat_id);
         self.nav_selection = "nav-channel";
         self.storage_view = StorageView::RawFiles;
@@ -60,6 +63,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_storage(&mut self, view: StorageView, cx: &mut Context<Self>) {
+        if !self.telegram_is_authorized() {
+            return;
+        }
         if self.storage_view == StorageView::RawFiles {
             self.remember_channel_view();
         }

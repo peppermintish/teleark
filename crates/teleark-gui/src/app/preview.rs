@@ -89,9 +89,23 @@ impl TeleArkApp {
         self.preference_persistence = PreferencePersistence::Idle;
         self.locale_persistence = LocalePersistence::Idle;
         self.configured_telegram_api_id = Some(12345);
-        if state == "login" {
+        if matches!(
+            state.as_str(),
+            "login" | "login-refreshing" | "login-refreshed"
+        ) {
             self.telegram_auth = TelegramAuthState::Unauthorized;
             self.page = Page::Account;
+            if state != "login" {
+                self.qr_login_error = Some(teleark_core::ApplicationErrorKind::Authorization);
+                if state == "login-refreshing" {
+                    self.telegram_activity = TelegramActivity::Working;
+                } else {
+                    self.telegram_auth = TelegramAuthState::QrCode {
+                        deep_link: "TeleArk refreshed UI preview - not a login token".into(),
+                        expires_at_unix_seconds: 1_900_000_000,
+                    };
+                }
+            }
             return;
         }
         let account = TelegramAccount {

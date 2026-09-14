@@ -1619,6 +1619,7 @@ pub(super) mod tests {
             .expect("second cache");
         app.update(cx, |app, cx| {
             app.library = Some(library.clone());
+            app.telegram_auth = TelegramAuthState::Authorized(account.clone());
             app.telegram_account = Some(account);
             app.telegram_chats = chats.to_vec();
             app.select_channel(10, cx);
