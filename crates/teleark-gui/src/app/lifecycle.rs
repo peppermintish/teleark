@@ -139,70 +139,110 @@ impl TeleArkApp {
             TransitionAction::SwitchAccount => "transition-account",
             TransitionAction::ApplyProxy => "transition-proxy",
         };
-        let popup = components::card()
-            .id("transition-dialog")
-            .debug_selector(|| "transition-dialog".into())
-            .w(px(440.0))
-            .p_5()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(div().text_lg().child(self.tr(title)))
-            .child(div().text_sm().child(self.tr(if waiting {
-                "transition-waiting"
-            } else {
-                "transition-description"
-            })))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(self.sync_event_time(transition.started)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        components::button(
-                            "transition-cancel",
-                            self.tr("common-cancel"),
-                            None,
-                            false,
+        let popup =
+            components::confirmation_surface("transition-dialog")
+                .child(components::confirmation_heading(
+                    self.tr(title),
+                    self.tr("transition-description"),
+                    match transition.action {
+                        TransitionAction::Quit => IconName::Close,
+                        TransitionAction::SwitchAccount => IconName::CircleUser,
+                        TransitionAction::ApplyProxy => IconName::Globe,
+                    },
+                ))
+                .child(
+                    div()
+                        .mx_5()
+                        .mb_5()
+                        .p_3()
+                        .rounded(theme::RADIUS_MEDIUM)
+                        .bg(theme::blue_pale())
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            gpui_kit::component::Icon::new(crate::assets::Symbol::Transfer)
+                                .size(px(16.0))
+                                .text_color(theme::blue())
+                                .flex_none(),
                         )
-                        .debug_selector(|| "transition-cancel".into())
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.transition = None;
-                            app.confirm_account_switch = false;
-                            app.show_account_switch = false;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        components::button(
-                            "transition-wait",
-                            self.tr("transition-wait"),
-                            None,
-                            true,
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(
+                                    self.tr(if waiting {
+                                        "transition-waiting-title"
+                                    } else {
+                                        "transition-active"
+                                    }),
+                                ))
+                                .child(div().mt_1().text_color(theme::text_secondary()).child(
+                                    self.tr(if waiting {
+                                        "transition-waiting"
+                                    } else {
+                                        "transition-preserved"
+                                    }),
+                                ))
+                                .when(waiting, |body| {
+                                    body.child(
+                                        div().mt_2().text_color(theme::text_muted()).child(
+                                            self.tr_with(
+                                                "transition-started",
+                                                MessageArgs::new().with(
+                                                    "time",
+                                                    self.sync_event_time(transition.started)
+                                                        .to_string(),
+                                                ),
+                                            ),
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+                .child(
+                    components::confirmation_actions()
+                        .child(
+                            components::button(
+                                "transition-cancel",
+                                self.tr("common-cancel"),
+                                None,
+                                false,
+                            )
+                            .debug_selector(|| "transition-cancel".into())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.transition = None;
+                                app.confirm_account_switch = false;
+                                app.show_account_switch = false;
+                                cx.notify();
+                            })),
                         )
-                        .debug_selector(|| "transition-wait".into())
-                        .disabled(waiting)
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            if let Some(transition) = &mut app.transition {
-                                transition.phase = TransitionPhase::Waiting;
-                            }
-                            app.advance_transition(cx);
-                            cx.notify();
-                        })),
-                    ),
-            );
+                        .child(
+                            components::button(
+                                "transition-wait",
+                                self.tr("transition-wait"),
+                                None,
+                                true,
+                            )
+                            .debug_selector(|| "transition-wait".into())
+                            .disabled(waiting)
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(transition) = &mut app.transition {
+                                    transition.phase = TransitionPhase::Waiting;
+                                }
+                                app.advance_transition(cx);
+                                cx.notify();
+                            })),
+                        ),
+                );
         gpui_kit::base::Dialog::new(cx)
             .focus_handle(self.modal_focus.clone())
             .flex()
             .items_center()
             .justify_center()
-            .backdrop(div().absolute().inset_0().bg(gpui_kit::rgba(0x10182060)))
+            .backdrop(div().absolute().inset_0().bg(theme::modal_backdrop()))
             .popup(popup)
             .close_on_backdrop_press(false)
             .on_cancel(|_, _, _| false)

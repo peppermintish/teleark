@@ -5,7 +5,8 @@ use crate::{
     theme,
 };
 use gpui_kit::component::{
-    Disableable as _, IconName,
+    Disableable as _, Icon, IconName,
+    button::ButtonVariants as _,
     input::{Input, InputState},
 };
 use gpui_kit::{
@@ -115,14 +116,14 @@ impl TeleArkApp {
             .min_w_0()
             .child(
                 div()
-                    .mb_2()
+                    .mb_1()
                     .text_xs()
                     .text_color(theme::text_secondary())
                     .child(self.tr(label)),
             )
             .child(
                 Input::new(input)
-                    .h(px(38.0))
+                    .h(theme::FORM_CONTROL_HEIGHT)
                     .disabled(self.proxy.action.busy()),
             )
             .into_any_element()
@@ -130,17 +131,40 @@ impl TeleArkApp {
 
     pub(crate) fn render_proxy_settings(
         &self,
-        layout: LayoutPolicy,
+        _layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let busy = self.proxy.action.busy();
         let mut card = components::card()
+            .rounded(theme::RADIUS_LARGE)
             .p_5()
-            .child(components::section_title(self.tr("proxy-settings-title")))
             .child(
                 div()
-                    .mt_2()
-                    .text_sm()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(36.0))
+                            .flex_none()
+                            .rounded(theme::RADIUS_MEDIUM)
+                            .bg(theme::blue_pale())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Globe)
+                                    .size(px(18.0))
+                                    .text_color(theme::blue()),
+                            ),
+                    )
+                    .child(components::section_title(self.tr("proxy-settings-title"))),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
                     .text_color(theme::text_secondary())
                     .child(self.tr("proxy-settings-description")),
             )
@@ -148,43 +172,36 @@ impl TeleArkApp {
                 div()
                     .mt_4()
                     .flex()
-                    .flex_wrap()
-                    .gap_2()
+                    .p_1()
+                    .gap_1()
+                    .rounded(theme::RADIUS_MEDIUM)
+                    .bg(theme::sidebar())
                     .child(
-                        components::button(
-                            "proxy-enable",
-                            self.tr("proxy-enable"),
-                            None,
-                            self.proxy.enabled,
-                        )
-                        .disabled(busy || self.proxy.load_failed)
-                        .debug_selector(|| "proxy-enable".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.proxy.enabled = true;
-                            cx.notify();
-                        })),
+                        components::button("proxy-disable", self.tr("proxy-disable"), None, false)
+                            .ghost()
+                            .flex_1()
+                            .h(px(30.0))
+                            .when(!self.proxy.enabled, |b| b.bg(theme::surface()).shadow_sm())
+                            .disabled(busy || self.proxy.load_failed)
+                            .debug_selector(|| "proxy-disable".into())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.proxy.enabled = false;
+                                cx.notify();
+                            })),
                     )
                     .child(
-                        components::button(
-                            "proxy-disable",
-                            self.tr("proxy-disable"),
-                            None,
-                            !self.proxy.enabled,
-                        )
-                        .disabled(busy || self.proxy.load_failed)
-                        .debug_selector(|| "proxy-disable".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.proxy.enabled = false;
-                            cx.notify();
-                        })),
+                        components::button("proxy-enable", self.tr("proxy-enable"), None, false)
+                            .ghost()
+                            .flex_1()
+                            .h(px(30.0))
+                            .when(self.proxy.enabled, |b| b.bg(theme::surface()).shadow_sm())
+                            .disabled(busy || self.proxy.load_failed)
+                            .debug_selector(|| "proxy-enable".into())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.proxy.enabled = true;
+                                cx.notify();
+                            })),
                     ),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("proxy-apply-note")),
             );
         if self.proxy.enabled {
             card = card
@@ -199,8 +216,14 @@ impl TeleArkApp {
                                 "proxy-socks5",
                                 self.tr("proxy-protocol-socks5"),
                                 None,
-                                self.proxy.protocol == ProxyProtocol::Socks5,
+                                false,
                             )
+                            .ghost()
+                            .h(px(28.0))
+                            .text_size(px(12.0))
+                            .when(self.proxy.protocol == ProxyProtocol::Socks5, |b| {
+                                b.bg(theme::blue_pale()).text_color(theme::blue())
+                            })
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.proxy.protocol = ProxyProtocol::Socks5;
@@ -212,8 +235,14 @@ impl TeleArkApp {
                                 "proxy-http",
                                 self.tr("proxy-protocol-http"),
                                 None,
-                                self.proxy.protocol == ProxyProtocol::HttpConnect,
+                                false,
                             )
+                            .ghost()
+                            .h(px(28.0))
+                            .text_size(px(12.0))
+                            .when(self.proxy.protocol == ProxyProtocol::HttpConnect, |b| {
+                                b.bg(theme::blue_pale()).text_color(theme::blue())
+                            })
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.proxy.protocol = ProxyProtocol::HttpConnect;
@@ -225,7 +254,7 @@ impl TeleArkApp {
                     div()
                         .mt_4()
                         .grid()
-                        .grid_cols(if layout.is_compact() { 1 } else { 2 })
+                        .grid_cols(2)
                         .gap_3()
                         .child(self.proxy_input("proxy-host", &self.proxy.host))
                         .child(self.proxy_input("proxy-port", &self.proxy.port))
@@ -241,6 +270,17 @@ impl TeleArkApp {
                 );
         }
         card = card
+            .child(
+                div()
+                    .mt_4()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme::border_subtle())
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(theme::text_secondary())
+                    .child(self.tr("proxy-apply-note")),
+            )
             .when(self.proxy.invalid, |card| {
                 card.child(
                     div()
@@ -255,20 +295,16 @@ impl TeleArkApp {
                     .mt_4()
                     .flex()
                     .flex_wrap()
-                    .gap_3()
+                    .gap_2()
                     .child(
-                        components::button(
-                            "proxy-apply",
-                            self.tr("proxy-apply"),
-                            Some(IconName::Check),
-                            true,
-                        )
-                        .disabled(busy || self.proxy.load_failed)
-                        .debug_selector(|| "proxy-apply".into())
-                        .on_click(cx.listener(|this, _, _, cx| this.apply_proxy(cx))),
+                        components::button("proxy-apply", self.tr("proxy-apply"), None, true)
+                            .disabled(busy || self.proxy.load_failed)
+                            .debug_selector(|| "proxy-apply".into())
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_proxy(cx))),
                     )
                     .child(
                         components::button("proxy-test", self.tr("proxy-test"), None, false)
+                            .ghost()
                             .disabled(
                                 busy || !self
                                     .proxy
@@ -300,7 +336,7 @@ impl TeleArkApp {
                         },
                     ),
             )
-            .child(div().mt_4().child(components::badge(
+            .child(div().mt_4().flex().child(components::badge(
                 self.tr(self.network_message_id()),
                 if self.proxy.show_banner() {
                     Tone::Amber

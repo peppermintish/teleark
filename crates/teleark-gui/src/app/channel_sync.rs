@@ -980,7 +980,24 @@ impl TeleArkApp {
             }
         }
         body = body
-            .child(sync_section_title(self.tr("sync-recent-events"))) // The locked GPUI cache does not replay accessibility nodes.
+            .child(sync_section_title(self.tr("sync-recent-events")))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .h(theme::ROW_HEIGHT)
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .text_size(theme::LIST_TEXT_SIZE)
+                    .child(
+                        div()
+                            .w(px(116.0))
+                            .flex_none()
+                            .child(self.tr("sync-column-time")),
+                    )
+                    .child(self.tr("sync-column-event")),
+            ) // The locked GPUI cache does not replay accessibility nodes.
             // Keep controls discoverable when assistive technology is active.
             .child(if window.is_a11y_active() {
                 div()

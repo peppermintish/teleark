@@ -1338,10 +1338,10 @@ settings-telegram-custom-purpose = Use this option to connect through the Telegr
 
 # Network proxy
 proxy-settings-title = Network proxy
-proxy-settings-description = Route all TeleArk network traffic through a SOCKS5 or HTTP CONNECT proxy. A proxy failure never enables direct access.
+proxy-settings-description = Choose how TeleArk connects. Proxy connections use SOCKS5 or HTTP CONNECT and never fall back to direct access.
 proxy-enable = Use proxy
-proxy-disable = Disable proxy (direct access)
-proxy-apply-note = Apply to save these changes. Active transfers finish before connections change; you can cancel the pending change. Direct access requires explicitly disabling the proxy and applying.
+proxy-disable = Direct connection
+proxy-apply-note = Changes take effect after active transfers finish. You can cancel while waiting.
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = Proxy IP address
@@ -1638,12 +1638,12 @@ upload-phase-restarting-unsealed = Restarting safely after interrupted manifest 
 
 # Whole-application access gate and transfer-safe lifecycle actions.
 app-pin-title = Application lock
-app-pin-description = Use an optional 6–12 digit PIN to protect access to this application. This PIN is separate from file encryption passwords.
-app-pin-enabled = PIN enabled
-app-pin-disabled = PIN disabled · Application does not lock
+app-pin-description = A 6–12 digit PIN protects access to TeleArk. Without a PIN, the app stays unlocked. File encryption is managed separately.
+app-pin-enabled = On
+app-pin-disabled = Off
 app-pin-current = Current PIN
-app-pin-new = New PIN (6–12 digits)
-app-pin-confirm = Confirm new PIN
+app-pin-new = New PIN · 6–12 digits
+app-pin-confirm = Confirm PIN
 app-pin-save = Save PIN
 app-pin-disable = Disable PIN
 app-pin-lock = Lock application
@@ -1663,11 +1663,21 @@ app-lock-back = Back to sign in
 transition-quit = Quit TeleArk?
 transition-account = Switch account?
 transition-proxy = Apply proxy configuration?
-transition-description = Transfers are still active. Wait for them to finish before continuing, or cancel this action to keep working. Paused tasks retain their saved progress.
-transition-waiting = Waiting for transfers and file preparation to finish. Background work continues. You can cancel this pending action at any time.
+transition-description = Wait for active transfers to finish before continuing.
+transition-waiting = Background work continues. Cancel to keep using the current session.
 transition-wait = Wait, then continue
 proxy-fixed-timing = Phase started: { $phase } · Last event: { $activity }
 proxy-event-time = { $time } · { $phase }
 sync-log-open = Sync activity and logs
 sync-private-event = { $kind } · Message { $message }
 shell-sync-working-attention = Syncing · needs attention
+
+app-lock-state = Locked
+app-lock-switch = Switch account
+transition-active = Transfers are running
+transition-preserved = Uploads and downloads keep working. Paused tasks keep their saved progress.
+transition-waiting-title = Waiting for transfers
+transition-started = Requested at { $time }
+sync-column-time = Time
+sync-column-event = Activity
+sync-log-description = Channel updates, private file sync and recent activity.

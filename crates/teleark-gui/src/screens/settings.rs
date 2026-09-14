@@ -162,7 +162,7 @@ impl TeleArkApp {
                 div()
                     .mt_5()
                     .grid()
-                    .grid_cols(if layout.is_compact() { 2 } else { 4 })
+                    .grid_cols(2)
                     .gap_3()
                     .child(self.system_locale_card(cx))
                     .child(self.locale_card(
@@ -380,17 +380,43 @@ impl TeleArkApp {
                 .flex_col()
                 .gap_4()
                 .child(
-                    components::button(
-                        "settings-sync-log",
-                        self.tr("sync-log-open"),
-                        Some(IconName::Info),
-                        false,
-                    )
-                    .debug_selector(|| "settings-sync-log".into())
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.channel_sync_details = true;
-                        cx.notify();
-                    })),
+                    components::card()
+                        .rounded(theme::RADIUS_LARGE)
+                        .p_3()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(self.tr("sync-log-open")),
+                                )
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .text_size(px(12.0))
+                                        .text_color(theme::text_secondary())
+                                        .child(self.tr("sync-log-description")),
+                                ),
+                        )
+                        .child(
+                            components::icon_button(
+                                "settings-sync-log",
+                                IconName::ChevronRight,
+                                self.tr("sync-log-open"),
+                            )
+                            .ghost()
+                            .debug_selector(|| "settings-sync-log".into())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.channel_sync_details = true;
+                                cx.notify();
+                            })),
+                        ),
                 )
                 .child(self.render_proxy_settings(layout, cx))
                 .into_any_element(),
@@ -435,7 +461,16 @@ impl TeleArkApp {
             .overflow_y_scrollbar()
             .child(
                 div()
-                    .max_w(px(880.0))
+                    .max_w(
+                        if matches!(
+                            self.settings_section,
+                            SettingsSection::General | SettingsSection::Network
+                        ) {
+                            theme::SETTINGS_FORM_WIDTH
+                        } else {
+                            px(880.0)
+                        },
+                    )
                     .mx_auto()
                     .pb_5()
                     .child(active_content),
@@ -472,50 +507,24 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.settings_section == section;
-        components::list_row()
-            .id(("settings-section", section as u64))
-            .debug_selector(move || format!("settings-nav-row-{}", section as u64))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded(theme::RADIUS_SMALL)
-            .bg(if selected {
-                theme::blue_soft()
-            } else {
-                theme::canvas()
-            })
-            .text_color(if selected {
-                theme::blue()
-            } else {
-                theme::text_secondary()
-            })
-            .text_size(theme::LIST_TEXT_SIZE)
-            .cursor_pointer()
-            .focusable()
-            .tab_index(0)
-            .hover(|item| item.bg(theme::blue_pale()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_settings_section(section, cx);
-            }))
-            .on_key_down(
-                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.set_settings_section(section, cx);
-                    }
-                }),
-            )
-            .child(
-                Icon::new(icon)
-                    .size(theme::LIST_ICON_SIZE)
-                    .text_color(if selected {
-                        theme::blue()
-                    } else {
-                        theme::text_secondary()
-                    }),
-            )
-            .child(div().min_w_0().truncate().child(label))
-            .into_any_element()
+        components::list_navigation_button(
+            ("settings-section", section as u64),
+            label,
+            Some(Icon::new(icon)),
+        )
+        .debug_selector(move || format!("settings-nav-row-{}", section as u64))
+        .bg(if selected {
+            theme::blue_soft()
+        } else {
+            theme::canvas()
+        })
+        .text_color(if selected {
+            theme::blue()
+        } else {
+            theme::text_secondary()
+        })
+        .on_click(cx.listener(move |this, _, _, cx| this.set_settings_section(section, cx)))
+        .into_any_element()
     }
 
     fn render_storage_settings(&self, _cx: &mut Context<Self>) -> AnyElement {

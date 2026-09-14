@@ -1311,10 +1311,10 @@ settings-telegram-custom-purpose = 自分で登録した Telegram アプリの A
 
 # Network proxy
 proxy-settings-title = ネットワークプロキシ
-proxy-settings-description = TeleArk のすべての通信を SOCKS5 または HTTP CONNECT プロキシ経由にします。障害時も直接接続には切り替わりません。
+proxy-settings-description = TeleArk の接続方法を選択します。プロキシは SOCKS5 と HTTP CONNECT に対応し、失敗時も直接接続に切り替わりません。
 proxy-enable = プロキシを使用
-proxy-disable = 無効にする（直接接続を許可）
-proxy-apply-note = 適用すると設定を保存します。進行中の転送が完了してから接続を変更します。待機中の変更はキャンセルできます。直接接続にはプロキシを明示的に無効にして適用する必要があります。
+proxy-disable = 直接接続
+proxy-apply-note = 実行中の転送が完了してから変更を適用します。待機中はキャンセルできます。
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = プロキシの IP アドレス
@@ -1611,12 +1611,12 @@ upload-phase-restarting-unsealed = マニフェスト暗号化の中断後、新
 
 # Whole-application access gate and transfer-safe lifecycle actions.
 app-pin-title = アプリロック
-app-pin-description = 任意の6〜12桁のPINでアプリへのアクセスを保護します。ファイル暗号化のパスワードとは別です。
-app-pin-enabled = PINは有効です
-app-pin-disabled = PINは無効です · アプリはロックされません
+app-pin-description = 6〜12 桁の PIN で TeleArk へのアクセスを保護します。PIN を設定しない場合、アプリはロックされません。ファイル暗号化は別に管理されます。
+app-pin-enabled = オン
+app-pin-disabled = オフ
 app-pin-current = 現在のPIN
-app-pin-new = 新しいPIN（6〜12桁）
-app-pin-confirm = 新しいPINを確認
+app-pin-new = 新しい PIN · 6〜12 桁
+app-pin-confirm = PIN の確認
 app-pin-save = PINを保存
 app-pin-disable = PINを無効にする
 app-pin-lock = アプリをロック
@@ -1636,11 +1636,21 @@ app-lock-back = サインインに戻る
 transition-quit = TeleArkを終了しますか？
 transition-account = アカウントを切り替えますか？
 transition-proxy = プロキシ設定を適用しますか？
-transition-description = 転送中のタスクがあります。完了まで待つか、この操作をキャンセルして作業を続けてください。一時停止中のタスクは保存済みの進捗を保持します。
-transition-waiting = 転送とファイルの準備が完了するまで待機しています。バックグラウンド処理は続行します。この待機中の操作はいつでもキャンセルできます。
+transition-description = 実行中の転送が完了してから続行します。
+transition-waiting = バックグラウンド処理は続行します。キャンセルすると現在のセッションを引き続き使用できます。
 transition-wait = 完了を待って続行
 proxy-fixed-timing = フェーズ開始: { $phase } · 最終イベント: { $activity }
 proxy-event-time = { $time } · { $phase }
 sync-log-open = 同期の状況とログ
 sync-private-event = { $kind } · メッセージ { $message }
 shell-sync-working-attention = 同期中 · 確認が必要
+
+app-lock-state = ロック中
+app-lock-switch = アカウントを切り替え
+transition-active = 転送を実行中
+transition-preserved = アップロードとダウンロードは続行します。一時停止したタスクの進行状況は保持されます。
+transition-waiting-title = 転送の完了を待機中
+transition-started = 要求日時：{ $time }
+sync-column-time = 時刻
+sync-column-event = アクティビティ
+sync-log-description = チャンネル更新、プライベートファイルの同期、最近のアクティビティ。

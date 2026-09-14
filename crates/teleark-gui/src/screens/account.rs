@@ -17,25 +17,12 @@ use teleark_runtime::TelegramAuthState;
 
 impl TeleArkApp {
     pub(crate) fn render_account_switch_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
-        let popup = components::card()
-            .id("account-switch-dialog")
-            .debug_selector(|| "account-switch-dialog".into())
-            .w(px(420.0))
-            .p_6()
-            .shadow_lg()
-            .child(
-                div()
-                    .text_size(px(20.0))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(self.tr("account-switch-confirm-title")),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("account-switch-confirm-description")),
-            )
+        let popup = components::confirmation_surface("account-switch-dialog")
+            .child(components::confirmation_heading(
+                self.tr("account-switch-confirm-title"),
+                self.tr("account-switch-confirm-description"),
+                IconName::CircleUser,
+            ))
             .when(self.show_account_switch, |popup| {
                 popup.child(
                     div()
@@ -46,11 +33,7 @@ impl TeleArkApp {
                 )
             })
             .child(
-                div()
-                    .mt_5()
-                    .flex()
-                    .justify_end()
-                    .gap_3()
+                components::confirmation_actions()
                     .child(
                         components::button(
                             "account-switch-cancel",
@@ -83,7 +66,7 @@ impl TeleArkApp {
             .flex()
             .items_center()
             .justify_center()
-            .backdrop(div().absolute().inset_0().bg(gpui_kit::rgba(0x10182060)))
+            .backdrop(div().absolute().inset_0().bg(theme::modal_backdrop()))
             .popup(popup)
             .close_on_backdrop_press(false)
             .on_cancel(|_, _, _| false)

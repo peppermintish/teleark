@@ -72,6 +72,9 @@ notifications from rebuilding the timeline; the list materializes visible rows.
 Retention omissions remain visible. Active catalog/library work cannot suppress
 private/channel failures in the shell summary.
 
+The visual hierarchy, shared confirmation surfaces and reference review are
+recorded in [Application access interface](../ACCESS_UI_DESIGN.md).
+
 ## Verification
 
 Deterministic coverage includes disabled PIN, verifier persistence/frozen v1,

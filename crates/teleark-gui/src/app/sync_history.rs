@@ -1,5 +1,6 @@
 //! Immutable, bounded history rows; only visible rows are materialized.
 use super::*;
+use gpui_kit::StatefulInteractiveElement as _;
 use std::sync::Arc;
 
 #[derive(Clone, PartialEq)]
@@ -104,16 +105,43 @@ impl Render for SyncHistory {
                                 format!(" · {}", row.error)
                             }
                         );
-                        components::list_summary(("sync-history-row", index), summary)
+                        components::list_row()
+                            .id(("sync-history-row", index))
+                            .w_full()
                             .debug_selector(move || format!("sync-history-row-{index}"))
-                            .text_color(if row.error.is_empty() {
-                                theme::text_secondary()
-                            } else {
-                                theme::red()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(theme::border_subtle())
+                            .child(
+                                div()
+                                    .w(px(116.0))
+                                    .flex_none()
+                                    .text_color(theme::text_muted())
+                                    .child(row.time.clone()),
+                            )
+                            .child(
+                                div()
+                                    .size(px(5.0))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(row.tone.foreground()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if row.error.is_empty() {
+                                        theme::text_primary()
+                                    } else {
+                                        theme::red()
+                                    })
+                                    .child(format!("{} · {}", row.title, row.source)),
+                            )
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(summary.clone())
+                                    .build(window, cx)
                             })
-                            .border_l_2()
-                            .border_color(row.tone.foreground())
-                            .pl_2()
                     })
                     .collect::<Vec<_>>()
             },

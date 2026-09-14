@@ -54,6 +54,74 @@ pub fn card() -> Div {
         .bg(theme::surface())
 }
 
+/// Shared structure for account and transfer confirmations.
+pub fn confirmation_surface(id: &'static str) -> Stateful<Div> {
+    card()
+        .id(id)
+        .debug_selector(move || id.into())
+        .w(theme::DIALOG_WIDTH)
+        .rounded(theme::RADIUS_LARGE)
+        .shadow_lg()
+        .overflow_hidden()
+}
+
+pub fn confirmation_heading(title: SharedString, description: SharedString, icon: IconName) -> Div {
+    div()
+        .p_5()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .size(px(36.0))
+                .flex_none()
+                .rounded(theme::RADIUS_MEDIUM)
+                .bg(theme::blue_pale())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    gpui_kit::component::Icon::new(icon)
+                        .size(px(18.0))
+                        .text_color(theme::blue()),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(17.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
+                        .text_color(theme::text_secondary())
+                        .child(description),
+                ),
+        )
+}
+
+pub fn confirmation_actions() -> Div {
+    div()
+        .rounded_b(theme::RADIUS_LARGE)
+        .px_5()
+        .py_3()
+        .border_t_1()
+        .border_color(theme::border_subtle())
+        .bg(theme::canvas())
+        .flex()
+        .justify_end()
+        .gap_2()
+}
+
 /// Shared visual boundary for background work, with a named task and a semantic state.
 /// Callers append the explanation and actions below this header.
 pub fn activity_card(

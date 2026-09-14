@@ -34,6 +34,18 @@ pub const BATCH_MEMBER_INDENT: Pixels = px(40.0);
 pub const RADIUS_SMALL: Pixels = px(6.0);
 pub const RADIUS_MEDIUM: Pixels = px(8.0);
 pub const RADIUS_LARGE: Pixels = px(12.0);
+pub const AUTH_PANEL_WIDTH: Pixels = px(384.0);
+pub const SETTINGS_FORM_WIDTH: Pixels = px(640.0);
+pub const DIALOG_WIDTH: Pixels = px(440.0);
+pub const FORM_CONTROL_HEIGHT: Pixels = px(34.0);
+
+pub fn access_canvas() -> Rgba {
+    color(0xeff2f7, 0x1b1e24)
+}
+
+pub fn modal_backdrop() -> Rgba {
+    color(0x172239, 0x000000).alpha(0.28)
+}
 
 pub fn apply_appearance<T>(
     preference: AppearancePreference,

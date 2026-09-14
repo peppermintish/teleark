@@ -1,6 +1,9 @@
 //! Whole-window access gate. Locking never mutates a runtime owner or its keys.
 use super::*;
-use gpui_kit::component::{Disableable as _, input::Input, scroll::ScrollableElement as _};
+use gpui_kit::component::{
+    Disableable as _, Icon, IconName, button::ButtonVariants as _, input::Input,
+    scroll::ScrollableElement as _,
+};
 use teleark_runtime::AppPinRecord;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -260,68 +263,109 @@ impl TeleArkApp {
 
     fn pin_field(&self, label: &'static str, input: &Entity<InputState>) -> AnyElement {
         div()
+            .min_w_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(self.tr(label))
-            .child(Input::new(input).h(px(34.0)))
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme::text_secondary())
+                    .child(self.tr(label)),
+            )
+            .child(
+                Input::new(input)
+                    .h(theme::FORM_CONTROL_HEIGHT)
+                    .disabled(self.app_lock.busy),
+            )
             .into_any_element()
     }
 
     pub(crate) fn render_app_pin_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let enabled = self.app_lock.record.is_some();
         components::card()
-            .p_5()
-            .flex()
-            .flex_col()
-            .gap_3()
+            .rounded(theme::RADIUS_LARGE)
+            .overflow_hidden()
             .child(
                 div()
+                    .p_5()
                     .flex()
-                    .items_center()
-                    .gap_2()
+                    .flex_col()
+                    .gap_4()
                     .child(
-                        gpui_kit::component::Icon::new(if self.app_lock.record.is_some() {
-                            crate::assets::Symbol::Lock
-                        } else {
-                            crate::assets::Symbol::Unlock
-                        })
-                        .size(px(16.0)),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(36.0))
+                                    .flex_none()
+                                    .rounded(theme::RADIUS_MEDIUM)
+                                    .bg(theme::blue_pale())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(if enabled {
+                                            crate::assets::Symbol::Lock
+                                        } else {
+                                            crate::assets::Symbol::Unlock
+                                        })
+                                        .size(px(18.0))
+                                        .text_color(theme::blue()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(16.0))
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(self.tr("app-pin-title")),
+                            )
+                            .child(components::badge(
+                                self.tr(if enabled {
+                                    "app-pin-enabled"
+                                } else {
+                                    "app-pin-disabled"
+                                }),
+                                if enabled {
+                                    components::Tone::Blue
+                                } else {
+                                    components::Tone::Neutral
+                                },
+                            )),
                     )
-                    .child(div().text_lg().child(self.tr("app-pin-title"))),
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("app-pin-description")),
+                    )
+                    .when(enabled, |body| {
+                        body.child(self.pin_field("app-pin-current", &self.app_lock.pin))
+                    })
+                    .child(
+                        div()
+                            .grid()
+                            .grid_cols(2)
+                            .gap_3()
+                            .child(self.pin_field("app-pin-new", &self.app_lock.new_pin))
+                            .child(self.pin_field("app-pin-confirm", &self.app_lock.confirmation)),
+                    )
+                    .when_some(self.app_lock.message, |body, message| {
+                        body.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme::text_secondary())
+                                .child(self.tr(message)),
+                        )
+                    }),
             )
             .child(
-                div()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr("app-pin-description")),
-            )
-            .child(self.tr(if self.app_lock.record.is_some() {
-                "app-pin-enabled"
-            } else {
-                "app-pin-disabled"
-            }))
-            .when(self.app_lock.record.is_some(), |body| {
-                body.child(self.pin_field("app-pin-current", &self.app_lock.pin))
-            })
-            .child(self.pin_field("app-pin-new", &self.app_lock.new_pin))
-            .child(self.pin_field("app-pin-confirm", &self.app_lock.confirmation))
-            .when_some(self.app_lock.message, |body, message| {
-                body.child(self.tr(message))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        components::button("app-pin-save", self.tr("app-pin-save"), None, true)
-                            .debug_selector(|| "app-pin-save".into())
-                            .disabled(self.app_lock.busy || self.app_lock.load_failed)
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.submit_app_pin(PinOperation::Save, window, cx)
-                            })),
-                    )
-                    .when(self.app_lock.record.is_some(), |body| {
+                components::confirmation_actions()
+                    .when(enabled, |body| {
                         body.child(
                             components::button(
                                 "app-pin-disable",
@@ -329,6 +373,7 @@ impl TeleArkApp {
                                 None,
                                 false,
                             )
+                            .ghost()
                             .disabled(self.app_lock.busy)
                             .on_click(cx.listener(
                                 |app, _, window, cx| {
@@ -348,7 +393,16 @@ impl TeleArkApp {
                                 cx.listener(|app, _, window, cx| app.lock_application(window, cx)),
                             ),
                         )
-                    }),
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        components::button("app-pin-save", self.tr("app-pin-save"), None, true)
+                            .debug_selector(|| "app-pin-save".into())
+                            .disabled(self.app_lock.busy || self.app_lock.load_failed)
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.submit_app_pin(PinOperation::Save, window, cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -365,7 +419,7 @@ impl TeleArkApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::canvas())
+            .bg(theme::access_canvas())
             .text_color(theme::text_primary())
             .font_family(".SystemUIFont")
             .track_focus(&self.main_focus)
@@ -375,21 +429,49 @@ impl TeleArkApp {
             .on_action(cx.listener(|_, _: &UploadFile, _, _| {}))
             .on_action(cx.listener(|_, _: &FocusSearch, _, _| {}))
             .on_action(cx.listener(|_, _: &ShowAbout, _, _| {}));
+        content = content.child(
+            div()
+                .h(px(56.0))
+                .flex_none()
+                .px_6()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(gpui_kit::img("teleark/app-icon.png").size(px(24.0)))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child("TeleArk"),
+                )
+                .child(div().flex_1())
+                .child(
+                    Icon::new(crate::assets::Symbol::Lock)
+                        .size(px(12.0))
+                        .text_color(theme::text_muted()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("app-lock-state")),
+                ),
+        );
         if self.app_lock.show_proxy {
             content = content.child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .p_5()
+                    .px_6()
+                    .pb_4()
                     .child(
-                        components::button("app-lock-back", self.tr("app-lock-back"), None, false)
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.app_lock.show_proxy = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(self.render_proxy_settings(layout, cx)),
+                        div()
+                            .w_full()
+                            .max_w(theme::SETTINGS_FORM_WIDTH)
+                            .mx_auto()
+                            .child(self.render_proxy_settings(layout, cx)),
+                    ),
             );
         } else if self.telegram_account.is_none() && !self.app_lock.load_failed {
             content = content.child(
@@ -408,35 +490,66 @@ impl TeleArkApp {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .p_5()
+                    .px_6()
+                    .py_3()
                     .child(
-                        div()
-                            .w(px(340.0))
+                        components::card()
+                            .w(theme::AUTH_PANEL_WIDTH)
+                            .flex_none()
+                            .rounded(px(16.0))
+                            .shadow_sm()
+                            .p_6()
                             .flex()
                             .flex_col()
                             .items_center()
-                            .gap_4()
-                            .child(self.account_avatar_element(88.0))
                             .child(
-                                gpui_kit::component::Icon::new(crate::assets::Symbol::Lock)
-                                    .size(px(18.0)),
-                            )
-                            .child(
-                                div().text_size(px(26.0)).child(
-                                    self.telegram_account
-                                        .as_ref()
-                                        .map(|a| a.display_name.clone())
-                                        .unwrap_or_else(|| "TeleArk".into()),
-                                ),
+                                div()
+                                    .relative()
+                                    .mb_4()
+                                    .child(self.account_avatar_element(64.0))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .right_0()
+                                            .bottom_0()
+                                            .size(px(22.0))
+                                            .border_2()
+                                            .border_color(theme::surface())
+                                            .rounded_full()
+                                            .bg(theme::blue())
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Icon::new(crate::assets::Symbol::Lock)
+                                                    .size(px(11.0))
+                                                    .text_color(gpui_kit::rgb(0xffffff)),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(px(23.0))
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .max_w_full()
+                                    .truncate()
+                                    .child(
+                                        self.telegram_account
+                                            .as_ref()
+                                            .map(|a| a.display_name.clone())
+                                            .unwrap_or_else(|| "TeleArk".into()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(13.0))
                                     .text_color(theme::text_secondary())
                                     .child(self.tr("app-lock-enter")),
                             )
                             .child(
                                 div()
+                                    .mt_5()
                                     .w_full()
                                     .child(Input::new(&self.app_lock.pin).h(px(38.0))),
                             )
@@ -447,6 +560,9 @@ impl TeleArkApp {
                                     None,
                                     true,
                                 )
+                                .w_full()
+                                .mt_3()
+                                .h(px(36.0))
                                 .debug_selector(|| "app-lock-enter".into())
                                 .disabled(self.app_lock.busy || self.app_lock.load_failed)
                                 .on_click(cx.listener(
@@ -459,13 +575,42 @@ impl TeleArkApp {
                                 self.app_lock
                                     .message
                                     .or(self.app_lock.load_failed.then_some("app-pin-load-failed")),
-                                |body, id| body.child(div().text_sm().child(self.tr(id))),
+                                |body, id| {
+                                    body.child(
+                                        div()
+                                            .mt_3()
+                                            .w_full()
+                                            .text_size(px(12.0))
+                                            .text_color(theme::text_secondary())
+                                            .child(self.tr(id)),
+                                    )
+                                },
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .mt_5()
+                                    .pt_4()
+                                    .w_full()
+                                    .border_t_1()
+                                    .border_color(theme::border_subtle())
+                                    .flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
                                     .text_color(theme::text_secondary())
-                                    .child(self.tr("app-lock-background")),
+                                    .child(
+                                        Icon::new(crate::assets::Symbol::Transfer)
+                                            .size(px(14.0))
+                                            .mt(px(2.0))
+                                            .flex_none(),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(self.tr("app-lock-background")),
+                                    ),
                             ),
                     ),
             );
@@ -476,15 +621,17 @@ impl TeleArkApp {
                     .flex()
                     .justify_center()
                     .gap_3()
-                    .p_3()
+                    .flex_none()
+                    .py_4()
                     .when(self.telegram_account.is_some(), |body| {
                         body.child(
                             components::button(
                                 "app-lock-account",
-                                self.tr("account-switch-confirm-action"),
-                                None,
+                                self.tr("app-lock-switch"),
+                                Some(IconName::CircleUser),
                                 false,
                             )
+                            .ghost()
                             .debug_selector(|| "app-lock-account".into())
                             .on_click(cx.listener(|app, _, _, cx| app.request_account_switch(cx))),
                         )
@@ -497,9 +644,14 @@ impl TeleArkApp {
                             } else {
                                 "proxy-settings-title"
                             }),
-                            None,
+                            Some(if self.app_lock.show_proxy {
+                                IconName::ArrowLeft
+                            } else {
+                                IconName::Globe
+                            }),
                             false,
                         )
+                        .ghost()
                         .debug_selector(|| "app-lock-proxy".into())
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.app_lock.show_proxy = !app.app_lock.show_proxy;

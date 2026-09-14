@@ -1311,10 +1311,10 @@ settings-telegram-custom-purpose = 此功能用于使用你自行注册的 Teleg
 
 # Network proxy
 proxy-settings-title = 网络代理
-proxy-settings-description = 通过 SOCKS5 或 HTTP CONNECT 代理传输 TeleArk 的全部网络流量。代理故障时绝不会自动直连。
+proxy-settings-description = 选择 TeleArk 的连接方式。代理支持 SOCKS5 和 HTTP CONNECT，连接失败时不会改用直连。
 proxy-enable = 使用代理
-proxy-disable = 关闭代理（允许直连）
-proxy-apply-note = 点击应用以保存更改。连接将在正在进行的传输结束后切换；您可取消待执行的更改。仅在明确关闭代理并应用后才允许直连。
+proxy-disable = 直接连接
+proxy-apply-note = 正在进行的传输完成后应用更改，等待期间可取消。
 proxy-protocol-socks5 = SOCKS5
 proxy-protocol-http = HTTP CONNECT
 proxy-host = 代理 IP 地址
@@ -1611,12 +1611,12 @@ upload-phase-restarting-unsealed = 清单加密曾中断，正在以新密钥安
 
 # Whole-application access gate and transfer-safe lifecycle actions.
 app-pin-title = 应用锁
-app-pin-description = 使用可选的 6–12 位数字 PIN 保护应用访问。此 PIN 独立于文件加密密码。
-app-pin-enabled = 已启用 PIN
-app-pin-disabled = 未启用 PIN · 应用不上锁
+app-pin-description = 使用 6–12 位数字 PIN 保护 TeleArk 访问。未设置 PIN 时应用保持解锁，文件加密单独管理。
+app-pin-enabled = 已启用
+app-pin-disabled = 未启用
 app-pin-current = 当前 PIN
-app-pin-new = 新 PIN（6–12 位数字）
-app-pin-confirm = 确认新 PIN
+app-pin-new = 新 PIN · 6–12 位数字
+app-pin-confirm = 确认 PIN
 app-pin-save = 保存 PIN
 app-pin-disable = 关闭 PIN
 app-pin-lock = 锁定应用
@@ -1636,11 +1636,21 @@ app-lock-back = 返回登入页面
 transition-quit = 退出 TeleArk？
 transition-account = 切换账户？
 transition-proxy = 应用代理配置？
-transition-description = 仍有传输任务正在进行。可等待任务结束后继续，或取消本次操作以继续使用应用。已暂停任务会保留已保存的进度。
-transition-waiting = 正在等待传输和文件准备结束。后台任务继续运行，您可随时取消这项待执行操作。
+transition-description = 等待正在进行的传输完成后再继续。
+transition-waiting = 后台任务继续运行，取消可继续使用当前会话。
 transition-wait = 等待结束后继续
 proxy-fixed-timing = 阶段开始：{ $phase } · 最近事件：{ $activity }
 proxy-event-time = { $time } · { $phase }
 sync-log-open = 同步活动与日志
 sync-private-event = { $kind } · 消息 { $message }
 shell-sync-working-attention = 同步中 · 需要处理
+
+app-lock-state = 已锁定
+app-lock-switch = 切换账户
+transition-active = 传输正在进行
+transition-preserved = 上传和下载继续运行，已暂停任务保留保存的进度。
+transition-waiting-title = 正在等待传输
+transition-started = 请求时间：{ $time }
+sync-column-time = 时间
+sync-column-event = 活动
+sync-log-description = 频道更新、私有文件同步与最近活动。
