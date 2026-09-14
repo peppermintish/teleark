@@ -20,6 +20,20 @@ English/light synthetic previews passed at 900×600 and actual native full-scree
 including primary actions and independent inspector scrolling. No credentialed
 Telegram upload or installed release replacement was performed.
 
+Known startup limitations, confirmed by source inspection: each upload (including
+source-dependent resume) finishes a whole-file BLAKE3 admission pass before starting
+the streaming producer. That pass reads with a bounded 1 MiB buffer and records
+both whole-file and container digests; it is not encryption, but delays the first
+network part. The transfer list still reads `average_bytes_per_second`, and the
+top-level total reads controller goodput; both are updated only after an entire
+container is uploaded and published. The inspector already receives individual
+part acknowledgements and rate samples. Consequently an unavailable list/total
+speed does not establish that transport has not started. Open work is to expose
+those measured rates promptly and assess incremental source admission while
+preserving source-change detection and immutable recovery identities. No live
+timings were collected, so these findings do not attribute a specific user's
+elapsed wait to disk, hashing, target validation or Telegram latency.
+
 ## Automatic device keys and optional application PIN (2026-09-15)
 
 Private-channel management now triggers automatic OS-random key preparation on
