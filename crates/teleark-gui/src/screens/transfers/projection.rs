@@ -60,6 +60,7 @@ pub(super) struct Presentation {
     pub key_indices: BTreeMap<u64, usize>,
     pub selected_count: usize,
     pub actions: BTreeMap<usize, Arc<Vec<u64>>>,
+    pub vault_actions: BTreeMap<usize, Arc<Vec<u64>>>,
     pub scroll_applied: std::cell::Cell<bool>,
 }
 impl TransferProjectionCache {
@@ -138,6 +139,29 @@ impl TransferProjectionCache {
             (action as usize, Arc::new(ids))
         })
         .collect();
+        let vault_snapshots = &app.vault_transfer_view.items;
+        let vault_batches = vault_snapshots
+            .iter()
+            .map(|row| (row.id, row.batch_id))
+            .collect::<Vec<_>>();
+        let vault_scoped = scope_vault_ids(&rows, &app.selected_transfer_keys, &vault_batches);
+        let vault_actions = [
+            TransferAction::Resume,
+            TransferAction::Pause,
+            TransferAction::Retry,
+            TransferAction::Cancel,
+            TransferAction::Delete,
+        ]
+        .into_iter()
+        .map(|action| {
+            let ids = vault_snapshots
+                .iter()
+                .filter(|row| vault_scoped.contains(&row.id) && vault_action_supported(action, row))
+                .map(|row| row.id)
+                .collect();
+            (action as usize, Arc::new(ids))
+        })
+        .collect();
         let result = std::rc::Rc::new(Presentation {
             source,
             selection: app.nav_selection,
@@ -151,6 +175,7 @@ impl TransferProjectionCache {
             key_indices,
             selected_count,
             actions,
+            vault_actions,
             scroll_applied: std::cell::Cell::new(false),
         });
         self.presentation = Some(result.clone());
@@ -274,6 +299,13 @@ impl TransferItem {
         }
     }
 
+    fn vault_id(&self) -> Option<u64> {
+        match self {
+            Self::Vault(row, _) => Some(row.id),
+            _ => None,
+        }
+    }
+
     fn native_batch(&self) -> Option<u64> {
         match self {
             Self::Native(row, _) => row.batch_id,
@@ -391,6 +423,39 @@ pub(super) fn vault_transfer_state(snapshot: &VaultTransferSnapshot) -> Transfer
     }
 }
 
+pub(super) fn vault_action_supported(
+    action: TransferAction,
+    snapshot: &VaultTransferSnapshot,
+) -> bool {
+    use teleark_runtime::VaultRecoveryState as Recovery;
+    match action {
+        TransferAction::Pause => matches!(
+            snapshot.recovery_state,
+            Some(Recovery::Queued | Recovery::Running)
+        ),
+        TransferAction::Resume => snapshot.recovery_state == Some(Recovery::Paused),
+        TransferAction::Retry => snapshot.recovery_state == Some(Recovery::Retryable),
+        TransferAction::Cancel => matches!(
+            snapshot.recovery_state,
+            Some(
+                Recovery::Queued
+                    | Recovery::Running
+                    | Recovery::Pausing
+                    | Recovery::Paused
+                    | Recovery::Retryable
+                    | Recovery::Blocked
+            )
+        ),
+        TransferAction::Delete => matches!(
+            snapshot.state,
+            VaultTransferState::Completed
+                | VaultTransferState::Failed(_)
+                | VaultTransferState::Cancelled
+                | VaultTransferState::Interrupted
+        ),
+    }
+}
+
 fn vault_direction(direction: VaultTransferDirection) -> TransferDirection {
     match direction {
         VaultTransferDirection::Upload => TransferDirection::Upload,
@@ -483,6 +548,38 @@ pub(super) fn scope_ids(
             ids.insert(id);
         } else if let Some(batch) = item.native_batch()
             && let Some(members) = batches.get(&batch)
+        {
+            ids.extend(members);
+        }
+    }
+    ids
+}
+
+pub(super) fn scope_vault_ids(
+    items: &[TransferItem],
+    selected: &BTreeSet<u64>,
+    snapshots: &[(u64, Option<u64>)],
+) -> BTreeSet<u64> {
+    let has_selection = items
+        .iter()
+        .enumerate()
+        .any(|(index, item)| selected.contains(&item.key(index)));
+    let mut batches: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (id, batch) in snapshots {
+        if let Some(batch) = batch {
+            batches.entry(*batch).or_default().push(*id);
+        }
+    }
+    let mut ids = BTreeSet::new();
+    for (_, item) in items
+        .iter()
+        .enumerate()
+        .filter(|(index, item)| !has_selection || selected.contains(&item.key(*index)))
+    {
+        if let Some(id) = item.vault_id() {
+            ids.insert(id);
+        } else if let TransferItem::VaultBatch(batch, _, _) = item
+            && let Some(members) = batches.get(batch)
         {
             ids.extend(members);
         }
