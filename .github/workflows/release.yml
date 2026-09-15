@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -45,17 +45,27 @@ jobs:
             exit 1
           fi
 
+      # cargo-deny-action is a Docker action and cannot start on macOS.
+      - name: Install native dependency auditor
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
       - name: Audit dependency licenses and advisories
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: cargo deny --locked check
 
       - name: Verify workspace
         run: |
+          set -euo pipefail
           cargo fmt --all --check
           cargo check --workspace --all-targets --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --all-targets --locked
           cargo test -p teleark-core --locked
           cargo test -p teleark-i18n --locked
+
+      - name: Validate workspace documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
 
       - name: Build release workspace
         run: cargo build --workspace --release --locked
@@ -72,10 +82,10 @@ jobs:
           scripts/package-macos.sh target/release/teleark "dist/${package}/TeleArk.app"
           cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          shasum -a 256 "dist/${package}.tar.gz" > dist/SHA256SUMS
+          (cd dist && shasum -a 256 "${package}.tar.gz" > SHA256SUMS)
 
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: teleark-unsigned-macos
           path: |
@@ -94,7 +104,7 @@ jobs:
       contents: write
     steps:
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           name: teleark-unsigned-macos
           path: dist
@@ -102,6 +112,7 @@ jobs:
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail

@@ -1,6 +1,6 @@
 # ADR 0025: Fixed storage channel, file-local damage and retained key epochs
 
-Status: Accepted. The lock-triggered cancellation portion is superseded by [ADR 0026](0026-session-unlock-and-task-key-leases.md). Supersedes ADR 0015's requirement that intact management markers authorize use of an already bound channel, and ADR 0008's single-local-key-record restriction. Manifest authentication and the remote privacy/ownership checks remain mandatory.
+Status: Accepted. The separate mute/archive action is superseded by [ADR 0027](0027-storage-workspace-and-repair-defaults.md). The lock-triggered cancellation portion is superseded by [ADR 0026](0026-session-unlock-and-task-key-leases.md). Supersedes ADR 0015's requirement that intact management markers authorize use of an already bound channel, and ADR 0008's single-local-key-record restriction. Manifest authentication and the remote privacy/ownership checks remain mandatory.
 
 ## Decision
 

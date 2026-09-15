@@ -1,6 +1,6 @@
 # ADR 0016: Bounded, visible upload preflight
 
-- Status: Accepted
+- Status: Accepted. Materialization of every queued row before preflight is refined by [ADR 0028](0028-upload-selection-without-count-cap.md): only the first internal window is materialized, while selection counters expose all remaining work.
 - Date: 2026-09-07
 - Refines: ADR 0015's validation scheduling for multi-file upload batches; remote identity requirements remain unchanged.
 

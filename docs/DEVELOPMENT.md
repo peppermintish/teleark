@@ -1,8 +1,21 @@
 # Development
 
-Use `rust-toolchain.toml` and the checked-in lockfile. Start with [AGENTS.md](../AGENTS.md); [implementation status](IMPLEMENTATION_STATUS.md) is the capability/limitation record.
+Commands and preview fixtures for the repository's `rust-toolchain.toml` and checked-in lockfile. Contributor rules live in [AGENTS.md](../AGENTS.md).
 
 ## Quality gates
+
+Choose local validation by the changed behavior; CI remains the full workspace gate.
+
+| Change | Local validation |
+| --- | --- |
+| Documentation only | Review the diff, local links/anchors and stale references; `git diff --check`. No Rust rebuild unless executable examples or build instructions changed. |
+| One module | `cargo fmt --all --check`; affected crate tests and strict Clippy with `--all-targets --locked`. Include callers when the API changes. |
+| UI / messages | Affected GUI tests and non-visual i18n/catalog checks. Interface testing and layout reviews use English (`en-US`) only, covering both 900×600 and actual full-screen mode. Visual previews and layout reviews use light mode only; existing automated dark-theme coverage may remain. Default-size or large-window previews do not replace full-screen checks. For long operations, include slow/blocked, phase-change and terminal feedback. |
+| Storage / crypto / manifests | Supported-version and skipped-upgrade fixtures; preserved data/keys, restart/rollback, insufficient-space and visible migration-phase tests; affected canonical-vector, tamper and recovery tests. See [migration safety](SECURITY.md#validation-and-migration-safety). |
+| Dependencies | Review the graph and notices; `cargo deny check` plus affected compilation/tests. |
+| Release / shared contracts / broad refactor | Full commands below and any applicable protected release qualification. |
+
+Full source gates (explicit Core/i18n checks also run in CI):
 
 ```bash
 cargo fmt --all --check
@@ -15,11 +28,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo deny check
 ```
 
-Use deterministic temporary databases/files, fake remote stores, injected clocks and bounded workers. Reproducible fixes require regression tests; migrations preserve data from every supported prior version. Crypto/manifest changes preserve canonical vectors, tamper rejection and recovery equality. Keep long fuzzing, million-row benchmarks and credentialed Telegram tests in separate protected/manual workflows. Never point tests at a developer's real session or database.
+Long fuzzing, million-row benchmarks and credentialed Telegram tests run in separate protected/manual workflows. GPUI dependency provenance is recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
 
-Before dependency changes, review direct/transitive licenses, maintenance and advisories. The published GPUI Kit/gpui-pre graph and exact permissive exceptions are recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md); the unprefixed GPL graph remains banned. Distributions include both licenses and `THIRD_PARTY_NOTICES.md`. A passing deny policy does not imply every transitive crate is maintained forever.
-
-GPUI Kit's development-only `test-support` feature drives actual wheel-event regression tests. Its eight newly locked dependencies were reviewed: `convert_case 0.11.0` (MIT), `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These are existing upstream test helpers, excluded from release features; no existing package was upgraded. Necessity is the real scroll/focus harness; the full locked advisory/license gate remains required.
+GPUI Kit's development-only `test-support` feature provides real event/focus regression tests. Its reviewed test-only graph adds `convert_case 0.11.0` (MIT), plus `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These helpers are excluded from release features.
 
 ## Native macOS build
 
@@ -57,11 +68,9 @@ The embedded pair identifies the application and is extractable from the resulti
 
 ## Isolated UI review
 
-Visual previews and layout reviews use English (`en-US`) and light mode only. Cover 900×600 and actual native full-screen mode; a large window does not replace full-screen. Existing automated dark-theme coverage may remain.
-
 Always include `--preview-ui` for layout work:
 
-Use English (`--locale=en-US`) only for interface tests and visual previews.
+Use English (`--locale=en-US`) only for interface testing, visual previews, screenshots and layout reviews. Do not open other-language interfaces or add other-language UI passes for localization checks. Every interface test/layout review must cover both 900×600 and actual full-screen mode. Visual previews and layout reviews use light mode only; existing automated dark-theme coverage may remain. Enter full-screen mode through the native window control; a large `--window-size` or the default window is not a substitute. At both sizes, verify primary actions remain reachable and inspectors scroll independently.
 
 ```bash
 cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=en-US --window-size=1360x760
@@ -76,21 +85,39 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `upload-history`, `login`, `returning`, `setup`, `locked`, `raw`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress` |
-| `--locale` | `en-US`, `zh-CN`, `ja-JP` |
-| `--window-size` | Minimum 900×600; review 960×640, 1360×760, 1920×1080 |
+| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `batch-groups`, `batch-large`, `upload-history`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
+| `--locale` | `en-US` only for interface tests and previews |
+| `--window-size` | 900×600 is required; also review actual native full-screen mode. Other window sizes are supplemental |
 
 The default content size is 1120×680. Startup centers the native frame inside the primary display’s OS-reported work area, excluding the menu bar and Dock/taskbar, with a 16-point margin and separate 36-point native-titlebar allowance. Oversized requests shrink to fit; on unusually small work areas the window minimum also shrinks instead of forcing overlap. Record actual size separately. The legacy `--skip-telegram-api-id-prompt` flag remains accepted, but API setup is now opt-in. Non-preview startup opens real local state and can resume eligible downloads after account entry.
 
-`--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check English by default; use other locales for the localized message and wrapping checks.
+Channel sync fixtures show an active difference or a server wait with queue/timing and an independently scrolling timeline; they never create the real synchronization owner. Startup now shows database opening/migration before initializing runtime owners in the background.
 
-Inspect actual windows, not only process startup: navigation after refresh/long scroll; login and returning session; storage setup/Files/Raw/guide; locked upload → unlock; modal focus/Tab/Return/Escape; transfer bulk actions/details, batch membership, scroll isolation at both boundaries, expanded/collapsed navigation, multi-file picker/removal and local-file states; Settings/About; English light mode at 900×600 and actual native full-screen. Never capture a real QR token or recovery secret. Record blocked or unperformed checks honestly in status. CUA/AppKit inspection requires an unlocked Mac.
+`--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check the message and wrapping in English only.
+
+`--preview-state=channel-selected` opens a synthetic channel with the second row focused and checked, so selection overlays, text and checkbox visibility can be reviewed together.
+
+`--preview-state=batch-groups` shows adjacent expanded download/upload groups between ordinary tasks. Use `--screen=transfers --preview-state=batch-large` and activate the 12-file upload header to review the same hierarchy in its auxiliary window.
+
+Inspect actual affected windows, including keyboard/focus, wrapping, scrolling and loading/error states. The full release matrix also covers login/returning sessions, storage setup/Files/Raw, unlock, transfer and Library bulk actions/details, batch membership, sidebar states, file picker/removal, local-file states and Settings/About. Process survival is not visual verification. Never capture real QR tokens or recovery secrets. CUA/AppKit inspection requires an unlocked Mac.
 
 ## CI and releases
 
-`ci.yml` runs legal checks, cargo-deny, formatting, check, Clippy, workspace tests and explicit Core/i18n checks. `fuzz.yml` runs bounded daily parser campaigns. `release.yml` is an unsigned macOS bootstrap with checksums; a version tag is not evidence of signing, security audit or credentialed testing. Keep secrets in protected release environments and use least-privilege permissions.
+`ci.yml` runs all eight source gates plus the legal baseline on macOS. CI and Release install pinned `cargo-deny 0.20.2` as a native tool; Docker actions cannot run on a macOS runner. `fuzz.yml` runs two bounded daily parser campaigns on Linux with explicit `cargo +nightly` (the repository toolchain file otherwise selects stable), retaining crash inputs when produced. This Linux job validates formats and produces no desktop package.
 
-For substantial changes, review the full diff, update affected contracts and record justified gate exceptions. Commit only when authorized. Use [implementation status](IMPLEMENTATION_STATUS.md) for unfinished work and precise next actions, not a growing chronology of every command.
+`release.yml` builds only the runner's native macOS architecture, assembles an unsigned `TeleArk.app`, and uploads a `.tar.gz` and `SHA256SUMS`. Manual dispatch produces downloadable workflow artifacts; a `v*.*.*` push publishes them as a GitHub release. The publication job specifies `GH_REPO` because it downloads artifacts without a repository checkout. Windows/Linux desktop packaging, a universal macOS binary, signing and notarization are not implemented by this workflow. A version tag is not evidence of signing, security audit or credentialed testing. Keep secrets in protected release environments and use least-privilege permissions.
+
+After workflow edits, run `actionlint` and the affected commands locally. To smoke-test the parser campaigns on a supported local host:
+
+```bash
+cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+cargo +nightly fuzz run part_decode -- -max_total_time=30 -rss_limit_mb=2048
+cargo +nightly fuzz run manifest_decode -- -max_total_time=30 -rss_limit_mb=2048
+```
+
+These short local campaigns do not substitute for the scheduled ten-minute campaigns or a successful hosted workflow run.
+
+Protected system, security and platform qualification remains tracked in [implementation status](IMPLEMENTATION_STATUS.md#next-actions-and-release-gates).
 
 ## Documentation recovery checkpoints
 
@@ -107,6 +134,12 @@ git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
 ```
 
 `checkpoint/pre-gpui-kit-redesign-20260907` also preserves the pre-rewrite repository. Restoring source does not downgrade an already migrated user database; never replace or remove user data for a code rollback.
+
+## Proxy validation
+
+`cargo test -p teleark-telegram --locked network::tests` runs actual loopback socket routing and negative direct-destination traps, including MTProto bootstrap traffic and environment bypass variables. Runtime owner tests check shutdown barriers, restart persistence and probe cancellation/admission; GUI network policy tests block a real framework HTTP request and guard alternate network exits. Run full workspace gates when changing this shared route contract. No real session or external proxy is needed.
+
+Use `--preview-ui --preview-state=proxy-failed --locale=en-US --window-size=900x600` for an isolated persistent-error settings preview, or `proxy-testing`/`proxy-ready` for waiting/configured states. These are synthetic presentation states and do not dial a proxy or measure latency. A successful real settings test means a TCP tunnel to a Telegram DC was accepted, not authenticated API health.
 
 
 `--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.
