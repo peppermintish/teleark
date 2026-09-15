@@ -775,6 +775,84 @@ fn direction_history_has_indexed_deep_cursor_and_includes_maximum_id() -> Storag
 }
 
 #[test]
+fn deleting_terminal_vault_history_is_atomic_and_preserves_downloaded_output() -> StorageResult<()>
+{
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let output = directory.path().join("downloaded.bin");
+    std::fs::write(&output, b"user data").expect("downloaded output");
+    let mut db = Database::open_in_memory()?;
+    db.admit_vault_job(&job(9, VaultJobDirection::Download))?;
+    db.connection.execute(
+        "UPDATE vault_transfer_jobs SET state='completed' WHERE account_id=7 AND id=9",
+        [],
+    )?;
+    db.connection.execute(
+        "INSERT INTO vault_transfer_parts(account_id,task_id,part_index,identity,receipt) VALUES(7,9,0,X'01',X'02')",
+        [],
+    )?;
+    db.connection.execute(
+        "INSERT INTO vault_manifest_outbox(account_id,task_id,codec_version,commitment,random_id) VALUES(7,9,1,zeroblob(32),9)",
+        [],
+    )?;
+    db.record_vault_download(&crate::VaultDownloadRecord {
+        account_id: 7,
+        chat_id: 11,
+        package_id: "09".repeat(16),
+        destination: output.clone(),
+        size_bytes: 9,
+        completed_at_unix_ms: 101,
+    })?;
+
+    db.delete_vault_transfer(7, 9)?;
+
+    assert!(db.vault_job(7, 9)?.is_none());
+    assert!(db.vault_parts(7, 9, None, 1)?.is_empty());
+    assert!(db.vault_manifest_outbox(7, 9)?.is_none());
+    assert_eq!(db.downloaded_files_page(7, None)?.len(), 1);
+    assert_eq!(
+        std::fs::read(&output).expect("output remains"),
+        b"user data"
+    );
+    Ok(())
+}
+
+#[test]
+fn deleting_nonterminal_vault_history_rolls_back_and_legacy_upload_history_is_removed()
+-> StorageResult<()> {
+    let mut db = Database::open_in_memory()?;
+    db.admit_vault_job(&job(10, VaultJobDirection::Upload))?;
+    db.connection.execute(
+        "INSERT INTO vault_transfer_parts(account_id,task_id,part_index,identity) VALUES(7,10,0,X'01')",
+        [],
+    )?;
+    assert!(db.delete_vault_transfer(7, 10).is_err());
+    assert!(db.vault_job(7, 10)?.is_some());
+    assert_eq!(db.vault_parts(7, 10, None, 1)?.len(), 1);
+
+    db.save_vault_uploads(&[crate::VaultUploadRecord {
+        account_id: 7,
+        id: 11,
+        chat_id: 11,
+        batch_id: None,
+        queued_at_unix_ms: 100,
+        file_name: "legacy.bin".into(),
+        package_id: None,
+        size_bytes: 8,
+        transferred_bytes: 0,
+        completed_parts: 0,
+        part_count: 1,
+        started_at_unix_ms: 100,
+        duration_ms: None,
+        average_bytes_per_second: None,
+        state: crate::StoredVaultUploadState::Interrupted,
+        failure_code: None,
+    }])?;
+    db.delete_vault_transfer(7, 11)?;
+    assert!(db.vault_upload_history(7)?.records.is_empty());
+    Ok(())
+}
+
+#[test]
 fn recovery_history_keeps_old_live_jobs_ahead_of_new_terminal_history() -> StorageResult<()> {
     let mut db = Database::open_in_memory()?;
     db.admit_vault_job(&job(1, VaultJobDirection::Upload))?;

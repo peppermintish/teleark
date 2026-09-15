@@ -672,6 +672,14 @@ impl DesktopLibrary {
         })
     }
 
+    pub(crate) fn delete_vault_transfer(
+        &self,
+        account: i64,
+        id: u64,
+    ) -> Result<(), ApplicationError> {
+        self.worker.delete_vault_transfer(account, id)
+    }
+
     /// Bounded inventory of successful downloads for the specified account.
     pub fn downloaded_files_page(
         &self,
@@ -948,6 +956,11 @@ enum StorageRequest {
     VaultUploadHistory {
         account: i64,
         reply: SyncSender<Result<teleark_storage::VaultUploadHistory, ApplicationError>>,
+    },
+    DeleteVaultTransfer {
+        account: i64,
+        id: u64,
+        reply: SyncSender<Result<(), ApplicationError>>,
     },
     ProxyConfiguration {
         reply: SyncSender<Result<NetworkRoute, ApplicationError>>,
@@ -1382,6 +1395,12 @@ impl StorageWorker {
     fn delete_native_download(&self, task_id: u64) -> Result<(), ApplicationError> {
         self.request("delete_native_download", |reply| {
             StorageRequest::DeleteNativeDownload { task_id, reply }
+        })
+    }
+
+    fn delete_vault_transfer(&self, account: i64, id: u64) -> Result<(), ApplicationError> {
+        self.request("delete_vault_transfer", |reply| {
+            StorageRequest::DeleteVaultTransfer { account, id, reply }
         })
     }
 
@@ -2074,6 +2093,13 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let _ = reply.send(
                     database
                         .vault_upload_history(account)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::DeleteVaultTransfer { account, id, reply } => {
+                let _ = reply.send(
+                    database
+                        .delete_vault_transfer(account, id)
                         .map_err(map_storage_error),
                 );
             }

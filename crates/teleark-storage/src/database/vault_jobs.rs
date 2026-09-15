@@ -376,6 +376,80 @@ impl Database {
         nonnegative_from_sql("vault_transfer_jobs", "count", count)
     }
 
+    /// Removes one terminal Vault transfer and all of its durable recovery
+    /// metadata in a single transaction. Downloaded output identities are
+    /// deliberately kept: history cleanup must never remove a user's file.
+    pub fn delete_vault_transfer(&mut self, account: i64, id: u64) -> StorageResult<()> {
+        if account <= 0 {
+            return Err(invalid("vault_job.account"));
+        }
+        let id = unsigned_to_sql("vault_job.id", id)?;
+        self.durable_vault_write(|tx| {
+            let formal: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2",
+                    params![account, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let legacy: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM vault_upload_history WHERE account_id=?1 AND id=?2",
+                    params![account, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let pending: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM vault_pending_uploads WHERE account_id=?1 AND id=?2",
+                    params![account, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if formal.is_none() && legacy.is_none() && pending.is_none() {
+                return Err(StorageError::NotFound {
+                    entity: crate::EntityKind::TransferTask,
+                    id,
+                });
+            }
+            if formal
+                .as_deref()
+                .is_some_and(|state| !terminal_vault_job_state(state))
+                || legacy
+                    .as_deref()
+                    .is_some_and(|state| !terminal_upload_history_state(state))
+                || pending
+                    .as_deref()
+                    .is_some_and(|state| !terminal_pending_upload_state(state))
+            {
+                return Err(invalid("vault_job.delete_state"));
+            }
+
+            tx.execute(
+                "DELETE FROM vault_transfer_parts WHERE account_id=?1 AND task_id=?2",
+                params![account, id],
+            )?;
+            tx.execute(
+                "DELETE FROM vault_manifest_outbox WHERE account_id=?1 AND task_id=?2",
+                params![account, id],
+            )?;
+            tx.execute(
+                "DELETE FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2",
+                params![account, id],
+            )?;
+            tx.execute(
+                "DELETE FROM vault_pending_uploads WHERE account_id=?1 AND id=?2",
+                params![account, id],
+            )?;
+            tx.execute(
+                "DELETE FROM vault_upload_history WHERE account_id=?1 AND id=?2",
+                params![account, id],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Authenticated remote locators are imported atomically with their local job.
     /// Runtime rechecks their ciphertext before issuing any completion receipt.
     pub fn import_vault_upload(
@@ -534,6 +608,19 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?)
     }
 }
+
+fn terminal_vault_job_state(state: &str) -> bool {
+    matches!(state, "cancelled" | "retryable" | "blocked" | "completed")
+}
+
+fn terminal_upload_history_state(state: &str) -> bool {
+    matches!(state, "failed" | "cancelled" | "interrupted" | "completed")
+}
+
+fn terminal_pending_upload_state(state: &str) -> bool {
+    matches!(state, "cancelled" | "retryable" | "blocked" | "promoted")
+}
+
 fn active_lease(tx: &Transaction<'_>, lease: VaultJobLease, stopping: bool) -> StorageResult<bool> {
     let value: Option<(String,i64,u32)>=tx.query_row("SELECT state,generation,context_version FROM vault_transfer_jobs WHERE account_id=?1 AND id=?2",params![lease.account_id,unsigned_to_sql("vault_job.id",lease.id)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
     Ok(value.is_some_and(|(state, generation, version)| {

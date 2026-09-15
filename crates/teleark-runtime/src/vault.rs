@@ -1691,13 +1691,32 @@ impl VaultOwner {
         }
     }
 
-    fn delete_transfer(&self, account: i64, _id: u64) -> Result<(), ApplicationError> {
+    fn delete_transfer(&self, account: i64, id: u64) -> Result<(), ApplicationError> {
         if self.telegram.lifecycle().snapshot().1 != Some(account) {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
-        // The durable deletion transaction is added in the storage task. Until
-        // then, fail closed instead of removing only the in-memory projection.
-        Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest))
+        if let Some(snapshot) = self.transfers.get(id) {
+            if snapshot.account_id != account {
+                return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+            }
+            if !matches!(
+                snapshot.state,
+                VaultTransferState::Completed
+                    | VaultTransferState::Failed(_)
+                    | VaultTransferState::Cancelled
+                    | VaultTransferState::Interrupted
+            ) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+        }
+        if self.upload_controls.contains(account, id)? {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        self.library.delete_vault_transfer(account, id)?;
+        self.transfers.remove_if(id, |snapshot| {
+            snapshot.account_id == account && snapshot.id == id
+        });
+        Ok(())
     }
 
     fn initialize(&mut self, password: &str) -> Result<String, ApplicationError> {

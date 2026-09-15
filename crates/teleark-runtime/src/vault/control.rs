@@ -65,6 +65,14 @@ impl UploadControls {
         }
     }
 
+    pub(super) fn contains(&self, account: i64, id: u64) -> Result<bool, ApplicationError> {
+        Ok(self
+            .entries
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+            .contains_key(&(account, id)))
+    }
+
     fn signal_or_acknowledge(
         &self,
         database: &mut Database,
