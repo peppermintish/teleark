@@ -478,6 +478,11 @@ enum VaultCommand {
         action: VaultUploadControl,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
+    DeleteTransfer {
+        account: i64,
+        id: u64,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
+    },
     RestoreUploadHistory {
         account: i64,
         reply: mpsc::SyncSender<Result<(), ApplicationError>>,
@@ -1031,6 +1036,22 @@ impl DesktopVault {
         })
     }
 
+    /// Deletes one terminal Vault transfer's history without touching a downloaded output.
+    pub fn delete_transfer(&self, account: i64, id: u64) -> Result<(), ApplicationError> {
+        self.submit_delete_transfer(account, id)?.wait()
+    }
+
+    /// Admit deletion in the Vault owner so persistence and the live projection can be
+    /// updated as one background operation. The storage transaction is supplied by the
+    /// Vault history implementation.
+    pub fn submit_delete_transfer(
+        &self,
+        account: i64,
+        id: u64,
+    ) -> Result<VaultJob<()>, ApplicationError> {
+        self.submit(|reply| VaultCommand::DeleteTransfer { account, id, reply })
+    }
+
     /// Restores only queued work after unlock. Explicitly paused, cancelled,
     /// failed and unknown-version jobs are never silently restarted.
     /// Resume queued uploads and downloads for which this session has keys.
@@ -1248,6 +1269,7 @@ impl DesktopVault {
         let queue = if matches!(
             envelope.command,
             VaultCommand::ControlUpload { .. }
+                | VaultCommand::DeleteTransfer { .. }
                 | VaultCommand::StopUploadBatch { .. }
                 | VaultCommand::PauseForShutdown { .. }
         ) {
@@ -1405,6 +1427,9 @@ impl VaultOwner {
                 reply,
             } => {
                 let _ = reply.send(self.control_upload(account, id, action));
+            }
+            VaultCommand::DeleteTransfer { account, id, reply } => {
+                let _ = reply.send(self.delete_transfer(account, id));
             }
             VaultCommand::RestoreUploadHistory { account, reply } => {
                 let _ = reply.send(self.restore_upload_history(account));
@@ -1664,6 +1689,15 @@ impl VaultOwner {
             }
             VaultCommand::Shutdown => {}
         }
+    }
+
+    fn delete_transfer(&self, account: i64, _id: u64) -> Result<(), ApplicationError> {
+        if self.telegram.lifecycle().snapshot().1 != Some(account) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        // The durable deletion transaction is added in the storage task. Until
+        // then, fail closed instead of removing only the in-memory projection.
+        Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest))
     }
 
     fn initialize(&mut self, password: &str) -> Result<String, ApplicationError> {

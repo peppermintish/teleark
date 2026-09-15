@@ -71,6 +71,7 @@ impl VaultSession {
                 VaultCommand::Download { .. }
                     | VaultCommand::ResumeDownload { .. }
                     | VaultCommand::ResumeQueuedTransfers { .. }
+                    | VaultCommand::DeleteTransfer { .. }
             ))
             || matches!(
                 command,
@@ -163,6 +164,7 @@ impl VaultCommand {
                 | Self::UploadBatch { .. }
                 | Self::Download { .. }
                 | Self::ResumeDownload { .. }
+                | Self::DeleteTransfer { .. }
         )
     }
 
@@ -197,6 +199,26 @@ mod tests {
             package_id: 1,
             reply: mpsc::sync_channel(1).0,
         }
+    }
+
+    fn delete() -> VaultCommand {
+        VaultCommand::DeleteTransfer {
+            account: 7,
+            id: 1,
+            reply: mpsc::sync_channel(1).0,
+        }
+    }
+
+    #[test]
+    fn delete_is_admitted_as_a_keyless_transfer_operation() {
+        let session = VaultSession::new(None);
+        let envelope = session.admit(delete()).expect("delete admission");
+        assert!(envelope.command.is_transfer());
+        assert_eq!(
+            session.pending_transfers.load(Ordering::Acquire),
+            1,
+            "the owner must retain the admitted operation until it finishes"
+        );
     }
 
     #[test]
