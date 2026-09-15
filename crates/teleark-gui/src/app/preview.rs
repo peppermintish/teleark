@@ -681,6 +681,29 @@ impl TeleArkApp {
                 self.storage_status = teleark_runtime::StorageChannelStatus::Missing;
                 self.storage_notice = None;
                 self.storage_loading = true;
+                let progress = teleark_runtime::StorageSetupProgress::new();
+                progress.phase(teleark_runtime::StorageSetupPhase::ReadingDialogs);
+                self.storage_setup_progress = Some(progress);
+            }
+            "storage-replacement" => {
+                self.page = Page::Storage;
+                self.storage_status = teleark_runtime::StorageChannelStatus::Missing;
+                self.storage_loading = true;
+                self.storage_notice = None;
+                let progress = teleark_runtime::StorageSetupProgress::new();
+                progress.phase(teleark_runtime::StorageSetupPhase::ReadingDialogs);
+                progress.phase(teleark_runtime::StorageSetupPhase::VerifyingChannel);
+                progress.phase(teleark_runtime::StorageSetupPhase::DiscoveringReplacement);
+                progress.phase(teleark_runtime::StorageSetupPhase::CreatingChannel);
+                self.storage_setup_progress = Some(progress);
+            }
+            "storage-replaced" => {
+                self.page = Page::Storage;
+                self.storage_notice = Some("storage-auto-replaced");
+                let progress = teleark_runtime::StorageSetupProgress::new();
+                progress.phase(teleark_runtime::StorageSetupPhase::SavingBinding);
+                progress.finish(None);
+                self.storage_setup_progress = Some(progress);
             }
             "raw" => {
                 self.page = Page::Storage;

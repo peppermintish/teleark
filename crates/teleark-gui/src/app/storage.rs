@@ -126,10 +126,37 @@ impl TeleArkApp {
         self.storage_details_expanded = false;
         self.storage_loading = true;
         self.storage_error = None;
+        let progress = teleark_runtime::StorageSetupProgress::new();
+        self.storage_setup_progress = Some(progress.clone());
+        self.storage_setup_presentation = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let Some(entity) = this.upgrade() else { return };
+                if entity.update(cx, |this, cx| {
+                    if this.telegram_login_generation != generation {
+                        return true;
+                    }
+                    cx.notify();
+                    this.storage_setup_progress
+                        .as_ref()
+                        .is_none_or(|progress| progress.snapshot().finished)
+                        || !this.storage_loading
+                }) {
+                    return;
+                }
+            }
+        }));
         cx.notify();
         let work = cx.background_spawn(async move {
-            let managed =
-                telegram.ensure_storage_channel(&library, account_id, title, description)?;
+            let managed = telegram.ensure_storage_channel_observed(
+                &library,
+                account_id,
+                title,
+                description,
+                progress,
+            )?;
             library.save_telegram_sources(&account, std::slice::from_ref(&managed.channel))?;
             Ok::<_, ApplicationError>(managed)
         });
@@ -143,15 +170,22 @@ impl TeleArkApp {
                     return;
                 }
                 this.storage_loading = false;
+                this.storage_setup_presentation = None;
                 match result {
                     Ok(managed) => {
-                        this.storage_notice = this.storage_notice.or(Some(if managed.created {
-                            "storage-auto-created"
+                        this.storage_notice = if managed.replaced {
+                            this.storage_replacement_acknowledged = false;
+                            Some("storage-auto-replaced")
                         } else {
-                            "storage-auto-found"
-                        }));
+                            this.storage_notice.or(Some(if managed.created {
+                                "storage-auto-created"
+                            } else {
+                                "storage-auto-found"
+                            }))
+                        };
                         this.storage_error = match managed.health {
-                            StorageChannelHealth::AccessDenied => {
+                            StorageChannelHealth::Unavailable
+                            | StorageChannelHealth::AccessDenied => {
                                 Some(ApplicationErrorKind::StorageAccessDenied)
                             }
                             StorageChannelHealth::UnsafeConfiguration => {

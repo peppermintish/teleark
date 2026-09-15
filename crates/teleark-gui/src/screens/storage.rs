@@ -17,13 +17,15 @@ use gpui_kit::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use teleark_runtime::StorageMaintenancePhase;
+use teleark_runtime::{StorageMaintenancePhase, StorageSetupPhase};
 
 impl TeleArkApp {
     pub(crate) fn storage_is_quiet(&self) -> bool {
         self.storage_status.health() == Some(teleark_runtime::StorageChannelHealth::Healthy)
             && !self.storage_loading
             && self.storage_error.is_none()
+            && (self.storage_notice != Some("storage-auto-replaced")
+                || self.storage_replacement_acknowledged)
             && !self.storage_waiting_for_retry()
             && self.storage_confirmation.is_none()
             && self
@@ -178,6 +180,44 @@ impl TeleArkApp {
                 .flex()
                 .flex_col()
                 .gap_3()
+                .when(
+                    self.storage_notice == Some("storage-auto-replaced")
+                        && !self.storage_replacement_acknowledged,
+                    |body| {
+                        body.child(
+                            components::card()
+                                .p_3()
+                                .border_color(theme::amber())
+                                .bg(theme::amber_soft())
+                                .debug_selector(|| "storage-replacement-notice".into())
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .child(self.tr("storage-auto-replaced")),
+                                )
+                                .child(
+                                    components::button(
+                                        "storage-replacement-acknowledge",
+                                        self.tr("storage-replacement-acknowledge"),
+                                        None,
+                                        false,
+                                    )
+                                    .debug_selector(|| "storage-replacement-acknowledge".into())
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.storage_replacement_acknowledged = true;
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        )
+                    },
+                )
                 .when(self.show_storage_guide, |body| {
                     body.child(self.storage_guide(true, cx))
                 })
@@ -399,6 +439,9 @@ impl TeleArkApp {
                     )
                 }),
         )
+        .when_some(self.storage_setup_progress.as_ref(), |card, progress| {
+            card.child(self.render_storage_setup_progress(progress))
+        })
         .when(
             !self.storage_loading && !waiting && self.storage_error.is_some(),
             |card| {
@@ -427,6 +470,61 @@ impl TeleArkApp {
         .into_any_element()
     }
 
+    fn render_storage_setup_progress(
+        &self,
+        progress: &teleark_runtime::StorageSetupProgress,
+    ) -> AnyElement {
+        let state = progress.snapshot();
+        let duration = if state.finished {
+            state.last_activity.duration_since(state.phase_since)
+        } else {
+            state.phase_since.elapsed()
+        };
+        div()
+            .h(px(96.0))
+            .flex_none()
+            .overflow_y_scrollbar()
+            .px_4()
+            .py_2()
+            .text_xs()
+            .text_color(theme::text_secondary())
+            .debug_selector(|| "storage-setup-timeline".into())
+            .child(self.tr(storage_setup_phase_id(state.phase)))
+            .child(
+                div().child(
+                    self.tr_with(
+                        "storage-maintenance-time",
+                        teleark_i18n::MessageArgs::new()
+                            .with("seconds", duration.as_secs().to_string())
+                            .with("idle", state.last_activity.elapsed().as_secs().to_string()),
+                    ),
+                ),
+            )
+            .child(
+                div().child(
+                    state
+                        .timeline
+                        .iter()
+                        .map(|(phase, millis)| {
+                            format!(
+                                "{} · {}s",
+                                self.tr(storage_setup_phase_id(*phase)),
+                                millis / 1000
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" → "),
+                ),
+            )
+            .when(state.omitted > 0, |row| {
+                row.child(div().child(self.tr_with(
+                    "storage-maintenance-omitted",
+                    teleark_i18n::MessageArgs::new().with("count", state.omitted.to_string()),
+                )))
+            })
+            .into_any_element()
+    }
+
     fn render_storage_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let health = self.storage_status.health();
         let repair = health.is_some_and(|health| health.needs_repair());
@@ -436,7 +534,8 @@ impl TeleArkApp {
             || self.storage_waiting_for_retry()
             || self
                 .storage_notice
-                .is_some_and(|id| !matches!(id, "storage-auto-found" | "storage-auto-created"));
+                .is_some_and(|id| !matches!(id, "storage-auto-found" | "storage-auto-created"))
+            || self.storage_setup_progress.is_some();
         components::card()
             .flex_none()
             .overflow_hidden()
@@ -1242,6 +1341,19 @@ fn storage_phase_id(phase: StorageMaintenancePhase) -> &'static str {
     }
 }
 
+fn storage_setup_phase_id(phase: StorageSetupPhase) -> &'static str {
+    match phase {
+        StorageSetupPhase::CheckingBinding => "storage-setup-phase-binding",
+        StorageSetupPhase::ReadingDialogs => "storage-setup-phase-dialogs",
+        StorageSetupPhase::VerifyingChannel => "storage-setup-phase-verifying",
+        StorageSetupPhase::DiscoveringReplacement => "storage-setup-phase-discovering",
+        StorageSetupPhase::CreatingChannel => "storage-setup-phase-creating",
+        StorageSetupPhase::PreparingChannel => "storage-setup-phase-preparing",
+        StorageSetupPhase::SavingBinding => "storage-setup-phase-saving",
+        StorageSetupPhase::Completed => "storage-setup-phase-completed",
+    }
+}
+
 pub(crate) fn vault_health_id(health: teleark_runtime::VaultFileHealth) -> &'static str {
     use teleark_runtime::VaultFileHealth;
     match health {
@@ -1260,6 +1372,75 @@ mod tests {
     use super::*;
     use teleark_i18n::{Localizer, SupportedLocale};
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn replacement_setup_timeline_remains_visible_at_compact_and_fullscreen_sizes(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            app.update(cx, |app, cx| {
+                app.localizer = Localizer::new(SupportedLocale::EnUs).expect("catalog");
+                app.storage_status = StorageChannelStatus::Missing;
+                app.storage_loading = true;
+                app.storage_error = None;
+                let progress = teleark_runtime::StorageSetupProgress::new();
+                progress.phase(StorageSetupPhase::ReadingDialogs);
+                progress.phase(StorageSetupPhase::VerifyingChannel);
+                progress.phase(StorageSetupPhase::DiscoveringReplacement);
+                progress.phase(StorageSetupPhase::CreatingChannel);
+                app.storage_setup_progress = Some(progress);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let timeline = cx
+                .debug_bounds("storage-setup-timeline")
+                .expect("setup timeline");
+            assert!(timeline.top() >= px(0.0) && timeline.bottom() <= px(height));
+            assert!(timeline.right() <= px(width));
+            assert!(cx.debug_bounds("storage-activity-card").is_some());
+        }
+    }
+
+    #[gpui_kit::test]
+    fn replacement_notice_is_reachable_and_acknowledgement_restores_quiet_workspace(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            app.update(cx, |app, cx| {
+                app.localizer = Localizer::new(SupportedLocale::EnUs).expect("catalog");
+                app.storage_loading = false;
+                app.storage_error = None;
+                app.storage_notice = Some("storage-auto-replaced");
+                app.storage_replacement_acknowledged = false;
+                let progress = teleark_runtime::StorageSetupProgress::new();
+                progress.phase(StorageSetupPhase::SavingBinding);
+                progress.finish(None);
+                app.storage_setup_progress = Some(progress);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let notice = cx
+                .debug_bounds("storage-replacement-notice")
+                .expect("replacement notice");
+            let action = cx
+                .debug_bounds("storage-replacement-acknowledge")
+                .expect("acknowledgement action");
+            assert!(notice.top() >= px(0.0) && notice.bottom() <= px(height));
+            assert!(action.top() >= notice.top() && action.bottom() <= notice.bottom());
+            assert!(action.right() <= px(width));
+            cx.simulate_click(action.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("storage-replacement-notice").is_none());
+            assert!(cx.debug_bounds("storage-expand-details").is_some());
+            app.update(cx, |app, _| {
+                assert_eq!(app.storage_notice, Some("storage-auto-replaced"));
+            });
+        }
+    }
 
     #[gpui_kit::test]
     fn recovery_guide_last_step_is_reachable_in_bounded_viewport(

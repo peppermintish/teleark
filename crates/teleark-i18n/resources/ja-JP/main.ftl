@@ -1203,6 +1203,10 @@ account-qr-unavailable = QRコードを表示できません
 
 storage-auto-created = TeleArkがプライベートストレージ用チャンネルを作成しました。準備が整い、自動で管理されます。
 
+storage-auto-replaced = 以前のプライベートチャンネルは利用できません。TeleArkは代替チャンネルに接続し、自動で管理します。以前のチャンネルとともに削除されたファイルは復旧できません。ローカルコピーは変更されません。
+
+storage-replacement-acknowledge = 確認しました
+
 storage-auto-found = TeleArkがプライベートストレージ用チャンネルを見つけて接続しました。自動で管理されます。
 
 
@@ -1372,6 +1376,15 @@ detail-failure-last-phase = 最後に記録された段階
 # Bound channel resilience
 storage-health-repair = TeleArk の識別メッセージまたはチャンネル説明からの参照がないか、無効、またはピン留めが解除されています。
 storage-health-access = 連携済みチャンネルにアクセスできないか、所有権がありません。権限を復元して再確認してください。
+
+storage-setup-phase-binding = 保存済みチャンネルの連携を確認中
+storage-setup-phase-dialogs = Telegramのチャンネル一覧を最後まで取得中
+storage-setup-phase-verifying = 連携済みチャンネルの所有権と公開設定を確認中
+storage-setup-phase-discovering = 利用可能な管理チャンネルを検索中
+storage-setup-phase-creating = プライベートチャンネルを作成中
+storage-setup-phase-preparing = 管理チャンネルを検証・準備中
+storage-setup-phase-saving = 確認済みのアカウントとチャンネルの連携を保存中
+storage-setup-phase-completed = プライベートチャンネルの準備完了
 storage-health-unsafe = 保存チャンネルは非公開で、他のメンバーがいない必要があります。Telegram で設定を修正して再確認してください。
 storage-health-unsupported = このチャンネルは新しい識別形式を使用しています。TeleArk を更新してください。データは保持されています。
 storage-repair-action = チャンネルの変更内容を確認

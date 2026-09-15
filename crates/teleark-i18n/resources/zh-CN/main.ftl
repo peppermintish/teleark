@@ -1203,6 +1203,10 @@ account-qr-unavailable = 二维码暂不可用
 
 storage-auto-created = TeleArk 已创建你的私有存储频道，现已就绪，并将自动管理。
 
+storage-auto-replaced = 之前的私有频道已无法使用。TeleArk 已连接替代频道并将自动管理。随旧频道删除的文件无法恢复；本地副本保持不变。
+
+storage-replacement-acknowledge = 知道了
+
 storage-auto-found = TeleArk 已找到并连接你的私有存储频道，将自动管理。
 
 
@@ -1372,6 +1376,15 @@ detail-failure-last-phase = 最后记录的阶段
 # Bound channel resilience
 storage-health-repair = 频道的 TeleArk 识别消息或简介中的引用缺失、无效，或识别消息已取消置顶。
 storage-health-access = 无法访问已绑定频道，或你不再拥有该频道。请恢复权限后重新检查。
+
+storage-setup-phase-binding = 检查已保存的频道绑定
+storage-setup-phase-dialogs = 读取完整的 Telegram 频道列表
+storage-setup-phase-verifying = 检查已绑定频道的所有权和隐私设置
+storage-setup-phase-discovering = 查找可用的托管频道
+storage-setup-phase-creating = 创建私有频道
+storage-setup-phase-preparing = 验证并准备托管频道
+storage-setup-phase-saving = 保存已验证的账号与频道绑定
+storage-setup-phase-completed = 私有频道已就绪
 storage-health-unsafe = 存储频道必须私有且没有其他成员。请在 Telegram 中调整配置后重新检查。
 storage-health-unsupported = 此频道使用较新的身份格式。请升级 TeleArk；数据已保留。
 storage-repair-action = 查看频道修改内容

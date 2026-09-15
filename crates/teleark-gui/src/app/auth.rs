@@ -123,6 +123,9 @@ impl TeleArkApp {
         self.storage_retry_task = None;
         self.storage_loading = false;
         self.storage_notice = None;
+        self.storage_replacement_acknowledged = false;
+        self.storage_setup_progress = None;
+        self.storage_setup_presentation = None;
         self.library_batch_cancellation
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.cancel_managed_scan();

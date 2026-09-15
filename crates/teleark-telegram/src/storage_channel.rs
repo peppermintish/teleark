@@ -22,6 +22,8 @@ pub enum StorageChannelHealth {
     IdentityUnpinned,
     IdentityInvalid,
     UnsafeConfiguration,
+    /// The formerly bound peer is no longer available to this account.
+    Unavailable,
     AccessDenied,
     UnsupportedIdentity,
 }
@@ -56,6 +58,7 @@ pub enum StorageMaintenancePhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteIdentity {
     Unrelated,
+    Unavailable,
     Legacy,
     Verified(i32),
 }
@@ -168,7 +171,11 @@ impl TelegramConnection {
                 };
                 let identity = self.inspect_storage_identity(chat, account).await?;
                 Ok::<_, TelegramError>(
-                    (identity != RemoteIdentity::Unrelated).then(|| (*chat).clone()),
+                    matches!(
+                        identity,
+                        RemoteIdentity::Legacy | RemoteIdentity::Verified(_)
+                    )
+                    .then(|| (*chat).clone()),
                 )
             };
             let (a, b, c, d) = tokio::try_join!(inspect(0), inspect(1), inspect(2), inspect(3))?;
@@ -194,16 +201,27 @@ impl TelegramConnection {
         if chat.kind != TelegramChatKind::Channel {
             return Ok(RemoteIdentity::Unrelated);
         }
-        let tl::enums::messages::ChatFull::Full(full) = self
+        let tl::enums::messages::ChatFull::Full(full) = match self
             .client
             .invoke(&tl::functions::channels::GetFullChannel {
                 channel: chat.peer_ref.into(),
             })
             .await
-            .map_err(map_invocation)?;
+        {
+            Ok(full) => full,
+            Err(error) if resilience::channel_is_unavailable(&error) => {
+                return Ok(RemoteIdentity::Unavailable);
+            }
+            Err(error) => return Err(map_invocation(error)),
+        };
         let tl::enums::ChatFull::ChannelFull(details) = full.full_chat else {
             return Err(TelegramError::new(TelegramErrorKind::PermissionDenied));
         };
+        if full.chats.iter().any(
+            |peer| matches!(peer, tl::enums::Chat::ChannelForbidden(channel) if channel.id == chat.id),
+        ) {
+            return Ok(RemoteIdentity::Unavailable);
+        }
         let channel = full
             .chats
             .iter()
@@ -268,7 +286,7 @@ impl TelegramConnection {
         let account = self.current_account().await?.id;
         let identity = self.inspect_storage_identity(chat, account).await?;
         let id = match identity {
-            RemoteIdentity::Unrelated => {
+            RemoteIdentity::Unrelated | RemoteIdentity::Unavailable => {
                 return Err(TelegramError::new(TelegramErrorKind::PermissionDenied));
             }
             RemoteIdentity::Verified(id) => id,

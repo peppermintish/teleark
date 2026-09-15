@@ -92,10 +92,12 @@ pub use channel_transfer::{
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
 mod storage_maintenance;
+mod storage_setup;
 pub use diagnostics::{DiagnosticsStatus, diagnostics_status, initialize_diagnostics};
 pub use storage_channel::{ManagedStorageChannel, StorageChannelStatus};
 pub use storage_channel::{StorageChannelHealth, StorageMaintenancePhase};
 pub use storage_maintenance::{StorageMaintenance, StorageMaintenanceSnapshot};
+pub use storage_setup::{StorageSetupPhase, StorageSetupProgress, StorageSetupSnapshot};
 pub use teleark_telegram::DownloadPartState;
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
@@ -1007,6 +1009,12 @@ enum StorageRequest {
         chat_id: i64,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
+    ReplaceStorageChannel {
+        account_id: i64,
+        expected_chat_id: i64,
+        replacement_chat_id: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     Search {
         query: LibraryQuery,
         reply: SyncSender<Result<LibraryPage, ApplicationError>>,
@@ -1681,6 +1689,19 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                     &mut database,
                     account_id,
                     chat_id,
+                ));
+            }
+            StorageRequest::ReplaceStorageChannel {
+                account_id,
+                expected_chat_id,
+                replacement_chat_id,
+                reply,
+            } => {
+                let _ = reply.send(storage_channel::replace_binding(
+                    &mut database,
+                    account_id,
+                    expected_chat_id,
+                    replacement_chat_id,
                 ));
             }
             StorageRequest::Search { query, reply } => {

@@ -54,6 +54,8 @@ impl StorageChannelStatus {
 pub struct ManagedStorageChannel {
     pub channel: TelegramChatSummary,
     pub created: bool,
+    /// A previously bound peer was confirmed unavailable and replaced.
+    pub replaced: bool,
     pub health: StorageChannelHealth,
 }
 
@@ -137,6 +139,25 @@ impl DesktopLibrary {
             }
         })
     }
+
+    pub(crate) fn replace_storage_channel_id(
+        &self,
+        account_id: i64,
+        expected_chat_id: i64,
+        replacement_chat_id: i64,
+    ) -> Result<(), ApplicationError> {
+        validate_id(account_id)?;
+        validate_id(expected_chat_id)?;
+        validate_id(replacement_chat_id)?;
+        self.worker.request("replace_storage_channel", |reply| {
+            StorageRequest::ReplaceStorageChannel {
+                account_id,
+                expected_chat_id,
+                replacement_chat_id,
+                reply,
+            }
+        })
+    }
 }
 
 pub(crate) fn load_binding(
@@ -187,6 +208,47 @@ pub(crate) fn save_binding(
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
         })
         .map_err(map_storage_error)
+}
+
+pub(crate) fn replace_binding(
+    database: &mut Database,
+    account_id: i64,
+    expected_chat_id: i64,
+    replacement_chat_id: i64,
+) -> Result<(), ApplicationError> {
+    validate_id(account_id)?;
+    validate_id(expected_chat_id)?;
+    validate_id(replacement_chat_id)?;
+    if load_binding(database, account_id)? != Some(expected_chat_id) {
+        return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+    }
+    let fixed_key = format!("{FIXED_BINDING_PREFIX}{account_id}");
+    let legacy_key = format!("{BINDING_PREFIX}{account_id}");
+    let fixed = database.setting(&fixed_key).map_err(map_storage_error)?;
+    let fallback = if fixed.is_none() {
+        database.setting(&legacy_key).map_err(map_storage_error)?
+    } else {
+        None
+    };
+    let replaced = database
+        .compare_and_swap_setting(
+            &SettingRecord {
+                key: fixed_key,
+                value: format!("{{\"version\":2,\"channel_id\":{replacement_chat_id}}}"),
+                updated_at_unix_ms: crate::system_time_unix_ms(std::time::SystemTime::now())
+                    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+            },
+            fixed.as_ref().map(|record| record.value.as_str()),
+            fallback
+                .as_ref()
+                .map(|record| (legacy_key.as_str(), record.value.as_str())),
+        )
+        .map_err(map_storage_error)?;
+    if replaced {
+        Ok(())
+    } else {
+        Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+    }
 }
 
 fn validate_id(id: i64) -> Result<(), ApplicationError> {
@@ -324,6 +386,29 @@ mod tests {
         assert_eq!(library.storage_channel_id(200)?, Some(8));
         assert!(library.save_storage_channel_id(100, 0).is_err());
         assert_eq!(library.storage_channel_id(100)?, Some(7));
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_binding_replacement_is_compare_and_swap() -> Result<(), ApplicationError> {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("catalog.sqlite3");
+        let mut database = Database::open(&path).expect("open database");
+        save_binding(&mut database, 100, 7)?;
+        save_binding(&mut database, 200, 11)?;
+
+        let conflict =
+            replace_binding(&mut database, 100, 8, 9).expect_err("stale replacement must fail");
+        assert_eq!(conflict.kind(), ApplicationErrorKind::Conflict);
+        assert_eq!(load_binding(&database, 100)?, Some(7));
+
+        replace_binding(&mut database, 100, 7, 9)?;
+        assert_eq!(load_binding(&database, 100)?, Some(9));
+        assert_eq!(load_binding(&database, 200)?, Some(11));
+        drop(database);
+        let database = Database::open(&path).expect("reopen database");
+        assert_eq!(load_binding(&database, 100)?, Some(9));
+        assert_eq!(load_binding(&database, 200)?, Some(11));
         Ok(())
     }
 

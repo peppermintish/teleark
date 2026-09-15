@@ -169,6 +169,7 @@ enum TelegramRequest {
         account_id: i64,
         preferred: Option<i64>,
         create: Option<(String, String)>,
+        progress: Option<crate::StorageSetupProgress>,
         reply: mpsc::SyncSender<Result<(StorageChannelStatus, bool), ApplicationError>>,
     },
     MaintainStorage {
@@ -390,31 +391,100 @@ impl DesktopTelegram {
         title: String,
         description: String,
     ) -> Result<ManagedStorageChannel, ApplicationError> {
-        let preferred = library.storage_channel_id(account_id)?;
-        let (status, created) = self.request("ensure_storage_channel", |reply| {
-            TelegramRequest::DiscoverStorage {
-                account_id,
-                preferred,
-                create: Some((title, description)),
-                reply,
+        self.ensure_storage_channel_observed(
+            library,
+            account_id,
+            title,
+            description,
+            crate::StorageSetupProgress::new(),
+        )
+    }
+
+    pub fn ensure_storage_channel_observed(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+        title: String,
+        description: String,
+        progress: crate::StorageSetupProgress,
+    ) -> Result<ManagedStorageChannel, ApplicationError> {
+        let result = (|| {
+            let preferred = library.storage_channel_id(account_id)?;
+            let create = Some((title, description));
+            let first = self.request("ensure_storage_channel", |reply| {
+                TelegramRequest::DiscoverStorage {
+                    account_id,
+                    preferred,
+                    create: create.clone(),
+                    progress: Some(progress.clone()),
+                    reply,
+                }
+            })?;
+            let ((status, created), replaced_channel) =
+                resolve_replacement_status(preferred, first, || {
+                    progress.phase(crate::StorageSetupPhase::DiscoveringReplacement);
+                    self.request("replace_storage_channel", |reply| {
+                        TelegramRequest::DiscoverStorage {
+                            account_id,
+                            preferred: None,
+                            create: create.clone(),
+                            progress: Some(progress.clone()),
+                            reply,
+                        }
+                    })
+                })?;
+            let (channel, health) = match status {
+                StorageChannelStatus::Ready(channel) => {
+                    (channel, crate::StorageChannelHealth::Healthy)
+                }
+                StorageChannelStatus::Degraded { channel, health } => (channel, health),
+                StorageChannelStatus::Unavailable { .. } => {
+                    return Err(ApplicationError::new(
+                        ApplicationErrorKind::StorageAccessDenied,
+                    ));
+                }
+                _ => return Err(ApplicationError::new(ApplicationErrorKind::Conflict)),
+            };
+            // A recovered original peer found during the second read needs no
+            // replacement notification or binding change.
+            let replaced_channel = replaced_channel.filter(|previous| *previous != channel.id);
+            progress.phase(crate::StorageSetupPhase::SavingBinding);
+            if let Some(previous) = replaced_channel {
+                library.replace_storage_channel_id(account_id, previous, channel.id)?;
+            } else {
+                library.save_storage_channel_id(account_id, channel.id)?;
             }
-        })?;
-        let (channel, health) = match status {
-            StorageChannelStatus::Ready(channel) => (channel, crate::StorageChannelHealth::Healthy),
-            StorageChannelStatus::Degraded { channel, health } => (channel, health),
-            StorageChannelStatus::Unavailable { .. } => {
-                return Err(ApplicationError::new(
-                    ApplicationErrorKind::StorageAccessDenied,
-                ));
-            }
-            _ => return Err(ApplicationError::new(ApplicationErrorKind::Conflict)),
-        };
-        library.save_storage_channel_id(account_id, channel.id)?;
-        Ok(ManagedStorageChannel {
-            channel,
-            created,
-            health,
-        })
+            Ok(ManagedStorageChannel {
+                channel,
+                created,
+                replaced: replaced_channel.is_some(),
+                health,
+            })
+        })();
+        let failure = result
+            .as_ref()
+            .err()
+            .map(ApplicationError::kind)
+            .or_else(|| {
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|managed| match managed.health {
+                        crate::StorageChannelHealth::Unavailable
+                        | crate::StorageChannelHealth::AccessDenied => {
+                            Some(ApplicationErrorKind::StorageAccessDenied)
+                        }
+                        crate::StorageChannelHealth::UnsafeConfiguration => {
+                            Some(ApplicationErrorKind::StorageConfigurationUnsafe)
+                        }
+                        crate::StorageChannelHealth::UnsupportedIdentity => {
+                            Some(ApplicationErrorKind::StorageIdentityUnsupported)
+                        }
+                        _ => None,
+                    })
+            });
+        progress.finish(failure);
+        result
     }
 
     fn resolve_storage_channel(
@@ -429,6 +499,7 @@ impl DesktopTelegram {
                 account_id,
                 preferred,
                 create,
+                progress: None,
                 reply,
             }
         })?;
@@ -1048,6 +1119,33 @@ impl DesktopTelegram {
     }
 }
 
+fn unavailable_binding(status: &StorageChannelStatus, preferred: Option<i64>) -> Option<i64> {
+    let preferred = preferred?;
+    match status {
+        StorageChannelStatus::Unavailable { chat_id, .. } if *chat_id == preferred => {
+            Some(preferred)
+        }
+        StorageChannelStatus::Degraded { channel, health }
+            if channel.id == preferred && *health == crate::StorageChannelHealth::Unavailable =>
+        {
+            Some(preferred)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_replacement_status(
+    preferred: Option<i64>,
+    first: (StorageChannelStatus, bool),
+    rediscover: impl FnOnce() -> Result<(StorageChannelStatus, bool), ApplicationError>,
+) -> Result<((StorageChannelStatus, bool), Option<i64>), ApplicationError> {
+    let unavailable = unavailable_binding(&first.0, preferred);
+    match unavailable {
+        Some(previous) => Ok((rediscover()?, Some(previous))),
+        None => Ok((first, None)),
+    }
+}
+
 impl WorkerState {
     fn record_auth_result(&mut self, result: &Result<TelegramAuthState, ApplicationError>) {
         if self.authorization.snapshot().phase == teleark_telegram::AuthorizationPhase::Revoked {
@@ -1286,6 +1384,7 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             account_id,
             preferred,
             create,
+            progress,
             reply,
         } => {
             // A timeout abandons the actual RPC future. Creation is not
@@ -1293,7 +1392,7 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             // uncertain create, including when this timeout drops its future.
             let result = tokio::time::timeout(
                 Duration::from_secs(60),
-                discover_storage(state, account_id, preferred, create),
+                discover_storage(state, account_id, preferred, create, progress.as_ref()),
             )
             .await
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Network))
@@ -1826,12 +1925,21 @@ async fn discover_storage(
     account_id: i64,
     preferred: Option<i64>,
     create: Option<(String, String)>,
+    progress: Option<&crate::StorageSetupProgress>,
 ) -> Result<(StorageChannelStatus, bool), ApplicationError> {
     require_account(state, account_id)?;
+    if let Some(progress) = progress {
+        progress.phase(crate::StorageSetupPhase::ReadingDialogs);
+    }
     let dialogs = connection_ref(state)?
         .list_dialogs(MAX_DIALOGS)
         .await
         .map_err(map_telegram_error)?;
+    // A truncated roster cannot establish that the saved peer was deleted, or
+    // that no managed candidate exists before issuing a replacement create.
+    if dialogs.len() >= MAX_DIALOGS {
+        return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
+    }
     if let Some(chat_id) = preferred {
         state.storage_binding = Some((account_id, chat_id));
         state.chats = Arc::new(dialogs.into_iter().map(|chat| (chat.id(), chat)).collect());
@@ -1844,6 +1952,9 @@ async fn discover_storage(
                 false,
             ));
         };
+        if let Some(progress) = progress {
+            progress.phase(crate::StorageSetupPhase::VerifyingChannel);
+        }
         let health = connection_ref(state)?
             .storage_channel_health(chat, account_id)
             .await
@@ -1858,6 +1969,9 @@ async fn discover_storage(
             false,
         ));
     }
+    if let Some(progress) = progress {
+        progress.phase(crate::StorageSetupPhase::DiscoveringReplacement);
+    }
     let candidates = connection_ref(state)?
         .discover_storage_channels(&dialogs)
         .await
@@ -1870,6 +1984,9 @@ async fn discover_storage(
     };
     state.chats = Arc::new(dialogs.into_iter().map(|chat| (chat.id(), chat)).collect());
     if let (StorageChannelStatus::Ready(summary), Some((title, description))) = (&status, &create) {
+        if let Some(progress) = progress {
+            progress.phase(crate::StorageSetupPhase::PreparingChannel);
+        }
         let chat = state
             .chats
             .get(&summary.id)
@@ -1886,6 +2003,9 @@ async fn discover_storage(
     }
     if let (StorageChannelStatus::Missing, Some((title, description))) = (&status, create) {
         state.storage_creation_guard.begin(account_id)?;
+        if let Some(progress) = progress {
+            progress.phase(crate::StorageSetupPhase::CreatingChannel);
+        }
         let channel = connection_ref(state)?
             .create_storage_channel(&title, &description)
             .await
@@ -1903,6 +2023,9 @@ async fn discover_storage(
             .map_err(map_telegram_error)?;
         if candidates.len() != 1 || candidates[0].id() != channel.id() {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        if let Some(progress) = progress {
+            progress.phase(crate::StorageSetupPhase::PreparingChannel);
         }
         let channel = connection_ref(state)?
             .ensure_storage_branding(&channel, &title, &description)
@@ -1928,7 +2051,7 @@ async fn validate_storage(
     // Full discovery is needed only before a session has established its binding.
     // Every file still checks fresh owner/private metadata; no history scan per part.
     if state.storage_binding.is_none() && discover {
-        let (status, _) = discover_storage(state, account_id, None, None).await?;
+        let (status, _) = discover_storage(state, account_id, None, None, None).await?;
         if let Some(channel) = status.usable_channel() {
             state.storage_binding = Some((account_id, channel.id));
         }
@@ -2499,6 +2622,87 @@ mod tests {
             _ => ApplicationErrorKind::Network,
         };
         assert_eq!(mapped, ApplicationErrorKind::Authorization);
+    }
+
+    #[test]
+    fn only_a_confirmed_unavailable_binding_selects_replacement() {
+        let channel = TelegramChatSummary {
+            sync_pts: None,
+            id: 7,
+            name: "fixture".to_owned(),
+            username: None,
+            kind: TelegramChatKind::Channel,
+        };
+        assert_eq!(
+            unavailable_binding(
+                &StorageChannelStatus::Unavailable {
+                    chat_id: 7,
+                    candidates: Vec::new(),
+                },
+                Some(7),
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            unavailable_binding(
+                &StorageChannelStatus::Degraded {
+                    channel: channel.clone(),
+                    health: crate::StorageChannelHealth::Unavailable,
+                },
+                Some(7),
+            ),
+            Some(7)
+        );
+        for status in [
+            StorageChannelStatus::Ready(channel.clone()),
+            StorageChannelStatus::Degraded {
+                channel: channel.clone(),
+                health: crate::StorageChannelHealth::AccessDenied,
+            },
+            StorageChannelStatus::Unavailable {
+                chat_id: 8,
+                candidates: Vec::new(),
+            },
+        ] {
+            assert_eq!(unavailable_binding(&status, Some(7)), None);
+        }
+        let (status, replaced) = resolve_replacement_status(
+            Some(7),
+            (
+                StorageChannelStatus::Degraded {
+                    channel: channel.clone(),
+                    health: crate::StorageChannelHealth::Unavailable,
+                },
+                false,
+            ),
+            || Ok((StorageChannelStatus::Ready(channel.clone()), true)),
+        )
+        .expect("replacement discovery");
+        assert_eq!(status, (StorageChannelStatus::Ready(channel.clone()), true));
+        assert_eq!(replaced, Some(7));
+        let (status, replaced) = resolve_replacement_status(
+            Some(7),
+            (
+                StorageChannelStatus::Degraded {
+                    channel: channel.clone(),
+                    health: crate::StorageChannelHealth::AccessDenied,
+                },
+                false,
+            ),
+            || panic!("lost ownership must not create a replacement"),
+        )
+        .expect("preserve restricted peer");
+        assert_eq!(
+            status,
+            (
+                StorageChannelStatus::Degraded {
+                    channel,
+                    health: crate::StorageChannelHealth::AccessDenied,
+                },
+                false
+            )
+        );
+        assert_eq!(replaced, None);
     }
 
     #[test]

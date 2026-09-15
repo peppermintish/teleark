@@ -42,7 +42,7 @@ fn check_cancel(cancel: &ScanCancellation) -> Result<(), TelegramError> {
 }
 fn require_safe(health: StorageChannelHealth) -> Result<(), TelegramError> {
     match health {
-        StorageChannelHealth::AccessDenied => {
+        StorageChannelHealth::Unavailable | StorageChannelHealth::AccessDenied => {
             Err(TelegramError::new(TelegramErrorKind::StorageAccessDenied))
         }
         StorageChannelHealth::UnsafeConfiguration => Err(TelegramError::new(
@@ -53,6 +53,16 @@ fn require_safe(health: StorageChannelHealth) -> Result<(), TelegramError> {
         )),
         _ => Ok(()),
     }
+}
+pub(super) fn channel_is_unavailable(error: &InvocationError) -> bool {
+    matches!(
+        error,
+        InvocationError::Rpc(rpc)
+            if matches!(
+                rpc.name.as_str(),
+                "CHANNEL_PRIVATE" | "CHANNEL_INVALID" | "CHANNEL_PUBLIC_GROUP_NA"
+            )
+    )
 }
 fn map_channel_error(error: InvocationError) -> TelegramError {
     match &error {
@@ -69,6 +79,31 @@ fn map_channel_error(error: InvocationError) -> TelegramError {
     }
 }
 
+fn owned_channel_from_full(
+    chats: &[tl::enums::Chat],
+    expected_channel: i64,
+    details_channel: i64,
+) -> Result<&tl::types::Channel, StorageChannelHealth> {
+    if chats.iter().any(
+        |peer| matches!(peer, tl::enums::Chat::ChannelForbidden(channel) if channel.id == expected_channel),
+    ) {
+        return Err(StorageChannelHealth::Unavailable);
+    }
+    let Some(channel) = chats.iter().find_map(|peer| match peer {
+        tl::enums::Chat::Channel(channel) if channel.id == expected_channel => Some(channel),
+        _ => None,
+    }) else {
+        return Err(StorageChannelHealth::AccessDenied);
+    };
+    if channel.left {
+        return Err(StorageChannelHealth::Unavailable);
+    }
+    if details_channel != expected_channel || !channel.creator {
+        return Err(StorageChannelHealth::AccessDenied);
+    }
+    Ok(channel)
+}
+
 impl TelegramConnection {
     /// Callers must supply the persisted account/channel binding, never a display name.
     pub async fn storage_channel_health(
@@ -79,25 +114,26 @@ impl TelegramConnection {
         if chat.kind != TelegramChatKind::Channel || self.current_account().await?.id != account {
             return Ok(StorageChannelHealth::AccessDenied);
         }
-        let tl::enums::messages::ChatFull::Full(full) = self
+        let tl::enums::messages::ChatFull::Full(full) = match self
             .client
             .invoke(&tl::functions::channels::GetFullChannel {
                 channel: chat.peer_ref.into(),
             })
             .await
-            .map_err(map_channel_error)?;
+        {
+            Ok(full) => full,
+            Err(error) if channel_is_unavailable(&error) => {
+                return Ok(StorageChannelHealth::Unavailable);
+            }
+            Err(error) => return Err(map_channel_error(error)),
+        };
         let tl::enums::ChatFull::ChannelFull(details) = full.full_chat else {
             return Ok(StorageChannelHealth::AccessDenied);
         };
-        let Some(channel) = full.chats.iter().find_map(|p| match p {
-            tl::enums::Chat::Channel(c) if c.id == chat.id => Some(c),
-            _ => None,
-        }) else {
-            return Ok(StorageChannelHealth::AccessDenied);
+        let channel = match owned_channel_from_full(&full.chats, chat.id, details.id) {
+            Ok(channel) => channel,
+            Err(health) => return Ok(health),
         };
-        if details.id != chat.id || !channel.creator || channel.left {
-            return Ok(StorageChannelHealth::AccessDenied);
-        }
         if !is_private_storage_candidate(channel)
             || !private_configuration(
                 details.participants_count,
@@ -354,6 +390,23 @@ use crate::publication::sent_message_id;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn forbidden_bound_channel_is_classified_as_unavailable() {
+        let forbidden = tl::enums::Chat::ChannelForbidden(tl::types::ChannelForbidden {
+            broadcast: true,
+            megagroup: false,
+            monoforum: false,
+            id: 42,
+            access_hash: 7,
+            title: "removed fixture".to_owned(),
+            until_date: None,
+        });
+        assert_eq!(
+            owned_channel_from_full(&[forbidden], 42, 42).expect_err("unavailable peer"),
+            StorageChannelHealth::Unavailable
+        );
+    }
+
     #[tokio::test]
     async fn repair_waits_for_required_defaults_and_propagates_failure_on_retry() {
         use std::sync::{
@@ -467,6 +520,7 @@ mod tests {
             assert!(require_safe(health).is_ok());
         }
         for health in [
+            StorageChannelHealth::Unavailable,
             StorageChannelHealth::AccessDenied,
             StorageChannelHealth::UnsafeConfiguration,
             StorageChannelHealth::UnsupportedIdentity,

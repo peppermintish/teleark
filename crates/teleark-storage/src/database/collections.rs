@@ -29,6 +29,45 @@ impl Database {
         Ok(())
     }
 
+    /// One SQLite statement compares the current value before changing it.
+    /// The fallback is consulted only if the primary key does not yet exist,
+    /// allowing a legacy key to be promoted without a cross-process read/write race.
+    pub fn compare_and_swap_setting(
+        &mut self,
+        setting: &SettingRecord,
+        expected: Option<&str>,
+        fallback: Option<(&str, &str)>,
+    ) -> StorageResult<bool> {
+        validate_setting(setting)?;
+        if let Some((key, _)) = fallback {
+            validate_setting_key(key)?;
+        }
+        let (fallback_key, fallback_value) =
+            fallback.map_or((None, None), |(key, value)| (Some(key), Some(value)));
+        Ok(self.connection.execute(
+            r#"
+INSERT INTO settings (key, value, updated_at_unix_ms)
+SELECT ?1, ?2, ?3
+WHERE (SELECT value FROM settings WHERE key = ?1) = ?4
+   OR (?4 IS NULL
+       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = ?1)
+       AND (SELECT value FROM settings WHERE key = ?5) = ?6)
+ON CONFLICT(key) DO UPDATE SET
+    value = excluded.value,
+    updated_at_unix_ms = excluded.updated_at_unix_ms
+WHERE settings.value = ?4
+"#,
+            params![
+                setting.key,
+                setting.value,
+                setting.updated_at_unix_ms,
+                expected,
+                fallback_key,
+                fallback_value,
+            ],
+        )? == 1)
+    }
+
     /// Saves a group of settings atomically after validating the entire batch.
     pub fn set_settings(&mut self, settings: &[SettingRecord]) -> StorageResult<()> {
         for setting in settings {

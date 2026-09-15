@@ -1230,6 +1230,10 @@ account-qr-unavailable = QR code unavailable
 
 storage-auto-created = TeleArk created your private storage channel. It is ready and will be managed automatically.
 
+storage-auto-replaced = The previous private channel is no longer available. TeleArk connected a replacement channel and will manage it automatically. Files deleted with the old channel cannot be recovered; local copies remain unchanged.
+
+storage-replacement-acknowledge = Got it
+
 storage-auto-found = TeleArk found and connected your private storage channel. It is managed automatically.
 
 
@@ -1399,6 +1403,15 @@ detail-failure-last-phase = Last recorded phase
 # Bound channel resilience
 storage-health-repair = The channel’s TeleArk identification message or its description reference is missing, invalid or no longer pinned.
 storage-health-access = The bound channel is inaccessible or you no longer own it. Restore access and recheck.
+
+storage-setup-phase-binding = Checking the saved channel binding
+storage-setup-phase-dialogs = Reading the complete Telegram channel list
+storage-setup-phase-verifying = Checking owner and privacy of the bound channel
+storage-setup-phase-discovering = Looking for an available managed channel
+storage-setup-phase-creating = Creating a private channel
+storage-setup-phase-preparing = Verifying and preparing the managed channel
+storage-setup-phase-saving = Saving the verified account/channel binding
+storage-setup-phase-completed = Private channel ready
 storage-health-unsafe = This channel must be private and have no other members. Correct its settings in Telegram, then recheck.
 storage-health-unsupported = This channel uses a newer identity format. Update TeleArk; its data has been preserved.
 storage-repair-action = Review channel changes

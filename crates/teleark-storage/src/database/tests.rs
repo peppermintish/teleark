@@ -780,6 +780,65 @@ fn settings_and_manual_collection_membership_persist() -> Result<(), Box<dyn Err
 }
 
 #[test]
+fn setting_compare_and_swap_rejects_stale_connections_and_promotes_legacy()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("catalog.sqlite3");
+    let mut first = Database::open(&path)?;
+    let mut second = Database::open(&path)?;
+    first.set_setting(&SettingRecord {
+        key: "binding.v1".to_owned(),
+        value: "7".to_owned(),
+        updated_at_unix_ms: 1,
+    })?;
+    assert!(first.compare_and_swap_setting(
+        &SettingRecord {
+            key: "binding.v2".to_owned(),
+            value: "9".to_owned(),
+            updated_at_unix_ms: 2,
+        },
+        None,
+        Some(("binding.v1", "7")),
+    )?);
+    assert!(!second.compare_and_swap_setting(
+        &SettingRecord {
+            key: "binding.v2".to_owned(),
+            value: "10".to_owned(),
+            updated_at_unix_ms: 3,
+        },
+        None,
+        Some(("binding.v1", "7")),
+    )?);
+    assert_eq!(
+        second.setting("binding.v2")?.map(|record| record.value),
+        Some("9".to_owned())
+    );
+    assert!(second.compare_and_swap_setting(
+        &SettingRecord {
+            key: "binding.v2".to_owned(),
+            value: "11".to_owned(),
+            updated_at_unix_ms: 4,
+        },
+        Some("9"),
+        None,
+    )?);
+    assert!(!first.compare_and_swap_setting(
+        &SettingRecord {
+            key: "binding.v2".to_owned(),
+            value: "12".to_owned(),
+            updated_at_unix_ms: 5,
+        },
+        Some("9"),
+        None,
+    )?);
+    assert_eq!(
+        first.setting("binding.v2")?.map(|record| record.value),
+        Some("11".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
 fn settings_batch_validates_before_writing_any_row() -> Result<(), Box<dyn Error>> {
     let mut database = Database::open_in_memory()?;
     let oversized = "x".repeat(1_048_577);

@@ -1,5 +1,11 @@
 # Implementation status — v0.4.4
 
+## Unavailable private-channel recovery (2026-09-15)
+
+When the account's bound private channel becomes unavailable after deletion or loss of access, automatic management no longer retries its obsolete ID forever. A complete Telegram dialog read and typed remote health result precede one fresh discovery: a unique verified managed candidate is connected, or a new private channel is created and verified. Storage changes the saved account binding only if its old ID still matches. Owner-lost but present channels, unsafe settings, damaged/newer identity, ambiguous discovery, uncertain creation and truncated rosters remain blocked; no arbitrary title or old local cache authorizes adoption. Old channel-scoped history, encrypted inventory, keys and local copies are not rewritten or deleted; files removed with the old Telegram channel are not restored by the replacement. Setup phases and bounded timeline remain visible through loading/failure and completion. [ADR 0042](adr/0042-unavailable-channel-replacement.md) supersedes ADR 0025's no-replacement clause.
+
+Validation: the full locked workspace suite passed (773 tests, 10 existing ignored), including new unavailable/forbidden versus owner-lost decisions, cross-connection compare-and-swap, bounded phase retention and GUI notice/acknowledgement regressions. Workspace check, strict Clippy, formatting, warning-denied rustdoc, cargo-deny (existing duplicate warnings), and diff whitespace checks passed. Native synthetic English/light previews at 900×600 and actual macOS full-screen verified preparation feedback, a visible replacement notice, acknowledgement returning to the file-first workspace and the retained replacement history in channel details. Actual Telegram deletion/recreation has not been performed in this local validation. Existing historical entries below retain their time-local claims.
+
 ## Memory streaming, portable recovery and receipt rates (2026-09-15)
 
 Implemented the six-point transfer update and the memory-only payload rule in
