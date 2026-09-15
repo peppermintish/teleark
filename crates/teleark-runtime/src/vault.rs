@@ -1695,7 +1695,8 @@ impl VaultOwner {
         if self.telegram.lifecycle().snapshot().1 != Some(account) {
             return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
         }
-        if let Some(snapshot) = self.transfers.get(id) {
+        let snapshot = self.transfers.get(id);
+        if let Some(snapshot) = snapshot.as_ref() {
             if snapshot.account_id != account {
                 return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
             }
@@ -1716,7 +1717,64 @@ impl VaultOwner {
         self.transfers.remove_if(id, |snapshot| {
             snapshot.account_id == account && snapshot.id == id
         });
+        self.cleanup_deleted_transfer_artifacts(account, id, snapshot.as_ref());
         Ok(())
+    }
+
+    fn cleanup_deleted_transfer_artifacts(
+        &self,
+        account: i64,
+        id: u64,
+        snapshot: Option<&VaultTransferSnapshot>,
+    ) {
+        if let Ok(directories) = self.library.managed_directories() {
+            let path = directories
+                .logs
+                .join("Transfers")
+                .join(format!("vault-transfer-{id}.jsonl"));
+            if let Err(error) = remove_vault_file_if_present(&path) {
+                tracing::warn!(
+                    event = "transfer.vault.deleted_log_cleanup_failed",
+                    task_id = id,
+                    error_kind = ?error.kind(),
+                    "deleted Vault transfer log cleanup could not be completed"
+                );
+            }
+        } else {
+            tracing::warn!(
+                event = "transfer.vault.deleted_log_cleanup_failed",
+                task_id = id,
+                "deleted Vault transfer log directory could not be resolved"
+            );
+        }
+
+        let spool = self
+            .library
+            .database_path
+            .with_extension("upload-spool")
+            .join(account.to_string())
+            .join(id.to_string());
+        if let Err(error) = remove_vault_directory_if_present(&spool) {
+            tracing::warn!(
+                event = "transfer.vault.deleted_spool_cleanup_failed",
+                task_id = id,
+                error_kind = ?error.kind(),
+                "deleted Vault upload recovery cleanup could not be completed"
+            );
+        }
+
+        if let Some(snapshot) = snapshot
+            && snapshot.direction == VaultTransferDirection::Download
+            && let Some(destination) = snapshot.destination.as_deref()
+            && let Err(error) = remove_vault_partial_if_present(destination)
+        {
+            tracing::warn!(
+                event = "transfer.vault.deleted_partial_cleanup_failed",
+                task_id = id,
+                error_kind = ?error.kind(),
+                "deleted Vault download partial cleanup could not be completed"
+            );
+        }
     }
 
     fn initialize(&mut self, password: &str) -> Result<String, ApplicationError> {
@@ -4630,6 +4688,65 @@ fn now_unix_ms() -> Result<i64, ApplicationError> {
         .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))
 }
 
+fn remove_vault_file_if_present(path: &Path) -> Result<(), ApplicationError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(path).map_err(|error| {
+                ApplicationError::new(match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+                    _ => ApplicationErrorKind::Persistence,
+                })
+            })
+        }
+        Ok(_) => Err(ApplicationError::new(
+            ApplicationErrorKind::PermissionDenied,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ApplicationError::new(match error.kind() {
+            std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+            _ => ApplicationErrorKind::Persistence,
+        })),
+    }
+}
+
+fn remove_vault_directory_if_present(path: &Path) -> Result<(), ApplicationError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            std::fs::remove_dir_all(path).map_err(|error| {
+                ApplicationError::new(match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+                    _ => ApplicationErrorKind::Persistence,
+                })
+            })
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::remove_file(path).map_err(|error| {
+                ApplicationError::new(match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+                    _ => ApplicationErrorKind::Persistence,
+                })
+            })
+        }
+        Ok(_) => Err(ApplicationError::new(
+            ApplicationErrorKind::PermissionDenied,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ApplicationError::new(match error.kind() {
+            std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
+            _ => ApplicationErrorKind::Persistence,
+        })),
+    }
+}
+
+fn remove_vault_partial_if_present(destination: &Path) -> Result<(), ApplicationError> {
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+    let mut partial_name = file_name.to_os_string();
+    partial_name.push(".partial");
+    remove_vault_file_if_present(&destination.with_file_name(partial_name))
+}
+
 fn media_kind(kind: FileKind) -> teleark_crypto::MediaKind {
     match kind {
         FileKind::Video => teleark_crypto::MediaKind::Video,
@@ -4730,6 +4847,23 @@ fn map_transfer_error(error: TransferError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_delete_cleanup_removes_only_partial_and_preserves_final_output() {
+        let directory = tempfile::tempdir().expect("temporary output directory");
+        let destination = directory.path().join("downloaded.bin");
+        let partial = directory.path().join("downloaded.bin.partial");
+        std::fs::write(&destination, b"authenticated output").expect("final output");
+        std::fs::write(&partial, b"incomplete output").expect("partial output");
+
+        remove_vault_partial_if_present(&destination).expect("partial cleanup");
+
+        assert_eq!(
+            std::fs::read(&destination).expect("final output remains"),
+            b"authenticated output"
+        );
+        assert!(!partial.exists());
+    }
 
     #[test]
     fn download_resume_preserves_context_and_partial_on_preflight_failure()

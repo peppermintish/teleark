@@ -4281,6 +4281,39 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vault_delete_action_is_available_for_completed_failed_and_cancelled_states() {
+        for state in [
+            VaultTransferState::Completed,
+            VaultTransferState::Failed(ApplicationErrorKind::Network),
+            VaultTransferState::Cancelled,
+        ] {
+            let mut snapshot = vault_snapshot_fixture();
+            snapshot.state = state;
+            assert!(vault_action_supported(TransferAction::Delete, &snapshot));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn delete_confirmation_explicitly_preserves_downloaded_files(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.tr("action-confirm-delete-task"),
+                "Confirm Delete (Keep File)"
+            );
+            assert!(
+                app.tr_with(
+                    "transfer-delete-confirmation",
+                    MessageArgs::new().with("count", "1"),
+                )
+                .contains("Downloaded files will be kept")
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn recovery_failure_guidance_is_visible_before_history_fields(
         cx: &mut gpui_kit::TestAppContext,

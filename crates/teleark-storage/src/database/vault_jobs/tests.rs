@@ -817,6 +817,40 @@ fn deleting_terminal_vault_history_is_atomic_and_preserves_downloaded_output() -
 }
 
 #[test]
+fn deleting_failed_and_cancelled_vault_history_preserves_downloaded_output() -> StorageResult<()> {
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let mut db = Database::open_in_memory()?;
+    for (id, state, package_byte) in [(12_u64, "retryable", 0x0c_u8), (13, "cancelled", 0x0d)] {
+        let output = directory.path().join(format!("{id}.bin"));
+        std::fs::write(&output, format!("preserved-{id}")).expect("downloaded output");
+        db.admit_vault_job(&job(id, VaultJobDirection::Download))?;
+        db.connection.execute(
+            "UPDATE vault_transfer_jobs SET state=?1,failure_code=?2 WHERE account_id=7 AND id=?3",
+            rusqlite::params![
+                state,
+                (state == "retryable").then_some("network"),
+                id as i64
+            ],
+        )?;
+        db.record_vault_download(&crate::VaultDownloadRecord {
+            account_id: 7,
+            chat_id: 11,
+            package_id: format!("{package_byte:02x}").repeat(16),
+            destination: output.clone(),
+            size_bytes: format!("preserved-{id}").len() as u64,
+            completed_at_unix_ms: 101,
+        })?;
+        db.delete_vault_transfer(7, id)?;
+        assert!(db.vault_job(7, id)?.is_none());
+        assert_eq!(
+            std::fs::read(&output).expect("output remains"),
+            format!("preserved-{id}").as_bytes()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn deleting_nonterminal_vault_history_rolls_back_and_legacy_upload_history_is_removed()
 -> StorageResult<()> {
     let mut db = Database::open_in_memory()?;
