@@ -351,8 +351,8 @@ pub struct TeleArkApp {
     upload_draft_generation: u64,
     pub(crate) selected_file: usize,
     pub(crate) selected_transfer_keys: BTreeSet<u64>,
-    pub(crate) pending_transfer_delete: Option<u64>,
-    pub(crate) pending_transfer_bulk_delete: Vec<u64>,
+    pub(crate) pending_transfer_delete: Option<screens::transfers::TransferDeleteTarget>,
+    pub(crate) pending_transfer_bulk_delete: Vec<screens::transfers::TransferDeleteTarget>,
     pub(crate) transfer_action_error: Option<teleark_core::ApplicationErrorKind>,
     pub(crate) transfer_projection_cache:
         std::cell::RefCell<screens::transfers::TransferProjectionCache>,

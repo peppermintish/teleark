@@ -1174,19 +1174,33 @@ impl TeleArkApp {
                 ]
                 .into_iter()
                 .map(|action| {
-                    let ids = presentation.actions[&(action as usize)].clone();
+                    let native_ids = presentation.actions[&(action as usize)].clone();
+                    let vault_ids = presentation.vault_actions[&(action as usize)].clone();
+                    let disabled_ids_empty = if action == TransferAction::Delete {
+                        native_ids.is_empty() && vault_ids.is_empty()
+                    } else {
+                        native_ids.is_empty()
+                    };
                     components::button(
                         ("transfer-bulk", action as usize),
                         self.tr(action.label()),
                         Some(action.icon()),
                         false,
                     )
-                    .disabled(ids.is_empty() || self.transfer_action_job.is_some())
+                    .disabled(disabled_ids_empty || self.transfer_action_job.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if action == TransferAction::Delete {
-                            this.pending_transfer_bulk_delete = ids.as_ref().clone();
+                            let mut targets = native_ids
+                                .iter()
+                                .copied()
+                                .map(TransferDeleteTarget::Native)
+                                .collect::<Vec<_>>();
+                            targets
+                                .extend(vault_ids.iter().copied().map(TransferDeleteTarget::Vault));
+                            this.pending_transfer_delete = None;
+                            this.pending_transfer_bulk_delete = targets;
                         } else {
-                            this.apply_transfer_action(action, &ids, cx);
+                            this.apply_transfer_action(action, &native_ids, cx);
                         }
                         cx.notify();
                     }))
@@ -1228,12 +1242,12 @@ impl TeleArkApp {
                 !self.pending_transfer_bulk_delete.is_empty()
                     || self.pending_transfer_delete.is_some(),
                 |bar| {
-                    let ids = if let Some(id) = self.pending_transfer_delete {
-                        vec![id]
+                    let targets = if let Some(target) = self.pending_transfer_delete {
+                        vec![target]
                     } else {
                         self.pending_transfer_bulk_delete.clone()
                     };
-                    bar.child(self.render_transfer_delete_confirmation(ids, cx))
+                    bar.child(self.render_transfer_delete_confirmation(targets, cx))
                 },
             );
 
@@ -1533,11 +1547,98 @@ impl TeleArkApp {
         cx.notify();
     }
 
+    fn apply_delete_actions(&mut self, targets: &[TransferDeleteTarget], cx: &mut Context<Self>) {
+        if self.transfer_action_job.is_some() || targets.is_empty() {
+            return;
+        }
+        let native_ids = targets
+            .iter()
+            .filter_map(|target| match target {
+                TransferDeleteTarget::Native(id) => Some(*id),
+                TransferDeleteTarget::Vault(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let vault_ids = targets
+            .iter()
+            .filter_map(|target| match target {
+                TransferDeleteTarget::Native(_) => None,
+                TransferDeleteTarget::Vault(id) => Some(*id),
+            })
+            .collect::<Vec<_>>();
+        let transfers = self.transfers.clone();
+        let vault = self.vault.clone();
+        let account = self.telegram_account.as_ref().map(|account| account.id);
+        let generation = self.telegram_login_generation;
+        self.transfer_action_error = None;
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = cancelled.clone();
+        let work = cx.background_spawn(async move {
+            let (native_deleted, native_failure) = if native_ids.is_empty() {
+                (Vec::new(), None)
+            } else if let Some(transfers) = transfers {
+                execute_transfer_actions(TransferAction::Delete, &native_ids, &cancellation, |id| {
+                    transfers.delete(id)
+                })
+            } else {
+                (Vec::new(), Some(ApplicationErrorKind::Persistence))
+            };
+            let (vault_deleted, vault_failure) = if vault_ids.is_empty() {
+                (Vec::new(), None)
+            } else if let (Some(vault), Some(account)) = (vault, account) {
+                execute_transfer_actions(TransferAction::Delete, &vault_ids, &cancellation, |id| {
+                    vault.delete_transfer(account, id)
+                })
+            } else {
+                (Vec::new(), Some(ApplicationErrorKind::Persistence))
+            };
+            let deleted: Vec<TransferDeleteTarget> = native_deleted
+                .into_iter()
+                .map(TransferDeleteTarget::Native)
+                .chain(vault_deleted.into_iter().map(TransferDeleteTarget::Vault))
+                .collect();
+            (deleted, native_failure.or(vault_failure))
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let (deleted, failure) = work.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.transfer_action_job = None;
+                if this.telegram_login_generation != generation {
+                    return;
+                }
+                if !deleted.is_empty() {
+                    this.show_transfer_detail = false;
+                }
+                for target in deleted {
+                    match target {
+                        TransferDeleteTarget::Native(id) => {
+                            this.selected_transfer_keys.remove(&id);
+                        }
+                        TransferDeleteTarget::Vault(id) => {
+                            this.selected_transfer_keys
+                                .remove(&vault_transfer_selection_key(id));
+                        }
+                    }
+                }
+                this.transfer_action_error = failure;
+                cx.notify();
+            });
+        });
+        self.transfer_action_job = Some(TransferActionJob {
+            _task: task,
+            cancelled,
+        });
+        cx.notify();
+    }
+
     fn render_transfer_delete_confirmation(
         &self,
-        ids: Vec<u64>,
+        targets: Vec<TransferDeleteTarget>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let count = targets.len();
         div()
             .w_full()
             .p_3()
@@ -1549,7 +1650,7 @@ impl TeleArkApp {
             .gap_2()
             .child(div().flex_1().text_sm().child(self.tr_with(
                 "transfer-delete-confirmation",
-                MessageArgs::new().with("count", format_integer(self.locale(), ids.len() as u64)),
+                MessageArgs::new().with("count", format_integer(self.locale(), count as u64)),
             )))
             .child(
                 components::button(
@@ -1559,7 +1660,7 @@ impl TeleArkApp {
                     false,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.apply_transfer_action(TransferAction::Delete, &ids, cx);
+                    this.apply_delete_actions(&targets, cx);
                     this.pending_transfer_bulk_delete.clear();
                     this.pending_transfer_delete = None;
                     cx.notify();
@@ -1659,7 +1760,8 @@ impl TeleArkApp {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if action == TransferAction::Delete {
-                                this.pending_transfer_delete = Some(id);
+                                this.pending_transfer_delete =
+                                    Some(TransferDeleteTarget::Native(id));
                                 this.pending_transfer_bulk_delete.clear();
                             } else {
                                 this.apply_transfer_action(action, &[id], cx);
@@ -1705,7 +1807,13 @@ impl TeleArkApp {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.apply_vault_transfer_action(id, action, cx);
+                        if action == TransferAction::Delete {
+                            this.pending_transfer_delete = Some(TransferDeleteTarget::Vault(id));
+                            this.pending_transfer_bulk_delete.clear();
+                        } else {
+                            this.apply_vault_transfer_action(id, action, cx);
+                        }
+                        cx.notify();
                     })),
                 );
             }
@@ -3610,6 +3718,12 @@ pub(crate) enum TransferAction {
     Delete,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferDeleteTarget {
+    Native(u64),
+    Vault(u64),
+}
+
 impl TransferAction {
     fn supports_snapshot(self, snapshot: &ChannelDownloadSnapshot) -> bool {
         if let Some(cleanup) = snapshot.cleanup {
@@ -3848,7 +3962,7 @@ const fn decision_reason_message_id(reason: ControllerDecisionReason) -> &'stati
 fn transfer_selection_key(transfer: &TransferRow, index: usize) -> u64 {
     transfer.runtime_task_id.unwrap_or_else(|| {
         if let Some(id) = transfer.vault_transfer_id {
-            return 0x2000_0000_0000_0000_u64 | id;
+            return vault_transfer_selection_key(id);
         }
         transfer
             .vault_batch_id
@@ -3860,6 +3974,10 @@ fn transfer_selection_key(transfer: &TransferRow, index: usize) -> u64 {
             })
             .unwrap_or(0x8000_0000_0000_0000_u64 | index as u64)
     })
+}
+
+pub(crate) const fn vault_transfer_selection_key(id: u64) -> u64 {
+    0x2000_0000_0000_0000_u64 | id
 }
 
 fn native_cleanup_message_id(phase: ChannelDownloadCleanupPhase) -> &'static str {

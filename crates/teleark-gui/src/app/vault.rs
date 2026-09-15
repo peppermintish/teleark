@@ -1,7 +1,7 @@
 //! Vault presentation owner. Business operations stay in the runtime.
 
 use super::*;
-use crate::screens::transfers::TransferAction;
+use crate::screens::transfers::{TransferAction, vault_transfer_selection_key};
 
 /// Preserve the account projection while explicit legacy recovery uses its own view.
 pub(super) struct ManagedViewCache {
@@ -36,7 +36,10 @@ impl TeleArkApp {
         if snapshot.account_id != account {
             return;
         }
-        let control = matches!(action, TransferAction::Pause | TransferAction::Cancel);
+        let control = matches!(
+            action,
+            TransferAction::Pause | TransferAction::Cancel | TransferAction::Delete
+        );
         let key = (account, id, control);
         if self.vault_transfer_jobs.contains_key(&key)
             || self.vault_transfer_jobs.len() >= 64
@@ -76,9 +79,7 @@ impl TeleArkApp {
                             .map(|_| None)
                     }
                 }
-                TransferAction::Delete => Err(teleark_core::ApplicationError::new(
-                    teleark_core::ApplicationErrorKind::InvalidRequest,
-                )),
+                TransferAction::Delete => vault.delete_transfer(account, id).map(|()| None),
             }
         });
         let task = cx.spawn(async move |this, cx| {
@@ -96,6 +97,11 @@ impl TeleArkApp {
                 match result {
                     Ok(Some(file)) => {
                         this.apply_completed_vault_uploads(account, chat_id, vec![file])
+                    }
+                    Ok(None) if action == TransferAction::Delete => {
+                        this.show_transfer_detail = false;
+                        this.selected_transfer_keys
+                            .remove(&vault_transfer_selection_key(id));
                     }
                     Ok(None) => {}
                     Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
