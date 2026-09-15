@@ -498,6 +498,28 @@ mod tests {
     }
 
     #[test]
+    fn finalization_fits_the_default_worker_stack() {
+        let result = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let dir = tempfile::tempdir().expect("directory");
+                let path = dir.path().join("jobs.sqlite");
+                let (mut db, lease, parts) = fixture(&path);
+                let mut worker = DurableDownload::open(&db, lease).expect("open");
+                for (part, bytes) in parts.iter().zip([b"abcd", b"efgh"]) {
+                    worker
+                        .restore_part(&mut db, part, || Ok(bytes.to_vec()))
+                        .expect("part");
+                }
+                worker.finalize(&db)
+            })
+            .expect("spawn")
+            .join()
+            .expect("worker thread");
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
     fn reopen_rechecks_fsynced_extents_and_fetches_only_missing_or_corrupt_data() {
         for corrupt in [false, true] {
             let dir = tempfile::tempdir().expect("directory");

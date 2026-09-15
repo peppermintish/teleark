@@ -317,7 +317,9 @@ fn hash_reader_cancellable(
     mut check: impl FnMut() -> Result<(), TransferError>,
 ) -> Result<ContentDigest, TransferError> {
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Hashing runs on retained background owners with small stacks. The
+    // bounded scratch buffer belongs on the heap, not in the stack frame.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check()?;
         let count = reader.read(&mut buffer).map_err(|error| {

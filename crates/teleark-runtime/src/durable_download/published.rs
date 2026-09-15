@@ -67,7 +67,9 @@ impl PublishedOutput {
             .seek(SeekFrom::Start(0))
             .map_err(|_| TransferError::PermissionDenied)?;
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = [0; 1024 * 1024];
+        // Retained worker threads have small stacks; keep this bounded scratch
+        // buffer on the heap instead of reserving 1 MiB in the stack frame.
+        let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             check()?;
             let count = self
