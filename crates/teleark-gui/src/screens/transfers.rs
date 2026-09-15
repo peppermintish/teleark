@@ -42,7 +42,7 @@ mod upload_activity;
 use crate::mock::transfers;
 use batch_style::BatchRowPosition;
 pub(crate) use projection::TransferProjectionCache;
-use projection::{TransferItem, vault_transfer_state};
+use projection::{TransferItem, vault_action_supported, vault_transfer_state};
 
 // The view owns one command batch. Dropping the owner stops at the next task
 // boundary, without interrupting an atomic runtime operation already in progress.
@@ -1672,34 +1672,21 @@ impl TeleArkApp {
         }
         if let Some(id) = transfer.vault_transfer_id
             && let Some(snapshot) = self.vault_transfer_snapshot(id)
-            && let Some(state) = snapshot.recovery_state
         {
-            use teleark_runtime::VaultRecoveryState as Recovery;
             for action in [
                 TransferAction::Pause,
                 TransferAction::Resume,
                 TransferAction::Retry,
                 TransferAction::Cancel,
+                TransferAction::Delete,
             ] {
-                let supported = match action {
-                    TransferAction::Pause => matches!(state, Recovery::Queued | Recovery::Running),
-                    TransferAction::Resume => state == Recovery::Paused,
-                    TransferAction::Retry => state == Recovery::Retryable,
-                    TransferAction::Cancel => matches!(
-                        state,
-                        Recovery::Queued
-                            | Recovery::Running
-                            | Recovery::Pausing
-                            | Recovery::Paused
-                            | Recovery::Retryable
-                            | Recovery::Blocked
-                    ),
-                    _ => false,
-                };
-                if !supported {
+                if !vault_action_supported(action, &snapshot) {
                     continue;
                 }
-                let control = matches!(action, TransferAction::Pause | TransferAction::Cancel);
+                let control = matches!(
+                    action,
+                    TransferAction::Pause | TransferAction::Cancel | TransferAction::Delete
+                );
                 actions = actions.child(
                     components::list_icon_button(
                         (action.element_id(), id),
