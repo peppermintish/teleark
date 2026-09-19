@@ -50,7 +50,7 @@ Source builds use their own Telegram API ID/Hash configured from the login/setti
 
 Use `.env.local` for private development environment values. To initialize a new checkout, copy `.env.example` to `.env.local` only if the local file does not already exist. Use mode `0600` for local environment files. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
 
-Neither Cargo nor the application automatically loads dotenv files. A plain `cargo run -r` does not read `.env.example` or `.env.local`. `.env.example` is a template only: replace its sample values in `.env.local`, and never load the example for builds or packaging. `scripts/build-local.sh` enforces this local packaging workflow. For an authorized development run using the existing build-time Telegram credential variables, load the trusted, locally maintained file in a subshell from the repository root:
+Neither Cargo nor the application automatically loads dotenv files. A plain `cargo run -r` does not read `.env.example` or `.env.local`. `.env.example` is a template only: replace its sample values in `.env.local`, and never load the example for builds or packaging. `scripts/build-local.sh` and `scripts/build-local.ps1` enforce this local packaging workflow. For an authorized development run using the existing build-time Telegram credential variables, load the trusted, locally maintained file in a subshell from the repository root:
 
 ```bash
 (
@@ -60,6 +60,12 @@ Neither Cargo nor the application automatically loads dotenv files. A plain `car
   set +a
   cargo run -r -p teleark-gui --bin teleark --locked
 )
+```
+
+Or in Windows PowerShell:
+
+```powershell
+.\scripts\run.ps1
 ```
 
 The variables apply to that subshell and its child processes. They are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.

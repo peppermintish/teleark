@@ -18,9 +18,11 @@ Build without launching:
 
 ```bash
 scripts/build-local.sh
+# On Windows (PowerShell):
+.\scripts\build-local.ps1
 ```
 
-First configure your own application credentials in `.env.local` using [README environment setup](../README.md#load-env-values-before-building). The helper always loads that file and stops if it is missing, invalid or still uses the public sample API ID. `.env.example` is a template only and is never sourced as a fallback. Use bash on macOS/Linux or Git Bash with native Rust on Windows. All commands below run from the repository root.
+First configure your own application credentials in `.env.local` using [README environment setup](../README.md#load-env-values-before-building). The helper always loads that file and stops if it is missing, invalid or still uses the public sample API ID. `.env.example` is a template only and is never sourced as a fallback. Use bash on macOS/Linux or PowerShell / Git Bash with native Rust on Windows. All commands below run from the repository root.
 
 The macOS packaging script only copies the supplied binary; it cannot change credentials embedded by a previous build. Always rebuild with `.env.local` first. Neither local environment file belongs in the bundle. CI has no private `.env.local`; its current workflow builds without embedded credentials unless separately configured through protected build secrets.
 

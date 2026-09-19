@@ -32,13 +32,17 @@ Core, Runtime, Storage, Telegram, Crypto, Index and Transfer are independent of 
 
 ## Build and run
 
-**macOS is the current build and release baseline.** Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`). The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
+**macOS is the current build and release baseline.** Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`). On Windows, install the native MSVC Rust toolchain via rustup and Visual Studio Build Tools with the "Desktop development with C++" workload and Windows SDK. The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
 
-Run the following commands from the repository root in bash or zsh. For platform prerequisites, standalone executables, macOS `.app` / `.dmg` / `.pkg` packages and Windows/Linux recipes, see the **[build and packaging guide](docs/PACKAGING.md)**. Windows and Linux builds and installers remain unverified.
+Run commands from the repository root in bash/zsh on macOS/Linux, or in PowerShell / Git Bash on Windows. For platform prerequisites, standalone executables, macOS `.app` / `.dmg` / `.pkg` packages and Windows/Linux recipes, see the **[build and packaging guide](docs/PACKAGING.md)**. Windows and Linux builds and installers remain unverified.
 
 ### Load `.env` values before building
 
+[`.env.example`](.env.example) is an illustrative reference template only, documenting the expected variable names with public **TEST ONLY** identifiers. It is never automatically loaded, sourced, or fallen back to by Cargo, TeleArk, or any build/run script. Local environment files are Git-ignored.
+
 Create a private local configuration without overwriting an existing file:
+
+**macOS / Linux (bash / zsh):**
 
 ```bash
 if [ ! -e .env.local ]; then
@@ -47,15 +51,26 @@ fi
 chmod 600 .env.local
 ```
 
-Edit `.env.local` and replace both sample values with your application's API ID and API Hash from [Telegram's API development panel](https://my.telegram.org/apps). [`.env.example`](.env.example) is a template containing public **TEST ONLY** identifiers; it is never a fallback build configuration. Local environment files are Git-ignored.
+**Windows (PowerShell):**
 
-After configuring `.env.local`, copy and run this single command to build and launch:
+```powershell
+if (-not (Test-Path .env.local)) {
+  Copy-Item .env.example .env.local
+}
+icacls .env.local /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
+```
+
+The `icacls` command removes inherited access from other accounts and grants read/write permissions solely to the current user, matching the private `0600` permission requirement.
+
+Edit `.env.local` and replace both sample values with your application's API ID and API Hash from [Telegram's API development panel](https://my.telegram.org/apps).
+
+After configuring `.env.local`, build and launch using the platform helper:
+
+**macOS / Linux (bash / zsh):**
 
 ```bash
 scripts/run.sh
 ```
-
-This command loads and validates `.env.local`, builds the release version and launches TeleArk after a successful build.
 
 To build without launching:
 
@@ -63,19 +78,46 @@ To build without launching:
 scripts/build-local.sh
 ```
 
-The helper loads `.env.local`, validates both values and rejects the public sample API ID. Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time**, so supply them on each build and rebuild after changing them. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
+**Windows (PowerShell):**
 
-Source only your trusted local configuration and keep it out of logs and packages. Embedded application identifiers are extractable from binaries. On Windows, use Git Bash with native Windows Rust and restrict the file with Windows permissions as well.
+```powershell
+.\scripts\run.ps1
+```
+
+To build without launching:
+
+```powershell
+.\scripts\build-local.ps1
+```
+
+**Windows (Git Bash):**
+
+In Git Bash, run `scripts/run.sh` or `scripts/build-local.sh`. If editing `.env.local` with Windows editors, ensure the file retains Unix (`LF`) line endings so the bash regex validation accepts the 32-character API Hash without trailing carriage returns.
+
+The helpers load `.env.local`, validate both values and reject the public sample API ID (`17349`). If `.env.local` is missing, the helper stops immediately with an error and will never fall back to `.env.example`.
+
+Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time** via `option_env!`, so supply them on each build and rebuild after changing them. A direct `cargo run --release -p teleark-gui --bin teleark --locked` without environment variables builds without embedded credentials; when launched, TeleArk will prompt for personal API credentials in the UI (Settings / Login) and save them to your local SQLite library. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
+
+Source only your trusted local configuration and keep it out of logs and packages. Embedded application identifiers are extractable from binaries.
 
 ### Script dry runs
 
 Add `--dry-run` to preview what each script would do without loading credentials, building, launching, packaging or running tests:
+
+**macOS / Linux:**
 
 ```bash
 scripts/run.sh --dry-run
 scripts/build-local.sh --dry-run
 scripts/package-macos.sh --dry-run
 python3 scripts/test-build-local.py --dry-run
+```
+
+**Windows (PowerShell):**
+
+```powershell
+.\scripts\run.ps1 --dry-run
+.\scripts\build-local.ps1 --dry-run
 ```
 
 For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-run path/to/teleark path/to/TeleArk.app`. Dry runs describe the planned operations; they do not validate local credentials or installed tools.
