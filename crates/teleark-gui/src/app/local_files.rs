@@ -351,18 +351,31 @@ mod tests {
         cx.background_executor.advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         assert_eq!(notifications.get(), baseline);
-        app.update(cx, |app, cx| app.start_volume_space_refresh(cx));
+        app.update(cx, |app, cx| app.refresh_volume_space(cx));
         cx.run_until_parked();
+        app.update(cx, |app, _| {
+            app.library = None;
+            app.local_files_task = None;
+        });
+        cx.run_until_parked();
+        drop(_subscription);
         let weak = app.downgrade();
         cx.update(|window, _| window.remove_window());
         drop(app);
+        cx.background_executor.advance_clock(Duration::from_secs(10));
         cx.run_until_parked();
         assert!(
             weak.upgrade().is_none(),
             "background timers must not retain the app"
         );
         drop(library);
-        std::fs::remove_dir_all(directory).expect("clean temporary fixture");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir_all(&directory) {
+            if std::time::Instant::now() >= deadline {
+                panic!("clean temporary fixture: {err}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn observation(id: u64, message: i64, presence: LocalFilePresence) -> LocalDownloadObservation {

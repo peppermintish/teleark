@@ -676,4 +676,70 @@ mod tests {
             assert_eq!(cache.rebuilds, 4);
         });
     }
+
+    #[gpui_kit::test]
+    fn volume_space_is_event_driven_without_idle_polling(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        let directory = std::env::temp_dir().join(format!(
+            "teleark-volume-space-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary fixture");
+        let library = DesktopLibrary::open(directory.join("catalog.sqlite3"))
+            .expect("temporary catalog");
+        library
+            .managed_directories()
+            .expect("temporary output directories");
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = notifications.clone();
+        let _subscription =
+            cx.update(|_, cx| cx.observe(&app, move |_, _| counter.set(counter.get() + 1)));
+
+        app.update(cx, |app, _| {
+            app.library = Some(library.clone());
+            app.volume_space = None;
+        });
+
+        // Explicit event-driven refresh queries the volume space.
+        app.update(cx, |app, cx| app.refresh_volume_space(cx));
+        cx.run_until_parked();
+
+        app.update(cx, |app, _| {
+            assert!(app.volume_space.is_some(), "volume space should be populated");
+        });
+
+        // Coalesced queries: when in flight, another request marks pending.
+        app.update(cx, |app, cx| {
+            app.volume_space_in_flight = true;
+            app.refresh_volume_space(cx);
+            assert!(app.volume_space_pending);
+            app.volume_space_in_flight = false;
+        });
+
+        // Idle time passing must NOT trigger repeated queries or repaint notifications.
+        let baseline = notifications.get();
+        cx.background_executor.advance_clock(std::time::Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), baseline, "no idle polling or repaints");
+
+        // Teardown cleanly.
+        app.update(cx, |app, _| {
+            app.library = None;
+            app.volume_space_task = None;
+        });
+        cx.run_until_parked();
+        drop(_subscription);
+        drop(library);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir_all(&directory) {
+            if std::time::Instant::now() >= deadline {
+                panic!("cleanup: {err}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }

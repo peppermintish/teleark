@@ -502,6 +502,8 @@ pub struct TeleArkApp {
     preference_task: Option<Task<()>>,
     preference_picker_task: Option<Task<()>>,
     volume_space_task: Option<Task<()>>,
+    volume_space_in_flight: bool,
+    volume_space_pending: bool,
     local_files_task: Option<Task<()>>,
     pub(crate) local_downloads: local_files::LocalDownloadCache,
     transfer_monitor_task: Option<Task<()>>,
@@ -915,6 +917,8 @@ impl TeleArkApp {
             preference_task: None,
             preference_picker_task: None,
             volume_space_task: None,
+            volume_space_in_flight: false,
+            volume_space_pending: false,
             local_files_task: None,
             local_downloads: Default::default(),
             transfer_monitor_task: None,
@@ -969,7 +973,7 @@ impl TeleArkApp {
             app.initialize_preview(window, cx);
         }
         app.start_transfer_refresh(cx);
-        app.start_volume_space_refresh(cx);
+        app.refresh_volume_space(cx);
         app.start_local_file_refresh(cx);
         app.start_network_observer(cx);
         app.start_authorization_observer(cx);

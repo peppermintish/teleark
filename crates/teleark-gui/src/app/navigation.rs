@@ -627,6 +627,7 @@ impl TeleArkApp {
                             },
                         ))
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.refresh_volume_space(cx);
                             if this.preference_persistence == PreferencePersistence::Failed {
                                 this.persist_preferences(cx);
                             } else {

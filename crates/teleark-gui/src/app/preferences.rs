@@ -31,6 +31,9 @@ impl TeleArkApp {
                 } else {
                     PreferencePersistence::Failed
                 };
+                if result.is_ok() {
+                    this.refresh_volume_space(cx);
+                }
                 if result.is_ok() && this.preferences != saved_preferences {
                     this.persist_preferences(cx);
                 }

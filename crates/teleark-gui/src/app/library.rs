@@ -690,8 +690,15 @@ mod tests {
             app.library_sync_task = None;
             app.visual_preview = true;
         });
+        cx.run_until_parked();
         drop(library);
-        std::fs::remove_dir_all(directory).expect("cleanup");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir_all(&directory) {
+            if std::time::Instant::now() >= deadline {
+                panic!("cleanup: {err}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[gpui::test]

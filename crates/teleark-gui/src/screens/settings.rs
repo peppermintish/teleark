@@ -2039,7 +2039,8 @@ mod tests {
         let localizer =
             teleark_i18n::Localizer::new(teleark_i18n::SupportedLocale::EnUs).expect("locale");
         let about = localizer.translate_or_id(teleark_i18n::MessageId::new("about-changelog-v040"));
-        let changelog = include_str!("../../../../CHANGELOG.md")
+        let raw = include_str!("../../../../CHANGELOG.md").replace("\r\n", "\n");
+        let changelog = raw
             .strip_prefix("# Changelog\n\n")
             .expect("changelog heading");
         let unreleased =

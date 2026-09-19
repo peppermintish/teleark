@@ -1607,8 +1607,15 @@ pub(super) mod tests {
             app.library = None;
             app.telegram_file_task = None;
         });
+        cx.run_until_parked();
         drop(library);
-        std::fs::remove_dir_all(directory).expect("remove fixture");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir_all(&directory) {
+            if std::time::Instant::now() >= deadline {
+                panic!("remove fixture: {err}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     pub(in crate::app) fn fixture_snapshot() -> teleark_runtime::ChannelSyncSnapshot {
         let now = std::time::Instant::now();

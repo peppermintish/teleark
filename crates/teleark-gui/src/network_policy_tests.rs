@@ -48,7 +48,9 @@ fn visit(path: &Path, sources: &mut Vec<(String, String)>) {
                 .to_string_lossy()
                 .ends_with("tests.rs")
         {
-            let text = std::fs::read_to_string(&path).expect("controlled proxy fixture");
+            let text = std::fs::read_to_string(&path)
+                .expect("controlled proxy fixture")
+                .replace("\r\n", "\n");
             let production = text
                 .split("\n#[cfg(test)]\nmod ")
                 .next()

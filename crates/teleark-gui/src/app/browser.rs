@@ -656,6 +656,13 @@ mod tests {
             app.library = None;
             app.telegram = None;
         });
-        std::fs::remove_dir_all(directory).expect("remove isolated fixture");
+        cx.run_until_parked();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir_all(&directory) {
+            if std::time::Instant::now() >= deadline {
+                panic!("remove isolated fixture: {err}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

@@ -55,6 +55,7 @@ impl TeleArkApp {
                         && this.preferences.reveal_completed_downloads)
                         .then(|| snapshot.map(|snapshot| snapshot.destination))
                         .flatten();
+                    this.refresh_volume_space(cx);
                     cx.notify();
                     (
                         matches!(
@@ -114,6 +115,7 @@ impl TeleArkApp {
                             app.native_transfer_view = view;
                             app.start_transfer_clock(cx);
                             app.advance_transition(cx);
+                            app.refresh_volume_space(cx);
                             cx.notify();
                         }
                     });
@@ -140,6 +142,7 @@ impl TeleArkApp {
                             app.vault_transfer_view = view;
                             app.start_transfer_clock(cx);
                             app.advance_transition(cx);
+                            app.refresh_volume_space(cx);
                             cx.notify();
                         }
                     });
@@ -200,28 +203,31 @@ impl TeleArkApp {
         }));
     }
 
-    pub(super) fn start_volume_space_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_volume_space(&mut self, cx: &mut Context<Self>) {
         let Some(library) = self.library.clone() else {
             return;
         };
+        if self.volume_space_in_flight {
+            self.volume_space_pending = true;
+            return;
+        }
+        self.volume_space_in_flight = true;
+        self.volume_space_pending = false;
         self.volume_space_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let library = library.clone();
-                let space = cx
-                    .background_spawn(async move { library.download_volume_space().ok() })
-                    .await;
-                let Some(entity) = this.upgrade() else { return };
-                entity.update(cx, |this, cx| {
-                    if this.volume_space != space {
-                        this.volume_space = space;
-                        cx.notify();
-                    }
-                });
-                drop(entity);
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(5))
-                    .await;
-            }
+            let space = cx
+                .background_spawn(async move { library.download_volume_space().ok() })
+                .await;
+            let Some(entity) = this.upgrade() else { return };
+            entity.update(cx, |this, cx| {
+                this.volume_space_in_flight = false;
+                if this.volume_space != space {
+                    this.volume_space = space;
+                    cx.notify();
+                }
+                if this.volume_space_pending {
+                    this.refresh_volume_space(cx);
+                }
+            });
         }));
     }
 }
