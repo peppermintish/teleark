@@ -141,7 +141,7 @@ Historical Completed means transfer finalization succeeded; current local presen
 
 Missing/changed outputs disable ordinary open/reveal actions. A completed native task can explicitly create a fresh account-validated download with a non-overwriting destination; its old history remains intact. No observation triggers network traffic or file deletion. Vault outputs persist through the schema-10 inventory; its finalization caveat is in [Data model](DATA_MODEL.md#local-output-inventory-version-10).
 
-An independent five-second query resolves the actual Downloads volume and displays its available bytes in the main status bar. Unavailable volumes stay unknown; they are not assigned the system disk's free space. The slower application-directory usage scan cannot suppress this indicator.
+An event-driven background query resolves the actual Downloads volume and displays its available bytes in the main status bar, triggering on startup, transfer progress and completion, preference changes, and user interaction without idle polling loops. In-flight queries coalesce so repeated events never spawn redundant filesystem operations. Unavailable volumes stay unknown; they are not assigned the system disk's free space. The slower application-directory usage scan cannot suppress this indicator.
 
 ## Generic Core state and recovery
 
