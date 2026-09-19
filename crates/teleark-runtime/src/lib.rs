@@ -306,14 +306,7 @@ fn managed_storage_metrics(
         app_used_bytes =
             app_used_bytes.saturating_add(directory_size_bounded(root, &mut remaining_entries)?);
     }
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let available_bytes = disks
-        .list()
-        .iter()
-        .filter(|disk| managed_root.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| disk.available_space())
-        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    let available_bytes = volume_space(managed_root)?.available_bytes;
     Ok(ManagedStorageMetrics {
         app_used_bytes,
         available_bytes,
