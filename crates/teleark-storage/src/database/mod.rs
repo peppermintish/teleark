@@ -654,7 +654,7 @@ fn decode_local_path(encoding: &str, bytes: Vec<u8>) -> StorageResult<PathBuf> {
 #[cfg(windows)]
 fn decode_local_path(encoding: &str, bytes: Vec<u8>) -> StorageResult<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    if encoding != "windows-utf16le-v1" || bytes.len() % 2 != 0 {
+    if encoding != "windows-utf16le-v1" || !bytes.len().is_multiple_of(2) {
         return Err(corrupt(
             "logical_files",
             "local_source_path_encoding",
@@ -662,8 +662,10 @@ fn decode_local_path(encoding: &str, bytes: Vec<u8>) -> StorageResult<PathBuf> {
         ));
     }
     let wide = bytes
-        .chunks_exact(2)
-        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     Ok(PathBuf::from(OsString::from_wide(&wide)))
 }
