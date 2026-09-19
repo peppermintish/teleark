@@ -1709,6 +1709,8 @@ async fn restrict_download_permissions(path: &Path) -> Result<(), TelegramError>
             .await
             .map_err(map_io)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1942,6 +1944,8 @@ async fn restrict_session_permissions(path: &Path) -> Result<(), TelegramError> 
             .await
             .map_err(map_io)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

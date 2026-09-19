@@ -230,6 +230,8 @@ fn restrict_permissions(path: &Path) -> Result<(), FileSessionError> {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
