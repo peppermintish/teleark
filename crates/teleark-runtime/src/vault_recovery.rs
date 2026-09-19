@@ -419,12 +419,14 @@ fn decode_path(input: &mut Reader<'_>) -> Result<PathBuf, RecoveryContextError> 
         return Err(RecoveryContextError::ForeignPathPlatform);
     }
     let bytes = input.bytes(MAX_PATH)?;
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(RecoveryContextError::Invalid);
     }
     let units = bytes
-        .chunks_exact(2)
-        .map(|v| u16::from_le_bytes([v[0], v[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| u16::from_le_bytes(*v))
         .collect::<Vec<_>>();
     if units.contains(&0) {
         return Err(RecoveryContextError::Invalid);
