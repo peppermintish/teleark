@@ -15,7 +15,7 @@ class LocalBuildTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / 'scripts').mkdir()
         for source in Path(__file__).parent.iterdir():
-            if source.suffix in ('.sh', '.py'):
+            if source.suffix in ('.sh', '.py', '.ps1'):
                 shutil.copy(source, self.root / 'scripts')
         self.bin = self.root / 'bin'
         self.bin.mkdir()
@@ -91,7 +91,12 @@ exit "${TEST_CARGO_EXIT:-0}"
         before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
         for script in sorted((self.root / 'scripts').iterdir()):
             with self.subTest(script=script.name):
-                prefix = [sys.executable] if script.suffix == '.py' else ['bash']
+                if script.suffix == '.py':
+                    prefix = [sys.executable]
+                elif script.suffix == '.ps1':
+                    prefix = ['powershell', '-ExecutionPolicy', 'Bypass', '-File']
+                else:
+                    prefix = ['bash']
                 result = subprocess.run(prefix + [str(script), '--dry-run'],
                                         cwd=self.root, env=self.env,
                                         capture_output=True, text=True)
@@ -113,6 +118,12 @@ exit "${TEST_CARGO_EXIT:-0}"
             result = subprocess.run(['bash', str(self.root / 'scripts' / script),
                                      '--unknown'], cwd=self.root, capture_output=True)
             self.assertEqual(result.returncode, 2)
+        if shutil.which('powershell'):
+            for script in ('build-local.ps1', 'run.ps1'):
+                result = subprocess.run(['powershell', '-ExecutionPolicy', 'Bypass',
+                                         '-File', str(self.root / 'scripts' / script),
+                                         '--unknown'], cwd=self.root, capture_output=True)
+                self.assertEqual(result.returncode, 2)
         self.assertFalse((self.root / 'cargo-called').exists())
 
 
