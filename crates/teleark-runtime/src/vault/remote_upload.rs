@@ -45,9 +45,13 @@ pub(super) fn remember_remote(
     file.write_all(&bytes).map_err(fail)?;
     file.sync_all().map_err(fail)?;
     std::fs::rename(&temporary, &path).map_err(fail)?;
+    #[cfg(unix)]
     std::fs::File::open(parent)
         .and_then(|file| file.sync_all())
-        .map_err(fail)
+        .map_err(fail)?;
+    #[cfg(not(unix))]
+    let _ = parent;
+    Ok(())
 }
 pub(super) fn remembered_remote(
     database: &Path,

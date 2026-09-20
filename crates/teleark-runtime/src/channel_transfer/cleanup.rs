@@ -56,6 +56,7 @@ fn conflict() -> ApplicationError {
     ApplicationError::new(ApplicationErrorKind::Conflict)
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn cleanup_io(error: std::io::Error) -> ApplicationError {
     ApplicationError::new(match error.kind() {
         std::io::ErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,
@@ -64,18 +65,26 @@ fn cleanup_io(error: std::io::Error) -> ApplicationError {
 }
 
 pub(super) fn sync_cleanup_directory(destination: &Path) -> Result<(), ApplicationError> {
-    let mut parent = destination.parent().ok_or_else(conflict)?;
-    loop {
-        // A user may have removed the entire output directory while the app
-        // was closed. Synchronize its nearest surviving ancestor instead of
-        // leaving an already absent partial permanently awaiting cleanup.
-        match std::fs::File::open(parent) {
-            Ok(directory) => return directory.sync_all().map_err(cleanup_io),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                parent = parent.parent().ok_or_else(|| cleanup_io(error))?;
+    #[cfg(unix)]
+    {
+        let mut parent = destination.parent().ok_or_else(conflict)?;
+        loop {
+            // A user may have removed the entire output directory while the app
+            // was closed. Synchronize its nearest surviving ancestor instead of
+            // leaving an already absent partial permanently awaiting cleanup.
+            match std::fs::File::open(parent) {
+                Ok(directory) => return directory.sync_all().map_err(cleanup_io),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    parent = parent.parent().ok_or_else(|| cleanup_io(error))?;
+                }
+                Err(error) => return Err(cleanup_io(error)),
             }
-            Err(error) => return Err(cleanup_io(error)),
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = destination;
+        Ok(())
     }
 }
 
