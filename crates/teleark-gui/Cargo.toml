@@ -24,5 +24,29 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+[package.metadata.deb]
+name = "teleark"
+maintainer = "TeleArk Contributors <noreply@teleark.app>"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/teleark", "usr/bin/teleark", "755"],
+    ["assets/linux/com.teleark.desktop.desktop", "usr/share/applications/com.teleark.desktop.desktop", "644"],
+    ["assets/icons/hicolor/16x16/apps/teleark.png", "usr/share/icons/hicolor/16x16/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/24x24/apps/teleark.png", "usr/share/icons/hicolor/24x24/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/32x32/apps/teleark.png", "usr/share/icons/hicolor/32x32/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/48x48/apps/teleark.png", "usr/share/icons/hicolor/48x48/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/64x64/apps/teleark.png", "usr/share/icons/hicolor/64x64/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/128x128/apps/teleark.png", "usr/share/icons/hicolor/128x128/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/256x256/apps/teleark.png", "usr/share/icons/hicolor/256x256/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/512x512/apps/teleark.png", "usr/share/icons/hicolor/512x512/apps/teleark.png", "644"],
+    ["../../README.md", "usr/share/doc/teleark/README.md", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/teleark/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/teleark/LICENSE-APACHE", "644"],
+    ["../../THIRD_PARTY_NOTICES.md", "usr/share/doc/teleark/THIRD_PARTY_NOTICES.md", "644"],
+]

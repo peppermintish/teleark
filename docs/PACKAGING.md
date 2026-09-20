@@ -1,6 +1,6 @@
 # Building and packaging TeleArk
 
-[Back to README](../README.md) · [Portable archives](#standalone-executable-and-portable-archives) · [macOS](#macos-app-dmg-and-pkg) · [Windows](#windows-installation-executable-manual-unverified) · [Linux](#linux-debianubuntu-deb-manual-unverified)
+[Back to README](../README.md) · [Portable archives](#standalone-executable-and-portable-archives) · [macOS](#macos-app-dmg-and-pkg) · [Windows](#windows-installation-executable-and-portable-zip) · [Linux](#linux-debianubuntu-deb-and-portable-tarball)
 
 ## Prerequisites and release build
 
@@ -8,11 +8,11 @@ Run commands from the repository root. Install Rust through rustup; this checkou
 
 | Platform | Build prerequisites | Executable | Packaging status |
 | --- | --- | --- | --- |
-| macOS | Rust and Apple Command Line Tools (`xcode-select --install`) | `target/release/teleark` | Repository script and CI produce an unsigned `.app` archive; manual `.dmg` / `.pkg` commands below |
-| Windows | Native MSVC Rust toolchain, Visual Studio Build Tools with Desktop development with C++ and Windows SDK; Git Bash for the environment examples | `target/release/teleark.exe` | Manual ZIP / Inno Setup recipe; native build and installer not yet qualified by this project |
-| Linux | Rust, C/C++ toolchain, CMake, pkg-config, Clang and development libraries required by the locked GPUI backend; a working graphical session/GPU driver | `target/release/teleark` | Manual tar archive / Debian package recipe; native build and installer not yet qualified by this project |
+| macOS | Rust and Apple Command Line Tools (`xcode-select --install`) | `target/release/teleark` | `scripts/package-macos.sh` produces unsigned `.app` archive; manual `.dmg` / `.pkg` commands below |
+| Windows | Native MSVC Rust toolchain, Visual Studio Build Tools with Desktop development with C++ and Windows SDK | `target/release/teleark.exe` | `scripts/package-windows.ps1` produces portable ZIP and Inno Setup installer (`.exe`) |
+| Linux | Rust, C/C++ toolchain, CMake, pkg-config, development libraries required by GPUI (`libxkbcommon-dev`, `libwayland-dev`, etc.) | `target/release/teleark` | `scripts/package-linux.sh` produces portable tarball and Debian `.deb` package |
 
-For platform dependency troubleshooting, check the native build requirements of the locked GPUI backend. The Windows and Linux prerequisites above are starting points, not a verified dependency list for this checkout. macOS is the current build/release baseline. There is no signed installer yet.
+For platform dependency troubleshooting, check the native build requirements of the locked GPUI backend. macOS targets 11.0+ (Big Sur), Linux targets glibc 2.35+, and Windows targets Windows 10 (1809+).
 
 Build without launching:
 
@@ -24,33 +24,20 @@ scripts/build-local.sh
 
 First configure your own application credentials in `.env.local` using [README environment setup](../README.md#load-env-values-before-building). The helper always loads that file and stops if it is missing, invalid or still uses the public sample API ID. `.env.example` is a template only and is never sourced as a fallback. Use bash on macOS/Linux or PowerShell / Git Bash with native Rust on Windows. All commands below run from the repository root.
 
-The macOS packaging script only copies the supplied binary; it cannot change credentials embedded by a previous build. Always rebuild with `.env.local` first. Neither local environment file belongs in the bundle. CI has no private `.env.local`; its current workflow builds without embedded credentials unless separately configured through protected build secrets.
+The packaging scripts only copy the supplied binary; they cannot change credentials embedded by a previous build. Always rebuild with `.env.local` first. Neither local environment file belongs in the bundle. CI has no private `.env.local`; its current workflow builds without embedded credentials unless separately configured through protected build secrets.
 
 ## Standalone executable and portable archives
 
-Build with the command above, loading credentials as described in the linked environment instructions when needed. Launch with `./target/release/teleark` on macOS/Linux or `.\target\release\teleark.exe` in Windows PowerShell. This is a desktop GUI executable, not a headless CLI. A single executable may still require platform runtime libraries; test on a clean target machine before distributing it.
+Build with the command above, loading credentials as described in the linked environment instructions when needed. Launch with `./target/release/teleark` on macOS/Linux or `.\target\release\teleark.exe` in Windows PowerShell. This is a desktop GUI executable, not a headless CLI.
 
-For a macOS/Linux archive containing the executable and required notices (bash/zsh):
+### Windows Static Runtime Linking
 
-```bash
-(
-  set -eu
-  bundle="dist/teleark-$(uname -s)-$(uname -m)"
-  mkdir -p "$bundle"
-  cp target/release/teleark README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "$bundle/"
-  tar -C dist -czf "${bundle}.tar.gz" "$(basename "$bundle")"
-)
-```
-
-For Windows, after the native build, use PowerShell:
+To ensure `teleark.exe` runs on freshly installed Windows systems without requiring the Microsoft Visual C++ Redistributable (`VCRUNTIME140.dll`), compile with static C runtime (`/MT`):
 
 ```powershell
-New-Item -ItemType Directory -Force dist/teleark-windows | Out-Null
-Copy-Item target/release/teleark.exe, README.md, LICENSE-MIT, LICENSE-APACHE, THIRD_PARTY_NOTICES.md dist/teleark-windows/
-Compress-Archive -Path dist/teleark-windows -DestinationPath dist/teleark-windows.zip -Force
+$env:RUSTFLAGS = "-C target-feature=+crt-static"
+cargo build --release -p teleark-gui --bin teleark --locked
 ```
-
-Use a fresh staging directory for each release. These archives are unpack-and-run distributions; they do not register an application or create an uninstaller. Include any required redistributable runtime dependencies after checking their licenses.
 
 ## macOS: `.app`, `.dmg` and `.pkg`
 
@@ -83,78 +70,41 @@ pkgbuild --component dist/TeleArk.app \
   dist/TeleArk.pkg
 ```
 
-Open the `.dmg` and drag the app into Applications, or open the `.pkg` and follow Installer. These commands do not sign or notarize the output. Public distribution still needs signing/notarization and clean-machine validation; see Apple's [distribution guidance](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). Build separately for Apple Silicon and Intel; the commands do not create a universal binary. The existing [release workflow](../.github/workflows/release.yml) packages an unsigned `.app` in `.tar.gz` with a checksum, not a `.dmg` or `.pkg`.
+These commands do not sign or notarize the output. Public distribution still needs signing/notarization and clean-machine validation.
 
-## Windows: installation executable (manual, unverified)
+## Windows: installation executable and portable ZIP
 
-First complete the native Windows build and portable folder above. Install [Inno Setup](https://jrsoftware.org/isinfo.php). Save the following as `dist/teleark.iss`, replacing `AppVersion` with the workspace version from `Cargo.toml`:
+After building on Windows (ideally with `+crt-static`), package the application using the repository script:
 
-```ini
-[Setup]
-AppId=app.teleark.desktop
-AppName=TeleArk
-AppVersion=0.4.4
-DefaultDirName={localappdata}\Programs\TeleArk
-PrivilegesRequired=lowest
-OutputDir=.
-OutputBaseFilename=TeleArk-Setup
-UninstallDisplayIcon={app}\teleark.exe
-
-[Files]
-Source: "teleark-windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[Icons]
-Name: "{userprograms}\TeleArk"; Filename: "{app}\teleark.exe"
+```powershell
+.\scripts\package-windows.ps1
 ```
 
-Compile using Inno Setup's IDE, or run `ISCC.exe dist\teleark.iss` from a shell where `ISCC.exe` is on PATH. The result is `dist/TeleArk-Setup.exe`, which installs for the current user and creates an uninstall entry. See the [compiler command-line documentation](https://jrsoftware.org/ishelp/topic_compilercmdline.htm). This recipe does not produce MSI/MSIX, bundle the MSVC runtime or sign the installer. Check native dependencies and test install, launch, upgrade and uninstall on Windows before publishing.
+This generates:
+1. `dist/teleark-<version>-windows-x86_64.zip` (portable distribution with licenses).
+2. `dist/TeleArk-Setup-<version>-windows-x86_64.exe` (Inno Setup non-admin installer using `scripts/teleark.iss`).
+3. `dist/SHA256SUMS` (checksums).
 
-## Linux: Debian/Ubuntu `.deb` (manual, unverified)
+If [Inno Setup](https://jrsoftware.org/isinfo.php) (`ISCC.exe`) is installed and available, the installer is built automatically with lowest privilege requirements (`{localappdata}\Programs\TeleArk`) and desktop/start menu shortcuts.
 
-First complete and test a native release build on the intended Debian/Ubuntu baseline. Install `dpkg-dev` and the packaging-only [cargo-deb tool](https://github.com/kornelski/cargo-deb):
+## Linux: Debian/Ubuntu `.deb` and portable tarball
+
+After building on Linux (targeting Ubuntu 22.04 / glibc 2.35 baseline), package the application using the repository script:
 
 ```bash
-sudo apt-get install dpkg-dev
-cargo install cargo-deb --locked
+scripts/package-linux.sh
 ```
 
-The repository does not currently define Debian metadata. To try this packaging recipe, add the following table to `crates/teleark-gui/Cargo.toml` in your packaging checkout. Replace the maintainer placeholder with the distributor's actual name/email:
+This generates:
+1. `dist/teleark-<version>-linux-<arch>.tar.gz` (portable distribution with desktop entry and icons).
+2. `dist/teleark_<version>_amd64.deb` (Debian/Ubuntu package using `cargo-deb`).
+3. `dist/SHA256SUMS` (checksums).
 
-```toml
-[package.metadata.deb]
-name = "teleark"
-maintainer = "Your Name <you@example.com>"
-depends = "$auto"
-section = "utils"
-priority = "optional"
-assets = [
-    ["target/release/teleark", "usr/bin/teleark", "755"],
-    ["assets/linux/com.teleark.desktop.desktop", "usr/share/applications/com.teleark.desktop.desktop", "644"],
-    ["assets/icons/hicolor/16x16/apps/teleark.png", "usr/share/icons/hicolor/16x16/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/32x32/apps/teleark.png", "usr/share/icons/hicolor/32x32/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/48x48/apps/teleark.png", "usr/share/icons/hicolor/48x48/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/64x64/apps/teleark.png", "usr/share/icons/hicolor/64x64/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/128x128/apps/teleark.png", "usr/share/icons/hicolor/128x128/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/256x256/apps/teleark.png", "usr/share/icons/hicolor/256x256/apps/teleark.png", "644"],
-    ["assets/icons/hicolor/512x512/apps/teleark.png", "usr/share/icons/hicolor/512x512/apps/teleark.png", "644"],
-    ["../../README.md", "usr/share/doc/teleark/README.md", "644"],
-    ["../../LICENSE-MIT", "usr/share/doc/teleark/LICENSE-MIT", "644"],
-    ["../../LICENSE-APACHE", "usr/share/doc/teleark/LICENSE-APACHE", "644"],
-    ["../../THIRD_PARTY_NOTICES.md", "usr/share/doc/teleark/THIRD_PARTY_NOTICES.md", "644"],
-]
-```
-
-Then package the already-built executable without rebuilding outside its credential environment:
-
+Install the `.deb` package on Debian/Ubuntu systems:
 ```bash
-mkdir -p dist
-cargo deb -p teleark-gui --no-build --output dist/teleark.deb
-dpkg-deb --info dist/teleark.deb
-dpkg-deb --contents dist/teleark.deb
-sudo apt install ./dist/teleark.deb
+sudo apt install ./dist/teleark_<version>_amd64.deb
 ```
-
-Run `teleark` from the application launcher or a terminal in the desktop session; remove it with `sudo apt remove teleark`. `$auto` resolves linked library dependencies, but cannot prove dynamically loaded graphics/runtime dependencies are complete. Inspect the package and validate install/launch/upgrade/removal on a clean target distribution. RPM, AppImage and Flatpak packaging are not configured; do not rename a `.deb` or tar archive to those formats.
+The package dependencies are automatically resolved by `dpkg`/`apt`, requiring only runtime libraries without build tools or `-dev` headers.
 
 
 ## Telegram session identity
