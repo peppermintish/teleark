@@ -459,7 +459,13 @@ impl TeleArkApp {
             },
             activity_detail: if let Some(status) = server_status {
                 let wait = status.wait_remaining_seconds();
-                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+                Some(
+                    format!(
+                        "Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining",
+                        status.code, status.flag, wait
+                    )
+                    .into(),
+                )
             } else if unavailable {
                 Some(self.tr("transfer-recovery-unavailable-detail"))
             } else if unverified_saved {
@@ -507,25 +513,26 @@ impl TeleArkApp {
                 format!("{} ({}s)", status.flag, wait).into()
             } else {
                 self.vault_transfer_view
-                .rates
-                .get(&snapshot.id)
-                .and_then(|rate| rate.bytes_per_second)
-                .or_else(|| {
-                    (state == TransferState::Completed)
-                        .then_some(snapshot.average_bytes_per_second)
-                        .flatten()
-                })
-                .map(|speed| format_speed(self.locale(), speed).into())
-                .unwrap_or_else(|| {
-                    self.tr(
-                        if state == TransferState::Uploading || state == TransferState::Downloading
-                        {
-                            "transfer-rate-sampling"
-                        } else {
-                            "transfer-value-unavailable"
-                        },
-                    )
-                })
+                    .rates
+                    .get(&snapshot.id)
+                    .and_then(|rate| rate.bytes_per_second)
+                    .or_else(|| {
+                        (state == TransferState::Completed)
+                            .then_some(snapshot.average_bytes_per_second)
+                            .flatten()
+                    })
+                    .map(|speed| format_speed(self.locale(), speed).into())
+                    .unwrap_or_else(|| {
+                        self.tr(
+                            if state == TransferState::Uploading
+                                || state == TransferState::Downloading
+                            {
+                                "transfer-rate-sampling"
+                            } else {
+                                "transfer-value-unavailable"
+                            },
+                        )
+                    })
             },
             eta: self
                 .vault_transfer_view
@@ -807,7 +814,13 @@ impl TeleArkApp {
             },
             activity_detail: if let Some(status) = server_status {
                 let wait = status.wait_remaining_seconds();
-                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+                Some(
+                    format!(
+                        "Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining",
+                        status.code, status.flag, wait
+                    )
+                    .into(),
+                )
             } else {
                 self.receipt_activity_detail(
                     self.native_transfer_view.rates.get(&snapshot.id),
@@ -919,7 +932,13 @@ impl TeleArkApp {
             },
             activity_detail: if let Some(status) = server_status {
                 let wait = status.wait_remaining_seconds();
-                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+                Some(
+                    format!(
+                        "Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining",
+                        status.code, status.flag, wait
+                    )
+                    .into(),
+                )
             } else {
                 items
                     .iter()

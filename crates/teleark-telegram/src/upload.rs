@@ -181,8 +181,7 @@ impl TelegramConnection {
                             if attempt == attempts
                                 || !matches!(
                                     error.kind(),
-                                    TelegramErrorKind::Network
-                                        | TelegramErrorKind::Server
+                                    TelegramErrorKind::Network | TelegramErrorKind::Server
                                 )
                             {
                                 return Err(error);

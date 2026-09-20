@@ -300,7 +300,12 @@ impl TelegramError {
 
 impl fmt::Display for TelegramError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.kind, self.retry_after, self.server_code, self.server_message.as_deref()) {
+        match (
+            self.kind,
+            self.retry_after,
+            self.server_code,
+            self.server_message.as_deref(),
+        ) {
             (TelegramErrorKind::FloodWait, Some(duration), Some(code), Some(msg)) => {
                 write!(
                     formatter,
@@ -316,7 +321,10 @@ impl fmt::Display for TelegramError {
                 )
             }
             (kind, _, Some(code), Some(msg)) => {
-                write!(formatter, "Telegram adapter failure: {kind:?} ({code} {msg})")
+                write!(
+                    formatter,
+                    "Telegram adapter failure: {kind:?} ({code} {msg})"
+                )
             }
             (kind, ..) => write!(formatter, "Telegram adapter failure: {kind:?}"),
         }
@@ -2141,11 +2149,11 @@ fn map_invocation(error: InvocationError) -> TelegramError {
                 .with_server_detail(rpc.code, &rpc.name)
         }
         InvocationError::Rpc(rpc) if rpc.code >= 500 => {
-            TelegramError::new(TelegramErrorKind::Server)
-                .with_server_detail(rpc.code, &rpc.name)
+            TelegramError::new(TelegramErrorKind::Server).with_server_detail(rpc.code, &rpc.name)
         }
-        InvocationError::Rpc(rpc) => TelegramError::new(TelegramErrorKind::Network)
-            .with_server_detail(rpc.code, &rpc.name),
+        InvocationError::Rpc(rpc) => {
+            TelegramError::new(TelegramErrorKind::Network).with_server_detail(rpc.code, &rpc.name)
+        }
         InvocationError::Session(_) => TelegramError::new(TelegramErrorKind::Session),
         InvocationError::Dropped => TelegramError::new(TelegramErrorKind::Cancelled),
         InvocationError::Io(_)
@@ -2434,10 +2442,17 @@ mod tests {
                 caused_by: None,
             }));
             assert_eq!(error.kind(), TelegramErrorKind::FloodWait);
-            assert_eq!(error.retry_after(), Some(Duration::from_secs(expected_secs)));
+            assert_eq!(
+                error.retry_after(),
+                Some(Duration::from_secs(expected_secs))
+            );
             assert_eq!(error.server_code(), Some(code));
             assert_eq!(error.server_message(), Some(name));
-            assert!(error.to_string().contains(&format!("{expected_secs} second")));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{expected_secs} second"))
+            );
             assert!(error.to_string().contains(name));
         }
     }

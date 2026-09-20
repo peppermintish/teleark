@@ -1448,7 +1448,9 @@ fn restart_recovers_three_upload_files_concurrently() {
     let (vault, library) = open(dir.path(), &remote);
     let mut preferences = library.preferences().expect("preferences");
     preferences.transfer_tuning.upload_tasks = 3;
-    library.set_preferences(&preferences).expect("save preferences");
+    library
+        .set_preferences(&preferences)
+        .expect("save preferences");
     vault.initialize(PASSWORD.into()).expect("keys");
     let sources = (0..3)
         .map(|index| {

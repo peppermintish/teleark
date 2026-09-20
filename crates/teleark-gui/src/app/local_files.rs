@@ -362,7 +362,8 @@ mod tests {
         let weak = app.downgrade();
         cx.update(|window, _| window.remove_window());
         drop(app);
-        cx.background_executor.advance_clock(Duration::from_secs(10));
+        cx.background_executor
+            .advance_clock(Duration::from_secs(10));
         cx.run_until_parked();
         assert!(
             weak.upgrade().is_none(),

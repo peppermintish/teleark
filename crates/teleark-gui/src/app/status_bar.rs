@@ -689,8 +689,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&directory).expect("temporary fixture");
-        let library = DesktopLibrary::open(directory.join("catalog.sqlite3"))
-            .expect("temporary catalog");
+        let library =
+            DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("temporary catalog");
         library
             .managed_directories()
             .expect("temporary output directories");
@@ -709,7 +709,10 @@ mod tests {
         cx.run_until_parked();
 
         app.update(cx, |app, _| {
-            assert!(app.volume_space.is_some(), "volume space should be populated");
+            assert!(
+                app.volume_space.is_some(),
+                "volume space should be populated"
+            );
         });
 
         // Coalesced queries: when in flight, another request marks pending.
@@ -722,7 +725,8 @@ mod tests {
 
         // Idle time passing must NOT trigger repeated queries or repaint notifications.
         let baseline = notifications.get();
-        cx.background_executor.advance_clock(std::time::Duration::from_secs(60));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(60));
         cx.run_until_parked();
         assert_eq!(notifications.get(), baseline, "no idle polling or repaints");
 

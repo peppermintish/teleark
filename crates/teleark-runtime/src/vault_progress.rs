@@ -343,7 +343,11 @@ impl ByteTransferObserver for VaultUploadObserver {
                             .saturating_add(bytes.saturating_sub(activity.acknowledged_current));
                     }
                     activity.acknowledged_current = bytes;
-                    if activity.server_status.as_ref().is_some_and(|s| !s.is_active()) {
+                    if activity
+                        .server_status
+                        .as_ref()
+                        .is_some_and(|s| !s.is_active())
+                    {
                         activity.server_status = None;
                         snapshot.server_status = None;
                     }

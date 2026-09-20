@@ -585,7 +585,11 @@ impl RuntimeDownloadObserver {
                     wait_until_unix_ms,
                 });
             } else if event.state == DownloadPartState::Completed {
-                if snapshot.server_status.as_ref().is_some_and(|s| !s.is_active()) {
+                if snapshot
+                    .server_status
+                    .as_ref()
+                    .is_some_and(|s| !s.is_active())
+                {
                     snapshot.server_status = None;
                 }
             }
