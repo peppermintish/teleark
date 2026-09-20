@@ -13,7 +13,7 @@ use tokio::{
     time::Instant,
 };
 
-const MAX_BURST: usize = 512 * 1024;
+const MAX_BURST: usize = 128 * 1024;
 const READER_SLICE: usize = 16 * 1024;
 const EVENT_LIMIT: usize = 16;
 

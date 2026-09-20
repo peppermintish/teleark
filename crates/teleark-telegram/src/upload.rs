@@ -2,7 +2,7 @@
 use super::*;
 use tokio::sync::mpsc;
 
-pub const UPLOAD_PART_BYTES: usize = 512 * 1024;
+pub const UPLOAD_PART_BYTES: usize = 128 * 1024;
 pub const UPLOAD_RESUME_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Ciphertext only. The producer runs on a retained blocking owner.

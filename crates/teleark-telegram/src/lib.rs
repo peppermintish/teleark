@@ -75,7 +75,7 @@ const RECENT_SEARCH_MESSAGES: usize = 512;
 pub const MAX_TRANSFER_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 /// Floor(1.9 GiB), including the container header and authentication tags.
 pub const MAX_STREAM_OBJECT_BYTES: u64 = 19 * 1024 * 1024 * 1024 / 10;
-const DOWNLOAD_CHUNK_SIZE: u64 = 512 * 1024;
+const DOWNLOAD_CHUNK_SIZE: u64 = 128 * 1024;
 pub const DOWNLOAD_PART_SIZE_BYTES: u64 = 1024 * 1024;
 const MAX_DOWNLOAD_INFLIGHT_PARTS: usize = 64;
 const MAX_DOWNLOAD_PART_ATTEMPTS: u32 = 4;

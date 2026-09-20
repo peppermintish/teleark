@@ -91,8 +91,8 @@ fn load_checkpoint(
 ) -> Result<UploadCheckpoint, TransferError> {
     match File::open(path) {
         Ok(file) => {
-            let mut bytes = Vec::with_capacity(4161);
-            file.take(4161)
+            let mut bytes = Vec::with_capacity(32_768);
+            file.take(32_768)
                 .read_to_end(&mut bytes)
                 .map_err(map_spool_error)?;
             // Newer checkpoint codecs remain intact; do not downgrade them.
@@ -703,7 +703,12 @@ mod tests {
                         .expected_encoded_length()
                         .expect("encoded size")
                 );
-                assert_eq!(transport.store.blocks_received, 121);
+                let expected_blocks = (reservation
+                    .header
+                    .expected_encoded_length()
+                    .expect("encoded size") as usize)
+                    .div_ceil(UPLOAD_PART_BYTES);
+                assert_eq!(transport.store.blocks_received, expected_blocks);
             }
         }
     }
