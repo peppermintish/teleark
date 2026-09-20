@@ -117,14 +117,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libwayland-dev \
             libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
             libasound2-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
             libssl-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
             dpkg-dev
 
       - name: Install cargo-deb
@@ -191,10 +195,15 @@ jobs:
           version="${version//\//-}"
           package="teleark-${version}-macos-${architecture}"
           mkdir -p "dist/${package}"
-          scripts/package-macos.sh target/release/teleark "dist/${package}/TeleArk.app"
+          scripts/package-macos.sh target/release/teleark "dist/${package}/TeleArk.app" dist "$version"
           cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          (cd dist && shasum -a 256 "${package}.tar.gz" > SHA256SUMS)
+          (
+            cd dist
+            for f in "${package}.tar.gz" "TeleArk-${version}-macos-${architecture}.pkg"; do
+              if [ -f "$f" ]; then shasum -a 256 "$f" >> SHA256SUMS; fi
+            done
+          )
 
       - name: Package Linux release
         if: runner.os == 'Linux'
@@ -212,6 +221,7 @@ jobs:
             dist/*.zip
             dist/*.exe
             dist/*.deb
+            dist/*.pkg
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
@@ -235,7 +245,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.exe" -o -name "*.deb" \) -exec cp {} dist/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.exe" -o -name "*.deb" -o -name "*.pkg" \) -exec cp {} dist/ \;
           cd dist
           sha256sum * > SHA256SUMS
           echo "### 📦 Unified Release Package Manifest" >> "$GITHUB_STEP_SUMMARY"

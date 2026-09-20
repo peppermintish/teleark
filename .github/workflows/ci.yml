@@ -120,14 +120,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libwayland-dev \
             libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
             libasound2-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
-            libssl-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+            libssl-dev
 
       - name: Cache Rust build data
         id: rust-cache
