@@ -1202,7 +1202,7 @@ fn cancelled_upload_and_download_remain_terminal_after_restart() {
 }
 
 #[test]
-fn default_three_files_are_work_conserving_and_fresh_parts_have_no_readback() {
+fn default_two_files_are_work_conserving_and_fresh_parts_have_no_readback() {
     let dir = tempfile::tempdir().expect("directory");
     let remote = TestVaultRemote::new();
     let (vault, _library) = open(dir.path(), &remote);
@@ -1216,17 +1216,21 @@ fn default_three_files_are_work_conserving_and_fresh_parts_have_no_readback() {
         .collect();
     let (entered, release) = remote.concurrent_upload_gate(4);
     let work = vault.submit_upload_files(7, 11, sources).expect("batch");
-    for _ in 0..3 {
+    for _ in 0..2 {
         entered
             .recv_timeout(Duration::from_secs(10))
-            .expect("three files enter transport before a completion");
+            .expect("two files enter transport before a completion");
     }
-    assert!(entered.try_recv().is_err(), "fourth file stays queued");
+    assert!(entered.try_recv().is_err(), "third file stays queued");
     release.send(()).expect("one finishes");
     entered
         .recv_timeout(Duration::from_secs(10))
-        .expect("fourth fills the free slot while two remain blocked");
-    for _ in 0..3 {
+        .expect("third fills the free slot while one remains blocked");
+    release.send(()).expect("second finishes");
+    entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("fourth fills the free slot");
+    for _ in 0..2 {
         release.send(()).expect("finish");
     }
     assert_eq!(work.wait().expect("batch").completed_count, 4);
@@ -1442,6 +1446,9 @@ fn restart_recovers_three_upload_files_concurrently() {
     let dir = tempfile::tempdir().expect("directory");
     let remote = TestVaultRemote::new();
     let (vault, library) = open(dir.path(), &remote);
+    let mut preferences = library.preferences().expect("preferences");
+    preferences.transfer_tuning.upload_tasks = 3;
+    library.set_preferences(&preferences).expect("save preferences");
     vault.initialize(PASSWORD.into()).expect("keys");
     let sources = (0..3)
         .map(|index| {

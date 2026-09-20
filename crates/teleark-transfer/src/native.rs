@@ -286,6 +286,7 @@ impl FileSystemPort for NativeFileSystem {
         // Sibling paths share a filesystem. Publication must fail atomically if
         // another owner creates the destination, including a dangling symlink.
         std::fs::hard_link(&partial, &destination).map_err(|error| map_destination_io(&error))?;
+        #[cfg(unix)]
         if let Some(parent) = destination
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
