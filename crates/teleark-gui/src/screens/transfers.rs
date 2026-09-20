@@ -143,6 +143,7 @@ impl TeleArkApp {
                 destination: None,
                 session_log_path: None,
                 telemetry: telemetry.clone(),
+                server_status: None,
                 state,
             })
         })
@@ -295,6 +296,7 @@ impl TeleArkApp {
             part_events: Default::default(),
             session_log_path: None,
             telemetry: template.telemetry.clone(),
+            server_status: None,
         };
         let row = self.transfer_row_from_snapshot(&snapshot, false);
         self.focused_transfer_key = Some(snapshot.id);
@@ -438,8 +440,12 @@ impl TeleArkApp {
             && snapshot.direction == VaultTransferDirection::Download
             && state != TransferState::Completed;
         let unavailable = unverified_saved && snapshot.file_name.is_empty();
+        let server_status = snapshot.server_status();
         TransferRow {
-            activity: if unavailable {
+            activity: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("{} ({}s)", status.flag, wait).into())
+            } else if unavailable {
                 Some(self.tr("transfer-recovery-unavailable"))
             } else if unverified_saved {
                 Some(self.tr(state.message_id()))
@@ -451,7 +457,10 @@ impl TeleArkApp {
                     _ => activity.map(|activity| self.tr(upload_phase_message_id(activity.phase))),
                 }
             },
-            activity_detail: if unavailable {
+            activity_detail: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+            } else if unavailable {
                 Some(self.tr("transfer-recovery-unavailable-detail"))
             } else if unverified_saved {
                 Some(self.tr("transfer-recovery-verification-pending"))
@@ -493,8 +502,11 @@ impl TeleArkApp {
                 snapshot.size_bytes,
                 state == TransferState::Completed,
             ),
-            speed: self
-                .vault_transfer_view
+            speed: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                format!("{} ({}s)", status.flag, wait).into()
+            } else {
+                self.vault_transfer_view
                 .rates
                 .get(&snapshot.id)
                 .and_then(|rate| rate.bytes_per_second)
@@ -513,7 +525,8 @@ impl TeleArkApp {
                             "transfer-value-unavailable"
                         },
                     )
-                }),
+                })
+            },
             eta: self
                 .vault_transfer_view
                 .rates
@@ -782,16 +795,27 @@ impl TeleArkApp {
             state == TransferState::Completed,
         );
         let source = self.telegram_source_name(snapshot.chat_id);
+        let server_status = snapshot.server_status();
         TransferRow {
-            activity: snapshot
-                .cleanup
-                .map(|cleanup| self.tr(native_cleanup_message_id(cleanup.phase))),
-            activity_detail: self.receipt_activity_detail(
-                self.native_transfer_view.rates.get(&snapshot.id),
+            activity: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("{} ({}s)", status.flag, wait).into())
+            } else {
                 snapshot
                     .cleanup
-                    .map(|cleanup| self.native_cleanup_detail(cleanup)),
-            ),
+                    .map(|cleanup| self.tr(native_cleanup_message_id(cleanup.phase)))
+            },
+            activity_detail: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+            } else {
+                self.receipt_activity_detail(
+                    self.native_transfer_view.rates.get(&snapshot.id),
+                    snapshot
+                        .cleanup
+                        .map(|cleanup| self.native_cleanup_detail(cleanup)),
+                )
+            },
             runtime_task_id: Some(snapshot.id),
             vault_transfer_id: None,
             vault_batch_id: None,
@@ -808,7 +832,12 @@ impl TeleArkApp {
             size: format_bytes(self.locale(), snapshot.size_bytes).into(),
             transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
             progress,
-            speed: speed.into(),
+            speed: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                format!("{} ({}s)", status.flag, wait).into()
+            } else {
+                speed.into()
+            },
             eta: self
                 .native_transfer_view
                 .rates
@@ -877,15 +906,26 @@ impl TeleArkApp {
             .and_then(|item| item.destination.parent())
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let server_status = items.iter().find_map(|item| item.server_status());
         TransferRow {
-            activity: items
-                .iter()
-                .find_map(|item| item.cleanup)
-                .map(|cleanup| self.tr(native_cleanup_message_id(cleanup.phase))),
-            activity_detail: items
-                .iter()
-                .find_map(|item| item.cleanup)
-                .map(|cleanup| self.native_cleanup_detail(cleanup)),
+            activity: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("{} ({}s)", status.flag, wait).into())
+            } else {
+                items
+                    .iter()
+                    .find_map(|item| item.cleanup)
+                    .map(|cleanup| self.tr(native_cleanup_message_id(cleanup.phase)))
+            },
+            activity_detail: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                Some(format!("Throttled by Telegram server ({} Â· {}) Â· Cooldown {}s remaining", status.code, status.flag, wait).into())
+            } else {
+                items
+                    .iter()
+                    .find_map(|item| item.cleanup)
+                    .map(|cleanup| self.native_cleanup_detail(cleanup))
+            },
             runtime_task_id: None,
             vault_transfer_id: None,
             vault_batch_id: None,
@@ -933,15 +973,20 @@ impl TeleArkApp {
                 total_bytes,
                 state == TransferState::Completed,
             ),
-            speed: current_speed
-                .map(|speed| format_speed(self.locale(), speed).into())
-                .unwrap_or_else(|| {
-                    self.tr(if state == TransferState::Downloading {
-                        "transfer-rate-sampling"
-                    } else {
-                        "transfer-value-unavailable"
+            speed: if let Some(status) = server_status {
+                let wait = status.wait_remaining_seconds();
+                format!("{} ({}s)", status.flag, wait).into()
+            } else {
+                current_speed
+                    .map(|speed| format_speed(self.locale(), speed).into())
+                    .unwrap_or_else(|| {
+                        self.tr(if state == TransferState::Downloading {
+                            "transfer-rate-sampling"
+                        } else {
+                            "transfer-value-unavailable"
+                        })
                     })
-                }),
+            },
             eta: eta_ms
                 .map(|eta| format_duration_millis(self.locale(), eta).into())
                 .unwrap_or_else(|| self.tr("transfer-value-unavailable")),
@@ -2820,7 +2865,21 @@ impl TeleArkApp {
         if transfer.batch_summary.is_some() {
             return self.render_batch_detail(&transfer, layout, cx);
         }
-        let tone = transfer_tone(transfer.state);
+        let runtime_snapshot = transfer
+            .runtime_task_id
+            .and_then(|id| self.runtime_transfer_snapshot(id));
+        let vault_snapshot = transfer
+            .vault_transfer_id
+            .and_then(|id| self.vault_transfer_snapshot(id));
+        let server_status = vault_snapshot
+            .as_ref()
+            .and_then(|s| s.server_status())
+            .or_else(|| runtime_snapshot.as_ref().and_then(|s| s.server_status()));
+        let tone = if server_status.is_some() {
+            Tone::Amber
+        } else {
+            transfer_tone(transfer.state)
+        };
         let active = matches!(
             transfer.state,
             TransferState::Downloading | TransferState::Uploading | TransferState::Paused
@@ -2832,12 +2891,6 @@ impl TeleArkApp {
         let vault_backed = transfer.vault_transfer_id.is_some();
         let upload = transfer.direction == TransferDirection::Upload;
         let preview_upload = self.visual_preview && upload && !runtime_backed && !vault_backed;
-        let runtime_snapshot = transfer
-            .runtime_task_id
-            .and_then(|id| self.runtime_transfer_snapshot(id));
-        let vault_snapshot = transfer
-            .vault_transfer_id
-            .and_then(|id| self.vault_transfer_snapshot(id));
         let interrupted = vault_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.state == VaultTransferState::Interrupted);
@@ -2949,6 +3002,16 @@ impl TeleArkApp {
             (self.tr("detail-created"), created_at),
             (self.tr("detail-started"), started_at),
         ];
+        if let Some(status) = server_status {
+            let wait = status.wait_remaining_seconds();
+            details.insert(
+                0,
+                (
+                    self.tr("detail-server-status"),
+                    format!("{} {} ({}s remaining)", status.code, status.flag, wait).into(),
+                ),
+            );
+        }
         if completed && !upload && (runtime_backed || vault_backed) {
             details.insert(
                 4,
@@ -3557,6 +3620,16 @@ impl TeleArkApp {
                             details.child(self.render_transfer_telemetry(telemetry, active, cx))
                         },
                     )
+                    .when_some(server_status, |details, status| {
+                        let wait = status.wait_remaining_seconds();
+                        details.child(components::list_summary(
+                            "transfer-server-status-banner",
+                            format!(
+                                "Telegram Server: {} {} \u{b7} {}s cooldown remaining",
+                                status.code, status.flag, wait
+                            ),
+                        ))
+                    })
                     .when_some(runtime_snapshot, |details, snapshot| {
                         let events = snapshot.events.iter().enumerate().map(|(index, event)| {
                             let label = self.tr(match event.kind {
@@ -4483,6 +4556,7 @@ mod tests {
                 lanes: vec![],
                 decisions: vec![],
             },
+            server_status: None,
             state: VaultTransferState::Running,
         }
     }
@@ -4521,6 +4595,7 @@ mod tests {
             part_events: Default::default(),
             session_log_path: None,
             telemetry: vault.telemetry,
+            server_status: None,
         }
     }
 

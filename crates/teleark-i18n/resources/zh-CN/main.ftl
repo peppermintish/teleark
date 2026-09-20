@@ -1728,6 +1728,7 @@ managed-key-phase-securing = 正在保存并验证钥匙串记录
 managed-key-store-error = 无法访问系统钥匙串。请允许 TeleArk 访问后，在设置 → 加密密钥中重试。
 
 transfer-rate-sampling = 正在采样…
+detail-server-status = Telegram 服务端状态
 transfer-persistence-parallel = { $activity } · 正在保存恢复信息
 transfer-eta-compact = 剩余 { $eta }
 transfer-rate-basis = 已确认的应用数据 · 最近 3 秒窗口 · 每秒更新

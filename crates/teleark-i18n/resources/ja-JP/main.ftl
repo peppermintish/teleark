@@ -1728,6 +1728,7 @@ managed-key-phase-securing = キーチェーンの項目を保存・検証中
 managed-key-store-error = システムキーチェーンにアクセスできません。TeleArk のアクセスを許可し、設定 → 暗号化キーで再試行してください。
 
 transfer-rate-sampling = 測定中…
+detail-server-status = Telegram サーバー応答状態
 transfer-persistence-parallel = { $activity } · 復旧情報を保存中
 transfer-eta-compact = 残り { $eta }
 transfer-rate-basis = 確認済みアプリデータ · 直近 3 秒 · 1 秒ごとに更新

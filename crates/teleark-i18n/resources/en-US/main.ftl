@@ -1755,6 +1755,7 @@ managed-key-phase-securing = Saving and verifying the keychain entry
 managed-key-store-error = The system keychain could not be accessed. Allow TeleArk access and retry in Settings → Encryption keys.
 
 transfer-rate-sampling = Sampling…
+detail-server-status = Telegram server status
 transfer-persistence-parallel = { $activity } · Saving recovery information
 transfer-eta-compact = ETA { $eta }
 transfer-rate-basis = Confirmed application payload · 3 s window · updated every 1 s
