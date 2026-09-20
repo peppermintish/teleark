@@ -104,6 +104,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("directory");
         let source = dir.path().join("metadata.bin");
         std::fs::write(&source, b"abcdef").expect("source");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644))
+            .expect("initial permissions");
         let mut files = NativeFileSystem::new();
         files
             .register_source(SourceId(1), &source)
@@ -114,6 +116,7 @@ mod tests {
             &[2, 4],
             |completed, _| {
                 if completed == 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
                         .expect("metadata-only change between reads");
                 }
