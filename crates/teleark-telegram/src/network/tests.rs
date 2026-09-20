@@ -650,6 +650,7 @@ async fn oversized_http_response_fails_closed_with_bounded_memory() {
             .await
             .expect("controlled proxy fixture");
         let _ = stream.write_all(&vec![b'A'; MAX_HTTP_HEADER + 1]).await;
+        let _ = stream.read_to_end(&mut Vec::new()).await;
     });
     assert_eq!(
         dial(&route, target)
