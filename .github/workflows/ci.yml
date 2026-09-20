@@ -18,23 +18,44 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  ACTIONS_RUNNER_FORCE_NODE24: "true"
 
 jobs:
   quality:
-    name: Rust workspace quality
-    runs-on: macos-latest
-    timeout-minutes: 45
+    name: Quality and legal baseline (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Configure Rust toolchain
+        run: |
+          rustup default stable
+          rustup component add clippy rustfmt
 
       - name: Cache Rust build data
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: quality-linux-x86_64
+
+      - name: Report cache status
+        shell: bash
+        run: |
+          hit="${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "### ⚡ Cache Status — Quality & Legal (Linux)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$hit" = "true" ]; then
+            echo "| **Cache Status** | 🟢 **HIT (Exact)** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [Linux Quality]::🟢 Rust cache HIT"
+          else
+            echo "| **Cache Status** | ⚠️ **MISS** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [Linux Quality]::⚠️ Rust cache MISS"
+          fi
+          echo "| **Runner Image** | \`ubuntu-22.04\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Target** | \`x86_64-unknown-linux-gnu\` |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify repository legal baseline
         shell: bash
@@ -48,15 +69,88 @@ jobs:
             exit 1
           fi
 
-      # cargo-deny-action is a Docker action and cannot start on macOS.
-      - name: Install native dependency auditor
-        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --version 0.20.2 --locked
+          fi
 
       - name: Audit dependency licenses and advisories
         run: cargo deny --locked check
 
       - name: Verify formatting
         run: cargo fmt --all --check
+
+      - name: Validate workspace documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+  test-matrix:
+    name: Test workspace (${{ matrix.name }})
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure Rust toolchain
+        run: |
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libssl-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Cache Rust build data
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Report cache status
+        shell: bash
+        run: |
+          hit="${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "### ⚡ Cache Status — ${{ matrix.name }} (\`${{ matrix.target }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$hit" = "true" ]; then
+            echo "| **Cache Status** | 🟢 **HIT (Exact)** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [${{ matrix.name }}]::🟢 Rust cache HIT (${{ matrix.target }})"
+          else
+            echo "| **Cache Status** | ⚠️ **MISS** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [${{ matrix.name }}]::⚠️ Rust cache MISS (${{ matrix.target }})"
+          fi
+          echo "| **Runner OS** | \`${{ runner.os }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Runner Image** | \`${{ matrix.os }}\` |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
@@ -72,8 +166,3 @@ jobs:
 
       - name: Validate localization package
         run: cargo test -p teleark-i18n --locked
-
-      - name: Validate workspace documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --locked

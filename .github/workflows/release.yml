@@ -15,23 +15,43 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  ACTIONS_RUNNER_FORCE_NODE24: "true"
 
 jobs:
-  verify-and-package:
-    name: Verify and package unsigned macOS build
-    runs-on: macos-latest
-    timeout-minutes: 60
+  verify-legal-and-policy:
+    name: Verify legal baseline and dependency policies
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Configure Rust toolchain
+        run: |
+          rustup default stable
+          rustup component add clippy rustfmt
 
       - name: Cache Rust build data
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: release-policy-linux-x86_64
+
+      - name: Report cache status
+        shell: bash
+        run: |
+          hit="${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "### ⚡ Cache Status — Release Policy Check (Linux)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$hit" = "true" ]; then
+            echo "| **Cache Status** | 🟢 **HIT (Exact)** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [Release Policy]::🟢 Rust cache HIT"
+          else
+            echo "| **Cache Status** | ⚠️ **MISS** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [Release Policy]::⚠️ Rust cache MISS"
+          fi
+          echo "| **Runner Image** | \`ubuntu-22.04\` |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify repository legal baseline
         shell: bash
@@ -45,32 +65,124 @@ jobs:
             exit 1
           fi
 
-      # cargo-deny-action is a Docker action and cannot start on macOS.
-      - name: Install native dependency auditor
-        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --version 0.20.2 --locked
+          fi
 
       - name: Audit dependency licenses and advisories
         run: cargo deny --locked check
 
-      - name: Verify workspace
-        run: |
-          set -euo pipefail
-          cargo fmt --all --check
-          cargo check --workspace --all-targets --locked
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --all-targets --locked
-          cargo test -p teleark-core --locked
-          cargo test -p teleark-i18n --locked
+      - name: Verify formatting
+        run: cargo fmt --all --check
 
       - name: Validate workspace documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
 
-      - name: Build release workspace
+  package-matrix:
+    name: Build & package (${{ matrix.name }})
+    needs: verify-legal-and-policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+            artifact-name: release-macos
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact-name: release-windows
+          - name: Linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact-name: release-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure Rust toolchain
+        run: rustup default stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libssl-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            dpkg-dev
+
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v cargo-deb >/dev/null 2>&1; then
+            cargo install cargo-deb --version 2.11.1 --locked
+          fi
+
+      - name: Cache Rust build data
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-pkg-${{ matrix.target }}
+
+      - name: Report cache status
+        shell: bash
+        run: |
+          hit="${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "### ⚡ Cache Status — ${{ matrix.name }} Packaging (\`${{ matrix.target }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$hit" = "true" ]; then
+            echo "| **Cache Status** | 🟢 **HIT (Exact)** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [${{ matrix.name }} Packaging]::🟢 Rust cache HIT (${{ matrix.target }})"
+          else
+            echo "| **Cache Status** | ⚠️ **MISS** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Cache Status [${{ matrix.name }} Packaging]::⚠️ Rust cache MISS (${{ matrix.target }})"
+          fi
+          echo "| **Runner OS** | \`${{ runner.os }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Runner Image** | \`${{ matrix.os }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Windows release (+crt-static)
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --workspace --release --locked
 
-      - name: Create unsigned archive and checksum
+      - name: Build macOS release
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --workspace --release --locked
+
+      - name: Build Linux release
+        if: runner.os == 'Linux'
+        run: cargo build --workspace --release --locked
+
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          if (-not $version) { $version = "manual" }
+          .\scripts\package-windows.ps1 target\release\teleark.exe dist $version
+
+      - name: Package macOS release
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -84,12 +196,22 @@ jobs:
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           (cd dist && shasum -a 256 "${package}.tar.gz" > SHA256SUMS)
 
+      - name: Package Linux release
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME:-manual}"
+          scripts/package-linux.sh target/release/teleark dist "$version"
+
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v4
         with:
-          name: teleark-unsigned-macos
+          name: ${{ matrix.artifact-name }}
           path: |
             dist/*.tar.gz
+            dist/*.zip
+            dist/*.exe
+            dist/*.deb
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
@@ -97,17 +219,31 @@ jobs:
   publish:
     name: Publish tagged GitHub release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: verify-and-package
-    runs-on: ubuntu-latest
+    needs: package-matrix
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v8.0.1
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: teleark-unsigned-macos
-          path: dist
+          path: artifacts
+
+      - name: Consolidate packages and generate unified checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.exe" -o -name "*.deb" \) -exec cp {} dist/ \;
+          cd dist
+          sha256sum * > SHA256SUMS
+          echo "### 📦 Unified Release Package Manifest" >> "$GITHUB_STEP_SUMMARY"
+          echo "| File | SHA256 Checksum |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          while read -r hash name; do
+            echo "| \`$name\` | \`$hash\` |" >> "$GITHUB_STEP_SUMMARY"
+          done < SHA256SUMS
 
       - name: Create or update GitHub release
         env:
