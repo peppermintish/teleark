@@ -263,6 +263,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn checkpoint_failure_is_reported_and_retry_keeps_original_data()
     -> Result<(), Box<dyn std::error::Error>> {
