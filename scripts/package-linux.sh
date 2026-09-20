@@ -41,7 +41,7 @@ if "$dry_run"; then
   printf '  Staging directory: %s\n' "$staging_dir"
   printf '  Portable tarball: %s\n' "$tarball_path"
   printf '  Debian package: %s\n' "$deb_path"
-  echo 'Would copy binary, desktop entry, icons, licenses, compress tarball, and invoke cargo-deb if available.'
+  echo 'Would copy binary, desktop entry, icons, licenses, compress tarball, stamp preinst downgrade guard, and invoke cargo-deb if available.'
   exit 0
 fi
 
@@ -63,8 +63,17 @@ echo "Created portable archive: $tarball_path"
 # Build Debian package if cargo-deb is installed
 if command -v cargo-deb >/dev/null 2>&1; then
   echo "Building Debian package with cargo-deb..."
+  preinst_file="$repository_root/crates/teleark-gui/assets/linux/preinst"
+  if [ -f "$preinst_file" ]; then
+    sed -i.bak "s/APP_VERSION_PLACEHOLDER/${version}/g" "$preinst_file"
+    chmod +x "$preinst_file"
+    trap 'mv "${preinst_file}.bak" "$preinst_file" 2>/dev/null || true' EXIT
+  fi
   cargo deb -p teleark-gui --no-build --output "$deb_path"
-  echo "Created Debian package: $deb_path"
+  if [ -f "${preinst_file}.bak" ]; then
+    mv "${preinst_file}.bak" "$preinst_file"
+  fi
+  echo "Created Debian package with downgrade protection: $deb_path"
 else
   echo "cargo-deb not found on PATH. Skipping .deb generation." >&2
 fi

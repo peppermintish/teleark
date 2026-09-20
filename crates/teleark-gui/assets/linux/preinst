@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# dpkg passes: preinst upgrade <old-version>
+if [ "$1" = "upgrade" ]; then
+    old_version="$2"
+    new_version="APP_VERSION_PLACEHOLDER"
+    if dpkg --compare-versions "$new_version" lt "$old_version"; then
+        echo "Error: A newer version of TeleArk ($old_version) is already installed." >&2
+        echo "This package is version $new_version. Downgrading is not permitted. Aborting installation." >&2
+        exit 1
+    fi
+fi
+
+exit 0

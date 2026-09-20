@@ -1,0 +1,21 @@
+#!/bin/bash
+set -eu
+
+target_app="/Applications/TeleArk.app"
+pkg_version="APP_VERSION_PLACEHOLDER"
+
+if [ -d "$target_app" ] && [ -f "$target_app/Contents/Info.plist" ]; then
+  installed_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$target_app/Contents/Info.plist" 2>/dev/null || echo "")
+  if [ -n "$installed_version" ]; then
+    # Check if installer version is lower than currently installed version
+    lowest=$(printf '%s\n%s\n' "$pkg_version" "$installed_version" | sort -V | head -n1)
+    if [ "$lowest" = "$pkg_version" ] && [ "$pkg_version" != "$installed_version" ]; then
+      echo "Error: A newer version of TeleArk (v$installed_version) is already installed." >&2
+      echo "This installer is version v$pkg_version. Downgrading is not permitted." >&2
+      echo "Installation will now abort." >&2
+      exit 1
+    fi
+  fi
+fi
+
+exit 0
