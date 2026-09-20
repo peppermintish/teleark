@@ -4512,7 +4512,10 @@ fn transfer_controller(
         }
     } else {
         TransferControlParameters {
-            active_file_count: 1,
+            active_file_count: tuning.download_tasks,
+            transfer_connection_count: tuning.download_connections,
+            inflight_parts_per_file: tuning.download_parts,
+            inflight_rpcs_per_connection: tuning.download_parts.div_ceil(tuning.download_connections),
             ..TransferControlParameters::conservative_download()
         }
     };

@@ -14,14 +14,14 @@ pub struct TransferTuning {
 impl Default for TransferTuning {
     fn default() -> Self {
         Self {
-            upload_tasks: 3,
-            upload_parts: 10,
-            upload_connections: 2,
+            upload_tasks: 2,
+            upload_parts: 16,
+            upload_connections: 8,
             upload_queue: 2,
             upload_attempts: 4,
-            download_tasks: 3,
-            download_parts: 8,
-            download_connections: 2,
+            download_tasks: 2,
+            download_parts: 16,
+            download_connections: 8,
             download_attempts: 4,
         }
     }
@@ -93,7 +93,22 @@ mod tests {
     #[test]
     fn defaults_codec_and_bounds() {
         let value = TransferTuning::default();
-        assert_eq!((value.upload_tasks, value.upload_parts), (3, 10));
+        assert_eq!(
+            (
+                value.upload_tasks,
+                value.upload_parts,
+                value.upload_connections
+            ),
+            (2, 16, 8)
+        );
+        assert_eq!(
+            (
+                value.download_tasks,
+                value.download_parts,
+                value.download_connections
+            ),
+            (2, 16, 8)
+        );
         assert_eq!(TransferTuning::decode(&value.encode()), Some(value));
         for input in [
             "",

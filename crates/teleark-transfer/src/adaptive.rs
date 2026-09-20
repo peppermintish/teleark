@@ -100,10 +100,10 @@ impl TransferControlParameters {
     #[must_use]
     pub const fn conservative_upload() -> Self {
         Self {
-            transfer_connection_count: 1,
-            inflight_rpcs_per_connection: 4,
-            active_file_count: 1,
-            inflight_parts_per_file: 4,
+            transfer_connection_count: 8,
+            inflight_rpcs_per_connection: 2,
+            active_file_count: 2,
+            inflight_parts_per_file: 16,
             encryption_worker_count: 1,
             encrypted_part_queue_depth: 2,
         }
