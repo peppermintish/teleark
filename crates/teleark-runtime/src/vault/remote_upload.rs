@@ -518,6 +518,7 @@ impl VaultOwner {
             session_log_path: None,
             telemetry: transfer_controller(true, 0, self.library.preferences()?.transfer_tuning)?
                 .snapshot(),
+            server_status: None,
             state: VaultTransferState::Running,
         };
         if self.transfers.get(task).is_some() {

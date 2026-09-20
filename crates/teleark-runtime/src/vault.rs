@@ -163,7 +163,17 @@ pub struct VaultTransferSnapshot {
     pub destination: Option<PathBuf>,
     pub session_log_path: Option<PathBuf>,
     pub telemetry: TransferTelemetrySnapshot,
+    pub server_status: Option<teleark_telegram::TransferServerStatus>,
     pub state: VaultTransferState,
+}
+
+impl VaultTransferSnapshot {
+    pub fn server_status(&self) -> Option<&teleark_telegram::TransferServerStatus> {
+        self.server_status
+            .as_ref()
+            .or_else(|| self.upload_activity.as_ref().and_then(|a| a.server_status.as_ref()))
+            .filter(|s| s.is_active())
+    }
 }
 
 impl TransferRecord for VaultTransferSnapshot {
@@ -2387,6 +2397,7 @@ impl VaultOwner {
                         destination: None,
                         session_log_path: None,
                         telemetry: queued_telemetry.clone(),
+                        server_status: None,
                         state: VaultTransferState::Queued,
                     })
                     .collect::<Vec<_>>();
@@ -2973,6 +2984,7 @@ impl VaultOwner {
             session_log_path: None,
             telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
                 .snapshot(),
+            server_status: None,
             state: VaultTransferState::Queued,
         })?;
         VaultUploadObserver::new(self.transfers.clone(), task_id)
@@ -3237,6 +3249,7 @@ impl VaultOwner {
             destination: None,
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
+            server_status: None,
             state: VaultTransferState::Running,
         };
         if resumed.is_some() || queued.is_some() {
@@ -3996,6 +4009,7 @@ impl VaultOwner {
             destination: Some(destination.clone()),
             session_log_path: Some(session_log.path.clone()),
             telemetry: controller.snapshot(),
+            server_status: None,
             state: VaultTransferState::Running,
         }) {
             control::finish_job(&mut database, lease, Some(error.kind()))?;
@@ -5321,6 +5335,7 @@ mod tests {
             telemetry: transfer_controller(true, 1, teleark_telegram::TransferTuning::default())
                 .expect("controller")
                 .snapshot(),
+            server_status: None,
             state: VaultTransferState::Running,
         };
         let transfers = Arc::new(TransferSnapshots::new(vec![fixture]).expect("snapshot store"));
@@ -5923,6 +5938,7 @@ mod tests {
             telemetry: transfer_controller(true, 1, teleark_telegram::TransferTuning::default())
                 .expect("controller")
                 .snapshot(),
+            server_status: None,
             state: VaultTransferState::Completed,
         };
         let restored = (1..=256)

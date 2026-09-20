@@ -51,6 +51,7 @@ pub struct VaultUploadActivity {
     pub queued: u16,
     pub active: u16,
     pub wait_until: Option<Instant>,
+    pub server_status: Option<teleark_telegram::TransferServerStatus>,
     sample_at: Instant,
     sample_bytes: u64,
     acknowledged_base: u64,
@@ -110,6 +111,7 @@ impl VaultUploadActivity {
             queued: 0,
             active: 0,
             wait_until: None,
+            server_status: None,
         };
         activity.event(None, false, 0, 0);
         activity
@@ -341,6 +343,10 @@ impl ByteTransferObserver for VaultUploadObserver {
                             .saturating_add(bytes.saturating_sub(activity.acknowledged_current));
                     }
                     activity.acknowledged_current = bytes;
+                    if activity.server_status.as_ref().is_some_and(|s| !s.is_active()) {
+                        activity.server_status = None;
+                        snapshot.server_status = None;
+                    }
                     if attempt == 0 {
                         activity.sample_bytes = activity.acknowledged_base.saturating_add(bytes);
                     } else {
@@ -368,6 +374,22 @@ impl ByteTransferObserver for VaultUploadObserver {
                         Instant::now().checked_add(Duration::from_millis(wait_millis));
                     activity.set_phase(VaultUploadPhase::WaitingForTelegram);
                     activity.event(Some(index), false, attempt, wait_millis);
+                }
+                ByteTransferEvent::ServerThrottled { code, wait_seconds } => {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as i64);
+                    let wait_until_unix_ms = now_unix + i64::from(wait_seconds) * 1000;
+                    let status = teleark_telegram::TransferServerStatus {
+                        code,
+                        flag: format!("FLOOD_WAIT_{wait_seconds}"),
+                        wait_until_unix_ms,
+                    };
+                    snapshot.server_status = Some(status.clone());
+                    activity.server_status = Some(status);
+                    activity.set_phase(VaultUploadPhase::WaitingForTelegram);
+                    activity.wait_until =
+                        Instant::now().checked_add(Duration::from_secs(u64::from(wait_seconds)));
                 }
                 ByteTransferEvent::SavingCheckpoint => {
                     activity.persistence_since = Some(Instant::now());

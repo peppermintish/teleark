@@ -52,6 +52,7 @@ impl VaultOwner {
                         teleark_telegram::TransferTuning::default(),
                     )?
                     .snapshot(),
+                    server_status: None,
                     state: VaultTransferState::Failed(ApplicationErrorKind::InvalidRequest),
                 },
             };
@@ -263,6 +264,7 @@ pub(super) fn pending_snapshot(
         session_log_path: None,
         telemetry: transfer_controller(true, 0, teleark_telegram::TransferTuning::default())?
             .snapshot(),
+        server_status: None,
         state,
     })
 }

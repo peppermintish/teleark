@@ -242,6 +242,13 @@ pub struct ChannelDownloadSnapshot {
     pub part_events: PartEventHistory,
     pub session_log_path: Option<PathBuf>,
     pub telemetry: TransferTelemetrySnapshot,
+    pub server_status: Option<teleark_telegram::TransferServerStatus>,
+}
+
+impl ChannelDownloadSnapshot {
+    pub fn server_status(&self) -> Option<&teleark_telegram::TransferServerStatus> {
+        self.server_status.as_ref().filter(|s| s.is_active())
+    }
 }
 
 impl TransferRecord for ChannelDownloadSnapshot {
@@ -535,6 +542,21 @@ impl DownloadObserver for RuntimeDownloadObserver {
         self.process_part_event(event, server_wait);
     }
 
+    fn server_throttled(&self, code: i32, wait_seconds: u32) {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let wait_until_unix_ms = now_unix + i64::from(wait_seconds) * 1000;
+        let status = teleark_telegram::TransferServerStatus {
+            code,
+            flag: format!("FLOOD_WAIT_{wait_seconds}"),
+            wait_until_unix_ms,
+        };
+        let _ = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
+            snapshot.server_status = Some(status);
+        });
+    }
+
     fn part_event(&self, event: DownloadPartEvent) {
         self.process_part_event(event, None);
     }
@@ -551,6 +573,22 @@ impl RuntimeDownloadObserver {
             elapsed_millis: event.elapsed_millis,
         };
         let snapshot = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
+            if let Some(wait) = server_wait {
+                let wait_seconds = wait.as_secs().min(u32::MAX as u64) as u32;
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64);
+                let wait_until_unix_ms = now_unix + i64::from(wait_seconds) * 1000;
+                snapshot.server_status = Some(teleark_telegram::TransferServerStatus {
+                    code: 420,
+                    flag: format!("FLOOD_WAIT_{wait_seconds}"),
+                    wait_until_unix_ms,
+                });
+            } else if event.state == DownloadPartState::Completed {
+                if snapshot.server_status.as_ref().is_some_and(|s| !s.is_active()) {
+                    snapshot.server_status = None;
+                }
+            }
             snapshot.part_events.push(part_event);
             snapshot.telemetry.parts = snapshot.part_events.counters(
                 snapshot.size_bytes.div_ceil(DOWNLOAD_PART_SIZE_BYTES),
@@ -2302,6 +2340,7 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
         part_events: PartEventHistory::default(),
         session_log_path: None,
         telemetry: empty_download_telemetry(),
+        server_status: None,
     }
 }
 

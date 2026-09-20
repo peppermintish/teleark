@@ -94,6 +94,7 @@ fn download_snapshot(
         session_log_path: None,
         telemetry: transfer_controller(false, 0, teleark_telegram::TransferTuning::default())?
             .snapshot(),
+        server_status: None,
         state,
     })
 }
