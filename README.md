@@ -90,6 +90,20 @@ To build without launching:
 .\scripts\build-local.ps1
 ```
 
+*Note on Windows execution policies:* If PowerShell script execution is disabled by default (`PSSecurityException` or `running scripts is disabled on this system`), you can run `run.ps1` temporarily without modifying system-wide or user default settings:
+
+- **Single invocation (recommended):** Pass `-ExecutionPolicy Bypass` to PowerShell for that specific run:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
+  ```
+  *(Or in PowerShell 7+: `pwsh -ExecutionPolicy Bypass -File .\scripts\run.ps1`)*
+
+- **Current console session only:** Temporarily allow scripts in the active terminal window (reverts automatically as soon as the terminal is closed):
+  ```powershell
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+  .\scripts\run.ps1
+  ```
+
 **Windows (Git Bash):**
 
 In Git Bash, run `scripts/run.sh` or `scripts/build-local.sh`. If editing `.env.local` with Windows editors, ensure the file retains Unix (`LF`) line endings so the bash regex validation accepts the 32-character API Hash without trailing carriage returns.
@@ -119,6 +133,8 @@ python3 scripts/test-build-local.py --dry-run
 .\scripts\run.ps1 --dry-run
 .\scripts\build-local.ps1 --dry-run
 ```
+
+*(If script execution is disabled, use `powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 --dry-run`)*
 
 For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-run path/to/teleark path/to/TeleArk.app`. Dry runs describe the planned operations; they do not validate local credentials or installed tools.
 
