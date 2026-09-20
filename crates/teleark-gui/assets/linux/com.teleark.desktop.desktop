@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TeleArk
+Comment=A native desktop workspace for your files on Telegram
+Exec=teleark %U
+Icon=teleark
+Terminal=false
+Categories=Utility;FileTools;Network;
+StartupWMClass=com.teleark.desktop

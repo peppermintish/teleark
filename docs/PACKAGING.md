@@ -129,6 +129,14 @@ section = "utils"
 priority = "optional"
 assets = [
     ["target/release/teleark", "usr/bin/teleark", "755"],
+    ["assets/linux/com.teleark.desktop.desktop", "usr/share/applications/com.teleark.desktop.desktop", "644"],
+    ["assets/icons/hicolor/16x16/apps/teleark.png", "usr/share/icons/hicolor/16x16/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/32x32/apps/teleark.png", "usr/share/icons/hicolor/32x32/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/48x48/apps/teleark.png", "usr/share/icons/hicolor/48x48/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/64x64/apps/teleark.png", "usr/share/icons/hicolor/64x64/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/128x128/apps/teleark.png", "usr/share/icons/hicolor/128x128/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/256x256/apps/teleark.png", "usr/share/icons/hicolor/256x256/apps/teleark.png", "644"],
+    ["assets/icons/hicolor/512x512/apps/teleark.png", "usr/share/icons/hicolor/512x512/apps/teleark.png", "644"],
     ["../../README.md", "usr/share/doc/teleark/README.md", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/teleark/LICENSE-MIT", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/teleark/LICENSE-APACHE", "644"],
@@ -146,7 +154,7 @@ dpkg-deb --contents dist/teleark.deb
 sudo apt install ./dist/teleark.deb
 ```
 
-Run `teleark` from a terminal in the desktop session; remove it with `sudo apt remove teleark`. `$auto` resolves linked library dependencies, but cannot prove dynamically loaded graphics/runtime dependencies are complete. Inspect the package and validate install/launch/upgrade/removal on a clean target distribution. This minimal recipe has no application-menu entry. RPM, AppImage and Flatpak packaging are not configured; do not rename a `.deb` or tar archive to those formats.
+Run `teleark` from the application launcher or a terminal in the desktop session; remove it with `sudo apt remove teleark`. `$auto` resolves linked library dependencies, but cannot prove dynamically loaded graphics/runtime dependencies are complete. Inspect the package and validate install/launch/upgrade/removal on a clean target distribution. RPM, AppImage and Flatpak packaging are not configured; do not rename a `.deb` or tar archive to those formats.
 
 
 ## Telegram session identity
