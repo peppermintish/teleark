@@ -33,13 +33,13 @@ jobs:
           rustup default stable
           rustup component add clippy rustfmt
 
-      - name: Cache Rust build data
+      - name: Cache Rust build data (Quality Linux)
         id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
           key: quality-linux-x86_64
 
-      - name: Report cache status
+      - name: Report cache status (Quality Linux)
         shell: bash
         run: |
           hit="${{ steps.rust-cache.outputs.cache-hit }}"
@@ -87,7 +87,6 @@ jobs:
 
   test-matrix:
     name: Test workspace (${{ matrix.name }})
-    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -132,13 +131,13 @@ jobs:
             libfreetype6-dev \
             libssl-dev
 
-      - name: Cache Rust build data
+      - name: Cache Rust build data (${{ matrix.name }})
         id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Report cache status
+      - name: Report cache status (${{ matrix.name }})
         shell: bash
         run: |
           hit="${{ steps.rust-cache.outputs.cache-hit }}"
