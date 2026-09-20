@@ -149,7 +149,8 @@ impl TelegramConnection {
                         file_total_parts: count as i32,
                         bytes,
                     };
-                    for attempt in 1..=attempts {
+                    let mut attempt = 1;
+                    while attempt <= attempts {
                         flood_gate.wait().await;
                         budget.acquire(request.bytes.len()).await;
                         if let Some(observer) = &observer {
@@ -168,23 +169,39 @@ impl TelegramConnection {
                             }
                             Ok(Err(error)) => map_invocation(error),
                         };
+                        let is_flood = error.kind() == TelegramErrorKind::FloodWait;
                         if let Some(delay) = error.retry_after() {
-                            flood_gate.extend(delay);
+                            flood_gate.extend_with_status(
+                                delay,
+                                error.server_code().unwrap_or(420),
+                                error.server_message().unwrap_or("FLOOD_WAIT"),
+                            );
                         }
-                        if attempt == attempts
-                            || !matches!(
-                                error.kind(),
-                                TelegramErrorKind::Network
-                                    | TelegramErrorKind::Server
-                                    | TelegramErrorKind::FloodWait
-                            )
-                        {
-                            return Err(error);
+                        if !is_flood {
+                            if attempt == attempts
+                                || !matches!(
+                                    error.kind(),
+                                    TelegramErrorKind::Network
+                                        | TelegramErrorKind::Server
+                                )
+                            {
+                                return Err(error);
+                            }
+                            attempt += 1;
                         }
                         let delay = error
                             .retry_after()
                             .unwrap_or(Duration::from_millis(250 * (1u64 << (attempt - 1))));
                         if let Some(observer) = &observer {
+                            if is_flood {
+                                let wait_secs = error
+                                    .retry_after()
+                                    .map_or(1, |d| d.as_secs().min(u32::MAX as u64) as u32);
+                                observer.observe(ByteTransferEvent::ServerThrottled {
+                                    code: error.server_code().unwrap_or(420),
+                                    wait_seconds: wait_secs,
+                                });
+                            }
                             observer.observe(ByteTransferEvent::PartRetry {
                                 index: index as u32,
                                 attempt,

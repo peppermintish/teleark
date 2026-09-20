@@ -143,6 +143,8 @@ pub trait DownloadObserver: Send + Sync {
         self.part_event(event);
     }
 
+    fn server_throttled(&self, _code: i32, _wait_seconds: u32) {}
+
     fn part_event(&self, _event: DownloadPartEvent) {}
 }
 
@@ -224,11 +226,34 @@ pub enum TelegramErrorKind {
     Interrupted,
 }
 
+/// Server rate limit / throttle status snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferServerStatus {
+    pub code: i32,
+    pub flag: String,
+    pub wait_until_unix_ms: i64,
+}
+
+impl TransferServerStatus {
+    pub fn wait_remaining_seconds(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        (self.wait_until_unix_ms.saturating_sub(now).max(0) as u64) / 1000
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.wait_remaining_seconds() > 0
+    }
+}
+
 /// A locale-neutral Telegram adapter failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelegramError {
     kind: TelegramErrorKind,
     retry_after: Option<Duration>,
+    server_code: Option<i32>,
+    server_message: Option<String>,
 }
 
 impl TelegramError {
@@ -240,32 +265,60 @@ impl TelegramError {
         self.retry_after
     }
 
-    const fn new(kind: TelegramErrorKind) -> Self {
+    pub const fn server_code(&self) -> Option<i32> {
+        self.server_code
+    }
+
+    pub fn server_message(&self) -> Option<&str> {
+        self.server_message.as_deref()
+    }
+
+    pub(crate) const fn new(kind: TelegramErrorKind) -> Self {
         Self {
             kind,
             retry_after: None,
+            server_code: None,
+            server_message: None,
         }
     }
 
-    const fn flood_wait(retry_after: Duration) -> Self {
+    pub(crate) fn with_server_detail(mut self, code: i32, message: &str) -> Self {
+        self.server_code = Some(code);
+        self.server_message = Some(message.to_owned());
+        self
+    }
+
+    pub(crate) const fn flood_wait(retry_after: Duration) -> Self {
         Self {
             kind: TelegramErrorKind::FloodWait,
             retry_after: Some(retry_after),
+            server_code: Some(420),
+            server_message: None,
         }
     }
 }
 
 impl fmt::Display for TelegramError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.kind, self.retry_after) {
-            (TelegramErrorKind::FloodWait, Some(duration)) => {
+        match (self.kind, self.retry_after, self.server_code, self.server_message.as_deref()) {
+            (TelegramErrorKind::FloodWait, Some(duration), Some(code), Some(msg)) => {
+                write!(
+                    formatter,
+                    "Telegram requested a {} second retry delay ({code} {msg})",
+                    duration.as_secs()
+                )
+            }
+            (TelegramErrorKind::FloodWait, Some(duration), ..) => {
                 write!(
                     formatter,
                     "Telegram requested a {} second retry delay",
                     duration.as_secs()
                 )
             }
-            (kind, _) => write!(formatter, "Telegram adapter failure: {kind:?}"),
+            (kind, _, Some(code), Some(msg)) => {
+                write!(formatter, "Telegram adapter failure: {kind:?} ({code} {msg})")
+            }
+            (kind, ..) => write!(formatter, "Telegram adapter failure: {kind:?}"),
         }
     }
 }
@@ -563,6 +616,7 @@ impl TelegramConnection {
         let qr_login_update = Arc::new(AtomicBool::new(false));
         let drain_signal = Arc::clone(&qr_login_update);
         let authorization_monitor = config.authorization_monitor.clone();
+        let shared_flood_gate = Arc::new(DownloadFloodGate::default());
         let update_drain = tokio::spawn(async move {
             while let Some(update) = updates.recv().await {
                 if matches!(&update, UpdatesLike::ConnectionClosed) {
@@ -590,8 +644,8 @@ impl TelegramConnection {
             session,
             api_id: config.api_id,
             qr_login_update,
-            download_flood_gate: Arc::new(DownloadFloodGate::default()),
-            upload_flood_gate: Arc::new(DownloadFloodGate::default()),
+            download_flood_gate: Arc::clone(&shared_flood_gate),
+            upload_flood_gate: shared_flood_gate,
             bandwidth: TransferBandwidth::default(),
             runner: Some(runner),
             gateway: Some(gateway.task),
@@ -601,6 +655,10 @@ impl TelegramConnection {
             network_generation: config.network_generation,
             authorization_task: Some(authorization_task),
         })
+    }
+
+    pub fn server_throttle_status(&self) -> Option<TransferServerStatus> {
+        self.download_flood_gate.status()
     }
 
     pub fn with_bandwidth(mut self, bandwidth: TransferBandwidth) -> Self {
@@ -1028,7 +1086,23 @@ impl TelegramConnection {
                 let downloaded = match joined {
                     Ok(downloaded) => downloaded,
                     Err(error) => {
-                        if let Some(retry_delay) = download_part_retry_delay(&error, attempt, observer.max_part_attempts()) {
+                        let is_flood = error.kind() == TelegramErrorKind::FloodWait;
+                        let next_attempt = if is_flood { attempt } else { attempt.saturating_add(1) };
+                        let retry_delay = if is_flood {
+                            error.retry_after()
+                        } else {
+                            download_part_retry_delay(&error, attempt, observer.max_part_attempts())
+                        };
+                        if let Some(retry_delay) = retry_delay {
+                            if is_flood {
+                                let wait_secs = error
+                                    .retry_after()
+                                    .map_or(1, |d| d.as_secs().min(u32::MAX as u64) as u32);
+                                observer.server_throttled(
+                                    error.server_code().unwrap_or(420),
+                                    wait_secs,
+                                );
+                            }
                             observer.part_retry(DownloadPartEvent {
                                 part_index,
                                 offset_bytes,
@@ -1039,7 +1113,7 @@ impl TelegramConnection {
                             }, error.retry_after());
                             missing_parts.push_front(PendingDownloadPart {
                                 part_index,
-                                attempt: attempt.saturating_add(1),
+                                attempt: next_attempt,
                                 ready_at: Instant::now() + retry_delay,
                             });
                             continue;
@@ -1396,23 +1470,56 @@ fn download_part_retry_delay(
     }
 }
 
+fn random_jitter(max_millis: u64) -> Duration {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_ok() {
+        let val = u64::from_le_bytes(bytes);
+        Duration::from_millis(val % max_millis)
+    } else {
+        Duration::from_millis(500)
+    }
+}
+
 /// Shared by every chunk in this native download. A server wait extends the
 /// deadline immediately in the worker that receives it, before joining results.
 #[derive(Default)]
-struct DownloadFloodGate(std::sync::Mutex<Option<Instant>>);
+pub(crate) struct DownloadFloodGate {
+    deadline: std::sync::Mutex<Option<Instant>>,
+    last_status: std::sync::Mutex<Option<TransferServerStatus>>,
+}
 
 impl DownloadFloodGate {
-    fn extend(&self, delay: Duration) {
+    pub(crate) fn extend_with_status(&self, delay: Duration, code: i32, flag: &str) {
         let mut deadline = self
-            .0
+            .deadline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next = Instant::now() + delay;
+        let jitter = random_jitter(1000) + Duration::from_millis(250);
+        let next = Instant::now() + delay + jitter;
         *deadline = Some(deadline.map_or(next, |old| old.max(next)));
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let wait_until_unix_ms = now_unix + (delay + jitter).as_millis() as i64;
+        let mut status = self
+            .last_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *status = Some(TransferServerStatus {
+            code,
+            flag: flag.to_owned(),
+            wait_until_unix_ms,
+        });
     }
 
-    fn remaining(&self) -> Duration {
-        self.0
+    #[allow(dead_code)]
+    pub(crate) fn extend(&self, delay: Duration) {
+        self.extend_with_status(delay, 420, "FLOOD_WAIT");
+    }
+
+    pub(crate) fn remaining(&self) -> Duration {
+        self.deadline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map_or(Duration::ZERO, |deadline| {
@@ -1420,7 +1527,20 @@ impl DownloadFloodGate {
             })
     }
 
-    async fn wait(&self) {
+    pub(crate) fn status(&self) -> Option<TransferServerStatus> {
+        let status = self
+            .last_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        if status.is_active() {
+            Some(status)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn wait(&self) {
         loop {
             let delay = self.remaining();
             if delay.is_zero() {
@@ -1486,7 +1606,11 @@ async fn download_logical_part(
             .map_err(|error| {
                 let error = map_invocation(error);
                 if let Some(delay) = error.retry_after() {
-                    flood_gate.extend(delay);
+                    flood_gate.extend_with_status(
+                        delay,
+                        error.server_code().unwrap_or(420),
+                        error.server_message().unwrap_or("FLOOD_WAIT"),
+                    );
                 }
                 error
             })?
@@ -1992,25 +2116,43 @@ fn file_from_message(
     }))
 }
 
+fn is_flood_or_slowmode(name: &str) -> bool {
+    name.starts_with("FLOOD_WAIT")
+        || name.starts_with("FLOOD_PREMIUM_WAIT")
+        || name.starts_with("SLOWMODE_WAIT")
+}
+
+fn parse_trailing_seconds(name: &str) -> Option<u32> {
+    name.rsplit('_').next().and_then(|s| s.parse::<u32>().ok())
+}
+
 fn map_invocation(error: InvocationError) -> TelegramError {
     match error {
         InvocationError::Rpc(rpc) if rpc.code == 401 => {
             TelegramError::new(TelegramErrorKind::Authorization)
+                .with_server_detail(rpc.code, &rpc.name)
         }
-        InvocationError::Rpc(rpc) if rpc.code == 420 => TelegramError::flood_wait(
-            Duration::from_secs(u64::from(rpc.value.unwrap_or_default())),
-        ),
+        InvocationError::Rpc(rpc) if rpc.code == 420 || is_flood_or_slowmode(&rpc.name) => {
+            let seconds = rpc
+                .value
+                .or_else(|| parse_trailing_seconds(&rpc.name))
+                .unwrap_or(1);
+            TelegramError::flood_wait(Duration::from_secs(u64::from(seconds)))
+                .with_server_detail(rpc.code, &rpc.name)
+        }
         InvocationError::Rpc(rpc) if rpc.code >= 500 => {
             TelegramError::new(TelegramErrorKind::Server)
+                .with_server_detail(rpc.code, &rpc.name)
         }
+        InvocationError::Rpc(rpc) => TelegramError::new(TelegramErrorKind::Network)
+            .with_server_detail(rpc.code, &rpc.name),
         InvocationError::Session(_) => TelegramError::new(TelegramErrorKind::Session),
         InvocationError::Dropped => TelegramError::new(TelegramErrorKind::Cancelled),
         InvocationError::Io(_)
         | InvocationError::Deserialize(_)
         | InvocationError::Transport(_)
         | InvocationError::InvalidDc
-        | InvocationError::Authentication(_)
-        | InvocationError::Rpc(_) => TelegramError::new(TelegramErrorKind::Network),
+        | InvocationError::Authentication(_) => TelegramError::new(TelegramErrorKind::Network),
     }
 }
 
@@ -2276,6 +2418,41 @@ mod tests {
             .kind(),
             TelegramErrorKind::Network
         );
+    }
+
+    #[test]
+    fn flood_wait_and_slowmode_parse_codes_and_durations() {
+        for (code, name, expected_secs) in [
+            (420, "FLOOD_WAIT_17", 17),
+            (400, "FLOOD_PREMIUM_WAIT_300", 300),
+            (400, "SLOWMODE_WAIT_60", 60),
+        ] {
+            let error = map_invocation(InvocationError::Rpc(grammers_mtsender::RpcError {
+                code,
+                name: name.to_owned(),
+                value: None,
+                caused_by: None,
+            }));
+            assert_eq!(error.kind(), TelegramErrorKind::FloodWait);
+            assert_eq!(error.retry_after(), Some(Duration::from_secs(expected_secs)));
+            assert_eq!(error.server_code(), Some(code));
+            assert_eq!(error.server_message(), Some(name));
+            assert!(error.to_string().contains(&format!("{expected_secs} second")));
+            assert!(error.to_string().contains(name));
+        }
+    }
+
+    #[test]
+    fn shared_flood_gate_tracks_server_status_and_jitter() {
+        let gate = DownloadFloodGate::default();
+        assert!(gate.status().is_none());
+        gate.extend_with_status(Duration::from_secs(45), 420, "FLOOD_WAIT_45");
+        assert!(gate.remaining() >= Duration::from_millis(45_250));
+        let status = gate.status().expect("status must be present");
+        assert_eq!(status.code, 420);
+        assert_eq!(status.flag, "FLOOD_WAIT_45");
+        assert!(status.is_active());
+        assert!(status.wait_remaining_seconds() >= 44);
     }
 
     #[test]

@@ -38,6 +38,10 @@ pub enum ByteTransferEvent {
         attempt: u16,
         wait_millis: u64,
     },
+    ServerThrottled {
+        code: i32,
+        wait_seconds: u32,
+    },
     SendingMessage,
     Downloading {
         bytes: u64,

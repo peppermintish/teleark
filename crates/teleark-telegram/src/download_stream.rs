@@ -47,7 +47,8 @@ impl TelegramConnection {
                 let bandwidth = self.bandwidth.download.clone();
                 let receipts = receipts.clone();
                 inflight.spawn(async move {
-                    for attempt in 1..=u32::from(tuning.download_attempts) {
+                    let mut attempt = 1;
+                    while attempt <= u32::from(tuning.download_attempts) {
                         match download_logical_part(
                             client.clone(),
                             document.clone(),
@@ -62,6 +63,18 @@ impl TelegramConnection {
                         {
                             Ok(part) => return Ok(part),
                             Err(error) => {
+                                let is_flood = error.kind() == TelegramErrorKind::FloodWait;
+                                if is_flood {
+                                    if let Some(delay) = error.retry_after() {
+                                        gate.extend_with_status(
+                                            delay,
+                                            error.server_code().unwrap_or(420),
+                                            error.server_message().unwrap_or("FLOOD_WAIT"),
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        continue;
+                                    }
+                                }
                                 let Some(delay) = download_part_retry_delay(
                                     &error,
                                     attempt,
@@ -69,6 +82,7 @@ impl TelegramConnection {
                                 ) else {
                                     return Err(error);
                                 };
+                                attempt += 1;
                                 tokio::time::sleep(delay).await;
                             }
                         }
