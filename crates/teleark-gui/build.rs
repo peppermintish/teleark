@@ -62,10 +62,8 @@ fn main() {
         res.set("ProductName", "TeleArk");
         res.set("OriginalFilename", "teleark.exe");
 
-        if let Some(sdk_bin) = find_windows_sdk_bin() {
-            if let Some(sdk_str) = sdk_bin.to_str() {
-                res.set_toolkit_path(sdk_str);
-            }
+        if let Some(sdk_str) = find_windows_sdk_bin().as_deref().and_then(Path::to_str) {
+            res.set_toolkit_path(sdk_str);
         }
 
         if let Err(error) = res.compile() {

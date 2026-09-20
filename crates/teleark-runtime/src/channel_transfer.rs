@@ -584,14 +584,13 @@ impl RuntimeDownloadObserver {
                     flag: format!("FLOOD_WAIT_{wait_seconds}"),
                     wait_until_unix_ms,
                 });
-            } else if event.state == DownloadPartState::Completed {
-                if snapshot
+            } else if event.state == DownloadPartState::Completed
+                && snapshot
                     .server_status
                     .as_ref()
                     .is_some_and(|s| !s.is_active())
-                {
-                    snapshot.server_status = None;
-                }
+            {
+                snapshot.server_status = None;
             }
             snapshot.part_events.push(part_event);
             snapshot.telemetry.parts = snapshot.part_events.counters(
