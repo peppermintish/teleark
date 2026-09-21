@@ -2,7 +2,7 @@
 #define AppId "{9A67D26D-7281-4FE9-B942-D6D2A8719DF5}"
 #define AppName "TeleArk"
 #ifndef AppVersion
-  #define AppVersion "0.4.4"
+  #define AppVersion "0.4.5"
 #endif
 #define AppPublisher "TeleArk Contributors"
 #define AppURL "https://github.com/Kangarooss/teleark"
