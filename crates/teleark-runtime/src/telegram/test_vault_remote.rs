@@ -42,14 +42,14 @@ struct ConcurrentGate {
     release: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 pub(crate) struct TestVaultRemote {
-    concurrent_gates: Mutex<Vec<ConcurrentGate>>,
+    concurrent_gate: Mutex<Option<ConcurrentGate>>,
     state: Mutex<State>,
     gate: Mutex<Option<Gate>>,
 }
 impl TestVaultRemote {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            concurrent_gates: Mutex::new(Vec::new()),
+            concurrent_gate: Mutex::new(None),
             state: Mutex::new(State::default()),
             gate: Mutex::new(None),
         })
@@ -96,26 +96,27 @@ impl TestVaultRemote {
         assert!(count > 0, "concurrent gate needs an entrant");
         let (entered, ready) = mpsc::sync_channel(count);
         let (release, wait) = mpsc::channel();
-        let mut gates = self.concurrent_gates.lock().expect("gate");
-        gates.retain(|gate| gate.remaining > 0);
+        let previous = self
+            .concurrent_gate
+            .lock()
+            .expect("gate")
+            .replace(ConcurrentGate {
+                kind,
+                remaining: count,
+                entered,
+                release: Arc::new(Mutex::new(wait)),
+            });
         assert!(
-            gates.iter().all(|gate| gate.kind != kind),
-            "one concurrent gate per kind"
+            previous.is_none_or(|gate| gate.remaining == 0),
+            "one active concurrent gate"
         );
-        gates.push(ConcurrentGate {
-            kind,
-            remaining: count,
-            entered,
-            release: Arc::new(Mutex::new(wait)),
-        });
         (ready, release)
     }
     fn cross_gate(&self, kind: GateKind) -> Result<(), ApplicationError> {
         let concurrent = {
-            let mut gates = self.concurrent_gates.lock().expect("gate");
-            gates
-                .iter_mut()
-                .find(|gate| gate.kind == kind && gate.remaining > 0)
+            let mut gate = self.concurrent_gate.lock().expect("gate");
+            gate.as_mut()
+                .filter(|gate| gate.kind == kind && gate.remaining > 0)
                 .map(|gate| {
                     gate.remaining -= 1;
                     (gate.entered.clone(), gate.release.clone())
@@ -507,5 +508,64 @@ impl TestVaultRemote {
             }
             _ => panic!("unsupported request at synthetic Vault wire boundary"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn publish_pending_metadata(
+        remote: Arc<TestVaultRemote>,
+        file_name: &'static str,
+        bytes: Vec<u8>,
+    ) -> std::thread::JoinHandle<i64> {
+        std::thread::spawn(move || {
+            let (reply, response) = mpsc::sync_channel(1);
+            remote.handle(TelegramRequest::UploadBytes {
+                account_id: 7,
+                chat_id: 11,
+                file_name: file_name.into(),
+                caption: crate::vault::remote_upload::CAPTION.into(),
+                bytes,
+                publication_random_id: None,
+                observer: None,
+                cancellation: None,
+                reply,
+            });
+            response
+                .recv_timeout(Duration::from_secs(10))
+                .expect("pending metadata reply")
+                .expect("pending metadata publication")
+        })
+    }
+
+    #[test]
+    fn concurrent_unkeyed_metadata_publications_remain_distinct() {
+        let remote = TestVaultRemote::new();
+        let (entered, release) = remote.concurrent_pending_metadata_gate(2);
+        let first = publish_pending_metadata(remote.clone(), "first.tarku", vec![1]);
+        let second = publish_pending_metadata(remote.clone(), "second.tarku", vec![2]);
+
+        for _ in 0..2 {
+            entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("both publications overlap before insertion");
+        }
+        for _ in 0..2 {
+            release.send(()).expect("release publication");
+        }
+
+        let first = first.join().expect("first publisher");
+        let second = second.join().expect("second publisher");
+        assert_ne!(first, second);
+        let state = remote.state.lock().expect("state");
+        assert_eq!(state.objects.len(), 2);
+        assert!(state.publications.is_empty());
+        assert_eq!(state.objects.get(&first).expect("first object").bytes, [1]);
+        assert_eq!(
+            state.objects.get(&second).expect("second object").bytes,
+            [2]
+        );
     }
 }

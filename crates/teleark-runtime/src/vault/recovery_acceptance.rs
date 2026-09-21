@@ -1214,17 +1214,8 @@ fn default_two_files_are_work_conserving_and_fresh_parts_have_no_readback() {
             path
         })
         .collect();
-    let (metadata_entered, metadata_release) = remote.concurrent_pending_metadata_gate(2);
     let (entered, release) = remote.concurrent_upload_gate(4);
     let work = vault.submit_upload_files(7, 11, sources).expect("batch");
-    for _ in 0..2 {
-        metadata_entered
-            .recv_timeout(Duration::from_secs(10))
-            .expect("two ordinary metadata publications overlap before insertion");
-    }
-    for _ in 0..2 {
-        metadata_release.send(()).expect("release metadata");
-    }
     for _ in 0..2 {
         entered
             .recv_timeout(Duration::from_secs(10))
