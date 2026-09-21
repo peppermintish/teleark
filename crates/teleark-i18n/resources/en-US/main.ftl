@@ -1139,6 +1139,15 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.5 · Portable recovery and release installers
+
+    - Encrypted uploads and downloads stream through bounded memory in 512 KiB transport blocks. New uploads do not create ciphertext spools; downloads write authenticated plaintext, and compatible older files remain readable.
+    - Upload recovery can use authenticated remote receipts across a restart or a second device. Verified published containers are reused, while unpublished work restarts with fresh encryption identity. Transfer charts and timelines show measured activity with bounded history.
+    - When a bound private channel is unavailable, management verifies remote state before discovering or creating a replacement. Existing local history and keys remain intact; files lost with the old remote channel are not restored.
+    - Tagged releases build standalone executables, portable archives and native installers for Windows x86_64, macOS arm64 and Linux x86_64. Installers upgrade in place and reject an older version with an explanation. The workflow checks that the tag matches the application version before publication.
+    - CI checks every tracked plain-text file for CRLF on Linux, Windows and macOS, rejects `.cmd` and `.bat` scripts, and reports counts and violations in the GitHub Actions summary. The release workflow applies the same policy before publication.
+    - Updated application and macOS bundle metadata to 0.4.5. SQLite remains at read/write schema 22; supported older schemas migrate automatically. Encrypted file and recovery readers retain their documented compatibility. macOS packages remain unsigned and unnotarized.
+
     ## 0.4.4 · Session unlock and resilient background work
 
     - The storage page groups channel identification changes in a highlighted card with the exact message, pin and description updates. Locked-file cards keep their controls inside the border and scroll naturally at small sizes.

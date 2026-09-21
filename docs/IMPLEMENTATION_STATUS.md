@@ -1,4 +1,12 @@
-# Implementation status — v0.4.4
+# Implementation status — v0.4.5
+
+## Version 0.4.5 (2026-09-21)
+
+The workspace crates, lockfiles, macOS bundle and Windows installer fallback version now agree on 0.4.5. The release record is synchronized with the English, Simplified Chinese and Japanese About catalogs. This version update changes no persistent schema or codec: SQLite read/write remains 22 with automatic supported upgrades from schemas 0–21; encrypted file and recovery format support is recorded in the [recovery format guide](VAULT_TRANSFER_RECOVERY.md). Release artifacts and their upgrade/downgrade behavior are described below and in the [packaging guide](PACKAGING.md). The `v0.4.5` tag selects the release workflow only after it is pushed to GitHub; local tag creation alone does not publish artifacts.
+
+The CI matrix checks Git-index line endings on Linux, Windows and macOS; the release policy job runs the same check before publication. The check rejects CRLF in tracked plain text and all `.cmd`/`.bat` scripts, with counts and file annotations in the GitHub Actions summary. `.editorconfig` directs editors to UTF-8/LF, while the existing `.gitattributes` requests LF checkout. Synthetic checks cover LF text, binary data containing CRLF bytes, actual CRLF text, both forbidden extensions and report output.
+
+Local 0.4.5 validation passed formatting, workspace check, strict Clippy, all 769 workspace tests with serial execution (10 existing ignored), explicit Core/i18n suites, warning-denied rustdoc, cargo-deny (existing duplicate-version warnings), workflow lint and the line-ending policy tests. The default parallel suite timed out twice in the existing `blocked_transfer_does_not_block_lock_unlock_or_preserved_queued_work` runtime test; that test passed alone and in the serial suite. The explicit Windows x86_64 static-CRT release build and packaging produced the standalone executable, portable ZIP and installer with 0.4.5 metadata. Hosted macOS/Linux packaging and GitHub Release publication require the tagged workflow run.
 
 ## Release artifacts and installer upgrades (2026-09-21)
 
