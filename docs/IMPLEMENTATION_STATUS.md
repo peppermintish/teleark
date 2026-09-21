@@ -1,4 +1,12 @@
-# Implementation status — v0.4.10
+# Implementation status — v0.4.11
+
+## Version 0.4.11 (2026-09-22)
+
+Four locally retained native-download logs showed the same failure pattern: eight transfer connection slots, 104 part attempts lasting about 60 seconds, all mapped to slot 6 in the one-based UI. Each file stopped after a fourth attempt on that slot even though other slots had completed parts. The retry path selected `part_index % connection_count` on every attempt, repeatedly sending affected parts to the same stalled slot. The transport did not retain the timeout category in the part event, so the inspector showed only a generic network failure.
+
+Native part retries now start on another local connection slot, and a slot that times out is avoided for later parts in that download. The bounded retry count, Telegram rate-limit deadline, account checks and resumable bitmap are unchanged. The right-hand inspector presents a measured part cause, number, attempt, slot and wait time above the detailed trace. Schema-2 private `part_state` logs retain these details after restart; schema-1 logs can still show the recorded part, attempt and elapsed time while explicitly marking cause and slot unknown. SQLite stays read/write schema 22 with automatic upgrades from 0–21, and encrypted file, recovery and native bitmap codecs are unchanged. [ADR 0048](adr/0048-native-download-connection-failover-and-diagnostics.md) records the decision.
+
+The synthetic English light-mode preview was inspected at 900×600 and in actual native full-screen mode after the final wording change. The failure card remained readable, primary transfer actions were reachable, and the right-hand inspector scrolled independently. Local validation passed: formatting, locked workspace check, strict Clippy, the serial workspace suite, explicit Core/i18n tests, GUI tests, warning-denied rustdoc and cargo-deny. LF policy and both platform payload regressions passed. A credentialed Telegram retry against the affected account has not been run, so the physical reason that connection slot stalled remains unknown and the failover outcome has not been confirmed against that network.
 
 ## Version 0.4.10 (2026-09-21)
 

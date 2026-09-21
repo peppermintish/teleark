@@ -85,9 +85,9 @@ pub use vault_progress::{
 pub use channel_transfer::{
     ChannelDownloadCleanup, ChannelDownloadCleanupPhase, ChannelDownloadEvent,
     ChannelDownloadEventKind, ChannelDownloadFailure, ChannelDownloadFailureStage,
-    ChannelDownloadPartEvent, ChannelDownloadRequest, ChannelDownloadSnapshot,
-    ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers, PartEventHistory,
-    TransferRates, available_download_destination,
+    ChannelDownloadPartEvent, ChannelDownloadPartFailure, ChannelDownloadRequest,
+    ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers,
+    PartEventHistory, TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
@@ -98,7 +98,7 @@ pub use storage_channel::{ManagedStorageChannel, StorageChannelStatus};
 pub use storage_channel::{StorageChannelHealth, StorageMaintenancePhase};
 pub use storage_maintenance::{StorageMaintenance, StorageMaintenanceSnapshot};
 pub use storage_setup::{StorageSetupPhase, StorageSetupProgress, StorageSetupSnapshot};
-pub use teleark_telegram::DownloadPartState;
+pub use teleark_telegram::{DownloadPartFailureKind, DownloadPartState};
 pub use teleark_transfer::{
     ControllerDecision, ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase,
     DOWNLOAD_PART_SIZE_BYTES, DownloadThroughputStrategy, LaneTelemetry, MemoryCounters,

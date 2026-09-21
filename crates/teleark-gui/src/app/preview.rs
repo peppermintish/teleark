@@ -615,6 +615,7 @@ impl TeleArkApp {
             "recovery-guidance" => self.preview_recovery_failure(),
             "native-cleanup" => self.preview_native_cleanup(false),
             "native-cleanup-failed" => self.preview_native_cleanup(true),
+            "native-failure" => self.preview_native_failure(),
             "recovery-guide" => {
                 self.page = Page::Storage;
                 self.show_storage_guide = true;

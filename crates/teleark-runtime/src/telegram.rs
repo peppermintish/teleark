@@ -2455,7 +2455,10 @@ fn map_telegram_error(error: TelegramError) -> ApplicationError {
         | TelegramErrorKind::InvalidPassword => ApplicationErrorKind::InvalidRequest,
         TelegramErrorKind::Server => ApplicationErrorKind::Server,
         TelegramErrorKind::Session => ApplicationErrorKind::Persistence,
-        TelegramErrorKind::Network | TelegramErrorKind::FloodWait => ApplicationErrorKind::Network,
+        TelegramErrorKind::Network
+        | TelegramErrorKind::Timeout
+        | TelegramErrorKind::UnexpectedResponse
+        | TelegramErrorKind::FloodWait => ApplicationErrorKind::Network,
         TelegramErrorKind::Authorization => ApplicationErrorKind::Authorization,
         TelegramErrorKind::SourceMissing => ApplicationErrorKind::SourceMissing,
         TelegramErrorKind::PermissionDenied => ApplicationErrorKind::PermissionDenied,

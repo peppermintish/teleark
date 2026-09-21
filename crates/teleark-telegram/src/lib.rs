@@ -90,6 +90,17 @@ pub enum DownloadPartState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DownloadPartFailureKind {
+    Timeout,
+    Network,
+    Server,
+    RateLimited,
+    Authorization,
+    UnexpectedResponse,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DownloadPartEvent {
     pub part_index: u64,
     pub offset_bytes: u64,
@@ -97,6 +108,9 @@ pub struct DownloadPartEvent {
     pub state: DownloadPartState,
     pub attempt: u32,
     pub elapsed_millis: u64,
+    /// Zero-based local transfer connection slot, not a Telegram DC or network lane.
+    pub connection_slot: u16,
+    pub failure: Option<DownloadPartFailureKind>,
 }
 
 /// Cooperative command sampled between bounded Telegram download chunks.
@@ -209,6 +223,8 @@ pub enum TelegramErrorKind {
     InvalidConfiguration,
     Session,
     Network,
+    Timeout,
+    UnexpectedResponse,
     Server,
     FloodWait,
     Authorization,
@@ -1023,7 +1039,8 @@ impl TelegramConnection {
                     ready_at: Instant::now(),
                 })
                 .collect::<VecDeque<_>>();
-            let clients = self.transfer_clients(false,observer.desired_connections()).await;
+            let clients = self.transfer_clients(false, observer.desired_connections()).await;
+            let mut timed_out_slots = vec![false; clients.len()];
             let mut inflight_downloads = JoinSet::new();
             let flood_gate = Arc::clone(&self.download_flood_gate);
             loop {
@@ -1037,6 +1054,11 @@ impl TelegramConnection {
                     };
                     let part_index = pending_part.part_index;
                     let (offset_bytes, length_bytes) = part_map.part_range(part_index)?;
+                    let connection_slot = choose_download_connection_slot(
+                        part_index,
+                        pending_part.attempt,
+                        &timed_out_slots,
+                    );
                     observer.part_event(DownloadPartEvent {
                         part_index,
                         offset_bytes,
@@ -1044,8 +1066,10 @@ impl TelegramConnection {
                         state: DownloadPartState::Inflight,
                         attempt: pending_part.attempt,
                         elapsed_millis: 0,
+                        connection_slot: connection_slot as u16,
+                        failure: None,
                     });
-                    let client = clients[part_index as usize % clients.len()].clone();
+                    let client = clients[connection_slot].clone();
                     let document = file.document.clone();
                     let flood_gate = Arc::clone(&flood_gate);
                     let bandwidth = self.bandwidth.download.clone();
@@ -1068,6 +1092,7 @@ impl TelegramConnection {
                             offset_bytes,
                             length_bytes,
                             pending_part.attempt,
+                            connection_slot,
                             u64::try_from(attempt_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX),
                             result,
@@ -1086,6 +1111,7 @@ impl TelegramConnection {
                     offset_bytes,
                     length_bytes,
                     attempt,
+                    connection_slot,
                     attempt_elapsed_millis,
                     joined,
                 ) = completion
@@ -1094,6 +1120,10 @@ impl TelegramConnection {
                 let downloaded = match joined {
                     Ok(downloaded) => downloaded,
                     Err(error) => {
+                        if error.kind() == TelegramErrorKind::Timeout {
+                            timed_out_slots[connection_slot] = true;
+                        }
+                        let failure = Some(download_part_failure_kind(&error));
                         let is_flood = error.kind() == TelegramErrorKind::FloodWait;
                         let next_attempt = if is_flood { attempt } else { attempt.saturating_add(1) };
                         let retry_delay = if is_flood {
@@ -1118,6 +1148,8 @@ impl TelegramConnection {
                                 state: DownloadPartState::Retry,
                                 attempt,
                                 elapsed_millis: attempt_elapsed_millis,
+                                connection_slot: connection_slot as u16,
+                                failure,
                             }, error.retry_after());
                             missing_parts.push_front(PendingDownloadPart {
                                 part_index,
@@ -1133,6 +1165,8 @@ impl TelegramConnection {
                             state: DownloadPartState::Failed,
                             attempt,
                             elapsed_millis: attempt_elapsed_millis,
+                            connection_slot: connection_slot as u16,
+                            failure,
                         });
                         inflight_downloads.abort_all();
                         while inflight_downloads.join_next().await.is_some() {}
@@ -1157,6 +1191,8 @@ impl TelegramConnection {
                     state: DownloadPartState::Completed,
                     attempt,
                     elapsed_millis: downloaded.elapsed_millis,
+                    connection_slot: connection_slot as u16,
+                    failure: None,
                 });
             }
             if !part_map.is_complete() || received != file.size_bytes {
@@ -1471,7 +1507,10 @@ fn download_part_retry_delay(
     }
     match error.kind() {
         TelegramErrorKind::FloodWait => error.retry_after(),
-        TelegramErrorKind::Network | TelegramErrorKind::Server => Some(
+        TelegramErrorKind::Network
+        | TelegramErrorKind::Timeout
+        | TelegramErrorKind::UnexpectedResponse
+        | TelegramErrorKind::Server => Some(
             DOWNLOAD_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.saturating_sub(1).min(5)),
         ),
         _ => None,
@@ -1581,6 +1620,32 @@ fn take_ready_part(
     queue.remove(position)
 }
 
+fn choose_download_connection_slot(
+    part_index: u64,
+    attempt: u32,
+    timed_out_slots: &[bool],
+) -> usize {
+    let count = timed_out_slots.len();
+    debug_assert!(count > 0);
+    let first = (part_index as usize % count + attempt.saturating_sub(1) as usize) % count;
+    (0..count)
+        .map(|step| (first + step) % count)
+        .find(|&slot| !timed_out_slots[slot])
+        .unwrap_or(first)
+}
+
+fn download_part_failure_kind(error: &TelegramError) -> DownloadPartFailureKind {
+    match error.kind() {
+        TelegramErrorKind::Timeout => DownloadPartFailureKind::Timeout,
+        TelegramErrorKind::UnexpectedResponse => DownloadPartFailureKind::UnexpectedResponse,
+        TelegramErrorKind::Network => DownloadPartFailureKind::Network,
+        TelegramErrorKind::Server => DownloadPartFailureKind::Server,
+        TelegramErrorKind::FloodWait => DownloadPartFailureKind::RateLimited,
+        TelegramErrorKind::Authorization => DownloadPartFailureKind::Authorization,
+        _ => DownloadPartFailureKind::Other,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_logical_part(
     client: Client,
@@ -1610,7 +1675,7 @@ async fn download_logical_part(
             .await;
         let chunk = tokio::time::timeout(Duration::from_secs(60), download.next())
             .await
-            .map_err(|_| TelegramError::new(TelegramErrorKind::Network))?
+            .map_err(|_| TelegramError::new(TelegramErrorKind::Timeout))?
             .map_err(|error| {
                 let error = map_invocation(error);
                 if let Some(delay) = error.retry_after() {
@@ -1622,10 +1687,10 @@ async fn download_logical_part(
                 }
                 error
             })?
-            .ok_or_else(|| TelegramError::new(TelegramErrorKind::Network))?;
+            .ok_or_else(|| TelegramError::new(TelegramErrorKind::UnexpectedResponse))?;
         let remaining = expected_length.saturating_sub(bytes.len());
         if chunk.len() > remaining {
-            return Err(TelegramError::new(TelegramErrorKind::Network));
+            return Err(TelegramError::new(TelegramErrorKind::UnexpectedResponse));
         }
         bytes.extend_from_slice(&chunk);
         if let Some(receipts) = &receipts {
@@ -2581,6 +2646,30 @@ mod tests {
         assert_eq!(download_part_retry_delay(&network, 4, 4), None);
         assert_eq!(
             download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Authorization), 1, 8),
+            None
+        );
+    }
+
+    #[test]
+    fn timed_out_connection_is_not_reused_for_retries_or_later_parts() {
+        let mut timed_out_slots = [false; 8];
+        assert_eq!(choose_download_connection_slot(5, 1, &timed_out_slots), 5);
+        timed_out_slots[5] = true;
+        assert_eq!(choose_download_connection_slot(5, 2, &timed_out_slots), 6);
+        assert_eq!(choose_download_connection_slot(13, 1, &timed_out_slots), 6);
+        assert_eq!(choose_download_connection_slot(21, 1, &timed_out_slots), 6);
+        timed_out_slots[6] = true;
+        assert_eq!(choose_download_connection_slot(5, 3, &timed_out_slots), 7);
+        assert_eq!(
+            download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Timeout), 1, 4),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            download_part_failure_kind(&TelegramError::new(TelegramErrorKind::Timeout)),
+            DownloadPartFailureKind::Timeout
+        );
+        assert_eq!(
+            download_part_retry_delay(&TelegramError::new(TelegramErrorKind::Timeout), 4, 4),
             None
         );
     }

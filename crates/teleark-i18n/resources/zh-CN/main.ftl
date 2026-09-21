@@ -710,7 +710,10 @@ detail-queue-wait = 队列等待
 detail-elapsed = 已用时间
 detail-average-speed = 平均速度
 detail-failure-reason = 失败原因
+detail-failure-part-context = 分片 { $part } · 第 { $attempt } 次 · 连接 { $connection } · { $elapsed }
+detail-failure-part-context-legacy = 分片 { $part } · 第 { $attempt } 次尝试 · 等待 { $elapsed }。旧日志未记录确切原因或连接。
 detail-failure-retryable = 此失败可能是暂时性的。请检查上述条件后重试。
+detail-failure-timeout-guidance = 请重试下载。如果请求持续超时，请检查网络或代理与 Telegram 的连接。
 detail-failure-user-action = 重试前需要更改设置、账号、来源或文件系统状态。
 detail-failure-terminal = 此任务已停止，不会自动重试。
 detail-verification-not-reached = 尚未执行验证
@@ -732,6 +735,13 @@ native-download-error-permission-denied = macOS 拒绝访问所配置的下载�
 native-download-error-capacity = 已达到传输队列或本地资源限制。
 native-download-error-authorization = Telegram 授权已过期或不允许此次下载。
 native-download-error-network = 网络连接或 Telegram 请求被中断。
+native-part-error-timeout = Telegram 在 60 秒内未响应此分片请求。
+native-part-error-network = 此分片请求与 Telegram 的连接中断。
+native-part-error-server = Telegram 对此分片报告服务器错误。
+native-part-error-rate-limited = Telegram 要求此分片请求等待。
+native-part-error-authorization = Telegram 拒绝了此分片的账户授权。
+native-part-error-unexpected-response = Telegram 返回了不完整或异常的分片数据。
+native-part-error-other = 此分片请求因其他传输错误而停止。
 native-download-error-cancelled = 下载在完成前被取消。
 native-download-error-unknown = 下载因尚未分类的内部原因失败。
 settings-managed-logs-label = 诊断日志
@@ -923,7 +933,7 @@ transfer-part-inflight = 传输中
 transfer-part-completed = 已完成
 transfer-part-retry = 重试
 transfer-part-failed = 失败
-transfer-part-event-value = 分片 {$part} · offset {$offset} · {$length} · {$state} · 第 {$attempt} 次 · {$elapsed}
+transfer-part-event-value = 分片 {$part} · 偏移 {$offset} · {$length} · {$state} · 第 {$attempt} 次 · 连接 {$connection} · {$elapsed}
 settings-transfer-soft-limit-title = Telegram 软限制策略
 settings-transfer-soft-limit-description = 当实测有效吞吐支持更多活跃工作时，选择自适应控制器如何处理 Telegram 的保守建议。
 settings-transfer-soft-limit-respect = 遵守
@@ -1111,6 +1121,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.11 · 原生下载恢复与诊断
+
+    - 原生下载分片失败后，重试会切换到其他传输连接。某个连接达到 60 秒请求期限后，同一下载中的后续分片会避开该连接，避免单个卡住的连接耗尽所有重试次数。
+    - 传输详情现在显示已测得的分片失败原因、分片编号、尝试次数、本地连接编号和等待时间。新版第 2 版分片事件在私人会话日志中保留这些信息，重启后仍可解释最终失败；旧日志记录继续可读。
+    - 应用元数据已更新至 0.4.11。SQLite 读写模式仍为 22，支持从 0–21 自动升级。原生下载部分文件位图以及加密文件和恢复格式未更改。
+
     ## 0.4.10 · Telegram 构建配置与 Windows MSI
 
     - 发布 CI 会验证 Telegram 发行版 API ID/hash 密钥，并将其传入所有原生编译步骤，包括通用 macOS 的两种架构。安装版和便携版使用相同的内置配置；报告不会包含密钥值。

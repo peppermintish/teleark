@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-teleark-core = { version = "=0.4.10", path = "../teleark-core" }
+teleark-core = { version = "=0.4.11", path = "../teleark-core" }
 
 [lints]
 workspace = true

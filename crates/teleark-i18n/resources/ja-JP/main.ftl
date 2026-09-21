@@ -710,7 +710,10 @@ detail-queue-wait = キュー待機時間
 detail-elapsed = 経過時間
 detail-average-speed = 平均速度
 detail-failure-reason = 失敗理由
+detail-failure-part-context = パート { $part } · 試行 { $attempt } · 接続 { $connection } · { $elapsed }
+detail-failure-part-context-legacy = パート { $part } · 試行 { $attempt } · 待機 { $elapsed }。従来のログには正確な原因と接続が記録されていません。
 detail-failure-retryable = 一時的な失敗の可能性があります。上記の状態を確認して再試行してください。
+detail-failure-timeout-guidance = ダウンロードを再試行してください。要求のタイムアウトが続く場合は、Telegram へのネットワークまたはプロキシ接続を確認してください。
 detail-failure-user-action = 再試行する前に、設定、アカウント、ソース、またはファイルシステムの変更が必要です。
 detail-failure-terminal = このタスクは停止し、自動的には再試行されません。
 detail-verification-not-reached = 検証はまだ実行されていません
@@ -732,6 +735,13 @@ native-download-error-permission-denied = macOS により設定済みダウン�
 native-download-error-capacity = 転送キューまたはローカルリソースの上限に達しました。
 native-download-error-authorization = Telegram の認証が期限切れか、このダウンロードが許可されていません。
 native-download-error-network = ネットワーク接続または Telegram 要求が中断されました。
+native-part-error-timeout = Telegram が 60 秒以内にパート要求へ応答しませんでした。
+native-part-error-network = パート要求の Telegram 接続が切断されました。
+native-part-error-server = Telegram がこのパートにサーバーエラーを返しました。
+native-part-error-rate-limited = Telegram がこのパート要求の待機を求めました。
+native-part-error-authorization = Telegram がこのパートのアカウント認証を拒否しました。
+native-part-error-unexpected-response = Telegram から不完全または予期しないパートデータが返されました。
+native-part-error-other = 別の転送エラーによりパート要求が停止しました。
 native-download-error-cancelled = 完了前にダウンロードがキャンセルされました。
 native-download-error-unknown = 未分類の内部理由によりダウンロードに失敗しました。
 settings-managed-logs-label = 診断ログ
@@ -923,7 +933,7 @@ transfer-part-inflight = 転送中
 transfer-part-completed = 完了
 transfer-part-retry = 再試行
 transfer-part-failed = 失敗
-transfer-part-event-value = パート {$part} · offset {$offset} · {$length} · {$state} · 試行 {$attempt} · {$elapsed}
+transfer-part-event-value = パート {$part} · オフセット {$offset} · {$length} · {$state} · 試行 {$attempt} · 接続 {$connection} · {$elapsed}
 settings-transfer-soft-limit-title = Telegram ソフト制限ポリシー
 settings-transfer-soft-limit-description = 実測 goodput がより多いアクティブ処理を支持する場合に、適応型コントローラーが Telegram の保守的な推奨をどう扱うか選びます。
 settings-transfer-soft-limit-respect = 遵守
@@ -1111,6 +1121,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.4.11 · ネイティブダウンロードの復旧と診断
+
+    - ネイティブダウンロードのパート要求が失敗すると、再試行は別の転送接続へ切り替わります。60 秒の要求期限に達した接続は、そのダウンロードの後続パートで避けられます。停止した接続一つで再試行を使い切ることを防ぎます。
+    - 転送詳細には、計測されたパートの失敗理由、パート番号、試行回数、ローカル接続番号、待機時間が表示されます。新しいバージョン 2 のパートイベントはこの情報を非公開セッションログに保持し、再起動後も最終的な失敗を確認できます。従来のログも読み取れます。
+    - アプリのバージョンは 0.4.11 です。SQLite の読み書きスキーマ 22 と、0–21 からの自動更新は変更ありません。ネイティブの部分ファイル用ビットマップ、暗号化ファイル、復旧形式も変更ありません。
+
     ## 0.4.10 · Telegram ビルド設定と Windows MSI
 
     - リリース CI は Telegram 配布用 API ID/hash のシークレットを検証し、ユニバーサル macOS の両アーキテクチャを含むすべてのネイティブコンパイルに渡します。インストール版とポータブル版は同じ埋め込み設定を使用し、レポートには値を含めません。

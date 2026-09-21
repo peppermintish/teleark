@@ -17,7 +17,7 @@ use teleark_storage::{
 };
 use teleark_telegram::{
     DOWNLOAD_PART_SIZE_BYTES, DownloadControl, DownloadObserver, DownloadPartEvent,
-    DownloadPartState,
+    DownloadPartFailureKind, DownloadPartState,
 };
 use teleark_transfer::{
     AdaptiveControllerConfig, AdaptiveTransferController, ControllerPhase, MemoryCounters,
@@ -172,6 +172,16 @@ pub struct ChannelDownloadFailure {
     pub stage: ChannelDownloadFailureStage,
     pub retryable: bool,
     pub requires_user_action: bool,
+    pub part: Option<ChannelDownloadPartFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChannelDownloadPartFailure {
+    pub part_index: u64,
+    pub attempt: u32,
+    pub elapsed_millis: u64,
+    pub connection_slot: Option<u16>,
+    pub kind: Option<DownloadPartFailureKind>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,12 +210,15 @@ pub struct ChannelDownloadEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChannelDownloadPartEvent {
+    pub task_attempt: u32,
     pub part_index: u64,
     pub offset_bytes: u64,
     pub length_bytes: u64,
     pub state: DownloadPartState,
     pub attempt: u32,
     pub elapsed_millis: u64,
+    pub connection_slot: u16,
+    pub failure: Option<DownloadPartFailureKind>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -565,12 +578,15 @@ impl DownloadObserver for RuntimeDownloadObserver {
 impl RuntimeDownloadObserver {
     fn process_part_event(&self, event: DownloadPartEvent, server_wait: Option<Duration>) {
         let part_event = ChannelDownloadPartEvent {
+            task_attempt: self.receipts.attempt,
             part_index: event.part_index,
             offset_bytes: event.offset_bytes,
             length_bytes: event.length_bytes,
             state: event.state,
             attempt: event.attempt,
             elapsed_millis: event.elapsed_millis,
+            connection_slot: event.connection_slot,
+            failure: event.failure,
         };
         let snapshot = mutate_snapshot(&self.snapshots, self.id, |snapshot| {
             if let Some(wait) = server_wait {
@@ -773,6 +789,9 @@ impl DesktopTransfers {
             let session_log_path =
                 transfer_log_directory.join(format!("native-download-{}.jsonl", snapshot.id));
             if session_log_path.is_file() {
+                if let Some(failure) = snapshot.failure.as_mut() {
+                    failure.part = last_failed_part_from_log(&session_log_path);
+                }
                 snapshot.session_log_path = Some(session_log_path);
             }
             if snapshot.state == ChannelDownloadState::Running {
@@ -2195,7 +2214,17 @@ fn fail_download(
         current.duration_ms = Some(duration_ms);
         current.current_bytes_per_second = None;
         current.eta_ms = None;
-        current.failure = Some(failure);
+        let part = current.part_events.iter().rev().find_map(|event| {
+            (event.state == DownloadPartState::Failed && event.task_attempt == current.attempts)
+                .then_some(ChannelDownloadPartFailure {
+                    part_index: event.part_index,
+                    attempt: event.attempt,
+                    elapsed_millis: event.elapsed_millis,
+                    connection_slot: Some(event.connection_slot),
+                    kind: event.failure,
+                })
+        });
+        current.failure = Some(ChannelDownloadFailure { part, ..failure });
         current.events.push(ChannelDownloadEvent {
             kind: ChannelDownloadEventKind::Failed,
             timestamp_unix_ms: finished_at_unix_ms.unwrap_or(current.queued_at_unix_ms),
@@ -2458,7 +2487,80 @@ fn failure_diagnostic(kind: ApplicationErrorKind) -> ChannelDownloadFailure {
         stage: ChannelDownloadFailureStage::Transfer,
         retryable,
         requires_user_action,
+        part: None,
     }
+}
+
+pub(crate) const fn download_part_failure_code(kind: DownloadPartFailureKind) -> &'static str {
+    match kind {
+        DownloadPartFailureKind::Timeout => "timeout",
+        DownloadPartFailureKind::Network => "network",
+        DownloadPartFailureKind::Server => "server",
+        DownloadPartFailureKind::RateLimited => "rate_limited",
+        DownloadPartFailureKind::Authorization => "authorization",
+        DownloadPartFailureKind::UnexpectedResponse => "unexpected_response",
+        DownloadPartFailureKind::Other => "other",
+    }
+}
+
+fn parse_download_part_failure_code(code: &str) -> Option<DownloadPartFailureKind> {
+    Some(match code {
+        "timeout" => DownloadPartFailureKind::Timeout,
+        "network" => DownloadPartFailureKind::Network,
+        "server" => DownloadPartFailureKind::Server,
+        "rate_limited" => DownloadPartFailureKind::RateLimited,
+        "authorization" => DownloadPartFailureKind::Authorization,
+        "unexpected_response" => DownloadPartFailureKind::UnexpectedResponse,
+        "other" => DownloadPartFailureKind::Other,
+        _ => return None,
+    })
+}
+
+fn last_failed_part_from_log(path: &Path) -> Option<ChannelDownloadPartFailure> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(MAX_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::with_capacity((length - start) as usize);
+    file.take(MAX_TAIL_BYTES).read_to_end(&mut tail).ok()?;
+    let first_complete = if start == 0 {
+        0
+    } else {
+        tail.iter().position(|&byte| byte == b'\n')? + 1
+    };
+    for line in tail[first_complete..].split(|&byte| byte == b'\n').rev() {
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let event = record.get("event").and_then(serde_json::Value::as_str);
+        if event == Some("session_started") {
+            break;
+        }
+        if event != Some("part_state")
+            || record.get("state").and_then(serde_json::Value::as_str) != Some("Failed")
+        {
+            continue;
+        }
+        let schema = record.get("schema")?.as_u64()?;
+        if schema != 1 && schema != 2 {
+            return None;
+        }
+        return Some(ChannelDownloadPartFailure {
+            part_index: record.get("part_index")?.as_u64()?,
+            attempt: u32::try_from(record.get("attempt")?.as_u64()?).ok()?,
+            elapsed_millis: record.get("attempt_elapsed_ms")?.as_u64()?,
+            connection_slot: (schema == 2)
+                .then(|| u16::try_from(record.get("connection_slot")?.as_u64()?).ok())
+                .flatten(),
+            kind: (schema == 2)
+                .then(|| parse_download_part_failure_code(record.get("failure")?.as_str()?))
+                .flatten(),
+        });
+    }
+    None
 }
 
 fn error_code(kind: ApplicationErrorKind) -> &'static str {
@@ -2607,28 +2709,37 @@ mod tests {
     fn part_counters_use_each_parts_latest_state() {
         let events = [
             ChannelDownloadPartEvent {
+                task_attempt: 1,
                 part_index: 0,
                 offset_bytes: 0,
                 length_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 state: DownloadPartState::Inflight,
                 attempt: 1,
                 elapsed_millis: 0,
+                connection_slot: 0,
+                failure: None,
             },
             ChannelDownloadPartEvent {
+                task_attempt: 1,
                 part_index: 0,
                 offset_bytes: 0,
                 length_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 state: DownloadPartState::Completed,
                 attempt: 1,
                 elapsed_millis: 25,
+                connection_slot: 0,
+                failure: None,
             },
             ChannelDownloadPartEvent {
+                task_attempt: 1,
                 part_index: 1,
                 offset_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 length_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 state: DownloadPartState::Failed,
                 attempt: 1,
                 elapsed_millis: 40,
+                connection_slot: 0,
+                failure: Some(DownloadPartFailureKind::Network),
             },
         ];
 
@@ -2643,6 +2754,61 @@ mod tests {
         assert_eq!(counters.failed_parts, 1);
         assert_eq!(counters.missing_parts, 2);
         assert_eq!(counters.completed_parts_per_second_milli, 1_500);
+    }
+
+    #[test]
+    fn failed_part_diagnostic_restores_only_from_the_latest_session() {
+        let root = tempfile::tempdir().expect("fixture");
+        let path = root.path().join("native-download.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"schema\":1,\"event\":\"session_started\"}\n",
+                "{\"schema\":1,\"event\":\"part_state\",\"state\":\"Failed\"}\n",
+                "{\"schema\":1,\"event\":\"session_started\"}\n",
+                "{\"schema\":2,\"event\":\"part_state\",\"state\":\"Failed\",\"part_index\":5,\"attempt\":4,\"attempt_elapsed_ms\":60001,\"connection_slot\":5,\"failure\":\"timeout\"}\n",
+                "{\"schema\":1,\"event\":\"session_finished\",\"result\":\"Network\"}\n",
+            ),
+        )
+        .expect("write fixture");
+        assert_eq!(
+            last_failed_part_from_log(&path),
+            Some(ChannelDownloadPartFailure {
+                part_index: 5,
+                attempt: 4,
+                elapsed_millis: 60_001,
+                connection_slot: Some(5),
+                kind: Some(DownloadPartFailureKind::Timeout),
+            })
+        );
+        use std::io::Write as _;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open fixture");
+        writeln!(log, "{{\"schema\":1,\"event\":\"session_started\"}}").expect("new session");
+        writeln!(log, "{{\"schema\":1,\"event\":\"session_finished\"}}").expect("new finish");
+        assert_eq!(last_failed_part_from_log(&path), None);
+        drop(log);
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"schema\":1,\"event\":\"session_started\"}\n",
+                "{\"schema\":1,\"event\":\"part_state\",\"state\":\"Failed\",\"part_index\":13,\"attempt\":4,\"attempt_elapsed_ms\":60002}\n",
+                "{\"schema\":1,\"event\":\"session_finished\",\"result\":\"Network\"}\n",
+            ),
+        )
+        .expect("legacy fixture");
+        assert_eq!(
+            last_failed_part_from_log(&path),
+            Some(ChannelDownloadPartFailure {
+                part_index: 13,
+                attempt: 4,
+                elapsed_millis: 60_002,
+                connection_slot: None,
+                kind: None,
+            })
+        );
     }
 
     fn test_transfers(
@@ -3134,12 +3300,15 @@ mod tests {
         let mut template = wait_for_terminal(&transfers, id);
         for part_index in 0..512 {
             template.part_events.push(ChannelDownloadPartEvent {
+                task_attempt: 1,
                 part_index,
                 offset_bytes: part_index * DOWNLOAD_PART_SIZE_BYTES,
                 length_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 state: DownloadPartState::Completed,
                 attempt: 1,
                 elapsed_millis: 1,
+                connection_slot: 0,
+                failure: None,
             });
         }
         let store = TransferSnapshots::new(

@@ -316,12 +316,15 @@ mod tests {
         let mut template = template();
         for index in 0..8192 {
             template.part_events.push(ChannelDownloadPartEvent {
+                task_attempt: 1,
                 part_index: index,
                 offset_bytes: index * DOWNLOAD_PART_SIZE_BYTES,
                 length_bytes: DOWNLOAD_PART_SIZE_BYTES,
                 state: DownloadPartState::Completed,
                 attempt: 1,
                 elapsed_millis: 1,
+                connection_slot: 0,
+                failure: None,
             });
         }
         let mut controller = new_download_controller(teleark_telegram::TransferTuning::default())

@@ -113,12 +113,15 @@ mod tests {
 
     fn event(index: u64, state: DownloadPartState) -> ChannelDownloadPartEvent {
         ChannelDownloadPartEvent {
+            task_attempt: 1,
             part_index: index,
             offset_bytes: index * 1_048_576,
             length_bytes: 1_048_576,
             state,
             attempt: 1,
             elapsed_millis: 1,
+            connection_slot: 0,
+            failure: None,
         }
     }
 

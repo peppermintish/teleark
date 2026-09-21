@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.11 · Native download recovery and diagnostics
+
+- Native download part retries switch to another transfer connection slot after a failure. A slot that reaches the 60-second request deadline is avoided for later parts of the same download, preventing one stalled slot from exhausting every attempt assigned to it.
+- The transfer inspector shows the measured part failure cause, part number, attempt, local connection slot and wait time. New version-2 part events retain this detail in the private session log so the final failure remains explainable after restart; older log records remain readable.
+- Application metadata is 0.4.11. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged. The native partial-file bitmap and encrypted file/recovery formats are unchanged.
+
 ## 0.4.10 · Configured Telegram builds and Windows MSI
 
 - Release CI validates the Telegram distribution API ID/hash secrets and passes them to every native compilation, including both universal macOS slices. Installed and portable apps use the same embedded configuration; reports never include the values.

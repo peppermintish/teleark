@@ -738,7 +738,10 @@ detail-queue-wait = Queue wait
 detail-elapsed = Elapsed
 detail-average-speed = Average speed
 detail-failure-reason = Failure reason
+detail-failure-part-context = Part { $part } · attempt { $attempt } · connection { $connection } · { $elapsed }
+detail-failure-part-context-legacy = Part { $part } · attempt { $attempt } · waited { $elapsed }. This older log did not record the exact cause or connection.
 detail-failure-retryable = This failure may be temporary. Check the conditions above and retry.
+detail-failure-timeout-guidance = Retry the download. If requests keep timing out, check your network or proxy connection to Telegram.
 detail-failure-user-action = This failure needs a settings, account, source, or filesystem change before retrying.
 detail-failure-terminal = This task stopped and will not retry automatically.
 detail-verification-not-reached = Verification has not been performed
@@ -760,6 +763,13 @@ native-download-error-permission-denied = macOS denied access to the configured 
 native-download-error-capacity = The transfer queue or local resource limit was reached.
 native-download-error-authorization = Telegram authorization expired or does not allow this download.
 native-download-error-network = The network connection or Telegram request was interrupted.
+native-part-error-timeout = Telegram did not answer the part request within 60 seconds.
+native-part-error-network = The part request lost its Telegram connection.
+native-part-error-server = Telegram reported a server error for this part.
+native-part-error-rate-limited = Telegram asked this part request to wait.
+native-part-error-authorization = Telegram rejected the account authorization for this part.
+native-part-error-unexpected-response = Telegram returned incomplete or unexpected part data.
+native-part-error-other = The part request stopped for another transfer error.
 native-download-error-cancelled = The download was cancelled before completion.
 native-download-error-unknown = The download failed for an unclassified internal reason.
 settings-managed-logs-label = Diagnostic logs
@@ -951,7 +961,7 @@ transfer-part-inflight = Inflight
 transfer-part-completed = Completed
 transfer-part-retry = Retry
 transfer-part-failed = Failed
-transfer-part-event-value = Part {$part} · offset {$offset} · {$length} · {$state} · attempt {$attempt} · {$elapsed}
+transfer-part-event-value = Part {$part} · offset {$offset} · {$length} · {$state} · attempt {$attempt} · connection {$connection} · {$elapsed}
 settings-transfer-soft-limit-title = Telegram soft-limit policy
 settings-transfer-soft-limit-description = Choose how the adaptive controller handles conservative Telegram guidance when measured goodput favors more active work.
 settings-transfer-soft-limit-respect = Respect
@@ -1139,6 +1149,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.11 · Native download recovery and diagnostics
+
+    - Native download part retries switch to another transfer connection slot after a failure. A slot that reaches the 60-second request deadline is avoided for later parts of the same download, preventing one stalled slot from exhausting every attempt assigned to it.
+    - The transfer inspector shows the measured part failure cause, part number, attempt, local connection slot and wait time. New version-2 part events retain this detail in the private session log so the final failure remains explainable after restart; older log records remain readable.
+    - Application metadata is 0.4.11. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged. The native partial-file bitmap and encrypted file/recovery formats are unchanged.
+
     ## 0.4.10 · Configured Telegram builds and Windows MSI
 
     - Release CI validates the Telegram distribution API ID/hash secrets and passes them to every native compilation, including both universal macOS slices. Installed and portable apps use the same embedded configuration; reports never include the values.

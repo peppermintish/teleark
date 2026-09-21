@@ -20,10 +20,10 @@ use teleark_i18n::{
 use teleark_runtime::{
     ChannelDownloadCleanup, ChannelDownloadCleanupPhase, ChannelDownloadEventKind,
     ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, ControllerDecision,
-    ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase, DownloadPartState,
-    TransferBottleneck, TransferControlParameters, TransferTelemetrySnapshot, TunableParameter,
-    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadActivity,
-    VaultUploadPhase,
+    ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase, DownloadPartFailureKind,
+    DownloadPartState, TransferBottleneck, TransferControlParameters, TransferTelemetrySnapshot,
+    TunableParameter, VaultTransferDirection, VaultTransferSnapshot, VaultTransferState,
+    VaultUploadActivity, VaultUploadPhase,
 };
 
 use crate::{
@@ -306,6 +306,34 @@ impl TeleArkApp {
         self.vault_transfer_view.items = vec![].into();
         self.vault_transfer_view.omitted_items = 0;
         self.nav_selection = "nav-downloads";
+    }
+
+    pub(crate) fn preview_native_failure(&mut self) {
+        self.preview_native_cleanup(false);
+        let mut snapshot = (*self.native_transfer_view.items[0]).clone();
+        snapshot.cleanup = None;
+        snapshot.state = ChannelDownloadState::Failed(ApplicationErrorKind::Network);
+        snapshot.size_bytes = 80 * 1024 * 1024;
+        snapshot.transferred_bytes = 18 * 1024 * 1024;
+        snapshot.verification = ChannelDownloadVerification::NotReached;
+        snapshot.failure = Some(teleark_runtime::ChannelDownloadFailure {
+            kind: ApplicationErrorKind::Network,
+            stage: teleark_runtime::ChannelDownloadFailureStage::Transfer,
+            retryable: true,
+            requires_user_action: false,
+            part: Some(teleark_runtime::ChannelDownloadPartFailure {
+                part_index: 21,
+                attempt: 4,
+                elapsed_millis: 60_001,
+                connection_slot: Some(5),
+                kind: Some(DownloadPartFailureKind::Timeout),
+            }),
+        });
+        let row = self.transfer_row_from_snapshot(&snapshot, false);
+        self.focused_transfer_key = Some(snapshot.id);
+        self.preview_transfer_rows = vec![row];
+        self.native_transfer_view.items = vec![std::sync::Arc::new(snapshot)].into();
+        self.show_transfer_detail = true;
     }
 
     fn transfer_items(&self) -> std::sync::Arc<Vec<TransferItem>> {
@@ -3369,15 +3397,53 @@ impl TeleArkApp {
             .as_ref()
             .and_then(|snapshot| snapshot.failure)
             .map(|failure| {
+                let part_detail = failure.part.map(|part| {
+                    let args = MessageArgs::new()
+                        .with("part", format_integer(self.locale(), part.part_index))
+                        .with(
+                            "attempt",
+                            format_integer(self.locale(), u64::from(part.attempt)),
+                        )
+                        .with(
+                            "elapsed",
+                            format_duration_millis(self.locale(), part.elapsed_millis),
+                        );
+                    match part.connection_slot {
+                        Some(slot) => self.tr_with(
+                            "detail-failure-part-context",
+                            args.with(
+                                "connection",
+                                format_integer(self.locale(), u64::from(slot) + 1),
+                            ),
+                        ),
+                        None => self.tr_with("detail-failure-part-context-legacy", args),
+                    }
+                });
                 (
-                    self.tr(native_download_error_message_id(failure.kind)),
-                    self.tr(if failure.retryable {
-                        "detail-failure-retryable"
-                    } else if failure.requires_user_action {
-                        "detail-failure-user-action"
-                    } else {
-                        "detail-failure-terminal"
-                    }),
+                    self.tr(failure.part.and_then(|part| part.kind).map_or_else(
+                        || native_download_error_message_id(failure.kind),
+                        |kind| {
+                            if kind == DownloadPartFailureKind::Other {
+                                native_download_error_message_id(failure.kind)
+                            } else {
+                                native_part_failure_message_id(kind)
+                            }
+                        },
+                    )),
+                    self.tr(
+                        if failure.part.and_then(|part| part.kind)
+                            == Some(DownloadPartFailureKind::Timeout)
+                        {
+                            "detail-failure-timeout-guidance"
+                        } else if failure.retryable {
+                            "detail-failure-retryable"
+                        } else if failure.requires_user_action {
+                            "detail-failure-user-action"
+                        } else {
+                            "detail-failure-terminal"
+                        },
+                    ),
+                    part_detail,
                 )
             })
             .or_else(|| {
@@ -3392,6 +3458,7 @@ impl TeleArkApp {
                                     .map(|activity| activity.phase),
                             )),
                             self.tr(vault_recovery_guidance_message_id(snapshot, kind)),
+                            None,
                         ))
                     } else {
                         None
@@ -3561,28 +3628,38 @@ impl TeleArkApp {
                                 .child(self.tr("transfer-upload-interrupted-action")),
                         )
                     })
-                    .when_some(failure_reason, |details, (reason, guidance)| {
-                        details.child(
-                            div()
-                                .debug_selector(|| "transfer-recovery-guidance".to_owned())
-                                .mt_2()
-                                .p_3()
-                                .rounded(theme::RADIUS_SMALL)
-                                .bg(theme::red_soft())
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .text_xs()
-                                .text_color(theme::red())
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(self.tr("detail-failure-reason")),
-                                )
-                                .child(reason)
-                                .child(div().text_color(theme::text_secondary()).child(guidance)),
-                        )
-                    })
+                    .when_some(
+                        failure_reason,
+                        |details, (reason, guidance, part_detail)| {
+                            details.child(
+                                div()
+                                    .debug_selector(|| "transfer-recovery-guidance".to_owned())
+                                    .mt_2()
+                                    .p_3()
+                                    .rounded(theme::RADIUS_SMALL)
+                                    .bg(theme::red_soft())
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(theme::red())
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(self.tr("detail-failure-reason")),
+                                    )
+                                    .child(reason)
+                                    .when_some(part_detail, |card, detail| {
+                                        card.child(
+                                            div().text_color(theme::text_secondary()).child(detail),
+                                        )
+                                    })
+                                    .child(
+                                        div().text_color(theme::text_secondary()).child(guidance),
+                                    ),
+                            )
+                        },
+                    )
                     .when_some(
                         vault_snapshot
                             .as_ref()
@@ -3707,9 +3784,8 @@ impl TeleArkApp {
                                     DownloadPartState::Retry => "transfer-part-retry",
                                     DownloadPartState::Failed => "transfer-part-failed",
                                 });
-                                components::list_summary(
-                                    ("transfer-part-event", index),
-                                    self.tr_with(
+                                components::list_summary(("transfer-part-event", index), {
+                                    let summary = self.tr_with(
                                         "transfer-part-event-value",
                                         MessageArgs::new()
                                             .with(
@@ -3738,9 +3814,23 @@ impl TeleArkApp {
                                                     self.locale(),
                                                     event.elapsed_millis,
                                                 ),
+                                            )
+                                            .with(
+                                                "connection",
+                                                format_integer(
+                                                    self.locale(),
+                                                    u64::from(event.connection_slot) + 1,
+                                                ),
                                             ),
-                                    ),
-                                )
+                                    );
+                                    event.failure.map_or(summary.clone(), |kind| {
+                                        format!(
+                                            "{summary} · {}",
+                                            self.tr(native_part_failure_message_id(kind))
+                                        )
+                                        .into()
+                                    })
+                                })
                             });
                         details
                             .child(
@@ -4246,8 +4336,21 @@ fn native_download_error_message_id(kind: teleark_core::ApplicationErrorKind) ->
         ApplicationErrorKind::Capacity => "native-download-error-capacity",
         ApplicationErrorKind::Authorization => "native-download-error-authorization",
         ApplicationErrorKind::Network => "native-download-error-network",
+        ApplicationErrorKind::Server => "native-part-error-server",
         ApplicationErrorKind::Cancelled => "native-download-error-cancelled",
         _ => "native-download-error-unknown",
+    }
+}
+
+fn native_part_failure_message_id(kind: DownloadPartFailureKind) -> &'static str {
+    match kind {
+        DownloadPartFailureKind::Timeout => "native-part-error-timeout",
+        DownloadPartFailureKind::Network => "native-part-error-network",
+        DownloadPartFailureKind::Server => "native-part-error-server",
+        DownloadPartFailureKind::RateLimited => "native-part-error-rate-limited",
+        DownloadPartFailureKind::Authorization => "native-part-error-authorization",
+        DownloadPartFailureKind::UnexpectedResponse => "native-part-error-unexpected-response",
+        DownloadPartFailureKind::Other => "native-part-error-other",
     }
 }
 
@@ -5537,6 +5640,55 @@ mod tests {
                 let id = MessageId::new(native_download_error_message_id(kind));
                 assert!(localizer.contains(locale, id));
             }
+            for kind in [
+                DownloadPartFailureKind::Timeout,
+                DownloadPartFailureKind::Network,
+                DownloadPartFailureKind::Server,
+                DownloadPartFailureKind::RateLimited,
+                DownloadPartFailureKind::Authorization,
+                DownloadPartFailureKind::UnexpectedResponse,
+                DownloadPartFailureKind::Other,
+            ] {
+                let id = MessageId::new(native_part_failure_message_id(kind));
+                assert!(localizer.contains(locale, id));
+            }
+            assert!(localizer.contains(locale, MessageId::new("detail-failure-part-context")));
+            assert!(
+                localizer.contains(locale, MessageId::new("detail-failure-part-context-legacy"))
+            );
+            assert!(localizer.contains(locale, MessageId::new("detail-failure-timeout-guidance")));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn native_failure_inspector_shows_the_part_diagnostic_at_compact_and_large_sizes(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (entity, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        for (width, height) in [(900.0, 600.0), (1440.0, 900.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            entity.update(cx, |app, cx| {
+                app.preview_native_failure();
+                let snapshot = &app.native_transfer_view.items[0];
+                assert_eq!(
+                    snapshot.state,
+                    ChannelDownloadState::Failed(ApplicationErrorKind::Network)
+                );
+                assert_eq!(
+                    snapshot
+                        .failure
+                        .and_then(|failure| failure.part)
+                        .and_then(|part| part.kind),
+                    Some(DownloadPartFailureKind::Timeout)
+                );
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let inspector = cx.debug_bounds("transfer-inspector").expect("inspector");
+            let reason = cx
+                .debug_bounds("transfer-recovery-guidance")
+                .expect("failure reason");
+            assert!(reason.top() >= inspector.top() && reason.top() < inspector.bottom());
         }
     }
 

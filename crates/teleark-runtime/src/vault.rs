@@ -4360,15 +4360,22 @@ impl TransferSessionLog {
         event: teleark_telegram::DownloadPartEvent,
         elapsed_ms: u64,
     ) -> Result<(), ApplicationError> {
+        let failure = event.failure.map_or("null".to_owned(), |kind| {
+            format!(
+                "\"{}\"",
+                crate::channel_transfer::download_part_failure_code(kind)
+            )
+        });
         writeln!(
             self.writer,
-            "{{\"schema\":1,\"event\":\"part_state\",\"elapsed_ms\":{elapsed_ms},\"part_index\":{},\"offset_bytes\":{},\"length_bytes\":{},\"state\":\"{:?}\",\"attempt\":{},\"attempt_elapsed_ms\":{}}}",
+            "{{\"schema\":2,\"event\":\"part_state\",\"elapsed_ms\":{elapsed_ms},\"part_index\":{},\"offset_bytes\":{},\"length_bytes\":{},\"state\":\"{:?}\",\"attempt\":{},\"attempt_elapsed_ms\":{},\"connection_slot\":{},\"failure\":{failure}}}",
             event.part_index,
             event.offset_bytes,
             event.length_bytes,
             event.state,
             event.attempt,
             event.elapsed_millis,
+            event.connection_slot,
         )
         .map_err(map_log_io)?;
         self.writer.flush().map_err(map_log_io)
