@@ -23,7 +23,7 @@ impl TelegramConnection {
         let clients = self
             .transfer_clients(false, tuning.download_connections)
             .await;
-        let count = expected.div_ceil(UPLOAD_PART_BYTES as u64);
+        let count = expected.div_ceil(DOWNLOAD_PART_SIZE_BYTES);
         let window = u64::from(tuning.download_parts);
         let mut next = 0;
         let mut emitted = 0;
@@ -39,8 +39,8 @@ impl TelegramConnection {
             while next < count && next < emitted + window {
                 let index = next;
                 next += 1;
-                let offset = index * UPLOAD_PART_BYTES as u64;
-                let length = (expected - offset).min(UPLOAD_PART_BYTES as u64);
+                let (offset, length) = stream_download_part_range(index, expected)
+                    .ok_or_else(|| TelegramError::new(TelegramErrorKind::LimitExceeded))?;
                 let client = clients[index as usize % clients.len()].clone();
                 let document = file.document.clone();
                 let gate = self.download_flood_gate.clone();
@@ -107,6 +107,12 @@ impl TelegramConnection {
     }
 }
 
+fn stream_download_part_range(index: u64, expected: u64) -> Option<(u64, u64)> {
+    let offset = index.checked_mul(DOWNLOAD_PART_SIZE_BYTES)?;
+    let remaining = expected.checked_sub(offset)?;
+    Some((offset, remaining.min(DOWNLOAD_PART_SIZE_BYTES)))
+}
+
 struct StreamReceipts {
     state: Mutex<(u64, BTreeMap<u64, u64>)>,
     observer: Option<Arc<dyn ByteTransferObserver>>,
@@ -135,5 +141,31 @@ impl DownloadReceiptObserver for StreamReceipts {
         if let Ok(mut state) = self.state.lock() {
             state.1.remove(&part);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_download_stream_uses_one_mib_inflight_parts() {
+        assert_eq!(DOWNLOAD_PART_SIZE_BYTES, 1024 * 1024);
+
+        let expected = DOWNLOAD_PART_SIZE_BYTES * 2 + 17;
+        assert_eq!(expected.div_ceil(DOWNLOAD_PART_SIZE_BYTES), 3);
+        assert_eq!(
+            stream_download_part_range(0, expected),
+            Some((0, DOWNLOAD_PART_SIZE_BYTES))
+        );
+        assert_eq!(
+            stream_download_part_range(1, expected),
+            Some((DOWNLOAD_PART_SIZE_BYTES, DOWNLOAD_PART_SIZE_BYTES))
+        );
+        assert_eq!(
+            stream_download_part_range(2, expected),
+            Some((DOWNLOAD_PART_SIZE_BYTES * 2, 17))
+        );
+        assert_eq!(stream_download_part_range(3, expected), None);
     }
 }

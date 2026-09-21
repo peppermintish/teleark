@@ -89,9 +89,10 @@ promise of higher throughput. MTProto owns additional bounded in-flight wire cop
 Native and Vault downloads share the user-selected file gate. Native workers and
 Vault download owners have retained bounded pools separate from upload execution.
 Both native and bounded encrypted-object reads use the selected part, connection
-and attempt limits. Native logical parts remain 1 MiB, split into protocol reads;
-this preserves their existing download bitmap codec. Vault downloads authenticate
-complete application containers as before.
+and attempt limits. Native and encrypted-object logical parts are 1 MiB, split
+into protocol reads; this preserves the existing native download bitmap codec
+while keeping the bounded encrypted stream's in-flight window at the same size.
+Vault downloads authenticate complete application containers as before.
 
 Part attempts use structured errors, 60-second request timeouts and bounded
 exponential retry backoff. Direction-wide FloodWait gates honor the entire server
