@@ -62,3 +62,7 @@ try {
         Remove-Item -LiteralPath $repository -Recurse -Force
     }
 }
+
+# GitHub's pwsh wrapper exits with the last native command's status. The
+# expected rejection above leaves that status at 1 even though every test passed.
+$global:LASTEXITCODE = 0
