@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6 · Unified CI and wider native releases
+
+- One GitHub Actions workflow runs quality and platform tests for branches and pull requests, and builds/publishes installers for matching `vX.Y.Z` tags. Its summaries show stage results, LF policy counts, Rust cache hits and release checksums. An optional manual package preview builds without publishing.
+- Windows x64 and ARM64, universal macOS (Apple Silicon and Intel), and Linux x64 and ARM64 now have native release packages. Windows uses a static CRT; macOS uses system frameworks; Linux AppImage and portable archives bundle linked runtime libraries. Debian installers resolve ordinary OS runtime packages automatically. No end-user build SDK is required.
+- Windows, macOS and Debian installers retain in-place upgrades and reject older versions before replacing files. Application metadata is 0.4.6; SQLite schema 22 and supported encrypted/recovery formats are unchanged. macOS packages remain unsigned and unnotarized.
+
 ## 0.4.5 · Portable recovery and release installers
 
 - Encrypted uploads and downloads stream through bounded memory in 512 KiB transport blocks. New uploads do not create ciphertext spools; downloads write authenticated plaintext, and compatible older files remain readable.

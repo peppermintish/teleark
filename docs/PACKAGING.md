@@ -1,63 +1,35 @@
 # Desktop release packages
 
-The [release workflow](../.github/workflows/release.yml) builds three explicit native targets and publishes nine files for a matching `vX.Y.Z` tag. A manual run uploads the same files as workflow artifacts with a `-manual-<commit>` filename suffix. The installer version always comes from the `teleark-gui` Cargo package (`X.Y.Z`); branch names and the `v` tag prefix never become installer versions. A tag whose version differs from Cargo fails before packaging.
+The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for every branch, pull request and tag. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into every native installer.
+
+The tagged workflow checks and publishes these 15 files, plus both project licenses, third-party notices and a unified `SHA256SUMS`:
 
 | Target | Standalone executable | Portable archive | Native installer |
 | --- | --- | --- | --- |
-| Windows x86_64 | `teleark-<label>-windows-x86_64.exe` | `teleark-<label>-windows-x86_64.zip` | `TeleArk-Setup-<label>-windows-x86_64.exe` |
-| macOS arm64 | `teleark-<label>-macos-arm64.bin` (Mach-O executable) | `teleark-<label>-macos-arm64.tar.gz` (`TeleArk.app`) | `TeleArk-<label>-macos-arm64.pkg` |
-| Linux x86_64 | `teleark-<label>-linux-x86_64` | `teleark-<label>-linux-x86_64.tar.gz` | `teleark_<label>_amd64.deb` |
+| Windows x64 | `teleark-<label>-windows-x86_64.exe` | `teleark-<label>-windows-x86_64.zip` | `TeleArk-Setup-<label>-windows-x86_64.exe` |
+| Windows ARM64 | `teleark-<label>-windows-arm64.exe` | `teleark-<label>-windows-arm64.zip` | `TeleArk-Setup-<label>-windows-arm64.exe` |
+| macOS universal | `teleark-<label>-macos-universal.bin` | `teleark-<label>-macos-universal.tar.gz` containing `TeleArk.app` | `TeleArk-<label>-macos-universal.pkg` |
+| Linux x64 | `teleark-<label>-linux-x86_64.AppImage` | `teleark-<label>-linux-x86_64.tar.gz` containing `AppRun` | `teleark_<label>_amd64.deb` |
+| Linux ARM64 | `teleark-<label>-linux-aarch64.AppImage` | `teleark-<label>-linux-aarch64.tar.gz` containing `AppRun` | `teleark_<label>_arm64.deb` |
 
-Each platform job checks that all three files exist, verifies the archive and native package metadata, and uploads checksums. Tagged publication checks the exact nine-file manifest before creating a release. The workflow fails if an installer cannot be built or an existing release would be overwritten. Published assets also include both licenses, third-party notices and a unified `SHA256SUMS` file.
+Windows binaries statically link the Microsoft C runtime. The macOS universal executable contains both `arm64` and `x86_64` slices and its package check rejects references to non-system dynamic libraries. Linux portable outputs bundle linked runtime libraries in an AppDir, along with available distribution copyright notices. The Debian installer declares runtime package dependencies and `apt` resolves them automatically. Users do not need Rust, a compiler, an SDK or a separate language runtime. The host still supplies its operating system, graphics drivers and desktop facilities.
 
-Native installers upgrade in place. Windows Inno Setup keeps the existing per-user installation directory and refuses an older setup before copying files; it shows an error dialog, or logs the same reason in silent mode. The macOS package installs at `/Applications/TeleArk.app`; Installer.app shows a fatal version message and the component preinstall script also refuses downgrades from the command line. Debian's package manager replaces the installed `teleark` package in place, and the new package's `preinst` rejects a version older than the installed package before unpacking. Unknown installed versions on Windows and macOS also stop the installer. The portable archives and standalone executables do not enforce a version guard when copied manually.
+Native installers upgrade in place. Windows Inno Setup retains the existing per-user directory and shows an error before changing files if the installer is older; silent installation logs the same reason. The macOS package installs at `/Applications/TeleArk.app`; Installer.app and its command-line pre-install guard reject downgrades. Debian `preinst` rejects a version older than the installed package before unpacking. Copying a portable archive or standalone executable manually does not enforce a version guard.
 
-## macOS
-
-Build on an arm64 Mac and package with:
-
-```bash
-scripts/build-local.sh && scripts/package-macos.sh
-```
-
-This creates `dist/TeleArk.app`, the raw executable and the `.pkg`. `pkgbuild`, `productbuild` and other Apple packaging tools are required. The script stamps both bundle version fields from Cargo and rejects a binary that lacks the selected architecture. To install, open the `.pkg` in Installer.app, or run `sudo installer -pkg dist/TeleArk-<label>-macos-arm64.pkg -target /`.
-
-To produce a drag-to-Applications disk image (`.dmg`), use a fresh staging directory and an unused output filename:
-
-```bash
-(
-  set -eu
-  mkdir -p dist/dmg
-  ditto dist/TeleArk.app dist/dmg/TeleArk.app
-  ln -s /Applications dist/dmg/Applications
-  hdiutil create -volname TeleArk -srcfolder dist/dmg -ov -format UDZO dist/TeleArk.dmg
-)
-```
-
-The workflow does not publish a `.dmg`. The `.app` and `.pkg` are unsigned and not notarized; public distribution needs signing, notarization and clean-machine checks.
+Each package job checks native architecture, files, checksums and installer metadata. Windows and macOS jobs exercise a real install and in-place upgrade, then prove an older installer fails without replacing the executable. Linux jobs extract both portable formats, check the Debian guard and install the package. Publication refuses to overwrite an existing release or accept a missing asset. The GitHub Actions summary shows the stages, LF counts, cache hits and SHA256 manifest.
 
 ## Windows
 
-Build the x86_64 MSVC target with `+crt-static`, then run:
+Build either MSVC target with `RUSTFLAGS="-C target-feature=+crt-static"`, then run `scripts/package-windows.ps1` with the architecture argument (`x86_64` or `arm64`). The Inno Setup 6 compiler is a build-time tool; the installer includes the app and legal files. The installer defaults to `%LOCALAPPDATA%\Programs\TeleArk`, preserves an existing install location and accepts a same-version repair. The x64 build targets Windows 10 version 1809 or later and can run under Windows 11 ARM x64 emulation; the ARM64 package is native on Windows ARM. Inno Setup has separate [commercial-use license terms](https://jrsoftware.org/isorder.php) for distributors.
 
-```powershell
-.\scripts\package-windows.ps1
-```
+## macOS
 
-[Inno Setup 6](https://jrsoftware.org/isdl.php) (`ISCC.exe`) is required. The script creates the standalone executable, portable ZIP, installer and checksums; missing Inno Setup is an error. The installer defaults to `%LOCALAPPDATA%\Programs\TeleArk` and retains an existing TeleArk install path. Run the setup executable to install or upgrade.
+The release job builds `aarch64-apple-darwin` and `x86_64-apple-darwin` on an Apple Silicon runner with `MACOSX_DEPLOYMENT_TARGET=11.0`, joins them with `lipo`, and creates the app archive, raw executable and product package using `scripts/package-macos.sh`. macOS 11 is the declared minimum. The raw executable uses Apple system frameworks only; the `.app` includes the icon and legal files. Install through Finder or `sudo installer -pkg TeleArk-<label>-macos-universal.pkg -target /`.
+
+The `.app` and `.pkg` are currently unsigned and unnotarized. Public distribution through Gatekeeper needs Apple signing, notarization and clean-machine checks.
 
 ## Linux
 
-Build on the Ubuntu 22.04 x86_64 baseline and run:
+Linux packages are built natively on Ubuntu 22.04 x64 and ARM64 runners. `scripts/package-linux.sh` uses `cargo-deb` and a checksum-pinned MIT-licensed `linuxdeploy` build to create the Debian package and portable AppDir outputs. The AppImage is a one-file runnable application; the archive exposes `AppRun` for systems without AppImage FUSE support. To install or upgrade the Debian package, use `sudo apt install ./teleark_<label>_<arch>.deb`; `apt` installs ordinary runtime libraries if the host lacks them. Neither method asks users to install development headers or SDKs.
 
-```bash
-scripts/package-linux.sh
-```
-
-`cargo-deb` is required. The script creates the standalone ELF executable, portable tarball, `.deb` and checksums. Install or upgrade with:
-
-```bash
-sudo apt install ./dist/teleark_<label>_amd64.deb
-```
-
-The `.deb` contains application shortcuts, icons, licenses and notices. Its `preinst` compares Debian package versions using `dpkg`, including distro revision suffixes.
+Ubuntu 22.04 is the build baseline, so older distributions are not promised. Portable outputs include linked libraries but still use the host kernel, display server and graphics drivers. The Debian package installs desktop shortcuts, icons, licenses and notices; its `preinst` compares Debian version strings including distribution revisions.

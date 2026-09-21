@@ -26,6 +26,10 @@ if grep -Eiq '(^|[, ])[^, ]*(-dev|pkg-config|cmake|clang)([, (]|$)' <<< "$depend
 fi
 
 stage="$(mktemp -d)"
+if dpkg-query -W -f='${Status}' teleark 2>/dev/null | grep -Fxq 'install ok installed'; then
+  echo 'TeleArk is already installed on this release runner.' >&2
+  exit 1
+fi
 trap 'sudo dpkg -r teleark >/dev/null 2>&1 || true; rm -rf "$stage"' EXIT
 dpkg-deb -e "$deb" "$stage/control"
 dpkg-deb -x "$deb" "$stage/deb-payload"
@@ -41,8 +45,10 @@ tar -C "$stage" -xzf "$tarball"
 test -x "$stage/$base/AppRun"
 test -x "$stage/$base/usr/bin/teleark"
 test -s "$stage/$base/usr/share/doc/teleark/THIRD_PARTY_NOTICES.md"
+find "$stage/$base/usr/share/doc/teleark/system-libraries" -name '*.copyright' -print -quit | grep -q .
 cmp "$stage/$base/usr/bin/teleark" "$stage/deb-payload/usr/bin/teleark"
-if ldd "$stage/$base/usr/bin/teleark" | grep -Fq 'not found'; then
+linked_libraries="$(ldd "$stage/$base/usr/bin/teleark")"
+if grep -Fq 'not found' <<< "$linked_libraries"; then
   echo 'Portable Linux binary has an unresolved runtime library on the baseline runner.' >&2
   exit 1
 fi
@@ -51,6 +57,7 @@ fi
 cmp "$stage/squashfs-root/usr/bin/teleark" "$stage/deb-payload/usr/bin/teleark"
 test -x "$stage/squashfs-root/AppRun"
 test -s "$stage/squashfs-root/usr/share/doc/teleark/THIRD_PARTY_NOTICES.md"
+find "$stage/squashfs-root/usr/share/doc/teleark/system-libraries" -name '*.copyright' -print -quit | grep -q .
 (cd dist && sha256sum -c SHA256SUMS)
 
 sudo apt-get install -y "$deb"

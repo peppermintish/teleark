@@ -5,7 +5,7 @@ Commands and preview fixtures for the repository's `rust-toolchain.toml` and che
 ## Quality gates
 
 Plain-text source files use UTF-8 and LF on every platform (`.editorconfig` and
-`.gitattributes`). The CI and release workflows run
+`.gitattributes`). The CI/CD workflow runs
 `pwsh ./scripts/check-line-endings.ps1` against all tracked Git-index files,
 rejecting CRLF text and all `.cmd`/`.bat` scripts. Each check writes counts and
 violations to the GitHub Actions job summary. Run the same command before a commit;
@@ -30,7 +30,7 @@ pwsh ./scripts/test-line-endings.ps1
 cargo fmt --all --check
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo test --workspace --all-targets --locked -- --test-threads=1
 cargo test -p teleark-core --locked
 cargo test -p teleark-i18n --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
@@ -51,7 +51,7 @@ scripts/build-local.sh &&
 
 The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. The release archive contains this unsigned bundle.
 
-GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. A signed/notarized release and the macOS deployment floor, Apple Silicon/Intel matrix and other desktop platforms need separate qualification.
+GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. The tagged workflow builds both Apple Silicon and Intel slices; signing/notarization and clean-machine validation of the macOS 11 floor remain separate qualification.
 
 Source builds use their own Telegram API ID/Hash configured from the login/settings UI. Distributors may set `TELEARK_DISTRIBUTION_TELEGRAM_API_ID` and `TELEARK_DISTRIBUTION_TELEGRAM_API_HASH` through protected build secrets. Both must be valid; personal saved credentials override them. Embedded identifiers are extractable and do not authorize a Telegram user. For local testing, `.env.example` provides the [officially published TEST ONLY pair](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). These identifiers are server-limited and must not be used for distribution; obtain your own pair before publishing. Never log personal pairs or commit them to fixtures.
 
@@ -118,9 +118,9 @@ Inspect actual affected windows, including keyboard/focus, wrapping, scrolling a
 
 ## CI and releases
 
-`ci.yml` runs all eight source gates plus the legal baseline on macOS. CI and Release install pinned `cargo-deny 0.20.2` as a native tool; Docker actions cannot run on a macOS runner. `fuzz.yml` runs two bounded daily parser campaigns on Linux with explicit `cargo +nightly` (the repository toolchain file otherwise selects stable), retaining crash inputs when produced. This Linux job validates formats and produces no desktop package.
+[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs LF checks, the legal baseline and the full locked Linux source gates. Branches and pull requests then run Windows and macOS tests. A matching `vX.Y.Z` tag instead resolves the Cargo version, builds five native package targets and publishes one exact 15-file release manifest after every package verifies. Job conditions keep installer runners idle on ordinary pushes. Pushing a branch and its tag together creates separate GitHub runs, but the tag does not repeat the Windows/macOS test matrix; Linux quality runs again on the tag to validate the published commit.
 
-`release.yml` validates that a `vX.Y.Z` tag matches the Cargo GUI version, then builds explicit Windows x86_64, macOS arm64 and Linux x86_64 targets. Each runner produces a standalone executable, portable archive and native installer, tests package structure and the downgrade guard, and uploads all required artifacts. Manual dispatch uses the numeric Cargo installer version and a commit-suffixed artifact label; it does not publish a release. A matching tag push publishes the exact nine-file manifest with licenses, notices and checksums, after the policy gate passes. The publication job checks out the repository for legal files and specifies `GH_REPO` for the GitHub CLI. The macOS app/package remain unsigned and unnotarized; universal macOS binaries are not built. A tag is not evidence of signing, security audit or credentialed testing. Keep secrets in protected release environments and use least-privilege permissions. See [packaging](PACKAGING.md) and [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md).
+Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. Mac packages remain unsigned and unnotarized; a tag is not evidence of signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md) and [ADR 0044](adr/0044-single-workflow-native-release-matrix.md).
 
 After workflow edits, run `actionlint` and the affected commands locally. To smoke-test the parser campaigns on a supported local host:
 

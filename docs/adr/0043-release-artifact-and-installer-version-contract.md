@@ -1,6 +1,6 @@
 # ADR 0043: Release artifact and installer version contract
 
-Status: Accepted.
+Status: Partially superseded by [ADR 0044](0044-single-workflow-native-release-matrix.md). The version and installer downgrade contracts remain in force; the workflow, target matrix and asset count below describe the 0.4.5 release.
 
 ## Decision
 

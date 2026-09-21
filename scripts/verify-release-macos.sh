@@ -15,8 +15,10 @@ for required_architecture in arm64 x86_64; do
 done
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
 cmp "$binary" "$app/Contents/MacOS/teleark"
-tar -tzf "dist/${base}.tar.gz" | grep -F "${base}/TeleArk.app/Contents/MacOS/teleark" >/dev/null
-tar -tzf "dist/${base}.tar.gz" | grep -F "${base}/THIRD_PARTY_NOTICES.md" >/dev/null
+expanded="$(mktemp -d -t teleark-expand)"
+tar -tzf "dist/${base}.tar.gz" > "$expanded/archive-list"
+grep -Fq "${base}/TeleArk.app/Contents/MacOS/teleark" "$expanded/archive-list"
+grep -Fq "${base}/THIRD_PARTY_NOTICES.md" "$expanded/archive-list"
 
 # Raw Mach-O and app payloads must use only frameworks and dylibs supplied by
 # macOS. Non-system dependencies need to be bundled before publication.
@@ -27,7 +29,6 @@ while IFS= read -r dependency; do
   esac
 done < <(otool -L "$binary" | tail -n +2 | awk '{print $1}')
 
-expanded="$(mktemp -d -t teleark-expand)"
 pkgutil --expand "$package" "$expanded/product"
 grep -Fq "version=\"${version}\"" "$expanded/product/Distribution"
 grep -Fq 'checkTeleArkVersion()' "$expanded/product/Distribution"

@@ -1,4 +1,12 @@
-# Implementation status — v0.4.5
+# Implementation status — v0.4.6
+
+## Version 0.4.6 (2026-09-21)
+
+Workspace crates, lockfiles, macOS bundle metadata, Windows installer fallback and the three About catalogs now agree on 0.4.6. No persistent schema or codec changed: SQLite read/write remains schema 22 with supported automatic upgrades from 0–21; the encrypted file and recovery readers retain the documented compatibility in the [recovery guide](VAULT_TRANSFER_RECOVERY.md).
+
+One [CI/CD workflow](../.github/workflows/ci.yml) now runs LF, legal and full Linux quality gates for every trigger. Branches and pull requests continue to Windows/macOS tests; a matching version tag instead builds Windows x64/ARM64, universal macOS and Linux x64/ARM64 packages, verifies their install and downgrade behavior, and publishes exactly 15 package files with licenses, notices and checksums. An optional manual package preview uploads artifacts without publishing. GitHub job summaries show stage results, tracked-file LF counts, exact Rust cache hits and asset hashes. The [packaging guide](PACKAGING.md) names every file and platform limit; [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) records the workflow decision.
+
+Local 0.4.6 validation passed workflow lint, PowerShell/Bash package-script syntax, LF policy tests, formatting, locked workspace check, strict Clippy, 769 serial workspace tests (10 existing ignored), explicit Core/i18n suites, warning-denied rustdoc and cargo-deny (existing duplicate-version warnings). The version resolver accepted `v0.4.6` and rejected `v0.4.5`. The Windows x64 static-CRT release build produced a standalone executable, ZIP and installer with three verified checksums. The installer was silently installed; an in-place upgrade preserved an unrelated file and restored the registered version, while a downgrade failed with a logged reason and unchanged executable. The hosted native package matrix remains separate evidence. macOS packages remain unsigned and unnotarized; the Linux portable packages still rely on the host kernel, desktop and graphics drivers.
 
 ## Version 0.4.5 (2026-09-21)
 

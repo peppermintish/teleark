@@ -1111,6 +1111,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.6 · 统一的 CI/CD 与更广泛的原生发行版
+
+    - 单一 CI/CD 工作流测试分支和拉取请求，仅在版本标签与应用版本一致时构建并发布原生安装包。GitHub 摘要显示阶段、LF 检查、缓存命中和校验和。
+    - 发行版覆盖 Windows x64 与 ARM64、通用 macOS，以及 Linux x64 与 ARM64。Linux 便携包内含链接的运行库，Windows 静态链接 C 运行库，Debian 自动解析普通系统依赖；用户无需安装构建 SDK。
+    - 原生安装程序支持就地升级并拒绝旧版本。应用元数据已更新至 0.4.6；SQLite 模式 22 和受支持的加密格式保持不变。macOS 安装包仍未签名或公证。
+
     ## 0.4.5 · 跨设备恢复与发行版安装程序
 
     - 加密上传和下载以 512 KiB 传输块在受限内存中流式处理。新上传不创建密文暂存文件；下载只写入通过认证的明文，兼容的旧文件仍可读取。

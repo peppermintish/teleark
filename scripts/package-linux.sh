@@ -87,11 +87,17 @@ test -x "$staging_dir/usr/bin/teleark"
 # baseline runner alongside the portable payload.
 mkdir -p "$staging_dir/usr/share/doc/teleark/system-libraries"
 while IFS= read -r library; do
-  package="$(dpkg-query -S "$library" 2>/dev/null | head -n 1 | cut -d: -f1 || true)"
+  resolved_library="$(readlink -f "$library")"
+  package="$(dpkg-query -S "$library" "$resolved_library" 2>/dev/null | head -n 1 | cut -d: -f1 || true)"
+  package="${package%%,*}"
   if [[ -n "$package" && -f "/usr/share/doc/$package/copyright" ]]; then
     cp "/usr/share/doc/$package/copyright" "$staging_dir/usr/share/doc/teleark/system-libraries/${package}.copyright"
   fi
 done < <(ldd "$binary" | grep -oE '/[^[:space:]]+' | sort -u)
+compgen -G "$staging_dir/usr/share/doc/teleark/system-libraries/*.copyright" >/dev/null || {
+  echo 'No Linux runtime-library copyright notices were collected.' >&2
+  exit 1
+}
 
 LDAI_OUTPUT="$appimage_path" APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" \
   --appdir "$staging_dir" --output appimage

@@ -34,7 +34,7 @@ Core, Runtime, Storage, Telegram, Crypto, Index and Transfer are independent of 
 
 Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`) on macOS. On Windows, install the native MSVC Rust toolchain via rustup and Visual Studio Build Tools with the "Desktop development with C++" workload and Windows SDK. The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
 
-Run commands from the repository root in bash/zsh on macOS/Linux, or in PowerShell / Git Bash on Windows. The release workflow targets Windows x86_64, macOS arm64 and Linux x86_64, with standalone executables, portable archives and native installers. For the artifact list, platform prerequisites and manual packaging, see the **[build and packaging guide](docs/PACKAGING.md)**. Hosted release qualification is tracked in [implementation status](docs/IMPLEMENTATION_STATUS.md).
+Run commands from the repository root in bash/zsh on macOS/Linux, or in PowerShell / Git Bash on Windows. The single CI/CD workflow packages Windows x64/ARM64, universal macOS and Linux x64/ARM64 for matching version tags. It publishes portable outputs and native installers; see the **[build and packaging guide](docs/PACKAGING.md)** for files and platform requirements. Hosted release qualification is tracked in [implementation status](docs/IMPLEMENTATION_STATUS.md).
 
 ### Load `.env` values before building
 
