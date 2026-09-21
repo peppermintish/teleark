@@ -9,15 +9,15 @@ foreach ($arg in $args) {
     switch ($arg) {
         { $_ -in '--dry-run', '-DryRun', '-dry-run' } { $dry_run = $true; break }
         { $_.StartsWith('--') } {
-            [Console]::Error.WriteLine("Usage: scripts/package-windows.ps1 [--dry-run] [binary] [destination_dir] [version] [artifact_label]")
+            [Console]::Error.WriteLine("Usage: scripts/package-windows.ps1 [--dry-run] [binary] [destination_dir] [version] [artifact_label] [architecture]")
             exit 2
         }
         default { $paths += $arg; break }
     }
 }
 
-if ($paths.Count -gt 4) {
-    [Console]::Error.WriteLine("Usage: scripts/package-windows.ps1 [--dry-run] [binary] [destination_dir] [version] [artifact_label]")
+if ($paths.Count -gt 5) {
+    [Console]::Error.WriteLine("Usage: scripts/package-windows.ps1 [--dry-run] [binary] [destination_dir] [version] [artifact_label] [architecture]")
     exit 2
 }
 
@@ -43,8 +43,13 @@ $artifact_label = if ($paths.Count -ge 4) { $paths[3] } else { $version }
 if ($artifact_label -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
     throw "Invalid artifact label: $artifact_label"
 }
+$architecture = if ($paths.Count -ge 5) { $paths[4] } else { 'x86_64' }
+if ($architecture -cnotin @('x86_64', 'arm64')) {
+    throw "Unsupported Windows architecture: $architecture"
+}
+$setup_architecture = if ($architecture -eq 'arm64') { 'arm64' } else { 'x64compatible' }
 
-$package_name = "teleark-$artifact_label-windows-x86_64"
+$package_name = "teleark-$artifact_label-windows-$architecture"
 $dist_dir = [System.IO.Path]::GetFullPath($dist_dir)
 $staging_dir = [System.IO.Path]::GetFullPath((Join-Path $dist_dir $package_name))
 if (-not $staging_dir.StartsWith("$dist_dir$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -52,7 +57,7 @@ if (-not $staging_dir.StartsWith("$dist_dir$([System.IO.Path]::DirectorySeparato
 }
 $zip_path = Join-Path $dist_dir "$package_name.zip"
 $standalone_path = Join-Path $dist_dir "$package_name.exe"
-$setup_base = "TeleArk-Setup-$artifact_label-windows-x86_64"
+$setup_base = "TeleArk-Setup-$artifact_label-windows-$architecture"
 
 if ($dry_run) {
     Write-Output "Would assemble Windows portable bundle and installer:"
@@ -96,6 +101,7 @@ if ($command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue) {
     $iscc = $command.Source
 } else {
     $search_paths = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
         "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
         "C:\Program Files\Inno Setup 6\ISCC.exe",
         "C:\Program Files (x86)\Inno Setup 5\ISCC.exe"
@@ -113,7 +119,7 @@ if (-not $iscc) {
 }
 $iss_file = Join-Path $repository_root "scripts\teleark.iss"
 Write-Output "Compiling Inno Setup installer with $iscc..."
-& $iscc "/DAppVersion=$version" "/DSourceDir=$staging_dir" "/DOutputDir=$dist_dir" "/DOutputBaseFilename=$setup_base" $iss_file
+& $iscc "/DAppVersion=$version" "/DAppArchitecture=$setup_architecture" "/DSourceDir=$staging_dir" "/DOutputDir=$dist_dir" "/DOutputBaseFilename=$setup_base" $iss_file
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with code $LASTEXITCODE"
 }

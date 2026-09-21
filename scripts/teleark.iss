@@ -2,7 +2,10 @@
 #define AppId "{9A67D26D-7281-4FE9-B942-D6D2A8719DF5}"
 #define AppName "TeleArk"
 #ifndef AppVersion
-  #define AppVersion "0.4.5"
+  #define AppVersion "0.4.6"
+#endif
+#ifndef AppArchitecture
+  #define AppArchitecture "x64compatible"
 #endif
 #define AppPublisher "TeleArk Contributors"
 #define AppURL "https://github.com/Kangarooss/teleark"
@@ -36,6 +39,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 MinVersion=10.0.17763
+ArchitecturesAllowed={#AppArchitecture}
 
 ; In-place upgrade configuration
 UsePreviousAppDir=yes
