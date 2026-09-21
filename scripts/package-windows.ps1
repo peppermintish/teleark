@@ -1,4 +1,4 @@
-# Assemble Windows release packages (portable ZIP and Inno Setup installer).
+# Assemble Windows release packages (standalone EXE, portable ZIP and MSI).
 # Run cargo build before invoking this script.
 $ErrorActionPreference = 'Stop'
 
@@ -47,7 +47,6 @@ $architecture = if ($paths.Count -ge 5) { $paths[4] } else { 'x86_64' }
 if ($architecture -cne 'x86_64') {
     throw "Unsupported Windows architecture: $architecture"
 }
-$setup_architecture = 'x64compatible'
 
 $package_name = "teleark-$artifact_label-windows-$architecture"
 $dist_dir = [System.IO.Path]::GetFullPath($dist_dir)
@@ -65,8 +64,8 @@ if ($dry_run) {
     Write-Output "  Staging: $staging_dir"
     Write-Output "  Portable ZIP: $zip_path"
     Write-Output "  Standalone executable: $standalone_path"
-    Write-Output "  Installer: $(Join-Path $dist_dir "$setup_base.exe")"
-    Write-Output "Would copy binary, README.md, LICENSE-*, and THIRD_PARTY_NOTICES.md, compress ZIP, and run ISCC.exe."
+    Write-Output "  Installer: $(Join-Path $dist_dir "$setup_base.msi")"
+    Write-Output "Would copy binary, README.md, LICENSE-*, and THIRD_PARTY_NOTICES.md, compress ZIP, and compile a native MSI."
     exit 0
 }
 
@@ -95,38 +94,8 @@ if (Test-Path -LiteralPath $zip_path) {
 Compress-Archive -Path "$staging_dir\*" -DestinationPath $zip_path -Force
 Write-Output "Created portable archive: $zip_path"
 
-# Find Inno Setup compiler (ISCC.exe)
-$iscc = $null
-if ($command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue) {
-    $iscc = $command.Source
-} else {
-    $search_paths = @(
-        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
-        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "C:\Program Files\Inno Setup 6\ISCC.exe",
-        "C:\Program Files (x86)\Inno Setup 5\ISCC.exe"
-    )
-    foreach ($candidate in $search_paths) {
-        if (Test-Path $candidate) {
-            $iscc = $candidate
-            break
-        }
-    }
-}
-
-if (-not $iscc) {
-    throw 'Inno Setup compiler (ISCC.exe) is required to build the release installer.'
-}
-$iss_file = Join-Path $repository_root "scripts\teleark.iss"
-Write-Output "Compiling Inno Setup installer with $iscc..."
-& $iscc "/DAppVersion=$version" "/DAppArchitecture=$setup_architecture" "/DSourceDir=$staging_dir" "/DOutputDir=$dist_dir" "/DOutputBaseFilename=$setup_base" $iss_file
-if ($LASTEXITCODE -ne 0) {
-    throw "Inno Setup compilation failed with code $LASTEXITCODE"
-}
-$installer_path = Join-Path $dist_dir "$setup_base.exe"
-if (-not (Test-Path -LiteralPath $installer_path -PathType Leaf)) {
-    throw "Inno Setup reported success without creating $installer_path"
-}
+$installer_path = Join-Path $dist_dir "$setup_base.msi"
+& "$PSScriptRoot/build-windows-msi.ps1" -SourceDir $staging_dir -OutputPath $installer_path -Version $version
 Write-Output "Created installer: $installer_path"
 
 # Generate SHA256 checksums

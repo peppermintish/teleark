@@ -6,19 +6,29 @@ The tagged workflow checks and publishes these nine files, plus both project lic
 
 | Target | Standalone executable | Portable archive | Native installer |
 | --- | --- | --- | --- |
-| Windows x64 | `teleark-<label>-windows-x86_64.exe` | `teleark-<label>-windows-x86_64.zip` | `TeleArk-Setup-<label>-windows-x86_64.exe` |
+| Windows x64 | `teleark-<label>-windows-x86_64.exe` | `teleark-<label>-windows-x86_64.zip` | `TeleArk-Setup-<label>-windows-x86_64.msi` |
 | macOS universal | `teleark-<label>-macos-universal.bin` | `teleark-<label>-macos-universal.tar.gz` containing `TeleArk.app` | `TeleArk-<label>-macos-universal.pkg` |
 | Linux x64 | `teleark-<label>-linux-x86_64.AppImage` | `teleark-<label>-linux-x86_64.tar.gz` containing `AppRun` | `teleark_<label>_amd64.deb` |
 
 Windows binaries statically link the Microsoft C runtime. The macOS universal executable contains both `arm64` and `x86_64` slices and its package check rejects references to non-system dynamic libraries. Linux portable outputs bundle linked runtime libraries in an AppDir, along with available distribution copyright notices. The Debian installer declares runtime package dependencies and `apt` resolves them automatically. Users do not need Rust, a compiler, an SDK or a separate language runtime. The host still supplies its operating system, graphics drivers and desktop facilities.
 
-Native installers upgrade in place. Windows Inno Setup retains the existing per-user directory and shows an error before changing files if the installer is older; silent installation logs the same reason. The macOS package installs at `/Applications/TeleArk.app`; Installer.app and its command-line pre-install guard reject downgrades. Debian `preinst` rejects a version older than the installed package before unpacking. Copying a portable archive or standalone executable manually does not enforce a version guard.
+Native installers upgrade in place. Windows MSI retains the existing per-user directory and shows an error before changing files if the installer is older; silent installation logs the same reason. The macOS package installs at `/Applications/TeleArk.app`; Installer.app and its command-line pre-install guard reject downgrades. Debian `preinst` rejects a version older than the installed package before unpacking. Copying a portable archive or standalone executable manually does not enforce a version guard.
 
 Each package job checks native architecture, files, checksums and installer metadata. Windows and macOS jobs exercise a real install and in-place upgrade, then prove an older installer fails without replacing the executable. Linux jobs extract both portable formats, check the Debian guard and install the package. Publication refuses to overwrite an existing release or accept a missing asset. The GitHub Actions summary shows the stages, LF counts, cache hits and SHA256 manifest.
 
 ## Windows
 
-Build the `x86_64-pc-windows-msvc` target with `RUSTFLAGS="-C target-feature=+crt-static"`, then run `scripts/package-windows.ps1` with the `x86_64` architecture argument. The Inno Setup 6 compiler is a build-time tool; the installer includes the app and legal files. The installer defaults to `%LOCALAPPDATA%\Programs\TeleArk`, preserves an existing install location and accepts a same-version repair. The x64 build targets Windows 10 version 1809 or later and can run under Windows 11 ARM x64 emulation. Inno Setup has separate [commercial-use license terms](https://jrsoftware.org/isorder.php) for distributors.
+Build the `x86_64-pc-windows-msvc` target with `RUSTFLAGS="-C target-feature=+crt-static"`. Install the .NET 8 SDK on the build machine, run `dotnet tool restore` to restore the pinned WiX 5.0.2 compiler, then run `scripts/package-windows.ps1` with the `x86_64` architecture argument. The resulting MSI has an embedded cabinet with the app and legal files. End users need neither .NET, WiX nor a Visual C++ redistributable. Windows Installer supplies the native progress and error UI; the package includes no installer extension DLLs or scripts.
+
+The MSI defaults to `%LOCALAPPDATA%\Programs\TeleArk` without elevation. It preserves the install location, supports repair and upgrades, and refuses downgrades before changing files. Major upgrades run inside the Windows Installer transaction so a failed upgrade restores the previous installation. Versions use MSI's numeric `major.minor.patch` limits (`255.255.65535`). The x64 build targets Windows 10 version 1809 or later and can run under Windows 11 ARM x64 emulation.
+
+Existing per-user Inno installations migrate automatically in their registered location. The MSI checks the installed executable's numeric version resource, replaces the application and transactionally retires the old uninstall registration and `unins000` files. A newer or unversioned legacy executable stops installation with an explanation. App data and unrelated files are retained. Native tests cover fresh installation, repair, a real two-version upgrade/downgrade, rollback, and legacy migration using synthetic versioned files and registration. Tests refuse to run over a real TeleArk installation.
+
+For unattended installation use `msiexec /i TeleArk-Setup-<label>-windows-x86_64.msi /qn /norestart /L*v install.log`. An older installer fails with exit code 1603 and a logged reason. `INSTALLFOLDER="C:\chosen\path"` selects the directory on the first installation; upgrades retain the registered directory. A same-package repair can use `msiexec /fa <package.msi>`.
+
+## Telegram distribution configuration
+
+The workflow validates the repository secrets `TELEARK_DISTRIBUTION_TELEGRAM_API_ID` and `TELEARK_DISTRIBUTION_TELEGRAM_API_HASH` once before starting the packaging matrix. It then maps both secrets into the environment of each native compilation step, including both slices of universal macOS. Rust embeds them through the runtime's existing `option_env!` constants, so standalone executables and installed apps use the same configured pair. Missing or malformed secrets stop packaging; summaries report only validation status, never values. These identifiers are extractable from binaries and do not authorize a Telegram user. Saved personal credentials continue to override the embedded pair.
 
 ## macOS
 

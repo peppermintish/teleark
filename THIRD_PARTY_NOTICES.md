@@ -1,5 +1,15 @@
 # Third-Party Notices
 
+## Windows MSI build tooling
+
+Windows installers are compiled with [WiX 5.0.2](https://www.nuget.org/packages/wix/5.0.2),
+copyright .NET Foundation and contributors, under the
+[Microsoft Reciprocal License](https://raw.githubusercontent.com/wixtoolset/wix/v5.0.2/LICENSE.TXT).
+WiX and the .NET SDK are build tools, not distributed dependencies. The MSI uses
+Windows Installer's built-in actions and UI; no WiX extension binaries, dialog
+libraries or source implementations are incorporated. TeleArk's application and
+original installer definitions remain MIT OR Apache-2.0.
+
 TeleArk embeds the icon bundle from `gpui-kit-assets 0.6.0`. That crate
 declares Apache-2.0 and packages icons from the Lucide project. This notice is
 included conservatively for those assets. It must remain with binary

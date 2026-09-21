@@ -38,6 +38,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-line-endings.ps1
 
+      - name: Test distribution credential validation
+        shell: pwsh
+        run: ./scripts/test-distribution-credentials.ps1
+
       - name: Test universal macOS dependency check
         shell: bash
         run: bash scripts/test-macos-libraries.sh
@@ -182,6 +186,12 @@ jobs:
         id: resolve
         shell: pwsh
         run: ./scripts/release-version.ps1
+      - name: Validate Telegram distribution configuration
+        shell: pwsh
+        env:
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
+        run: ./scripts/check-distribution-credentials.ps1
 
   package:
     name: 3 · Package (${{ matrix.name }})
@@ -247,6 +257,8 @@ jobs:
         if: matrix.platform == 'windows'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }}
 
       - name: Build universal macOS release
@@ -254,6 +266,8 @@ jobs:
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: |
           set -euo pipefail
           cargo build -p teleark-gui --bin teleark --release --locked --target aarch64-apple-darwin
@@ -264,16 +278,43 @@ jobs:
 
       - name: Build Linux release
         if: matrix.platform == 'linux'
+        env:
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }}
 
-      - name: Package and verify Windows release
+      - name: Configure Windows packaging SDK
+        if: matrix.platform == 'windows'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore pinned MSI compiler
+        if: matrix.platform == 'windows'
+        run: dotnet tool restore
+
+      - name: Package Windows executable, ZIP and MSI
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           ./scripts/package-windows.ps1 "target/${{ matrix.target }}/release/teleark.exe" dist `
             '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
+
+      - name: Verify Windows artifacts and MSI transactions
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
           ./scripts/verify-release-windows.ps1 '${{ needs.version.outputs.version }}' `
             '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
+
+      - name: Retain failed Windows installer logs
+        if: ${{ failure() && matrix.platform == 'windows' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: windows-msi-test-logs
+          path: ${{ runner.temp }}/teleark-msi-*/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package and verify macOS release
         if: matrix.platform == 'macos'
@@ -322,6 +363,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.exe
+            dist/*.msi
             dist/*.deb
             dist/*.pkg
             dist/*.bin
@@ -355,7 +397,7 @@ jobs:
           }
           copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.exe"
           copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.zip"
-          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.exe"
+          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.msi"
           copy_asset macos-universal "teleark-${label}-macos-universal.bin"
           copy_asset macos-universal "teleark-${label}-macos-universal.tar.gz"
           copy_asset macos-universal "TeleArk-${label}-macos-universal.pkg"
@@ -398,7 +440,7 @@ jobs:
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           echo '| LF, legal, Linux quality | ${{ needs.quality.result }} |' >> "$GITHUB_STEP_SUMMARY"
           if [[ '${{ github.ref }}' == refs/tags/v* ]] || [ '${{ inputs.package_preview }}' = 'true' ]; then
-            echo '| Version match | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            echo '| Version and Telegram configuration | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
             echo '| Native packages | ${{ needs.package.result }} |' >> "$GITHUB_STEP_SUMMARY"
             echo '| GitHub Release | ${{ needs.publish.result }} |' >> "$GITHUB_STEP_SUMMARY"
           else
