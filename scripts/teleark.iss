@@ -2,7 +2,7 @@
 #define AppId "{9A67D26D-7281-4FE9-B942-D6D2A8719DF5}"
 #define AppName "TeleArk"
 #ifndef AppVersion
-  #define AppVersion "0.4.6"
+  #define AppVersion "0.4.7"
 #endif
 #ifndef AppArchitecture
   #define AppArchitecture "x64compatible"

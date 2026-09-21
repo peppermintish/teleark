@@ -1139,6 +1139,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.7 · Focused release targets and packaging fixes
+
+    - Tagged releases target Windows x64, universal macOS (Intel and Apple Silicon), and Linux x64. Each target provides a standalone executable, portable archive and native installer, for nine package files in the GitHub Release. Windows and Linux ARM64-only release jobs have been removed.
+    - macOS verification now checks linked libraries in each architecture separately, avoiding a false failure on the universal binary's second heading. Debian packaging includes the copyright metadata required by `cargo-deb`. The three native installers retain in-place upgrades and downgrade refusal.
+    - Application metadata is 0.4.7. SQLite read/write schema 22 and automatic upgrades from supported older schemas are unchanged; encrypted file and recovery formats are unchanged. macOS packages remain unsigned and unnotarized.
+
     ## 0.4.6 · Unified CI and wider native releases
 
     - One GitHub Actions workflow runs quality and platform tests for branches and pull requests, and builds/publishes installers for matching `vX.Y.Z` tags. Its summaries show stage results, LF policy counts, Rust cache hits and release checksums. An optional manual package preview builds without publishing.

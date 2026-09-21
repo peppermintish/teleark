@@ -2,15 +2,13 @@
 
 The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for every branch, pull request and tag. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into every native installer.
 
-The tagged workflow checks and publishes these 15 files, plus both project licenses, third-party notices and a unified `SHA256SUMS`:
+The tagged workflow checks and publishes these nine files, plus both project licenses, third-party notices and a unified `SHA256SUMS`:
 
 | Target | Standalone executable | Portable archive | Native installer |
 | --- | --- | --- | --- |
 | Windows x64 | `teleark-<label>-windows-x86_64.exe` | `teleark-<label>-windows-x86_64.zip` | `TeleArk-Setup-<label>-windows-x86_64.exe` |
-| Windows ARM64 | `teleark-<label>-windows-arm64.exe` | `teleark-<label>-windows-arm64.zip` | `TeleArk-Setup-<label>-windows-arm64.exe` |
 | macOS universal | `teleark-<label>-macos-universal.bin` | `teleark-<label>-macos-universal.tar.gz` containing `TeleArk.app` | `TeleArk-<label>-macos-universal.pkg` |
 | Linux x64 | `teleark-<label>-linux-x86_64.AppImage` | `teleark-<label>-linux-x86_64.tar.gz` containing `AppRun` | `teleark_<label>_amd64.deb` |
-| Linux ARM64 | `teleark-<label>-linux-aarch64.AppImage` | `teleark-<label>-linux-aarch64.tar.gz` containing `AppRun` | `teleark_<label>_arm64.deb` |
 
 Windows binaries statically link the Microsoft C runtime. The macOS universal executable contains both `arm64` and `x86_64` slices and its package check rejects references to non-system dynamic libraries. Linux portable outputs bundle linked runtime libraries in an AppDir, along with available distribution copyright notices. The Debian installer declares runtime package dependencies and `apt` resolves them automatically. Users do not need Rust, a compiler, an SDK or a separate language runtime. The host still supplies its operating system, graphics drivers and desktop facilities.
 
@@ -20,7 +18,7 @@ Each package job checks native architecture, files, checksums and installer meta
 
 ## Windows
 
-Build either MSVC target with `RUSTFLAGS="-C target-feature=+crt-static"`, then run `scripts/package-windows.ps1` with the architecture argument (`x86_64` or `arm64`). The Inno Setup 6 compiler is a build-time tool; the installer includes the app and legal files. The installer defaults to `%LOCALAPPDATA%\Programs\TeleArk`, preserves an existing install location and accepts a same-version repair. The x64 build targets Windows 10 version 1809 or later and can run under Windows 11 ARM x64 emulation; the ARM64 package is native on Windows ARM. Inno Setup has separate [commercial-use license terms](https://jrsoftware.org/isorder.php) for distributors.
+Build the `x86_64-pc-windows-msvc` target with `RUSTFLAGS="-C target-feature=+crt-static"`, then run `scripts/package-windows.ps1` with the `x86_64` architecture argument. The Inno Setup 6 compiler is a build-time tool; the installer includes the app and legal files. The installer defaults to `%LOCALAPPDATA%\Programs\TeleArk`, preserves an existing install location and accepts a same-version repair. The x64 build targets Windows 10 version 1809 or later and can run under Windows 11 ARM x64 emulation. Inno Setup has separate [commercial-use license terms](https://jrsoftware.org/isorder.php) for distributors.
 
 ## macOS
 
@@ -30,6 +28,6 @@ The `.app` and `.pkg` are currently unsigned and unnotarized. Public distributio
 
 ## Linux
 
-Linux packages are built natively on Ubuntu 22.04 x64 and ARM64 runners. `scripts/package-linux.sh` uses `cargo-deb` and a checksum-pinned MIT-licensed `linuxdeploy` build to create the Debian package and portable AppDir outputs. The AppImage is a one-file runnable application; the archive exposes `AppRun` for systems without AppImage FUSE support. To install or upgrade the Debian package, use `sudo apt install ./teleark_<label>_<arch>.deb`; `apt` installs ordinary runtime libraries if the host lacks them. Neither method asks users to install development headers or SDKs.
+Linux packages are built natively on an Ubuntu 22.04 x64 runner. `scripts/package-linux.sh` uses `cargo-deb` and a checksum-pinned MIT-licensed `linuxdeploy` build to create the Debian package and portable AppDir outputs. The AppImage is a one-file runnable application; the archive exposes `AppRun` for systems without AppImage FUSE support. To install or upgrade the Debian package, use `sudo apt install ./teleark_<label>_amd64.deb`; `apt` installs ordinary runtime libraries if the host lacks them. Neither method asks users to install development headers or SDKs.
 
 Ubuntu 22.04 is the build baseline, so older distributions are not promised. Portable outputs include linked libraries but still use the host kernel, display server and graphics drivers. The Debian package installs desktop shortcuts, icons, licenses and notices; its `preinst` compares Debian version strings including distribution revisions.

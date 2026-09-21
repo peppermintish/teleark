@@ -1,4 +1,14 @@
-# Implementation status — v0.4.6
+# Implementation status — v0.4.7
+
+## Version 0.4.7 (2026-09-21)
+
+The release target set is Windows x64, universal macOS with Intel and Apple Silicon slices, and Linux x64. The single workflow now expects exactly nine standalone, portable and installer files before publication; the Windows/Linux ARM64-only jobs and local packaging modes were removed. Universal macOS library verification inspects each architecture separately, and the Debian metadata now includes the copyright field required by `cargo-deb`. A deterministic macOS library-check regression covers both slices, non-system dependencies and missing inspection data. [ADR 0045](adr/0045-focused-release-targets.md) supersedes the wider target list in ADR 0044.
+
+The `v0.4.6` hosted run created macOS and Linux portable outputs but failed before package verification: the macOS check misread a universal-binary heading, and `cargo-deb` rejected missing copyright/authors metadata. Publication was skipped. The `v0.4.7` tag must exercise the corrected macOS package and Linux Debian installer on hosted runners before those artifacts or installer behaviors can be counted as verified. The app remains unsigned and unnotarized on macOS.
+
+Workspace crates, lockfiles, macOS bundle metadata, Windows installer fallback and the three About catalogs now agree on 0.4.7. No persistent schema or codec changed: SQLite read/write remains schema 22 with supported automatic upgrades from 0–21; encrypted file and recovery readers retain the documented compatibility in the [recovery guide](VAULT_TRANSFER_RECOVERY.md).
+
+Local 0.4.7 validation passed workflow lint, LF policy and regression tests, Bash package-script syntax, formatting, locked workspace check, strict Clippy, the full serial workspace suite, explicit Core/i18n tests, warning-denied rustdoc and cargo-deny (existing duplicate-version warnings). The version resolver accepted `v0.4.7`, and all three packaging helpers rejected removed single-architecture targets. A Windows x64 static-CRT release build produced the executable, ZIP and installer; the native verifier checked checksums, in-place upgrade and downgrade refusal, then removed its test installation. Hosted macOS and Linux package verification remains pending until the new tag run.
 
 ## Version 0.4.6 (2026-09-21)
 

@@ -1111,6 +1111,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.7 · 精简发行目标并修复打包检查
+
+    - 带版本标签的发行版覆盖 Windows x64、同时支持 Intel 和 Apple Silicon 的通用 macOS，以及 Linux x64。每个平台都提供独立可执行文件、便携归档和原生安装程序，GitHub Release 共发布九个软件包文件。不再构建 Windows 和 Linux 的 ARM64 专用发行版。
+    - macOS 验证现在分别检查两种架构的动态库，避免将通用二进制文件的第二个标题误判为依赖。Debian 打包加入 `cargo-deb` 所需的版权元数据。三个原生安装程序继续支持就地升级并拒绝降级。
+    - 应用元数据已更新至 0.4.7。SQLite 读写模式仍为 22，受支持旧模式的自动升级保持不变；加密文件与恢复格式也未更改。macOS 软件包仍未签名或公证。
+
     ## 0.4.6 · 统一的 CI/CD 与更广泛的原生发行版
 
     - 单一 CI/CD 工作流测试分支和拉取请求，仅在版本标签与应用版本一致时构建并发布原生安装包。GitHub 摘要显示阶段、LF 检查、缓存命中和校验和。
