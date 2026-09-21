@@ -44,6 +44,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
 
+      - name: Check LF line endings and portable scripts
+        shell: pwsh
+        run: ./scripts/check-line-endings.ps1
+
       - name: Configure Rust toolchain
         run: |
           rustup default stable

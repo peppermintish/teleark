@@ -4,6 +4,13 @@ Commands and preview fixtures for the repository's `rust-toolchain.toml` and che
 
 ## Quality gates
 
+Plain-text source files use UTF-8 and LF on every platform (`.editorconfig` and
+`.gitattributes`). The CI and release workflows run
+`pwsh ./scripts/check-line-endings.ps1` against all tracked Git-index files,
+rejecting CRLF text and all `.cmd`/`.bat` scripts. Each check writes counts and
+violations to the GitHub Actions job summary. Run the same command before a commit;
+Git-index inspection avoids false results from an older local Windows checkout.
+
 Choose local validation by the changed behavior; CI remains the full workspace gate.
 
 | Change | Local validation |
@@ -18,6 +25,8 @@ Choose local validation by the changed behavior; CI remains the full workspace g
 Full source gates (explicit Core/i18n checks also run in CI):
 
 ```bash
+pwsh ./scripts/check-line-endings.ps1
+pwsh ./scripts/test-line-endings.ps1
 cargo fmt --all --check
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
