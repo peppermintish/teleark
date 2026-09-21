@@ -6,7 +6,6 @@ label="${2:?artifact label is required}"
 architecture="$(uname -m)"
 case "$architecture" in
   x86_64) deb_architecture=amd64 ;;
-  aarch64) deb_architecture=arm64 ;;
   *) echo "Unsupported Linux architecture: $architecture" >&2; exit 2 ;;
 esac
 base="teleark-${label}-linux-${architecture}"

@@ -36,8 +36,6 @@ architecture="$(uname -m)"
 case "$architecture:$target" in
   x86_64:|x86_64:x86_64-unknown-linux-gnu)
     deb_architecture=amd64 ;;
-  aarch64:|aarch64:aarch64-unknown-linux-gnu)
-    deb_architecture=arm64 ;;
   *)
     echo "Unsupported Linux runner/target combination: $architecture:$target" >&2
     exit 2 ;;

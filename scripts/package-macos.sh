@@ -30,8 +30,8 @@ fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Installer version must be three numeric components: $version" >&2; exit 2; }
 artifact_label="${paths[4]:-$version}"
 [[ "$artifact_label" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "Invalid artifact label: $artifact_label" >&2; exit 2; }
-architecture="${paths[5]:-$(uname -m)}"
-if [[ "$architecture" != "arm64" && "$architecture" != "x86_64" && "$architecture" != "universal" ]]; then
+architecture="${paths[5]:-universal}"
+if [[ "$architecture" != "universal" ]]; then
   echo "Unsupported macOS architecture: $architecture" >&2
   exit 2
 fi
@@ -49,17 +49,12 @@ test -f "$binary"
 for tool in pkgbuild productbuild plutil lipo ditto /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Required macOS packaging tool is missing: $tool" >&2; exit 1; }
 done
-if [[ "$architecture" == "universal" ]]; then
-  for required_architecture in arm64 x86_64; do
-    if ! lipo -archs "$binary" | tr ' ' '\n' | grep -Fxq "$required_architecture"; then
-      echo "The built executable does not contain $required_architecture." >&2
-      exit 1
-    fi
-  done
-elif ! lipo -archs "$binary" | tr ' ' '\n' | grep -Fxq "$architecture"; then
-  echo "The built executable does not contain the expected $architecture architecture." >&2
-  exit 1
-fi
+for required_architecture in arm64 x86_64; do
+  if ! lipo -archs "$binary" | tr ' ' '\n' | grep -Fxq "$required_architecture"; then
+    echo "The built executable does not contain $required_architecture." >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$destination/Contents/MacOS" "$destination/Contents/Resources" "$dist_dir"
 cp "$binary" "$destination/Contents/MacOS/teleark"

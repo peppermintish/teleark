@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$Version,
     [Parameter(Mandatory)][string]$Label,
-    [Parameter(Mandatory)][ValidateSet('x86_64', 'arm64')][string]$Architecture
+    [Parameter(Mandatory)][ValidateSet('x86_64')][string]$Architecture
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ try {
 } finally {
     $reader.Dispose()
 }
-$expectedMachine = if ($Architecture -eq 'arm64') { 0xaa64 } else { 0x8664 }
+$expectedMachine = 0x8664
 if ($machine -ne $expectedMachine) { throw "Windows executable has unexpected PE architecture: 0x$($machine.ToString('x4'))" }
 
 $temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }

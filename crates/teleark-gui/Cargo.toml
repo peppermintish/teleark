@@ -31,6 +31,7 @@ winres = "0.1"
 [package.metadata.deb]
 name = "teleark"
 maintainer = "TeleArk Contributors <noreply@teleark.app>"
+copyright = "2026, TeleArk contributors"
 depends = "$auto"
 section = "utils"
 priority = "optional"

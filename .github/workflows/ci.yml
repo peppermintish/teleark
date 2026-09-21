@@ -39,6 +39,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-line-endings.ps1
 
+      - name: Test universal macOS dependency check
+        shell: bash
+        run: bash scripts/test-macos-libraries.sh
+
       - name: Configure Rust
         run: rustup default stable
 
@@ -185,10 +189,8 @@ jobs:
       matrix:
         include:
           - { name: Windows x64, os: windows-2022, platform: windows, target: x86_64-pc-windows-msvc, arch: x86_64, artifact: windows-x86_64 }
-          - { name: Windows ARM64, os: windows-11-arm, platform: windows, target: aarch64-pc-windows-msvc, arch: arm64, artifact: windows-arm64 }
           - { name: macOS universal, os: macos-15, platform: macos, target: aarch64-apple-darwin, arch: universal, artifact: macos-universal }
           - { name: Linux x64, os: ubuntu-22.04, platform: linux, target: x86_64-unknown-linux-gnu, arch: x86_64, artifact: linux-x86_64 }
-          - { name: Linux ARM64, os: ubuntu-22.04-arm, platform: linux, target: aarch64-unknown-linux-gnu, arch: aarch64, artifact: linux-aarch64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     steps:
@@ -233,10 +235,7 @@ jobs:
           cargo install cargo-deb --version 2.11.1 --locked
           tool="$RUNNER_TEMP/linuxdeploy-${{ matrix.arch }}.AppImage"
           curl -fsSL 'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${{ matrix.arch }}.AppImage' -o "$tool"
-          case '${{ matrix.arch }}' in
-            x86_64) expected=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d ;;
-            aarch64) expected=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff ;;
-          esac
+          expected=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
           echo "$expected  $tool" | sha256sum -c -
           chmod +x "$tool"
           echo "LINUXDEPLOY=$tool" >> "$GITHUB_ENV"
@@ -345,26 +344,20 @@ jobs:
             test -s "artifacts/release-$group/$name"
             cp "artifacts/release-$group/$name" "dist/$name"
           }
-          for arch in x86_64 arm64; do
-            copy_asset "windows-$arch" "teleark-${label}-windows-${arch}.exe"
-            copy_asset "windows-$arch" "teleark-${label}-windows-${arch}.zip"
-            copy_asset "windows-$arch" "TeleArk-Setup-${label}-windows-${arch}.exe"
-          done
+          copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.exe"
+          copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.zip"
+          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.exe"
           copy_asset macos-universal "teleark-${label}-macos-universal.bin"
           copy_asset macos-universal "teleark-${label}-macos-universal.tar.gz"
           copy_asset macos-universal "TeleArk-${label}-macos-universal.pkg"
-          for entry in 'x86_64:amd64' 'aarch64:arm64'; do
-            arch="${entry%%:*}"
-            deb_arch="${entry#*:}"
-            copy_asset "linux-$arch" "teleark-${label}-linux-${arch}.AppImage"
-            copy_asset "linux-$arch" "teleark-${label}-linux-${arch}.tar.gz"
-            copy_asset "linux-$arch" "teleark_${label}_${deb_arch}.deb"
-          done
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 15
+          copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.AppImage"
+          copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.tar.gz"
+          copy_asset linux-x86_64 "teleark_${label}_amd64.deb"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 9
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md dist/
           (cd dist && sha256sum * > SHA256SUMS)
           echo '### Release assets' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Validated 15 installers and portable assets across Windows x64/ARM64, macOS universal, and Linux x64/ARM64.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated nine installers and portable assets across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
           echo '| SHA256 | File |' >> "$GITHUB_STEP_SUMMARY"
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           while read -r hash file; do echo "| \`$hash\` | \`$file\` |" >> "$GITHUB_STEP_SUMMARY"; done < dist/SHA256SUMS

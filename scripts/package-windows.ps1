@@ -44,10 +44,10 @@ if ($artifact_label -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
     throw "Invalid artifact label: $artifact_label"
 }
 $architecture = if ($paths.Count -ge 5) { $paths[4] } else { 'x86_64' }
-if ($architecture -cnotin @('x86_64', 'arm64')) {
+if ($architecture -cne 'x86_64') {
     throw "Unsupported Windows architecture: $architecture"
 }
-$setup_architecture = if ($architecture -eq 'arm64') { 'arm64' } else { 'x64compatible' }
+$setup_architecture = 'x64compatible'
 
 $package_name = "teleark-$artifact_label-windows-$architecture"
 $dist_dir = [System.IO.Path]::GetFullPath($dist_dir)
