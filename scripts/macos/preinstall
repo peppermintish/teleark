@@ -1,20 +1,29 @@
 #!/bin/bash
-set -eu
+set -euo pipefail
 
 target_app="/Applications/TeleArk.app"
 pkg_version="APP_VERSION_PLACEHOLDER"
 
-if [ -d "$target_app" ] && [ -f "$target_app/Contents/Info.plist" ]; then
-  installed_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$target_app/Contents/Info.plist" 2>/dev/null || echo "")
-  if [ -n "$installed_version" ]; then
-    # Check if installer version is lower than currently installed version
-    lowest=$(printf '%s\n%s\n' "$pkg_version" "$installed_version" | sort -V | head -n1)
-    if [ "$lowest" = "$pkg_version" ] && [ "$pkg_version" != "$installed_version" ]; then
-      echo "Error: A newer version of TeleArk (v$installed_version) is already installed." >&2
-      echo "This installer is version v$pkg_version. Downgrading is not permitted." >&2
-      echo "Installation will now abort." >&2
-      exit 1
-    fi
+if ! [[ "$pkg_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "TeleArk installer has an invalid version. Installation has been stopped." >&2
+  exit 1
+fi
+
+if [ -d "$target_app" ]; then
+  installed_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$target_app/Contents/Info.plist" 2>/dev/null || true)
+  if ! [[ "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "The installed TeleArk version could not be read. Installation has been stopped before any files were changed." >&2
+    exit 1
+  fi
+
+  IFS=. read -r new_major new_minor new_patch <<< "$pkg_version"
+  IFS=. read -r old_major old_minor old_patch <<< "$installed_version"
+  if [ "$new_major" -lt "$old_major" ] ||
+     { [ "$new_major" -eq "$old_major" ] && [ "$new_minor" -lt "$old_minor" ]; } ||
+     { [ "$new_major" -eq "$old_major" ] && [ "$new_minor" -eq "$old_minor" ] && [ "$new_patch" -lt "$old_patch" ]; }; then
+    echo "TeleArk $installed_version is already installed. This installer is version $pkg_version." >&2
+    echo "Downgrading is not permitted; installation has been stopped before any files were changed." >&2
+    exit 1
   fi
 fi
 

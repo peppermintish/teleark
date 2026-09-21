@@ -65,58 +65,56 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-function ParseVersionComponent(var V: String): Integer;
-var
-  P: Integer;
+function TryParseVersion(VersionText: String; var Version: Int64): Boolean;
 begin
-  P := Pos('.', V);
-  if P > 0 then begin
-    Result := StrToIntDef(Copy(V, 1, P - 1), 0);
-    V := Copy(V, P + 1, Length(V));
-  end else begin
-    Result := StrToIntDef(V, 0);
-    V := '';
-  end;
+  VersionText := Trim(VersionText);
+  { Older TeleArk installers used a leading v in DisplayVersion. }
+  if (Length(VersionText) > 0) and ((VersionText[1] = 'v') or (VersionText[1] = 'V')) then
+    Delete(VersionText, 1, 1);
+  Result := StrToVersion(VersionText, Version);
+  if not Result then
+    Result := StrToVersion(VersionText + '.0', Version);
 end;
 
-function CompareVersions(V1, V2: String): Integer;
+function CheckInstalledVersion(const RootKey: HKEY; const InstallerVersion: Int64): Boolean;
 var
-  Num1, Num2: Integer;
+  InstalledText, MessageText: String;
+  InstalledVersion: Int64;
 begin
-  while (Length(V1) > 0) or (Length(V2) > 0) do begin
-    Num1 := ParseVersionComponent(V1);
-    Num2 := ParseVersionComponent(V2);
-    if Num1 > Num2 then begin
-      Result := 1;
-      Exit;
-    end;
-    if Num1 < Num2 then begin
-      Result := -1;
-      Exit;
-    end;
+  Result := True;
+  if not RegQueryStringValue(RootKey,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1',
+    'DisplayVersion', InstalledText) then
+    Exit;
+
+  if not TryParseVersion(InstalledText, InstalledVersion) then begin
+    MessageText := 'TeleArk cannot determine the installed version (' + InstalledText + '). ' +
+      'Installation has been stopped before any files were changed.';
+    Log(MessageText);
+    SuppressibleMsgBox(MessageText, mbCriticalError, MB_OK, IDOK);
+    Result := False;
+    Exit;
   end;
-  Result := 0;
+
+  if ComparePackedVersion(InstallerVersion, InstalledVersion) < 0 then begin
+    MessageText := 'A newer version of TeleArk (' + InstalledText + ') is already installed.' + #13#10 +
+      'This installer is version {#AppVersion}. Downgrading is not permitted.' + #13#10 +
+      'Installation has been stopped before any files were changed.';
+    Log(MessageText);
+    SuppressibleMsgBox(MessageText, mbCriticalError, MB_OK, IDOK);
+    Result := False;
+  end;
 end;
 
 function InitializeSetup(): Boolean;
 var
-  InstalledVer: String;
-  InstallerVer: String;
+  InstallerVersion: Int64;
 begin
-  Result := True;
-  InstallerVer := '{#AppVersion}';
-
-  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1', 'DisplayVersion', InstalledVer) or
-     RegQueryStringValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1', 'DisplayVersion', InstalledVer) then
-  begin
-    if CompareVersions(InstallerVer, InstalledVer) < 0 then begin
-      MsgBox(
-        'A newer version of TeleArk (v' + InstalledVer + ') is already installed on this system.' + #13#10#13#10 +
-        'This installer is version v' + InstallerVer + '.' + #13#10#13#10 +
-        'Downgrading is not permitted. Installation will now abort.',
-        mbError, MB_OK);
-      Result := False;
-      Exit;
-    end;
+  if not TryParseVersion('{#AppVersion}', InstallerVersion) then begin
+    Log('Invalid TeleArk installer version: {#AppVersion}');
+    Result := False;
+    Exit;
   end;
+  Result := CheckInstalledVersion(HKCU, InstallerVersion) and
+    CheckInstalledVersion(HKLM, InstallerVersion);
 end;
