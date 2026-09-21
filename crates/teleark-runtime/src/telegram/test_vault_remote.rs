@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GateKind {
     Validation,
+    PendingMetadataUpload,
     UploadPart,
     DownloadPart,
     ManifestDownload,
@@ -35,19 +36,20 @@ struct State {
     fail_once: Option<GateKind>,
 }
 struct ConcurrentGate {
+    kind: GateKind,
     remaining: usize,
     entered: mpsc::SyncSender<()>,
     release: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 pub(crate) struct TestVaultRemote {
-    concurrent_gate: Mutex<Option<ConcurrentGate>>,
+    concurrent_gates: Mutex<Vec<ConcurrentGate>>,
     state: Mutex<State>,
     gate: Mutex<Option<Gate>>,
 }
 impl TestVaultRemote {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            concurrent_gate: Mutex::new(None),
+            concurrent_gates: Mutex::new(Vec::new()),
             state: Mutex::new(State::default()),
             gate: Mutex::new(None),
         })
@@ -78,9 +80,30 @@ impl TestVaultRemote {
         &self,
         count: usize,
     ) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        self.concurrent_gate(GateKind::UploadPart, count)
+    }
+    pub(crate) fn concurrent_pending_metadata_gate(
+        &self,
+        count: usize,
+    ) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        self.concurrent_gate(GateKind::PendingMetadataUpload, count)
+    }
+    fn concurrent_gate(
+        &self,
+        kind: GateKind,
+        count: usize,
+    ) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        assert!(count > 0, "concurrent gate needs an entrant");
         let (entered, ready) = mpsc::sync_channel(count);
         let (release, wait) = mpsc::channel();
-        *self.concurrent_gate.lock().expect("gate") = Some(ConcurrentGate {
+        let mut gates = self.concurrent_gates.lock().expect("gate");
+        gates.retain(|gate| gate.remaining > 0);
+        assert!(
+            gates.iter().all(|gate| gate.kind != kind),
+            "one concurrent gate per kind"
+        );
+        gates.push(ConcurrentGate {
+            kind,
             remaining: count,
             entered,
             release: Arc::new(Mutex::new(wait)),
@@ -88,14 +111,15 @@ impl TestVaultRemote {
         (ready, release)
     }
     fn cross_gate(&self, kind: GateKind) -> Result<(), ApplicationError> {
-        let concurrent = if kind == GateKind::UploadPart {
-            let mut gate = self.concurrent_gate.lock().expect("gate");
-            gate.as_mut().filter(|gate| gate.remaining > 0).map(|gate| {
-                gate.remaining -= 1;
-                (gate.entered.clone(), gate.release.clone())
-            })
-        } else {
-            None
+        let concurrent = {
+            let mut gates = self.concurrent_gates.lock().expect("gate");
+            gates
+                .iter_mut()
+                .find(|gate| gate.kind == kind && gate.remaining > 0)
+                .map(|gate| {
+                    gate.remaining -= 1;
+                    (gate.entered.clone(), gate.release.clone())
+                })
         };
         if let Some((entered, release)) = concurrent {
             entered.send(()).expect("test observer");
@@ -287,6 +311,8 @@ impl TestVaultRemote {
                             pending_metadata,
                             "durable payloads need a publication identity"
                         );
+                        // The production unkeyed send creates a fresh Telegram message.
+                        // Only caller-reserved IDs participate in retry deduplication.
                     }
                     if let Some(random) = publication_random_id {
                         assert_ne!(random, 0);
@@ -309,7 +335,11 @@ impl TestVaultRemote {
                             total: bytes.len() as u64,
                         });
                     }
-                    if !pending_metadata {
+                    if pending_metadata {
+                        // Wait before taking `state`; tests must never hold the remote
+                        // mutex while coordinating concurrent publications.
+                        self.cross_gate(GateKind::PendingMetadataUpload)?;
+                    } else {
                         self.cross_gate(if caption == crate::transfer::MANIFEST_CAPTION {
                             GateKind::ManifestUpload
                         } else {
