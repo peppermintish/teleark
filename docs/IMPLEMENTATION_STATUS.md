@@ -1,4 +1,10 @@
-# Implementation status — v0.4.8
+# Implementation status — v0.4.9
+
+## Version 0.4.9 (2026-09-21)
+
+Workspace versions, lockfiles, native installer metadata and all three About catalogs are synchronized at 0.4.9. This release contains the Linux verification correction below and retains the tag-only push trigger and three release targets. Persistent schemas and codecs are unchanged: SQLite remains read/write schema 22 with supported automatic upgrades from 0–21; encrypted file and recovery compatibility is unchanged. Hosted native packaging and publication require the new version-tag run.
+
+Local 0.4.9 source gates passed: formatting, locked workspace check, strict Clippy, the serial workspace suite (769 passed, 10 existing ignored), explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. LF checks and policy tests, workflow lint, Bash syntax and both platform packaging regressions passed. The release resolver accepted `v0.4.9`. These results do not establish a native Linux installation or a published GitHub Release; those still require the hosted package run.
 
 ## Linux release payload verification correction (2026-09-21)
 

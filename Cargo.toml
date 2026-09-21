@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.8"
+version = "0.4.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/teleark/teleark"
@@ -21,14 +21,14 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 gpui-kit = "=0.6.0"
-teleark-core = { version = "=0.4.8", path = "crates/teleark-core" }
-teleark-crypto = { version = "=0.4.8", path = "crates/teleark-crypto" }
-teleark-i18n = { version = "=0.4.8", path = "crates/teleark-i18n" }
-teleark-index = { version = "=0.4.8", path = "crates/teleark-index" }
-teleark-runtime = { version = "=0.4.8", path = "crates/teleark-runtime" }
-teleark-storage = { version = "=0.4.8", path = "crates/teleark-storage" }
-teleark-telegram = { version = "=0.4.8", path = "crates/teleark-telegram" }
-teleark-transfer = { version = "=0.4.8", path = "crates/teleark-transfer" }
+teleark-core = { version = "=0.4.9", path = "crates/teleark-core" }
+teleark-crypto = { version = "=0.4.9", path = "crates/teleark-crypto" }
+teleark-i18n = { version = "=0.4.9", path = "crates/teleark-i18n" }
+teleark-index = { version = "=0.4.9", path = "crates/teleark-index" }
+teleark-runtime = { version = "=0.4.9", path = "crates/teleark-runtime" }
+teleark-storage = { version = "=0.4.9", path = "crates/teleark-storage" }
+teleark-telegram = { version = "=0.4.9", path = "crates/teleark-telegram" }
+teleark-transfer = { version = "=0.4.9", path = "crates/teleark-transfer" }
 tracing = "=0.1.44"
 
 [workspace.lints.rust]

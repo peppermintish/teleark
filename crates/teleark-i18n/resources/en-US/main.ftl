@@ -1139,6 +1139,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.9 · Correct Linux package verification
+
+    - Linux release verification compares AppImage and portable archive executables with each other. Debian payloads are verified independently, allowing the expected binary changes made by their different packaging tools. Native installation, downgrade refusal and checksums remain checked.
+    - CI tests the package comparison before compiling Rust, including corrupt and missing payload cases. Linux packaging and verification now appear as separate steps in the same workflow.
+    - Application metadata is 0.4.9. SQLite read/write schema 22 and automatic upgrades from supported older schemas are unchanged; encrypted file and recovery formats are unchanged. Targets remain Windows x64, universal macOS and Linux x64; macOS packages remain unsigned and unnotarized.
+
     ## 0.4.8 · One release run per version tag
 
     - GitHub Actions now starts on release tags, pull requests and manual dispatch. Pushing `main` and a matching `v*` tag together starts one release run; direct branch pushes no longer trigger CI.
