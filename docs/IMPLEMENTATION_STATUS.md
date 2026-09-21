@@ -1,5 +1,9 @@
 # Implementation status — v0.4.7
 
+## CI trigger correction (2026-09-21)
+
+The [single CI/CD workflow](../.github/workflows/ci.yml) now starts automatically for pull requests and `v*` tag pushes, with manual dispatch retained. It no longer starts on a branch push. Pushing `main` and a version tag together therefore creates one release run, avoiding the second Linux quality run and branch test matrix observed for `v0.4.7`. Direct pushes to `main` require a pull request or manual dispatch for CI; release tags continue to run the full quality gate before packaging. [ADR 0046](adr/0046-tag-only-push-trigger.md) records this trigger choice.
+
 ## Version 0.4.7 (2026-09-21)
 
 The release target set is Windows x64, universal macOS with Intel and Apple Silicon slices, and Linux x64. The single workflow now expects exactly nine standalone, portable and installer files before publication; the Windows/Linux ARM64-only jobs and local packaging modes were removed. Universal macOS library verification inspects each architecture separately, and the Debian metadata now includes the copyright field required by `cargo-deb`. A deterministic macOS library-check regression covers both slices, non-system dependencies and missing inspection data. [ADR 0045](adr/0045-focused-release-targets.md) supersedes the wider target list in ADR 0044.

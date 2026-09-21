@@ -1,6 +1,6 @@
 # Desktop release packages
 
-The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for every branch, pull request and tag. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into every native installer.
+The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for pull requests, version tags and manual dispatches. Branch pushes alone do not start a run, so a combined branch and version-tag push starts only the release run. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into every native installer.
 
 The tagged workflow checks and publishes these nine files, plus both project licenses, third-party notices and a unified `SHA256SUMS`:
 

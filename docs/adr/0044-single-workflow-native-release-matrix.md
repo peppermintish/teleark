@@ -1,6 +1,6 @@
 # ADR 0044: Single-workflow native release matrix
 
-Status: Partially superseded by [ADR 0045](0045-focused-release-targets.md) for target list and asset count. The single-workflow structure remains in force. This ADR superseded ADR 0043's workflow structure, target list and asset count; ADR 0043's numeric version and installer upgrade/downgrade contract remains in force.
+Status: Partially superseded by [ADR 0045](0045-focused-release-targets.md) for target list and asset count, and by [ADR 0046](0046-tag-only-push-trigger.md) for push triggers. The single-workflow structure remains in force. This ADR superseded ADR 0043's workflow structure, target list and asset count; ADR 0043's numeric version and installer upgrade/downgrade contract remains in force.
 
 ## Decision
 
