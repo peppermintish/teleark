@@ -32,9 +32,9 @@ Core, Runtime, Storage, Telegram, Crypto, Index and Transfer are independent of 
 
 ## Build and run
 
-**macOS is the current build and release baseline.** Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`). On Windows, install the native MSVC Rust toolchain via rustup and Visual Studio Build Tools with the "Desktop development with C++" workload and Windows SDK. The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
+Install Rust through rustup and Apple Command Line Tools (`xcode-select --install`) on macOS. On Windows, install the native MSVC Rust toolchain via rustup and Visual Studio Build Tools with the "Desktop development with C++" workload and Windows SDK. The repository uses `rust-toolchain.toml` and the checked-in `Cargo.lock`.
 
-Run commands from the repository root in bash/zsh on macOS/Linux, or in PowerShell / Git Bash on Windows. For platform prerequisites, standalone executables, macOS `.app` / `.dmg` / `.pkg` packages and Windows/Linux recipes, see the **[build and packaging guide](docs/PACKAGING.md)**. Windows and Linux builds and installers remain unverified.
+Run commands from the repository root in bash/zsh on macOS/Linux, or in PowerShell / Git Bash on Windows. The release workflow targets Windows x86_64, macOS arm64 and Linux x86_64, with standalone executables, portable archives and native installers. For the artifact list, platform prerequisites and manual packaging, see the **[build and packaging guide](docs/PACKAGING.md)**. Hosted release qualification is tracked in [implementation status](docs/IMPLEMENTATION_STATUS.md).
 
 ### Load `.env` values before building
 

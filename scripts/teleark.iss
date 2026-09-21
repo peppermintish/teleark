@@ -18,7 +18,7 @@
 #endif
 
 [Setup]
-AppId={#AppId}
+AppId={{#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -76,7 +76,7 @@ begin
     Result := StrToVersion(VersionText + '.0', Version);
 end;
 
-function CheckInstalledVersion(const RootKey: HKEY; const InstallerVersion: Int64): Boolean;
+function CheckInstalledVersion(const RootKey: Integer; const InstallerVersion: Int64): Boolean;
 var
   InstalledText, MessageText: String;
   InstalledVersion: Int64;
@@ -115,6 +115,7 @@ begin
     Result := False;
     Exit;
   end;
-  Result := CheckInstalledVersion(HKCU, InstallerVersion) and
-    CheckInstalledVersion(HKLM, InstallerVersion);
+  Result := CheckInstalledVersion(HKCU, InstallerVersion);
+  if Result then
+    Result := CheckInstalledVersion(HKLM, InstallerVersion);
 end;
