@@ -1111,6 +1111,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.10 · Telegram 构建配置与 Windows MSI
+
+    - 发布 CI 会验证 Telegram 发行版 API ID/hash 密钥，并将其传入所有原生编译步骤，包括通用 macOS 的两种架构。安装版和便携版使用相同的内置配置；报告不会包含密钥值。
+    - Windows 发行版现在同时提供原生 MSI、独立 EXE 和便携 ZIP。MSI 支持原位升级、修复、拒绝降级和失败回滚，并自动接管此前按用户安装的 Inno 版本，保留无关文件和应用数据。用户无需另行安装 SDK 或运行时。
+    - 应用元数据已更新至 0.4.10。SQLite 读写模式仍为 22，受支持旧模式的自动升级保持不变；加密文件与恢复格式也未更改。单一工作流仍面向 Windows x64、通用 macOS 和 Linux x64，每个版本标签只触发一次发布运行。
+
     ## 0.4.9 · 修正 Linux 软件包验证
 
     - Linux 发行验证现在比较 AppImage 与便携归档中的可执行文件。Debian 软件包内容单独验证，允许不同打包工具对二进制文件进行预期的修改。原生安装、降级拒绝和校验和检查继续保留。

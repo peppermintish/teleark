@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.10 · Configured Telegram builds and Windows MSI
+
+- Release CI validates the Telegram distribution API ID/hash secrets and passes them to every native compilation, including both universal macOS slices. Installed and portable apps use the same embedded configuration; reports never include the values.
+- Windows releases now include a native MSI alongside the standalone EXE and portable ZIP. The MSI supports in-place upgrades, repair, downgrade refusal and rollback, and automatically adopts previous per-user Inno installations while preserving unrelated files and app data. No extra SDK or runtime installation is required for users.
+- Application metadata is 0.4.10. SQLite read/write schema 22 and automatic upgrades from supported older schemas are unchanged; encrypted file and recovery formats are unchanged. The single workflow still targets Windows x64, universal macOS and Linux x64 and starts one release run per version tag.
+
 ## 0.4.9 · Correct Linux package verification
 
 - Linux release verification compares AppImage and portable archive executables with each other. Debian payloads are verified independently, allowing the expected binary changes made by their different packaging tools. Native installation, downgrade refusal and checksums remain checked.

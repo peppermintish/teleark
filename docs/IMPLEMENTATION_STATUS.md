@@ -1,4 +1,14 @@
-# Implementation status — v0.4.9
+# Implementation status — v0.4.10
+
+## Version 0.4.10 (2026-09-21)
+
+Release builds now map the configured Telegram distribution secret names into each native compilation, with a value-free validation report before packaging. Windows packages use a native MSI with an embedded cabinet, per-user installation, numeric downgrade guards and transactional upgrades. Previous per-user Inno installations migrate in place. The standalone EXE and ZIP remain available. The workflow keeps three native targets and a tag-only push trigger; [ADR 0047](adr/0047-windows-msi-and-distribution-build-inputs.md) records the build and upgrade contract.
+
+Workspace versions, lockfiles, macOS metadata and all three About catalogs are synchronized at 0.4.10. Persistent schemas and codecs are unchanged: SQLite remains read/write schema 22 with supported automatic upgrades from 0–21; encrypted file and recovery compatibility is unchanged.
+
+Local validation passed: formatting, locked workspace check, strict Clippy, 769 serial workspace tests (10 existing ignored), explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. LF policy checks/tests, workflow lint and both platform packaging regressions passed. Distribution input validation passed 13 synthetic cases, including redaction and malformed values; two runtime credential-precedence tests also passed with a synthetic pair compiled in. The version resolver accepted `v0.4.10`.
+
+The Windows x64 static-CRT release build produced the versioned EXE, ZIP and MSI with three verified checksums. Native Windows Installer tests passed fresh installation, repair, a two-version upgrade and downgrade refusal, missing-cabinet rollback, and synthetic legacy installation migration/refusal/rollback while preserving unrelated files. The older MSI is removed only after the new payload has installed within the transaction. Legacy registry fixtures use Windows' native registry provider so tests launched inside a packaged development app share the installer's registry view. These are local Windows results, not a hosted macOS/Linux build or a published release; those require the new version-tag run. GitHub secret settings were not accessed or changed.
 
 ## Version 0.4.9 (2026-09-21)
 
