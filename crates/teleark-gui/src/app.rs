@@ -327,6 +327,8 @@ pub struct TeleArkApp {
     pub(crate) vault_advanced_expanded: bool,
     pub(crate) vault_new_epoch_confirmation: bool,
     pub(crate) vault_key_progress: Option<teleark_runtime::VaultKeyProgress>,
+    pub(crate) vault_key_details: bool,
+    pub(crate) vault_key_scroll: gpui_kit::ScrollHandle,
     vault_key_presentation: Option<Task<()>>,
     pub(crate) account_restoring: bool,
     account_restore_retry_at: Option<std::time::Instant>,
@@ -736,6 +738,8 @@ impl TeleArkApp {
             vault_advanced_expanded: false,
             vault_new_epoch_confirmation: false,
             vault_key_progress: None,
+            vault_key_details: false,
+            vault_key_scroll: gpui_kit::ScrollHandle::new(),
             vault_key_presentation: None,
             account_restoring: false,
             account_restore_retry_at: None,
@@ -1189,6 +1193,20 @@ impl TeleArkApp {
                         f32::from(*width)
                     }),
             );
+        #[cfg(target_os = "windows")]
+        let workspace_height = if window.is_fullscreen() {
+            window
+                .display(cx)
+                .map_or(window.viewport_size().height, |display| {
+                    let taskbar_overlap =
+                        (window.bounds().bottom() - display.visible_bounds().bottom()).max(px(0.0));
+                    (window.viewport_size().height - taskbar_overlap).max(px(0.0))
+                })
+        } else {
+            window.viewport_size().height
+        };
+        #[cfg(not(target_os = "windows"))]
+        let workspace_height = window.viewport_size().height;
         let modal_open = self.transition.is_some()
             || self.show_upload
             || self.show_telegram_api_id_prompt
@@ -1209,7 +1227,8 @@ impl TeleArkApp {
         }
 
         div()
-            .size_full()
+            .w_full()
+            .h(workspace_height)
             .track_focus(&self.main_focus)
             .relative()
             .flex()
@@ -1253,6 +1272,7 @@ impl TeleArkApp {
                     EscapeBehavior::Ignore => {
                         this.dialogs.details = false;
                         this.channel_sync_details = false;
+                        this.vault_key_details = false;
                         this.show_transfer_detail = false;
                         this.pending_transfer_delete = None;
                         this.pending_transfer_bulk_delete.clear();
@@ -1316,10 +1336,6 @@ impl TeleArkApp {
                 |root| root.child(self.render_storage_maintenance(cx)),
             )
             .when(
-                self.vault_key_progress.is_some() && !self.vault_new_epoch_confirmation,
-                |root| root.child(self.render_vault_key_progress(cx)),
-            )
-            .when(
                 self.upload_in_flight
                     || (self.page == Page::Transfers && self.upload_selection_progress.is_some()),
                 |root| root.child(self.render_upload_selection_progress(false, cx)),
@@ -1329,6 +1345,12 @@ impl TeleArkApp {
             })
             .child(self.render_bandwidth_status(cx))
             .child(self.render_status_bar(cx))
+            .when(
+                self.vault_key_details
+                    && self.vault_key_progress.is_some()
+                    && !self.vault_new_epoch_confirmation,
+                |root| root.child(self.render_vault_key_details(cx)),
+            )
             .when(self.dialogs.details, |root| {
                 root.child(self.render_dialog_details(cx))
             })

@@ -1149,6 +1149,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.12 · Transfer table and key activity layout
+
+    - ETA and Progress use wider responsive columns. A Telegram cooldown is shown once in the progress row instead of repeating in the rate slot.
+    - Encryption key activity opens in a scrollable right-hand panel from the bottom status bar, replacing the full-width strip. On Windows, native full-screen keeps the status bar above the taskbar.
+    - Application metadata is 0.4.12. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged; transfer, encrypted file and recovery codecs are unchanged.
+
     ## 0.4.11 · Native download recovery and diagnostics
 
     - Native download part retries switch to another transfer connection slot after a failure. A slot that reaches the 60-second request deadline is avoided for later parts of the same download, preventing one stalled slot from exhausting every attempt assigned to it.
@@ -1515,6 +1521,12 @@ vault-key-phase-recovery = Preparing recovery protection
 vault-key-phase-saving = Preserving old keys and saving atomically
 vault-key-phase-completed = Encryption keys ready
 vault-key-phase-time = Phase: { $seconds } s · Last activity: { $idle } s ago
+vault-key-details-title = Encryption key activity
+vault-key-status-failed = Encryption key operation failed
+vault-key-status-complete = Encryption key operation complete
+vault-key-status-open = Show encryption key activity
+vault-key-timeline-title = Phase timeline
+vault-key-timeline-event = { $phase } · { $elapsed } from start
 vault-health-check-summary = Last history check: { $count } files checked. Files with unavailable keys remain unchecked.
 transfer-upload-saving-manifest = Saving the verified manifest locally
 

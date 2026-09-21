@@ -1,4 +1,12 @@
-# Implementation status — v0.4.11
+# Implementation status — v0.4.12
+
+## Version 0.4.12 (2026-09-22)
+
+The Transfers table gives ETA and Progress wider responsive columns. At 900×600 the fixed cells leave at least 180 points for the name; at larger widths Progress has 280 points. Active Telegram cooldown text is shown once in the progress label, with no duplicate in the rate slot. The transfer inspector overlays the table until there is enough width to dock without compressing the new columns.
+
+Vault key preparation, completion and failure remain visible in a compact bottom status-bar button. The button opens a bounded, independently scrollable right-hand phase timeline with the existing cancel and dismissal controls. The previous full-width key-progress strip is removed. Windows native full-screen now bounds the workspace by the display's visible work area when the taskbar remains over the full-screen window, keeping the status bar and its button reachable.
+
+The English light-mode previews were inspected at 900×600 and actual native full-screen for both Transfers and key activity; the status-bar button remained reachable above the Windows taskbar. Local validation passed formatting, locked workspace check, strict Clippy, the serial workspace suite, explicit Core/i18n tests, warning-denied rustdoc, cargo-deny, line-ending tests, distribution-credential checks and both platform payload regressions. The Git-index LF policy passed after staging. The previews and tests use synthetic state; live keychain permissions and Telegram server responses were not exercised. No persistent format, account policy or Telegram request rate has changed.
 
 ## Version 0.4.11 (2026-09-22)
 

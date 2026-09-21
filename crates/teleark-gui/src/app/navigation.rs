@@ -442,6 +442,11 @@ impl TeleArkApp {
         let preparation = self.dialogs.has_activity()
             && self.channel_sync_snapshot.is_none()
             && !self.account_restoring;
+        let key_status = self
+            .vault_key_progress
+            .as_ref()
+            .filter(|_| !self.vault_new_epoch_confirmation)
+            .map(|progress| progress.snapshot());
         let disk_label = if self.preference_persistence == PreferencePersistence::Saving {
             self.tr("settings-preferences-saving")
         } else if self.preference_persistence == PreferencePersistence::Failed {
@@ -559,6 +564,39 @@ impl TeleArkApp {
                                         input.set_value("", window, cx);
                                     });
                                 })),
+                        )
+                    })
+                    .when_some(key_status, |left, state| {
+                        let (label, icon) = if state.error.is_some() {
+                            (self.tr("vault-key-status-failed"), IconName::TriangleAlert)
+                        } else if state.finished {
+                            (self.tr("vault-key-status-complete"), IconName::Check)
+                        } else {
+                            (
+                                self.tr(crate::screens::unlock::key_phase_id(state.phase)),
+                                IconName::Redo2,
+                            )
+                        };
+                        left.child(
+                            components::compact_button(
+                                "shell-key-progress",
+                                label.clone(),
+                                Some(icon),
+                                self.vault_key_details,
+                            )
+                            .ghost()
+                            .h(px(24.0))
+                            .px_1()
+                            .min_w_0()
+                            .max_w(px(220.0))
+                            .overflow_hidden()
+                            .accessibility_label(label)
+                            .tooltip(self.tr("vault-key-status-open"))
+                            .debug_selector(|| "shell-key-progress".into())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.vault_key_details = !app.vault_key_details;
+                                cx.notify();
+                            })),
                         )
                     })
                     .when(self.vault_status.active_key_locked, |left| {

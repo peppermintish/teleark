@@ -29,7 +29,7 @@ use teleark_runtime::{
 use crate::{
     app::TeleArkApp,
     components::{self, Tone},
-    layout::LayoutPolicy,
+    layout::{LayoutPolicy, TransferColumnWidths},
     mock::{BatchSummary, TransferDirection, TransferRow, TransferState},
     theme,
 };
@@ -536,9 +536,8 @@ impl TeleArkApp {
                 snapshot.size_bytes,
                 state == TransferState::Completed,
             ),
-            speed: if let Some(status) = server_status {
-                let wait = status.wait_remaining_seconds();
-                format!("{} ({}s)", status.flag, wait).into()
+            speed: if server_status.is_some() {
+                self.tr("transfer-value-unavailable")
             } else {
                 self.vault_transfer_view
                     .rates
@@ -873,9 +872,8 @@ impl TeleArkApp {
             size: format_bytes(self.locale(), snapshot.size_bytes).into(),
             transferred: format_bytes(self.locale(), snapshot.transferred_bytes).into(),
             progress,
-            speed: if let Some(status) = server_status {
-                let wait = status.wait_remaining_seconds();
-                format!("{} ({}s)", status.flag, wait).into()
+            speed: if server_status.is_some() {
+                self.tr("transfer-value-unavailable")
             } else {
                 speed.into()
             },
@@ -1099,6 +1097,7 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let padding = layout.content_padding();
+        let columns = layout.transfer_columns();
         let query = self.search_input.read(cx).value().to_lowercase();
         let all_transfer_rows = self.transfer_items();
         let presentation = self.transfer_projection_cache.borrow_mut().presentation(
@@ -1371,11 +1370,20 @@ impl TeleArkApp {
             .child(transfer_header(self.tr("table-name"), None))
             .child(transfer_header(
                 self.tr("transfer-bytes-heading"),
-                Some(140.0),
+                Some(columns.bytes),
             ))
-            .child(transfer_header(self.tr("transfer-eta-heading"), Some(72.0)))
-            .child(transfer_header(self.tr("table-progress"), Some(188.0)))
-            .child(transfer_header(self.tr("transfer-actions"), Some(116.0)));
+            .child(transfer_header(
+                self.tr("transfer-eta-heading"),
+                Some(columns.eta),
+            ))
+            .child(transfer_header(
+                self.tr("table-progress"),
+                Some(columns.progress),
+            ))
+            .child(transfer_header(
+                self.tr("transfer-actions"),
+                Some(columns.actions),
+            ));
 
         let has_rows = !transfer_rows.is_empty();
         let row_count = transfer_rows.len();
@@ -1405,7 +1413,13 @@ impl TeleArkApp {
                     .cloned()
                     .map(|item| {
                         let row = item.row(this);
-                        this.render_transfer_row(index, row, BatchRowPosition::at(&rows, index), cx)
+                        this.render_transfer_row(
+                            index,
+                            row,
+                            BatchRowPosition::at(&rows, index),
+                            columns,
+                            cx,
+                        )
                     })
                     .unwrap_or_else(|| div().into_any_element())
             }),
@@ -1814,11 +1828,12 @@ impl TeleArkApp {
         &self,
         transfer: &TransferRow,
         index: usize,
+        columns: TransferColumnWidths,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selection_key = transfer_selection_key(transfer, index);
         let mut actions = div()
-            .w(px(116.0))
+            .w(px(columns.actions))
             .flex_none()
             .flex()
             .justify_end()
@@ -2031,13 +2046,14 @@ impl TeleArkApp {
         index: usize,
         transfer: TransferRow,
         position: BatchRowPosition,
+        columns: TransferColumnWidths,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let focused = self.focused_transfer_key == Some(transfer_selection_key(&transfer, index));
         let selection_key = transfer_selection_key(&transfer, index);
         let selected = self.selected_transfer_keys.contains(&selection_key);
         let tone = transfer_tone(transfer.state);
-        let actions = self.render_transfer_actions(&transfer, index, cx);
+        let actions = self.render_transfer_actions(&transfer, index, columns, cx);
         let bytes_label: SharedString =
             format!("{} / {}", transfer.transferred, transfer.size).into();
         let bytes_tooltip = bytes_label.clone();
@@ -2207,7 +2223,7 @@ impl TeleArkApp {
             )
             .child(
                 div()
-                    .w(px(140.0))
+                    .w(px(columns.bytes))
                     .flex_none()
                     .pr_3()
                     .text_color(theme::text_secondary())
@@ -2223,7 +2239,7 @@ impl TeleArkApp {
             )
             .child(
                 div()
-                    .w(px(72.0))
+                    .w(px(columns.eta))
                     .flex_none()
                     .pr_3()
                     .text_color(theme::text_muted())
@@ -2239,9 +2255,10 @@ impl TeleArkApp {
             )
             .child(
                 div()
-                    .w(px(188.0))
+                    .w(px(columns.progress))
                     .flex_none()
-                    .pr_5()
+                    .debug_selector(move || format!("transfer-progress-{selection_key}"))
+                    .pr(px(if columns.progress < 250.0 { 8.0 } else { 12.0 }))
                     .child(
                         div()
                             .flex()
@@ -4475,6 +4492,29 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn eta_and_progress_columns_use_the_supported_window_widths(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        let key = app.update(cx, |app, cx| {
+            app.show_transfer_detail = false;
+            cx.notify();
+            transfer_selection_key(&app.transfer_rows()[0], 0)
+        });
+        let eta_selector: &'static str = Box::leak(format!("transfer-eta-{key}").into_boxed_str());
+        let progress_selector: &'static str =
+            Box::leak(format!("transfer-progress-{key}").into_boxed_str());
+        for (width, height) in [(900.0, 600.0), (1920.0, 1080.0)] {
+            cx.simulate_resize(gpui_kit::size(px(width), px(height)));
+            cx.run_until_parked();
+            let columns = LayoutPolicy::from_size(width, height).transfer_columns();
+            let eta = cx.debug_bounds(eta_selector).expect("ETA cell");
+            let progress = cx.debug_bounds(progress_selector).expect("Progress cell");
+            assert_eq!(eta.size.width, px(columns.eta));
+            assert_eq!(progress.size.width, px(columns.progress));
+            assert!(eta.right() <= progress.left());
+        }
+    }
 
     #[test]
     fn vault_delete_action_is_available_for_completed_failed_and_cancelled_states() {

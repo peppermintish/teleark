@@ -206,6 +206,7 @@ impl TeleArkApp {
     ) {
         let refresh_files = !reveal_recovery || self.vault_status.active_key_locked;
         self.vault_key_progress = Some(progress);
+        self.vault_key_details = false;
         self.vault_activity = VaultActivity::Working;
         self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -282,6 +283,7 @@ impl TeleArkApp {
         self.pending_vault_action = None;
         self.vault_new_epoch_confirmation = false;
         self.vault_key_progress = None;
+        self.vault_key_details = false;
         self.hide_vault_recovery_key(cx);
         self.vault_activity = VaultActivity::Idle;
         cx.notify();
@@ -317,6 +319,7 @@ impl TeleArkApp {
         self.cancel_managed_scan();
         self.clear_vault_inputs(window, cx);
         self.vault_key_progress = None;
+        self.vault_key_details = false;
         self.vault_new_epoch_confirmation = true;
         self.vault_advanced_expanded = false;
         self.pending_vault_action = None;
@@ -488,6 +491,7 @@ impl TeleArkApp {
             progress.cancel();
         }
         self.vault_key_progress = None;
+        self.vault_key_details = false;
         self.vault_key_presentation = None;
         self.clear_vault_inputs(window, cx);
         self.pending_vault_action = None;

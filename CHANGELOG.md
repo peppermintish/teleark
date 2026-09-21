@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.12 · Transfer table and key activity layout
+
+- ETA and Progress use wider responsive columns. A Telegram cooldown is shown once in the progress row instead of repeating in the rate slot.
+- Encryption key activity opens in a scrollable right-hand panel from the bottom status bar, replacing the full-width strip. On Windows, native full-screen keeps the status bar above the taskbar.
+- Application metadata is 0.4.12. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged; transfer, encrypted file and recovery codecs are unchanged.
+
 ## 0.4.11 · Native download recovery and diagnostics
 
 - Native download part retries switch to another transfer connection slot after a failure. A slot that reaches the 60-second request deadline is avoided for later parts of the same download, preventing one stalled slot from exhausting every attempt assigned to it.

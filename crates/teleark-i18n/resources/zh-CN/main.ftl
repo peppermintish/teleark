@@ -1121,6 +1121,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.12 · 传输表格与密钥活动布局
+
+    - ETA 和进度列根据窗口宽度加宽。Telegram 冷却提示只在进度行显示一次，不再在速率位置重复。
+    - 加密密钥活动由底部状态栏按钮打开右侧可滚动面板，取代横跨页面底部的提示条。在 Windows 原生全屏模式下，状态栏保持在任务栏上方。
+    - 应用元数据已更新至 0.4.12。SQLite 读写模式仍为 22，并继续支持从 0–21 自动升级；传输、加密文件和恢复格式未更改。
+
     ## 0.4.11 · 原生下载恢复与诊断
 
     - 原生下载分片失败后，重试会切换到其他传输连接。某个连接达到 60 秒请求期限后，同一下载中的后续分片会避开该连接，避免单个卡住的连接耗尽所有重试次数。
@@ -1488,6 +1494,12 @@ vault-key-phase-recovery = 正在准备恢复保护
 vault-key-phase-saving = 正在保留旧密钥并原子保存
 vault-key-phase-completed = 加密密钥已就绪
 vault-key-phase-time = 当前阶段：{ $seconds } 秒 · 距上次活动：{ $idle } 秒
+vault-key-details-title = 加密密钥活动
+vault-key-status-failed = 加密密钥操作失败
+vault-key-status-complete = 加密密钥操作完成
+vault-key-status-open = 查看加密密钥活动
+vault-key-timeline-title = 阶段时间线
+vault-key-timeline-event = { $phase } · 开始后 { $elapsed }
 vault-health-check-summary = 最近一次历史检查：已检查 { $count } 个文件。密钥不可用的文件尚未检查。
 transfer-upload-saving-manifest = 正在保存已验证清单到本地
 

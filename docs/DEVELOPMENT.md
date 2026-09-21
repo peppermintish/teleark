@@ -103,7 +103,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `batch-groups`, `batch-large`, `upload-history`, `native-failure`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
+| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `batch-groups`, `batch-large`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
 | `--locale` | `en-US` only for interface tests and previews |
 | `--window-size` | 900×600 is required; also review actual native full-screen mode. Other window sizes are supplemental |
 
@@ -163,6 +163,8 @@ Use `--preview-ui --preview-state=proxy-failed --locale=en-US --window-size=900x
 `--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.
 
 `--screen=transfers --preview-state=native-failure --locale=en-US` shows a synthetic 60-second native part timeout, its connection slot and the right-hand failure inspector. Use it at 900×600 and actual native full-screen in light mode.
+
+`--screen=transfers --preview-state=transfer-rate-limited --locale=en-US` shows a synthetic Telegram cooldown with a long ETA at 900×600 and actual native full-screen. `--preview-state=managed-key-loading` shows the key activity button in the bottom status bar; open it to check the lateral phase inspector and its independent scroll area.
 
 
 ## Task completion checkpoints

@@ -6,6 +6,14 @@ use teleark_runtime::{
 
 pub(crate) const CHANNEL_CONTENT_MIN_WIDTH: f32 = 500.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TransferColumnWidths {
+    pub bytes: f32,
+    pub eta: f32,
+    pub progress: f32,
+    pub actions: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutPolicy {
     width: f32,
     height: f32,
@@ -82,7 +90,24 @@ impl LayoutPolicy {
             - self.sidebar_width()
             - self.transfer_inspector_width()
             - 2.0 * self.content_padding()
-            >= 740.0
+            >= 900.0
+    }
+    pub(crate) fn transfer_columns(self) -> TransferColumnWidths {
+        if self.is_compact() {
+            TransferColumnWidths {
+                bytes: 112.0,
+                eta: 100.0,
+                progress: 228.0,
+                actions: 100.0,
+            }
+        } else {
+            TransferColumnWidths {
+                bytes: 140.0,
+                eta: 112.0,
+                progress: 280.0,
+                actions: 116.0,
+            }
+        }
     }
     pub(crate) fn properties_width(self) -> f32 {
         if self.is_compact() { 250.0 } else { 300.0 }
@@ -123,8 +148,18 @@ mod tests {
         for width in [900.0, 960.0, 1299.0, 1300.0, 1360.0, 1599.0, 1600.0, 1920.0] {
             let policy = LayoutPolicy::from_size(width, 600.0);
             let content = width - policy.sidebar_width() - 2.0 * policy.content_padding();
+            let columns = policy.transfer_columns();
             // Transfer rows: checkbox, processed bytes, ETA, progress, actions and padding.
-            assert!(content - 28.0 - 140.0 - 72.0 - 188.0 - 116.0 - 64.0 >= 180.0);
+            assert!(
+                content
+                    - 28.0
+                    - columns.bytes
+                    - columns.eta
+                    - columns.progress
+                    - columns.actions
+                    - 64.0
+                    >= 180.0
+            );
             let library_fixed = if policy.is_compact() {
                 90.0
             } else {

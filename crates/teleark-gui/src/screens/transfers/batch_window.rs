@@ -209,6 +209,7 @@ impl TeleArkApp {
             .map(|(_, item)| item.row(self));
         let count = members.len();
         let layout = LayoutPolicy::from_window(window);
+        let columns = layout.transfer_columns();
         let palette = theme::batch_palette(cx);
         if title.as_ref() != Some(&group.name) {
             window.set_window_title(&group.name);
@@ -230,6 +231,7 @@ impl TeleArkApp {
                                     index,
                                     item.row(app),
                                     BatchRowPosition::WindowMember,
+                                    columns,
                                     cx,
                                 )
                             })

@@ -616,6 +616,22 @@ impl TeleArkApp {
             "native-cleanup" => self.preview_native_cleanup(false),
             "native-cleanup-failed" => self.preview_native_cleanup(true),
             "native-failure" => self.preview_native_failure(),
+            "transfer-rate-limited" => {
+                self.page = Page::Transfers;
+                let mut row = self
+                    .preview_transfer_rows
+                    .iter()
+                    .find(|row| row.batch_summary.is_none() && !row.batch_child)
+                    .expect("ordinary preview transfer")
+                    .clone();
+                row.state = crate::mock::TransferState::Downloading;
+                row.activity = Some("FLOOD_WAIT_6 (3s)".into());
+                row.eta = "16 min 37 s".into();
+                row.progress = 17.0;
+                row.transferred = "2.48 GB".into();
+                row.speed = "—".into();
+                self.preview_transfer_rows = vec![row];
+            }
             "recovery-guide" => {
                 self.page = Page::Storage;
                 self.show_storage_guide = true;

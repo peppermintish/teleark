@@ -1121,6 +1121,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.4.12 · 転送表と鍵の処理状況のレイアウト
+
+    - ウィンドウ幅に応じて ETA 列と進捗列を広げました。Telegram の待機表示は進捗行に一度だけ表示し、速度欄で繰り返しません。
+    - 暗号鍵の処理状況は、下部ステータスバーのボタンから開くスクロール可能な右側パネルに移しました。Windows のネイティブ全画面表示でも、ステータスバーはタスクバーの上に表示されます。
+    - アプリのバージョンは 0.4.12 です。SQLite の読み書きスキーマ 22 と、0–21 からの自動更新は変更ありません。転送、暗号化ファイル、復旧形式も変更ありません。
+
     ## 0.4.11 · ネイティブダウンロードの復旧と診断
 
     - ネイティブダウンロードのパート要求が失敗すると、再試行は別の転送接続へ切り替わります。60 秒の要求期限に達した接続は、そのダウンロードの後続パートで避けられます。停止した接続一つで再試行を使い切ることを防ぎます。
@@ -1488,6 +1494,12 @@ vault-key-phase-recovery = 復元用の保護を準備中
 vault-key-phase-saving = 古い鍵を保持して一括保存中
 vault-key-phase-completed = 暗号化キーの準備が完了しました
 vault-key-phase-time = 現在の段階：{ $seconds } 秒 · 最終動作：{ $idle } 秒前
+vault-key-details-title = 暗号鍵の処理状況
+vault-key-status-failed = 暗号鍵の処理に失敗しました
+vault-key-status-complete = 暗号鍵の処理が完了しました
+vault-key-status-open = 暗号鍵の処理状況を表示
+vault-key-timeline-title = 処理段階の履歴
+vault-key-timeline-event = { $phase } · 開始から { $elapsed }
 vault-health-check-summary = 前回の履歴チェック：{ $count } 件を確認しました。キーを利用できないファイルは未確認です。
 transfer-upload-saving-manifest = 検証済みマニフェストをローカルに保存中
 
