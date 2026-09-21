@@ -282,16 +282,19 @@ impl TestVaultRemote {
                 let result = (|| {
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
                     let pending_metadata = caption == crate::vault::remote_upload::CAPTION;
-                    let random = publication_random_id.unwrap_or_else(|| {
+                    if publication_random_id.is_none() {
                         assert!(
                             pending_metadata,
                             "durable payloads need a publication identity"
                         );
-                        -(self.state.lock().expect("state").objects.len() as i64 + 1)
-                    });
-                    assert_ne!(random, 0);
+                    }
+                    if let Some(random) = publication_random_id {
+                        assert_ne!(random, 0);
+                    }
                     assert!(bytes.len() <= 64 * 1024 * 1024, "bounded encrypted object");
                     if !pending_metadata {
+                        let random = publication_random_id
+                            .expect("durable payloads have a publication identity");
                         let mut state = self.state.lock().expect("state");
                         assert!(state.uploads.len() < 64);
                         state
@@ -320,7 +323,9 @@ impl TestVaultRemote {
                         })?;
                     }
                     let mut state = self.state.lock().expect("state");
-                    if let Some(id) = state.publications.get(&random).copied() {
+                    if let Some(random) = publication_random_id
+                        && let Some(id) = state.publications.get(&random).copied()
+                    {
                         let object = state.objects.get(&id).expect("stable publication");
                         assert_eq!(object.bytes, bytes);
                         assert_eq!(object.summary.file_name, file_name);
@@ -359,7 +364,9 @@ impl TestVaultRemote {
                             bytes,
                         },
                     );
-                    state.publications.insert(random, id);
+                    if let Some(random) = publication_random_id {
+                        state.publications.insert(random, id);
+                    }
                     drop(state);
                     // The remote object exists, but no successful reply or
                     // verified local receipt has reached the Vault owner yet.
