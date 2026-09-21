@@ -1,4 +1,10 @@
-# Implementation status — v0.4.7
+# Implementation status — v0.4.8
+
+## Version 0.4.8 (2026-09-21)
+
+The version tag follows the single-run trigger correction below. Workspace crates, lockfiles, macOS bundle metadata, Windows installer fallback and the three About catalogs now agree on 0.4.8. Tagged releases still build nine files for Windows x64, universal macOS and Linux x64. SQLite read/write remains schema 22 with supported automatic upgrades from 0–21; encrypted file and recovery formats are unchanged. Hosted package verification and publication depend on the `v0.4.8` workflow run.
+
+Local 0.4.8 validation passed workflow lint, LF checks, the macOS universal-library regression, formatting, locked workspace check, strict Clippy, the full serial workspace suite, explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. The version resolver accepted `v0.4.8`. A Windows x64 static-CRT release build produced the standalone executable, ZIP and installer; native verification checked checksums, in-place upgrade and downgrade refusal, then removed its test installation. Hosted macOS and Linux package verification remains pending.
 
 ## CI trigger correction (2026-09-21)
 

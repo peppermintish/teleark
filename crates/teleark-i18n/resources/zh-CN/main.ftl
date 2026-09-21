@@ -1111,6 +1111,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.4.8 · 每个版本标签只运行一次发行流程
+
+    - GitHub Actions 现在由发行标签、拉取请求或手动操作触发。同时推送 `main` 和匹配的 `v*` 标签只会启动一次发行流程；直接推送分支不再触发 CI。
+    - 发行目标仍为 Windows x64、同时支持 Intel 和 Apple Silicon 的通用 macOS，以及 Linux x64，并提供独立可执行文件、便携归档和原生安装程序。0.4.7 中的 macOS 和 Linux 打包修复继续保留。
+    - 应用元数据已更新至 0.4.8。SQLite 读写模式仍为 22，受支持旧模式的自动升级保持不变；加密文件与恢复格式也未更改。macOS 软件包仍未签名或公证。
+
     ## 0.4.7 · 精简发行目标并修复打包检查
 
     - 带版本标签的发行版覆盖 Windows x64、同时支持 Intel 和 Apple Silicon 的通用 macOS，以及 Linux x64。每个平台都提供独立可执行文件、便携归档和原生安装程序，GitHub Release 共发布九个软件包文件。不再构建 Windows 和 Linux 的 ARM64 专用发行版。

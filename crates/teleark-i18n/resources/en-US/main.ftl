@@ -1139,6 +1139,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.8 · One release run per version tag
+
+    - GitHub Actions now starts on release tags, pull requests and manual dispatch. Pushing `main` and a matching `v*` tag together starts one release run; direct branch pushes no longer trigger CI.
+    - The release targets Windows x64, universal macOS (Intel and Apple Silicon), and Linux x64, with standalone executables, portable archives and native installers. The macOS and Linux packaging fixes from 0.4.7 remain included.
+    - Application metadata is 0.4.8. SQLite read/write schema 22 and automatic upgrades from supported older schemas are unchanged; encrypted file and recovery formats are unchanged. macOS packages remain unsigned and unnotarized.
+
     ## 0.4.7 · Focused release targets and packaging fixes
 
     - Tagged releases target Windows x64, universal macOS (Intel and Apple Silicon), and Linux x64. Each target provides a standalone executable, portable archive and native installer, for nine package files in the GitHub Release. Windows and Linux ARM64-only release jobs have been removed.

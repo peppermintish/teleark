@@ -1111,6 +1111,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.4.8 · バージョンタグごとに一回のリリース実行
+
+    - GitHub Actions はリリースタグ、プルリクエスト、手動実行で起動します。`main` と対応する `v*` タグを同時にプッシュするとリリース実行は一回だけ始まり、ブランチへの直接プッシュでは CI が起動しません。
+    - リリース対象は Windows x64、Intel と Apple Silicon に対応するユニバーサル macOS、Linux x64 で、単体実行ファイル、ポータブルアーカイブ、標準インストーラーを提供します。0.4.7 の macOS と Linux のパッケージ修正も含まれます。
+    - アプリのバージョンは 0.4.8 です。SQLite の読み書きスキーマ 22、対応する旧スキーマからの自動更新、暗号化ファイルと復旧形式は変更ありません。macOS パッケージは未署名・未公証です。
+
     ## 0.4.7 · リリース対象の整理とパッケージ検査の修正
 
     - バージョンタグ付きリリースの対象は Windows x64、Intel と Apple Silicon に対応するユニバーサル macOS、Linux x64 です。各環境に単体実行ファイル、ポータブルアーカイブ、標準インストーラーを用意し、GitHub Release には合計九つのパッケージファイルを公開します。Windows と Linux の ARM64 専用ジョブは削除しました。
