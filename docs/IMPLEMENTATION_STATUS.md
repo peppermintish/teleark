@@ -1,5 +1,11 @@
 # Implementation status — v0.4.8
 
+## Linux release payload verification correction (2026-09-21)
+
+The supplied `v0.4.8` runner log shows successful creation of the AppImage, portable archive and Debian package, followed by an invalid byte comparison between the portable and Debian executables. `linuxdeploy` strips and rewrites the portable ELF's RPATH, while `cargo-deb` processes the original executable separately. Verification now compares AppImage with the portable archive, checks the Debian payload independently and retains the installed-file comparison against that Debian payload. All three executables must be Linux x64 ELF files; metadata, dependencies, checksums and downgrade refusal remain checked.
+
+A fast regression accepts the expected difference between Debian and portable bytes and rejects divergent portable executables, empty Debian payloads and missing library notices. It passed locally under Git Bash, along with Bash syntax and workflow lint. The single workflow runs this regression before compiling Rust and displays Linux packaging and verification as separate steps. This Windows host has no Linux runtime, and the connected browser is not signed into the private repository; native Linux installation and the hosted result remain unverified here.
+
 ## Version 0.4.8 (2026-09-21)
 
 The version tag follows the single-run trigger correction below. Workspace crates, lockfiles, macOS bundle metadata, Windows installer fallback and the three About catalogs now agree on 0.4.8. Tagged releases still build nine files for Windows x64, universal macOS and Linux x64. SQLite read/write remains schema 22 with supported automatic upgrades from 0–21; encrypted file and recovery formats are unchanged. Hosted package verification and publication depend on the `v0.4.8` workflow run.

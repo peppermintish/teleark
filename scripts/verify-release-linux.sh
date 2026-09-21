@@ -41,22 +41,20 @@ grep -Fq 'Downgrading is not permitted' "$stage/downgrade.log"
 "$stage/control/preinst" upgrade 0.0.1 "$package_version"
 
 tar -C "$stage" -xzf "$tarball"
-test -x "$stage/$base/AppRun"
-test -x "$stage/$base/usr/bin/teleark"
-test -s "$stage/$base/usr/share/doc/teleark/THIRD_PARTY_NOTICES.md"
-find "$stage/$base/usr/share/doc/teleark/system-libraries" -name '*.copyright' -print -quit | grep -q .
-cmp "$stage/$base/usr/bin/teleark" "$stage/deb-payload/usr/bin/teleark"
+(cd "$stage" && "$appimage" --appimage-extract >/dev/null)
+bash scripts/verify-linux-payloads.sh "$stage/$base" "$stage/squashfs-root" "$stage/deb-payload"
+for payload in "$stage/$base" "$stage/squashfs-root" "$stage/deb-payload"; do
+  if ! file "$payload/usr/bin/teleark" | grep -Eq 'ELF 64-bit LSB .*x86-64'; then
+    echo "Linux package has an invalid x64 ELF executable: $payload/usr/bin/teleark" >&2
+    exit 1
+  fi
+done
 linked_libraries="$(ldd "$stage/$base/usr/bin/teleark")"
 if grep -Fq 'not found' <<< "$linked_libraries"; then
   echo 'Portable Linux binary has an unresolved runtime library on the baseline runner.' >&2
   exit 1
 fi
 
-(cd "$stage" && "$appimage" --appimage-extract >/dev/null)
-cmp "$stage/squashfs-root/usr/bin/teleark" "$stage/deb-payload/usr/bin/teleark"
-test -x "$stage/squashfs-root/AppRun"
-test -s "$stage/squashfs-root/usr/share/doc/teleark/THIRD_PARTY_NOTICES.md"
-find "$stage/squashfs-root/usr/share/doc/teleark/system-libraries" -name '*.copyright' -print -quit | grep -q .
 (cd dist && sha256sum -c SHA256SUMS)
 
 sudo apt-get install -y "$deb"

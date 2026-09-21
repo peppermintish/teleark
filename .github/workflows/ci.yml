@@ -42,6 +42,10 @@ jobs:
         shell: bash
         run: bash scripts/test-macos-libraries.sh
 
+      - name: Test Linux package payload checks
+        shell: bash
+        run: bash scripts/test-linux-payloads.sh
+
       - name: Configure Rust
         run: rustup default stable
 
@@ -286,13 +290,19 @@ jobs:
           (cd dist && shasum -a 256 "$base.bin" "$base.tar.gz" "TeleArk-${label}-macos-universal.pkg" > SHA256SUMS)
           bash scripts/verify-release-macos.sh '${{ needs.version.outputs.version }}' "$label"
 
-      - name: Package and verify Linux release
+      - name: Package Linux release
         if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           scripts/package-linux.sh "target/${{ matrix.target }}/release/teleark" dist \
             '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}' '${{ matrix.target }}'
+
+      - name: Verify Linux package contents and installer
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
           bash scripts/verify-release-linux.sh '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}'
 
       - name: Report package assets
