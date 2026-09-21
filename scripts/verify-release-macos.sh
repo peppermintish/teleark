@@ -22,12 +22,14 @@ grep -Fq "${base}/THIRD_PARTY_NOTICES.md" "$expanded/archive-list"
 
 # Raw Mach-O and app payloads must use only frameworks and dylibs supplied by
 # macOS. Non-system dependencies need to be bundled before publication.
+linked_libraries="$(otool -L "$binary")"
+[[ "$linked_libraries" == *$'\n'* ]] || { echo 'Could not inspect macOS library dependencies.' >&2; exit 1; }
 while IFS= read -r dependency; do
   case "$dependency" in
     /usr/lib/*|/System/Library/*) ;;
     *) echo "Unbundled macOS library: $dependency" >&2; exit 1 ;;
   esac
-done < <(otool -L "$binary" | tail -n +2 | awk '{print $1}')
+done < <(printf '%s\n' "$linked_libraries" | tail -n +2 | awk '{print $1}')
 
 pkgutil --expand "$package" "$expanded/product"
 grep -Fq "version=\"${version}\"" "$expanded/product/Distribution"
