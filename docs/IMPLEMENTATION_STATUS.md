@@ -1,4 +1,12 @@
-# Implementation status — v0.4.12
+# Implementation status — v0.4.13
+
+## Version 0.4.13 (2026-09-22)
+
+This release includes the batch stop, cleanup, selection and scrolling fixes, fresh local-file availability, retry for missing files in completed batches, corrected encrypted-download in-flight part accounting, and the restored Windows EXE setup wizard. Workspace versions, both lockfiles, macOS bundle metadata and all three About catalogs are synchronized at 0.4.13. Installers continue to obtain their numeric version from Cargo metadata. SQLite remains read/write schema 22 with supported automatic upgrades from 0–21; encrypted file, transfer and recovery codecs are unchanged.
+
+Local release validation passed: formatting, locked workspace check, strict Clippy, 799 workspace tests across the initial suite and affected Telegram/Transfer rerun (10 existing manual tests ignored), explicit Core/i18n tests, warning-denied rustdoc, cargo-deny, LF policy/tests, distribution-credential validation, both platform payload regressions, workflow lint and the matching v0.4.13 release resolver. Both lockfiles retain unchanged third-party dependencies.
+
+The initial suite exposed an existing timing-sensitive Telegram test: random jitter could equal its minimum, allowing elapsed time to violate a countdown assertion. The test now checks the scheduled deadline against bounds captured around the call; production behavior is unchanged. The Windows EXE behavior and artifacts were verified in the preceding change; this release preparation did not repeat installation tests on the user's machine. Hosted native package checks and publication require pushing the matching version tag.
 
 ## Visible Windows EXE installer (2026-09-22)
 

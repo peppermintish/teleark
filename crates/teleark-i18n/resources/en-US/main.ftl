@@ -1151,6 +1151,15 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.13 · Reliable batch downloads and EXE setup
+
+    - Stop transfer stops all members of a batch together, prevents queued downloads from starting, and removes partial files. Starting an overlapping download no longer revives a stopped batch or disables all controls.
+    - Running batch members appear before pending ones. Parent and child selections stay synchronized, and large batch windows retain their scrollbar.
+    - Available locally reflects files currently on disk. Completed batches can retry deleted files while preserving existing copies and the original history.
+    - Windows releases again provide a visible EXE setup wizard, retaining repair, MSI upgrades, rollback and downgrade protection.
+    - Corrected encrypted-download in-flight part-size accounting.
+    - Application metadata is 0.4.13. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged; encrypted file, transfer and recovery codecs are unchanged.
+
     ## 0.4.12 · Transfer table and key activity layout
 
     - ETA and Progress use wider responsive columns. A Telegram cooldown is shown once in the progress row instead of repeating in the rate slot.

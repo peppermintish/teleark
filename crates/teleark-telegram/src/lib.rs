@@ -2527,8 +2527,18 @@ mod tests {
     fn shared_flood_gate_tracks_server_status_and_jitter() {
         let gate = DownloadFloodGate::default();
         assert!(gate.status().is_none());
+        let before = Instant::now();
         gate.extend_with_status(Duration::from_secs(45), 420, "FLOOD_WAIT_45");
-        assert!(gate.remaining() >= Duration::from_millis(45_250));
+        let after = Instant::now();
+        // Check the scheduled deadline: the remaining countdown can already be
+        // below the minimum when jitter is small or this thread is descheduled.
+        let deadline = gate
+            .deadline
+            .lock()
+            .expect("deadline lock must be available")
+            .expect("deadline must be present");
+        assert!(deadline >= before + Duration::from_millis(45_250));
+        assert!(deadline <= after + Duration::from_millis(46_249));
         let status = gate.status().expect("status must be present");
         assert_eq!(status.code, 420);
         assert_eq!(status.flag, "FLOOD_WAIT_45");
