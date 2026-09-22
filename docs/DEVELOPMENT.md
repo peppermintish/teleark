@@ -60,7 +60,7 @@ Source builds use their own Telegram API ID/Hash configured from the login/setti
 
 ## Local development environment
 
-Use `.env.local` for private development environment values. To initialize a new checkout, copy `.env.example` to `.env.local` only if the local file does not already exist. Use mode `0600` for local environment files. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
+Use `.env.local` for private development environment values. To initialize a new checkout, copy `.env.example` to `.env.local` only if the local file does not already exist. Restrict private local environment files to the current user: mode `0600` on Unix-like systems, or equivalent user-restricted file ACLs on Windows. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
 
 Neither Cargo nor the application automatically loads dotenv files. A plain `cargo run -r` does not read `.env.example` or `.env.local`. `.env.example` is a template only: replace its sample values in `.env.local`, and never load the example for builds or packaging. `scripts/build-local.sh` and `scripts/build-local.ps1` enforce this local packaging workflow. For an authorized development run using the existing build-time Telegram credential variables, load the trusted, locally maintained file in a subshell from the repository root:
 
@@ -74,13 +74,13 @@ Neither Cargo nor the application automatically loads dotenv files. A plain `car
 )
 ```
 
-Or in Windows PowerShell:
+Or from Windows PowerShell, launch the helper in a separate PowerShell process:
 
 ```powershell
-.\scripts\run.ps1
+pwsh -NoProfile -File .\scripts\run.ps1
 ```
 
-The variables apply to that subshell and its child processes. They are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.
+These invocations keep loaded variables in the Bash subshell or child PowerShell process and their descendants. Calling `scripts/run.ps1` or `scripts/build-local.ps1` directly from an existing PowerShell session changes that session's process environment; use the separate process shown above to keep those changes scoped. Variables are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.
 
 The embedded pair identifies the application and is extractable from the resulting binary. This workflow keeps development values out of Git and logs; it does not prevent others from reusing identifiers in a distributed build. Session credentials and Vault keys have separate protections described in [Security](SECURITY.md#local-data-api-configuration-and-logs).
 
@@ -173,7 +173,7 @@ Use `--preview-ui --preview-state=proxy-failed --locale=en-US --window-size=900x
 
 ## Task completion checkpoints
 
-After completing and validating each repository task, commit only its changes and create an annotated Git tag (for example `fix/YYYYMMDD-short-description`). Preserve unrelated pending work; do not push commits or tags without a request. Use English/light-only previews at 900×600 and actual native full-screen for visual changes.
+After completing and validating each repository task, commit only its changes when present and create an annotated Git tag (for example `fix/YYYYMMDD-short-description`). Task checkpoint tags do not change the application version. A requested release tag uses `vX.Y.Z`, matches synchronized application metadata under the [release contract](PACKAGING.md), and requires the release quality gates above. Preserve unrelated pending work; do not push commits or tags without a request. Use English/light-only previews at 900×600 and actual native full-screen for visual changes.
 
 
 ### Application PIN preview

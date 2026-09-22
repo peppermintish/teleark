@@ -60,7 +60,7 @@ if (-not (Test-Path .env.local)) {
 icacls .env.local /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
 ```
 
-The `icacls` command removes inherited access from other accounts and grants read/write permissions solely to the current user, matching the private `0600` permission requirement.
+The `icacls` command removes inherited permissions and replaces the current user's grant with read/write access. It does not remove existing explicit grants to other users or groups. Inspect the result with `icacls .env.local` and remove such grants before storing credentials so the file has user-restricted access equivalent to Unix mode `0600`.
 
 Edit `.env.local` and replace both sample values with your application's API ID and API Hash from [Telegram's API development panel](https://my.telegram.org/apps).
 
@@ -81,27 +81,29 @@ scripts/build-local.sh
 **Windows (PowerShell):**
 
 ```powershell
-.\scripts\run.ps1
+powershell -NoProfile -File .\scripts\run.ps1
 ```
 
 To build without launching:
 
 ```powershell
-.\scripts\build-local.ps1
+powershell -NoProfile -File .\scripts\build-local.ps1
 ```
+
+These commands launch a child PowerShell process so loaded credentials do not remain in the calling session's environment. PowerShell 7 users may substitute `pwsh` for `powershell`.
 
 *Note on Windows execution policies:* If PowerShell script execution is disabled by default (`PSSecurityException` or `running scripts is disabled on this system`), you can run `run.ps1` temporarily without modifying system-wide or user default settings:
 
 - **Single invocation (recommended):** Pass `-ExecutionPolicy Bypass` to PowerShell for that specific run:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run.ps1
   ```
-  *(Or in PowerShell 7+: `pwsh -ExecutionPolicy Bypass -File .\scripts\run.ps1`)*
+  *(Or in PowerShell 7+: `pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\run.ps1`)*
 
 - **Current console session only:** Temporarily allow scripts in the active terminal window (reverts automatically as soon as the terminal is closed):
   ```powershell
   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-  .\scripts\run.ps1
+  powershell -NoProfile -File .\scripts\run.ps1
   ```
 
 **Windows (Git Bash):**
@@ -130,11 +132,11 @@ python3 scripts/test-build-local.py --dry-run
 **Windows (PowerShell):**
 
 ```powershell
-.\scripts\run.ps1 --dry-run
-.\scripts\build-local.ps1 --dry-run
+powershell -NoProfile -File .\scripts\run.ps1 --dry-run
+powershell -NoProfile -File .\scripts\build-local.ps1 --dry-run
 ```
 
-*(If script execution is disabled, use `powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 --dry-run`)*
+*(If script execution is disabled, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run.ps1 --dry-run`)*
 
 For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-run path/to/teleark path/to/TeleArk.app`. Dry runs describe the planned operations; they do not validate local credentials or installed tools.
 
@@ -154,7 +156,7 @@ Preview a synthetic workspace without signing in, opening real user state or con
 cargo run -p teleark-gui -- --preview-ui --screen=transfers --locale=en-US --window-size=900x600
 ```
 
-Add `--preview-dark` for the dark theme. See [Development](docs/DEVELOPMENT.md) for more preview routes, contributor guidance and quality checks.
+Use English (`en-US`) and light mode for visual previews and layout reviews, checking both 900×600 and actual native full-screen mode. Existing automated dark-theme tests may remain. See [Development](docs/DEVELOPMENT.md#isolated-ui-review) for more preview routes, contributor guidance and quality checks.
 
 ## Data and recovery
 

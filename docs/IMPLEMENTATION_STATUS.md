@@ -1,4 +1,16 @@
-# Implementation status — v0.4.13
+# Implementation status — v0.4.14
+
+## Version 0.4.14 · Contributor instruction audit (2026-09-22)
+
+The repository's AI instruction inventory contains one `AGENTS.md`, with no nested or tool-specific rule files. Its supporting README, Development, Architecture and Security guidance now agrees with the accepted contracts: private environment permissions distinguish Unix modes from Windows ACLs; PowerShell development loading uses a child process; encrypted transport block sizes include framing overhead; downloads retain private partials until final verification; and task checkpoint tags are distinguished from synchronized release tags. README preview instructions now preserve English/light-only visual review at 900×600 and actual native full-screen.
+
+The audit also removed current instructions describing superseded ciphertext spools, 60 MiB containers, codec versions, manual Refresh, window-inactivity locking and cancellation of admitted key leases. Security guidance now reflects durable recovery, persisted recovery metadata and the explicit public TEST ONLY credential exception. Historical ADRs retain their original decisions and explicit supersession notices. These are documentation corrections; runtime behavior, security policy, persistent bytes and migration paths are unchanged.
+
+Workspace versions, both lockfiles, macOS bundle metadata and all three About catalogs are synchronized at 0.4.14. Only TeleArk package versions changed in the lockfiles. SQLite remains read/write schema 22 with supported automatic upgrades from 0–21; encrypted file, transfer and recovery codecs are unchanged.
+
+Local validation passed: formatting, locked workspace check, strict Clippy, all 799 serial workspace tests (10 existing manual tests ignored), explicit Core/i18n tests, warning-denied rustdoc, cargo-deny, LF policy regressions, 13 synthetic distribution-credential cases, and macOS/Linux payload fixture regressions. All 99 local links and 14 heading anchors in the five edited guidance files resolve. Child PowerShell dry-runs and the matching `v0.4.14` release resolver passed. Cargo-deny retains existing duplicate-version warnings; no dependency changed.
+
+No credentials were loaded or modified. Native UI previews, installer builds and live Telegram qualification were not repeated for these documentation and release-metadata changes. Windows PowerShell dry-runs required the documented process-only execution-policy override on this host; PowerShell 7 dry-runs also passed without it. Hosted native package validation and publication remain dependent on a requested push of the matching version tag.
 
 ## Version 0.4.13 (2026-09-22)
 

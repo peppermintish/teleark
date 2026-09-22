@@ -1151,6 +1151,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.4.14 · Contributor guidance corrections
+
+    - Corrected contributor guidance for protecting private configuration on Windows and loading development settings in a separate shell process.
+    - Clarified encrypted transport framing and aligned supporting guidance with the accepted architecture.
+    - Application metadata is 0.4.14. SQLite read/write schema 22 and supported automatic upgrades from 0–21 are unchanged; encrypted file, transfer and recovery codecs are unchanged.
+
     ## 0.4.13 · Reliable batch downloads and EXE setup
 
     - Stop transfer stops all members of a batch together, prevents queued downloads from starting, and removes partial files. Starting an overlapping download no longer revives a stopped batch or disables all controls.
