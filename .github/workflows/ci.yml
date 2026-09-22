@@ -245,6 +245,14 @@ jobs:
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           echo '| `${{ matrix.target }}` | ${{ steps.rust-cache.outputs.cache-hit == 'true' }} |' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Configure OpenSSL 3 for macOS signing
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
         shell: bash
