@@ -7,14 +7,20 @@ app="${1:?App bundle required}"
 standalone="${2:?Standalone output required}"
 repository_root="$(cd "$(dirname "$0")/../.." && pwd)"
 stage="$(mktemp -d -t teleark-sign)"
+keychain="$stage/signing.keychain-db"
 cleanup() {
-  security delete-keychain "$stage/signing.keychain-db" >/dev/null 2>&1 || true
+  security delete-keychain "$keychain" >/dev/null 2>&1 || true
   rm -rf "$stage"
 }
 trap cleanup EXIT
+phase() {
+  printf 'macOS signing: %s\n' "$1"
+}
 if [[ -n "${TELEARK_MACOS_SIGNING_P12_BASE64:-}" ]]; then
-  printf '%s' "$TELEARK_MACOS_SIGNING_P12_BASE64" | /usr/bin/base64 -D > "$stage/identity.p12"
+  phase 'decoding the CI signing identity'
+  printf '%s' "$TELEARK_MACOS_SIGNING_P12_BASE64" | openssl base64 -d -A > "$stage/identity.p12"
 elif [[ -n "${TELEARK_MACOS_SIGNING_P12:-}" && -f "$TELEARK_MACOS_SIGNING_P12" ]]; then
+  phase 'copying the local signing identity'
   cp "$TELEARK_MACOS_SIGNING_P12" "$stage/identity.p12"
 else
   echo 'Missing persistent macOS signing identity. Configure TELEARK_MACOS_SIGNING_P12_BASE64 in CI or TELEARK_MACOS_SIGNING_P12 locally.' >&2
@@ -22,25 +28,70 @@ else
 fi
 unset TELEARK_MACOS_SIGNING_P12_BASE64
 chmod 600 "$stage/identity.p12"
-# Empty temporary password carries no secret in process arguments; directory is 0700.
-security create-keychain -p '' "$stage/signing.keychain-db"
-security unlock-keychain -p '' "$stage/signing.keychain-db"
-# Import PEM material because Apple's PKCS#12 decoder rejects some OpenSSL envelopes.
-openssl pkcs12 -legacy -in "$stage/identity.p12" -nocerts -noenc -passin pass: -out "$stage/private.pem"
-openssl pkcs12 -legacy -in "$stage/identity.p12" -clcerts -nokeys -passin pass: -out "$stage/public.pem"
-openssl rsa -in "$stage/private.pem" -traditional -out "$stage/import-key.pem" 2>/dev/null
-security import "$stage/import-key.pem" -k "$stage/signing.keychain-db" -T /usr/bin/codesign >/dev/null
-security import "$stage/public.pem" -k "$stage/signing.keychain-db" >/dev/null
-security set-key-partition-list -S apple-tool:,apple: -s -k '' "$stage/signing.keychain-db" >/dev/null
 certificate="$repository_root/scripts/macos/release-certificate.pem"
 fingerprint="$(openssl x509 -in "$certificate" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
+[[ -n "$fingerprint" ]] || { echo 'The pinned macOS signing certificate has no SHA-1 fingerprint.' >&2; exit 1; }
+
+create_keychain() {
+  # Empty temporary password carries no secret in process arguments; directory is 0700.
+  security create-keychain -p '' "$keychain" >/dev/null
+  security set-keychain-settings -lut 21600 "$keychain" >/dev/null
+  security unlock-keychain -p '' "$keychain" >/dev/null
+}
+
+identity_summary() {
+  security find-identity -v -p codesigning "$keychain" 2>&1 || true
+}
+
+verify_identity() {
+  local summary
+  summary="$(identity_summary)"
+  if ! grep -Fqi "$fingerprint" <<< "$summary"; then
+    echo 'The temporary keychain does not contain the pinned macOS signing identity.' >&2
+    printf '%s\n' "$summary" >&2
+    return 1
+  fi
+  printf 'macOS signing: verified identity %s in the temporary keychain\n' "$fingerprint"
+}
+
+import_pem_identity() {
+  phase 'importing the identity through explicit PEM formats'
+  # The PEM path handles older macOS releases that reject some OpenSSL PKCS#12 envelopes.
+  openssl pkcs12 -legacy -in "$stage/identity.p12" -nocerts -noenc -passin pass: -out "$stage/private.pem"
+  openssl pkcs12 -legacy -in "$stage/identity.p12" -clcerts -nokeys -passin pass: -out "$stage/public-with-attributes.pem"
+  openssl rsa -in "$stage/private.pem" -traditional -out "$stage/import-key.pem" 2>/dev/null
+  openssl x509 -in "$stage/public-with-attributes.pem" -out "$stage/public.pem"
+  security import "$stage/import-key.pem" -t priv -f openssl -k "$keychain" -T /usr/bin/codesign >/dev/null
+  security import "$stage/public.pem" -t cert -f pemseq -k "$keychain" >/dev/null
+}
+
+phase 'creating the isolated temporary keychain'
+create_keychain
+phase 'importing the PKCS#12 signing identity'
+if ! security import "$stage/identity.p12" -f pkcs12 -P '' -k "$keychain" -T /usr/bin/codesign >/dev/null 2>&1; then
+  security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  create_keychain
+  import_pem_identity
+fi
+if ! verify_identity; then
+  security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  create_keychain
+  import_pem_identity
+  verify_identity
+fi
+
+phase 'granting codesign partition access to the private key'
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '' "$keychain" >/dev/null
+
 requirement="designated => identifier \"app.teleark.desktop\" and certificate leaf = H\"$fingerprint\""
-codesign --force --sign "$fingerprint" --keychain "$stage/signing.keychain-db" \
+phase 'signing the app bundle'
+codesign --force --sign "$fingerprint" --keychain "$keychain" \
   --identifier app.teleark.desktop --requirements "=$requirement" --timestamp=none "$app"
 codesign --verify --strict --verbose=2 "$app"
 # Preserve the same signing identity in both distribution forms.
+phase 'signing the standalone executable'
 cp "$app/Contents/MacOS/teleark" "$standalone"
-codesign --force --sign "$fingerprint" --keychain "$stage/signing.keychain-db" \
+codesign --force --sign "$fingerprint" --keychain "$keychain" \
   --identifier app.teleark.desktop --requirements "=$requirement" --timestamp=none "$standalone"
 codesign --verify --strict --verbose=2 "$standalone"
 codesign --verify -R "=identifier \"app.teleark.desktop\" and certificate leaf = H\"$fingerprint\"" "$app"
