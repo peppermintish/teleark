@@ -48,11 +48,9 @@ GPUI Kit's development-only `test-support` feature provides real event/focus reg
 
 ```bash
 cargo run -p teleark-gui --bin teleark
-scripts/build-local.sh &&
-  scripts/package-macos.sh target/release/teleark dist/TeleArk.app
 ```
 
-The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. Local and release packaging require the persistent self-signed identity described in [Packaging](PACKAGING.md#persistent-self-signed-release-identity). The release archive contains the signed bundle.
+For a signed app and installer, follow the copyable [local packaging commands](PACKAGING.md#build-and-package-locally). They build both Apple Silicon and Intel targets, combine them into the universal executable required by the packager, and write the app, standalone executable and installer to `dist/`. Packaging requires the persistent self-signed identity described there. A default `scripts/build-local.sh` invocation builds only the host target and cannot by itself supply both architectures.
 
 GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. The tagged workflow builds both Apple Silicon and Intel slices; Apple notarization and clean-machine validation of the macOS 11 floor remain separate qualification.
 
@@ -127,7 +125,7 @@ Inspect actual affected windows, including keyboard/focus, wrapping, scrolling a
 
 [`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs LF checks, the legal baseline and the full locked Linux source gates. Pull requests and ordinary manual runs then run Windows and macOS tests. A matching `vX.Y.Z` tag instead resolves the Cargo version, builds Windows x64, universal macOS and Linux x64 packages, and publishes one exact nine-file release manifest after every package verifies. Branch pushes do not trigger a run: pushing a branch and its version tag together starts only the tag run, which validates the published commit before packaging. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
 
-Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. Mac packages remain unsigned and unnotarized; a tag is not evidence of signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
+Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. The macOS app and standalone executable use the persistent self-signed identity; the installer remains unsigned, and Apple notarization is not provided. A tag alone is not evidence of successful signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
 
 After workflow edits, run `actionlint` and the affected commands locally. To smoke-test the parser campaigns on a supported local host:
 

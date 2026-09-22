@@ -1,5 +1,7 @@
 # Desktop release packages
 
+Packaging turns a compiled TeleArk executable into a portable app and a native installer, adding icons, version information and license files. macOS also signs the app with the persistent release identity. Local outputs go into the repository's `dist/` directory by default; CI verifies its outputs and attaches the finished files to the matching GitHub Release.
+
 The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for pull requests, version tags and manual dispatches. Branch pushes alone do not start a run, so a combined branch and version-tag push starts only the release run. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into every native installer.
 
 The tagged workflow checks and publishes these nine files, plus both project licenses, third-party notices and a unified `SHA256SUMS`:
@@ -37,6 +39,45 @@ The workflow validates the repository secrets `TELEARK_DISTRIBUTION_TELEGRAM_API
 The release job builds `aarch64-apple-darwin` and `x86_64-apple-darwin` on an Apple Silicon runner with `MACOSX_DEPLOYMENT_TARGET=11.0`, joins them with `lipo`, and creates the app archive, raw executable and product package using `scripts/package-macos.sh`. macOS 11 is the declared minimum. The raw executable uses Apple system frameworks only; the `.app` includes the icon and legal files. Install through Finder or `sudo installer -pkg TeleArk-<label>-macos-universal.pkg -target /`.
 
 The `.app` and standalone executable are signed with the pinned self-signed certificate in `scripts/macos/release-certificate.pem`. `scripts/macos/sign-app.sh` supplies the same explicit designated requirement (bundle identifier plus certificate fingerprint) to every release, so Keychain can recognize an updated executable. The installer remains unsigned; this identity does not provide Developer ID, notarization, or Gatekeeper trust. macOS can still refuse access to locked Keychains or legacy items created by a different identity. Runtime requests fail without opening authentication popups and preserve recovery material.
+
+### Build and package locally
+
+Run from the repository root on macOS with Rust, Apple Command Line Tools and OpenSSL 3 available. If OpenSSL 3 was installed with Homebrew, add it to your shell with `export PATH="$(brew --prefix openssl@3)/bin:$PATH"`. Prepare your private `.env.local` as described in [Development](DEVELOPMENT.md#local-development-environment), and replace `/private/path/to/identity.p12` below with the existing release signing identity. Keep that file outside the repository and reuse it for subsequent builds.
+
+The packager requires a universal executable containing both Apple Silicon and Intel code. Build both targets through the local helper, combine them, then package:
+
+```bash
+(
+  set +x
+  set -e
+  export TELEARK_MACOS_SIGNING_P12="/private/path/to/identity.p12"
+  unset TELEARK_MACOS_SIGNING_P12_BASE64
+  export MACOSX_DEPLOYMENT_TARGET=11.0
+
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  CARGO_BUILD_TARGET=aarch64-apple-darwin scripts/build-local.sh
+  CARGO_BUILD_TARGET=x86_64-apple-darwin scripts/build-local.sh
+  mkdir -p target/universal-apple-darwin/release
+  lipo -create \
+    target/aarch64-apple-darwin/release/teleark \
+    target/x86_64-apple-darwin/release/teleark \
+    -output target/universal-apple-darwin/release/teleark
+  scripts/package-macos.sh \
+    target/universal-apple-darwin/release/teleark dist/TeleArk.app
+)
+```
+
+Each build helper loads and validates `.env.local` privately. The packaging script assembles the app, adds its resources, signs the app and standalone executable using a temporary Keychain, and creates the installer. It reads the version from `Cargo.toml`; no installation or upload occurs during these commands. The example assumes Cargo's default `target/` output directory.
+
+The finished files are:
+
+| Local output | Purpose |
+| --- | --- |
+| `dist/TeleArk.app` | Signed app bundle; open it directly or copy it to Applications. |
+| `dist/TeleArk-<version>-macos-universal.pkg` | Installer to share; installs the app at `/Applications/TeleArk.app`. |
+| `dist/teleark-<version>-macos-universal.bin` | Signed standalone executable. |
+
+For version 0.5.0, the installer is `dist/TeleArk-0.5.0-macos-universal.pkg`. CI additionally creates the portable `.tar.gz` archive and release checksums. To preview the local output paths without building or accessing credentials, run `scripts/package-macos.sh --dry-run target/universal-apple-darwin/release/teleark dist/TeleArk.app`.
 
 ### Persistent self-signed release identity
 
