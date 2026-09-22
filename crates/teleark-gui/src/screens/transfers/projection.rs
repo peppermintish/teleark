@@ -12,9 +12,51 @@ pub(crate) struct TransferProjectionCache {
     account: Option<i64>,
     items: Arc<Vec<TransferItem>>,
     presentation: Option<std::rc::Rc<Presentation>>,
+    batch_retries: Option<BatchRetries>,
+}
+
+struct BatchRetries {
+    native: std::sync::Weak<[Arc<ChannelDownloadSnapshot>]>,
+    local_revision: u64,
+    account: Option<i64>,
+    ids: BTreeMap<u64, Arc<Vec<u64>>>,
 }
 
 impl TransferProjectionCache {
+    pub(super) fn batch_retry_ids(&mut self, app: &TeleArkApp, batch: u64) -> Arc<Vec<u64>> {
+        let account = app.telegram_account.as_ref().map(|account| account.id);
+        let valid = self.batch_retries.as_ref().is_some_and(|cached| {
+            cached.account == account
+                && cached.local_revision == app.local_downloads.revision()
+                && cached
+                    .native
+                    .upgrade()
+                    .is_some_and(|items| Arc::ptr_eq(&items, &app.native_transfer_view.items))
+        });
+        if !valid {
+            let mut ids = BTreeMap::<u64, Arc<Vec<u64>>>::new();
+            for row in app.native_transfer_view.items.iter() {
+                if let Some(batch) = row.batch_id
+                    && row.account_id == account
+                    && app.native_action_supported(TransferAction::Retry, row)
+                {
+                    Arc::make_mut(ids.entry(batch).or_default()).push(row.id);
+                }
+            }
+            self.batch_retries = Some(BatchRetries {
+                native: Arc::downgrade(&app.native_transfer_view.items),
+                local_revision: app.local_downloads.revision(),
+                account,
+                ids,
+            });
+        }
+        self.batch_retries
+            .as_ref()
+            .and_then(|cached| cached.ids.get(&batch))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(super) fn get(
         &self,
         app: &TeleArkApp,
@@ -49,6 +91,7 @@ impl TransferProjectionCache {
 
 pub(super) struct Presentation {
     source: Arc<Vec<TransferItem>>,
+    local_revision: u64,
     selection: &'static str,
     query: String,
     expanded: BTreeSet<u64>,
@@ -72,6 +115,7 @@ impl TransferProjectionCache {
     ) -> std::rc::Rc<Presentation> {
         if let Some(cached) = &self.presentation
             && Arc::ptr_eq(&cached.source, &source)
+            && cached.local_revision == app.local_downloads.revision()
             && cached.selection == app.nav_selection
             && cached.query == query
             && cached.expanded == app.expanded_transfer_batches
@@ -134,7 +178,7 @@ impl TransferProjectionCache {
         .map(|action| {
             let ids = snapshots
                 .iter()
-                .filter(|row| scoped.contains(&row.id) && action.supports_snapshot(row))
+                .filter(|row| scoped.contains(&row.id) && app.native_action_supported(action, row))
                 .map(|row| row.id)
                 .collect();
             (action as usize, Arc::new(ids))
@@ -165,6 +209,7 @@ impl TransferProjectionCache {
         .collect();
         let result = std::rc::Rc::new(Presentation {
             source,
+            local_revision: app.local_downloads.revision(),
             selection: app.nav_selection,
             query: query.into(),
             expanded: app.expanded_transfer_batches.clone(),

@@ -603,6 +603,7 @@ impl TeleArkApp {
                 .sort_by_key(|row| crate::screens::transfers::transfer_order(row.state));
         }
         match state.as_str() {
+            "batch-deleted" => self.preview_deleted_download_batch(),
             "local-availability" => {
                 self.page = Page::Channel;
                 self.storage_view = StorageView::RawFiles;

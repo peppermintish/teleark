@@ -78,6 +78,78 @@ fn batch_receipt_rate<'a>(
 }
 
 impl TeleArkApp {
+    pub(crate) fn preview_deleted_download_batch(&mut self) {
+        self.preview_native_cleanup(false);
+        let mut template = (*self.native_transfer_view.items[0]).clone();
+        template.cleanup = None;
+        template.batch_id = Some(90);
+        template.state = ChannelDownloadState::Completed;
+        template.verification = ChannelDownloadVerification::SizeChecked;
+        template.transferred_bytes = template.size_bytes;
+        let rows = [
+            "Research archive.zip",
+            "Field recording.wav",
+            "Project notes.pdf",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut row = template.clone();
+            row.id += index as u64;
+            row.message_id += index as i64;
+            row.file_name = name.into();
+            row.destination = format!("/Preview/Downloads/{name}").into();
+            std::sync::Arc::new(row)
+        })
+        .collect::<Vec<_>>();
+        self.local_downloads.clear();
+        for (index, row) in rows.iter().enumerate() {
+            self.local_downloads.insert(
+                row.destination.clone(),
+                teleark_runtime::LocalDownloadObservation {
+                    file: teleark_runtime::DownloadedFileRecord {
+                        cursor: teleark_runtime::DownloadedFilesCursor {
+                            kind: 0,
+                            id: row.id,
+                        },
+                        account_id: row.account_id.expect("preview account"),
+                        chat_id: row.chat_id,
+                        message_id: Some(row.message_id),
+                        package_id: None,
+                        destination: row.destination.clone(),
+                        size_bytes: row.size_bytes,
+                        completed_at_unix_ms: row.finished_at_unix_ms.expect("preview completion"),
+                    },
+                    presence: if index < 2 {
+                        teleark_runtime::LocalFilePresence::Missing
+                    } else {
+                        teleark_runtime::LocalFilePresence::Present
+                    },
+                },
+            );
+        }
+        self.native_transfer_view.items = rows.clone().into();
+        self.native_transfer_view.revision += 1;
+        self.preview_transfer_rows = vec![self.transfer_row_from_batch(
+            90,
+            &rows.iter().map(std::sync::Arc::as_ref).collect::<Vec<_>>(),
+        )];
+        self.preview_transfer_rows.extend(
+            rows.iter()
+                .map(|row| self.transfer_row_from_snapshot(row, true))
+                .collect::<Vec<_>>(),
+        );
+        self.expanded_transfer_batches.insert(90);
+        self.selected_transfer_keys = rows
+            .iter()
+            .map(|row| row.id)
+            .chain([0x4000_0000_0000_005a])
+            .collect();
+        self.focused_transfer_key = Some(0x4000_0000_0000_005a);
+        self.show_transfer_detail = false;
+        self.page = crate::app::Page::Transfers;
+    }
+
     pub(crate) fn preview_upload_history(&mut self) {
         let telemetry = TransferTelemetrySnapshot {
             phase: ControllerPhase::Ramp,
@@ -1290,6 +1362,17 @@ impl TeleArkApp {
                         Some(action.icon()),
                         false,
                     )
+                    .debug_selector(move || {
+                        format!(
+                            "transfer-bulk-{}-{}",
+                            action.element_id(),
+                            if disabled_ids_empty {
+                                "disabled"
+                            } else {
+                                "enabled"
+                            }
+                        )
+                    })
                     .disabled(disabled_ids_empty || self.transfer_action_job.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if action == TransferAction::Delete {
@@ -1617,6 +1700,18 @@ impl TeleArkApp {
         });
     }
 
+    fn native_action_supported(
+        &self,
+        action: TransferAction,
+        snapshot: &ChannelDownloadSnapshot,
+    ) -> bool {
+        action.supports_snapshot(snapshot)
+            || (action == TransferAction::Retry
+                && snapshot.state == ChannelDownloadState::Completed
+                && self.local_presence_for_path(&snapshot.destination)
+                    == Some(teleark_runtime::LocalFilePresence::Missing))
+    }
+
     fn apply_transfer_action(
         &mut self,
         action: TransferAction,
@@ -1631,6 +1726,12 @@ impl TeleArkApp {
         };
         self.transfer_action_error = None;
         let ids = ids.to_vec();
+        let snapshots = self.native_transfer_view.items.clone();
+        let updates = self.native_transfer_view.updates.clone();
+        let scope = (
+            self.telegram_account.as_ref().map(|account| account.id),
+            self.telegram_login_generation,
+        );
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancellation = cancelled.clone();
         let work = cx.background_spawn(async move {
@@ -1638,30 +1739,87 @@ impl TeleArkApp {
                 return (
                     Vec::new(),
                     transfers.stop(&ids).err().map(|error| error.kind()),
+                    Vec::new(),
                 );
             }
-            execute_transfer_actions(action, &ids, &cancellation, |id| match action {
-                TransferAction::Pause => transfers.pause(id),
-                TransferAction::Resume => transfers.resume(id),
-                TransferAction::Retry => transfers.retry(id),
-                TransferAction::Cancel => unreachable!("stop is a single selection operation"),
-                TransferAction::Delete => transfers.delete(id),
-            })
+            // One background pass, rather than a history scan per selected UI row.
+            let completed_ids = if action == TransferAction::Retry {
+                snapshots
+                    .iter()
+                    .filter(|row| {
+                        updates.get(&row.id).unwrap_or(row).state == ChannelDownloadState::Completed
+                    })
+                    .map(|row| row.id)
+                    .collect::<std::collections::BTreeSet<_>>()
+            } else {
+                Default::default()
+            };
+            let (completed, ids): (Vec<_>, Vec<_>) =
+                ids.into_iter().partition(|id| completed_ids.contains(id));
+            let (deleted, mut failure) =
+                execute_transfer_actions(action, &ids, &cancellation, |id| match action {
+                    TransferAction::Pause => transfers.pause(id),
+                    TransferAction::Resume => transfers.resume(id),
+                    TransferAction::Retry => transfers.retry(id),
+                    TransferAction::Cancel => unreachable!("stop is a single selection operation"),
+                    TransferAction::Delete => transfers.delete(id),
+                });
+            let batches = if completed.is_empty() {
+                Vec::new()
+            } else {
+                match transfers.redownload_missing_completed(&completed, &cancellation) {
+                    Ok(batches) => batches,
+                    Err(error) => {
+                        failure.get_or_insert(error.kind());
+                        Vec::new()
+                    }
+                }
+            };
+            let selection = if batches.is_empty() {
+                Vec::new()
+            } else {
+                match transfers.snapshot_view() {
+                    Ok(view) => replacement_selection_keys(&batches, &view.items),
+                    Err(error) => {
+                        failure.get_or_insert(error.kind());
+                        Vec::new()
+                    }
+                }
+            };
+            (deleted, failure, selection)
         });
         let task = cx.spawn(async move |this, cx| {
-            let (deleted, failure) = work.await;
+            let (deleted, failure, selection) = work.await;
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |this, cx| {
+                this.transfer_action_job = None;
+                if scope
+                    != (
+                        this.telegram_account.as_ref().map(|account| account.id),
+                        this.telegram_login_generation,
+                    )
+                {
+                    cx.notify();
+                    return;
+                }
                 if !deleted.is_empty() {
                     this.show_transfer_detail = false;
                 }
                 for id in deleted {
                     this.selected_transfer_keys.remove(&id);
                 }
+                if !selection.is_empty() {
+                    this.selected_transfer_keys.clear();
+                    this.show_transfer_detail = false;
+                    this.nav_selection = "nav-downloads";
+                    for key in selection {
+                        this.selected_transfer_keys.insert(key);
+                        this.focused_transfer_key = Some(key);
+                    }
+                }
                 this.transfer_action_error = failure;
-                this.transfer_action_job = None;
                 cx.notify();
             });
         });
@@ -1858,6 +2016,31 @@ impl TeleArkApp {
             .justify_end()
             .items_center()
             .gap_1();
+        if transfer.runtime_task_id.is_none()
+            && let Some(batch) = transfer.runtime_batch_id
+        {
+            let ids = self
+                .transfer_projection_cache
+                .borrow_mut()
+                .batch_retry_ids(self, batch);
+            if !ids.is_empty() {
+                actions = actions.child(
+                    components::list_icon_button(
+                        ("transfer-batch-retry", batch),
+                        IconName::Redo2,
+                        self.tr("action-retry"),
+                    )
+                    .debug_selector(move || format!("transfer-batch-retry-{batch}"))
+                    .ghost()
+                    .size(theme::LIST_CONTROL_SIZE)
+                    .disabled(self.transfer_action_job.is_some())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.apply_transfer_action(TransferAction::Retry, &ids, cx);
+                    })),
+                );
+            }
+        }
         if let Some(id) = transfer.runtime_task_id {
             for action in [
                 TransferAction::Pause,
@@ -4007,6 +4190,28 @@ impl TransferAction {
     }
 }
 
+fn replacement_selection_keys(
+    batches: &[u64],
+    snapshots: &[std::sync::Arc<ChannelDownloadSnapshot>],
+) -> Vec<u64> {
+    let batches = batches
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut groups = std::collections::BTreeMap::new();
+    for row in snapshots {
+        if let Some(batch) = row.batch_id
+            && batches.contains(&batch)
+        {
+            groups
+                .entry(batch)
+                .and_modify(|key| *key = 0x4000_0000_0000_0000 | batch)
+                .or_insert(row.id);
+        }
+    }
+    groups.into_values().collect()
+}
+
 fn execute_transfer_actions(
     action: TransferAction,
     ids: &[u64],
@@ -4528,6 +4733,8 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 mod tests {
     #[path = "batch_ui.rs"]
     mod batch_ui;
+    #[path = "completed_batch_retry.rs"]
+    mod completed_batch_retry;
     use super::*;
 
     #[gpui_kit::test]

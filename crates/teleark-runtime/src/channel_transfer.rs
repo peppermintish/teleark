@@ -33,6 +33,7 @@ use crate::{
     vault::{TransferSessionKind, TransferSessionLog},
 };
 
+mod batch_retry;
 mod cleanup;
 mod reservation;
 pub use cleanup::{ChannelDownloadCleanup, ChannelDownloadCleanupPhase};
@@ -2639,6 +2640,8 @@ fn parse_error_code(value: &str) -> Option<ApplicationErrorKind> {
 
 #[cfg(test)]
 mod tests {
+    #[path = "batch_redownload.rs"]
+    mod batch_redownload;
     #[path = "batch_stop.rs"]
     mod batch_stop;
     use std::{

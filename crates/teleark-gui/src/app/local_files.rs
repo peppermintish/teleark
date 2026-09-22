@@ -17,6 +17,7 @@ type Candidate = (bool, i64, std::path::PathBuf);
 #[derive(Default)]
 pub(crate) struct LocalDownloadCache {
     pub(crate) limited: bool,
+    revision: u64,
     paths: std::collections::BTreeMap<std::path::PathBuf, LocalDownloadObservation>,
     sources: std::collections::BTreeMap<LocalSource, BTreeSet<Candidate>>,
     ages: BTreeSet<(i64, std::path::PathBuf)>,
@@ -26,6 +27,9 @@ impl LocalDownloadCache {
     const CAPACITY: usize = 10_000;
 
     pub(crate) fn clear(&mut self) {
+        if !self.paths.is_empty() {
+            self.revision = self.revision.wrapping_add(1);
+        }
         self.limited = false;
         self.paths.clear();
         self.sources.clear();
@@ -34,6 +38,10 @@ impl LocalDownloadCache {
 
     pub(crate) fn get(&self, path: &std::path::Path) -> Option<&LocalDownloadObservation> {
         self.paths.get(path)
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn keys(item: &LocalDownloadObservation) -> impl Iterator<Item = LocalSource> {
@@ -59,6 +67,7 @@ impl LocalDownloadCache {
 
     fn remove(&mut self, path: &std::path::Path) {
         if let Some(item) = self.paths.remove(path) {
+            self.revision = self.revision.wrapping_add(1);
             let rank = Self::rank(&item);
             for key in Self::keys(&item) {
                 if let Some(candidates) = self.sources.get_mut(&key) {
@@ -97,6 +106,7 @@ impl LocalDownloadCache {
         self.ages
             .insert((item.file.completed_at_unix_ms, path.clone()));
         self.paths.insert(path, item);
+        self.revision = self.revision.wrapping_add(1);
         while self.paths.len() > Self::CAPACITY {
             if let Some((_, path)) = self.ages.first().cloned() {
                 self.remove(&path);
