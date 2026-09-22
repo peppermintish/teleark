@@ -1,6 +1,21 @@
 //! Release only the empty admission marker of a published native download.
 use super::*;
 
+/// Native task ownership has drained. Only the empty shared admission marker
+/// belongs to this owner; nonempty encrypted resume data must remain untouched.
+pub(super) fn release_cancelled(destination: &Path) -> Result<(), ApplicationError> {
+    let mut marker = destination.as_os_str().to_os_string();
+    marker.push(".partial");
+    let marker = PathBuf::from(marker);
+    if let Some(metadata) = metadata_if_present(&marker)?
+        && metadata.is_file()
+        && metadata.len() == 0
+    {
+        remove_file_if_present(&marker)?;
+    }
+    Ok(())
+}
+
 pub(super) fn release_completed(
     destination: &Path,
     expected_bytes: u64,
@@ -48,6 +63,26 @@ fn io_error(error: std::io::Error) -> ApplicationError {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn stopping_releases_empty_marker_without_removing_final_or_encrypted_data() {
+        let root = tempfile::tempdir().expect("fixture");
+        let output = root.path().join("file.bin");
+        let marker = root.path().join("file.bin.partial");
+        fs::write(&marker, b"").expect("reservation");
+        release_cancelled(&output).expect("release queued reservation");
+        assert!(!marker.exists());
+        fs::write(&output, b"completed bytes").expect("final");
+        fs::write(&marker, b"").expect("reservation");
+        release_cancelled(&output).expect("release stopped reservation");
+        assert_eq!(fs::read(&output).expect("final"), b"completed bytes");
+        fs::write(&marker, b"encrypted resume bytes").expect("other data");
+        release_cancelled(&output).expect("skip nonempty partial");
+        assert_eq!(
+            fs::read(marker).expect("preserved"),
+            b"encrypted resume bytes"
+        );
+    }
 
     #[test]
     fn only_empty_markers_with_complete_regular_outputs_are_removed() {

@@ -583,13 +583,15 @@ impl TeleArkApp {
                 .expect("preview batch");
             let name = self.tr_with(
                 "transfer-batch-upload-name",
-                MessageArgs::new().with("count", "12"),
+                MessageArgs::new().with("count", "48"),
             );
+            let total_size = format_bytes(self.locale(), (21 + 42 * 6) * 123 * 1024 * 1024);
             let group = &mut self.preview_transfer_rows[group_index];
             group.name = name;
-            group.batch_summary.as_mut().expect("preview summary").total = 12;
+            group.batch_summary.as_mut().expect("preview summary").total = 48;
+            group.size = total_size.into();
             let template = self.preview_transfer_rows[group_index + 6].clone();
-            let extra = (0..6).map(|index| {
+            let extra = (0..42).map(|index| {
                 let mut row = template.clone();
                 row.vault_transfer_id = Some(1000 + index);
                 row.name = format!("Additional recording {}.wav", index + 1).into();
@@ -597,6 +599,8 @@ impl TeleArkApp {
             });
             self.preview_transfer_rows
                 .splice(group_index + 7..group_index + 7, extra);
+            self.preview_transfer_rows[group_index + 1..group_index + 49]
+                .sort_by_key(|row| crate::screens::transfers::transfer_order(row.state));
         }
         match state.as_str() {
             "quit-confirm" | "quit-pausing" | "quit-failed" => {

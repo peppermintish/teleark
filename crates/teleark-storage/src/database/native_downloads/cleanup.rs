@@ -38,6 +38,54 @@ impl Database {
         })
     }
 
+    /// Persist one stop decision for the entire selection. Runtime has fenced
+    /// admission and signalled every writer before calling this background API.
+    /// An admitted attempt may still be waiting to save its initial checkpoint.
+    pub fn stop_native_downloads(
+        &mut self,
+        tasks: &[NativeDownloadTaskRecord],
+    ) -> StorageResult<()> {
+        if tasks.len() > NATIVE_DOWNLOAD_HISTORY_LIMIT {
+            return Err(StorageError::InvalidInput {
+                field: "native_cleanup.tasks",
+                reason: InputReason::OutOfRange,
+            });
+        }
+        for task in tasks {
+            validate_task(task)?;
+            if task.state != StoredNativeDownloadState::Cancelled {
+                return Err(StorageError::InvalidInput {
+                    field: "native_cleanup.state",
+                    reason: InputReason::InvalidCombination,
+                });
+            }
+        }
+        self.durable_vault_write(|tx| {
+            for task in tasks {
+                let id = unsigned_to_sql("native_cleanup.id", task.id)?;
+                let eligible: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM native_download_tasks WHERE id=?1 AND account_id IS ?2 AND attempts<=?3 AND state!='completed')",
+                    params![id, task.account_id, task.attempts], |row| row.get(0))?;
+                if !eligible {
+                    return Err(StorageError::InvalidInput {
+                        field: "native_cleanup.owner",
+                        reason: InputReason::InvalidCombination,
+                    });
+                }
+                tx.execute("INSERT INTO native_download_cleanup(task_id,attempt,requested_at) VALUES(?1,?2,?3) ON CONFLICT(task_id) DO UPDATE SET retry_requested=0 WHERE codec_version=1 AND attempt=excluded.attempt", params![id, task.attempts, task.updated_at_unix_ms])?;
+                let compatible: bool = tx.query_row("SELECT codec_version=1 AND attempt=?2 FROM native_download_cleanup WHERE task_id=?1", params![id, task.attempts], |row| row.get(0))?;
+                if !compatible {
+                    return Err(StorageError::InvalidInput {
+                        field: "native_cleanup.lease",
+                        reason: InputReason::InvalidCombination,
+                    });
+                }
+                save_task(tx, task)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn native_download_cleanup(&self, id: u64) -> StorageResult<Option<NativeDownloadCleanup>> {
         Ok(self.connection.query_row(
             "SELECT task_id,codec_version,attempt,requested_at,retry_requested FROM native_download_cleanup WHERE task_id=?1",
@@ -115,6 +163,61 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_stop_is_one_transaction_and_revokes_pending_retries() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let mut db = Database::open_in_memory().expect("database");
+        let mut rows = (0..48)
+            .map(|index| task(&mut db, &dir.path().join(index.to_string())))
+            .collect::<Vec<_>>();
+        for row in &mut rows {
+            row.state = StoredNativeDownloadState::Cancelled;
+        }
+        db.connection.execute_batch("CREATE TRIGGER reject_last_stop BEFORE UPDATE ON native_download_tasks WHEN NEW.id=48 AND NEW.state='cancelled' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").expect("failure fixture");
+        assert!(db.stop_native_downloads(&rows).is_err());
+        assert!(
+            db.pending_native_download_cleanups(0, 128)
+                .expect("leases")
+                .is_empty()
+        );
+        assert!(
+            db.native_downloads()
+                .expect("rows")
+                .iter()
+                .all(|row| row.state == StoredNativeDownloadState::Running)
+        );
+        db.connection
+            .execute_batch("DROP TRIGGER reject_last_stop")
+            .expect("repair");
+        // One worker has admitted its next attempt before its initial checkpoint.
+        rows[0].attempts += 1;
+        db.stop_native_downloads(&rows).expect("selection stop");
+        assert_eq!(
+            db.pending_native_download_cleanups(0, 128)
+                .expect("leases")
+                .len(),
+            48
+        );
+        assert!(
+            db.request_native_cleanup_retry(rows[0].id, rows[0].attempts)
+                .expect("retry")
+        );
+        db.stop_native_downloads(&rows).expect("stop again");
+        assert!(
+            !db.native_download_cleanup(rows[0].id)
+                .expect("lease")
+                .expect("present")
+                .retry_requested
+        );
+        for row in rows {
+            assert_eq!(
+                db.finish_native_download_cleanup(row.id, row.attempts)
+                    .expect("finish"),
+                Some(false)
+            );
+        }
+    }
 
     fn task(db: &mut Database, path: &std::path::Path) -> NativeDownloadTaskRecord {
         let mut task = db

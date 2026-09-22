@@ -32,6 +32,24 @@ impl DownloadSlots {
         state.active += 1;
         DownloadSlot(self)
     }
+    pub(crate) fn acquire_while(&self, eligible: impl Fn() -> bool) -> Option<DownloadSlot<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while state.active >= state.limit {
+            if !eligible() {
+                return None;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, std::time::Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        if !eligible() {
+            return None;
+        }
+        state.active += 1;
+        Some(DownloadSlot(self))
+    }
 }
 impl Drop for DownloadSlot<'_> {
     fn drop(&mut self) {

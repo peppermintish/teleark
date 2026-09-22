@@ -1010,6 +1010,7 @@ impl TelegramConnection {
         destination: impl AsRef<Path>,
         observer: &dyn DownloadObserver,
     ) -> Result<(), TelegramError> {
+        check_download_control(observer)?;
         let destination = destination.as_ref();
         validate_download_destination(destination).await?;
         let partial = partial_download_path(destination)?;

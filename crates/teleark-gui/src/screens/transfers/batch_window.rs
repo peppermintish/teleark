@@ -1,6 +1,7 @@
 //! Batch presentation shares the parent's revisioned projection and action owner.
 //! The auxiliary window retains neither a runtime nor a second polling loop.
 use super::*;
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::{
     Bounds, Entity, Render, Subscription, WeakEntity, WindowBounds, WindowOptions, size,
 };
@@ -47,6 +48,15 @@ impl BatchWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let handle = window.window_handle();
+        // Retire GPUI's view/accessibility ownership before Windows destroys
+        // the native handle, as the application Close Window command does.
+        window.on_window_should_close(cx, move |_, cx| {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+            false
+        });
         let updates = window.observe(&owner, cx, |_, window, _| window.refresh());
         let release = window.observe_release(&owner, cx, |_, window, _| window.remove_window());
         let child = window.window_handle();
@@ -312,7 +322,30 @@ impl TeleArkApp {
             .when_some(self.pending_transfer_delete, |page, id| {
                 page.child(self.render_transfer_delete_confirmation(vec![id], cx))
             })
-            .child(list)
+            .child(
+                div()
+                    .id("batch-window-list-viewport")
+                    .debug_selector(|| "batch-window-list-viewport".into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(list)
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .debug_selector(|| "batch-window-scrollbar".into())
+                            .child(
+                                Scrollbar::vertical(&scroll)
+                                    .id("batch-window-scrollbar")
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .debug_selector(|| "transfer-batch-window-rail".into())

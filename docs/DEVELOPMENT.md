@@ -115,7 +115,7 @@ Channel sync fixtures show an active difference or a server wait with queue/timi
 
 `--preview-state=channel-selected` opens a synthetic channel with the second row focused and checked, so selection overlays, text and checkbox visibility can be reviewed together.
 
-`--preview-state=batch-groups` shows adjacent expanded download/upload groups between ordinary tasks. Use `--screen=transfers --preview-state=batch-large` and activate the 12-file upload header to review the same hierarchy in its auxiliary window.
+`--preview-state=batch-groups` shows adjacent expanded download/upload groups between ordinary tasks. Use `--screen=transfers --preview-state=batch-large` and activate the 48-file upload header to review the same hierarchy, selection and scrollbar in its auxiliary window.
 
 Inspect actual affected windows, including keyboard/focus, wrapping, scrolling and loading/error states. The full release matrix also covers login/returning sessions, storage setup/Files/Raw, unlock, transfer and Library bulk actions/details, batch membership, sidebar states, file picker/removal, local-file states and Settings/About. Process survival is not visual verification. Never capture real QR tokens or recovery secrets. CUA/AppKit inspection requires an unlocked Mac.
 

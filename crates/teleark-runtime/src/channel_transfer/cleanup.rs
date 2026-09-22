@@ -32,6 +32,7 @@ pub(super) struct CleanupContext {
 type Reply<T> = mpsc::SyncSender<Result<T, ApplicationError>>;
 enum Command {
     Cancel(u64, Reply<()>),
+    Stop(Vec<u64>, Reply<()>),
     Retry(u64, Reply<bool>),
     Removing(u64),
     Finished(u64, u32, Result<(), ApplicationError>),
@@ -145,6 +146,7 @@ impl CleanupOwner {
                             .send(Command::Removing(work.id))
                             .map_err(persistence)?;
                         backend.discard_partial(&work.destination)?;
+                        reservation::release_cancelled(&work.destination)?;
                         // Match the durable publication contract: deletion is not
                         // acknowledged before its directory entry is synchronized.
                         sync_cleanup_directory(&work.destination)?;
@@ -171,6 +173,7 @@ impl CleanupOwner {
                         database,
                         work_sender,
                         busy: false,
+                        waiting_writers: false,
                         replies: BTreeMap::new(),
                     },
                     Err(error) => {
@@ -193,7 +196,13 @@ impl CleanupOwner {
                             owner.handle(command);
                             owner.dispatch();
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {} // shutdown observation only
+                        // Reconsider waiting writers without placing one blocked
+                        // writer ahead of every other task's filesystem cleanup.
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if owner.waiting_writers {
+                                owner.dispatch();
+                            }
+                        }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
@@ -215,6 +224,13 @@ impl CleanupOwner {
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
         response.recv().map_err(persistence)?
     }
+    pub fn stop(&self, ids: Vec<u64>) -> Result<(), ApplicationError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(Command::Stop(ids, reply))
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        response.recv().map_err(persistence)?
+    }
     pub fn retry(&self, id: u64) -> Result<bool, ApplicationError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
@@ -229,9 +245,104 @@ struct Owner {
     database: Database,
     work_sender: mpsc::SyncSender<Work>,
     busy: bool,
+    waiting_writers: bool,
     replies: BTreeMap<u64, Reply<()>>,
 }
 impl Owner {
+    fn stop(&mut self, ids: &[u64]) -> Result<(), ApplicationError> {
+        let now = unix_time_millis()?;
+        let records = {
+            // This is the same short admission/retirement barrier used by workers.
+            // Never hold it across persistence, transport or filesystem cleanup.
+            let _admission = self.context.scheduled.lock().map_err(persistence)?;
+            let account = self.context.pump.active_account.load(Ordering::Acquire);
+            let mut rows = Vec::with_capacity(ids.len());
+            for id in ids {
+                let row = self.context.snapshots.get(*id).ok_or_else(conflict)?;
+                if account <= 0 || row.account_id != Some(account) {
+                    return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+                }
+                if row.cleanup.is_some_and(|cleanup| {
+                    cleanup.phase
+                        == ChannelDownloadCleanupPhase::Failed(ApplicationErrorKind::InvalidRequest)
+                }) {
+                    return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+                }
+                if row.state != ChannelDownloadState::Completed
+                    && (row.state != ChannelDownloadState::Cancelled || row.cleanup.is_some())
+                {
+                    rows.push((row, self.control(*id)?));
+                }
+            }
+            // Signal the whole selection before projecting or persisting any row.
+            for (_, control) in &rows {
+                control.store(CONTROL_CANCELLED, Ordering::Release);
+            }
+            let mut records = Vec::with_capacity(rows.len());
+            for (mut row, _) in rows {
+                row.state = ChannelDownloadState::Cancelled;
+                row.verification = ChannelDownloadVerification::NotReached;
+                row.finished_at_unix_ms = Some(now);
+                let phase =
+                    row.cleanup
+                        .map_or(ChannelDownloadCleanupPhase::WaitingForWriter, |cleanup| {
+                            if matches!(cleanup.phase, ChannelDownloadCleanupPhase::Failed(_)) {
+                                ChannelDownloadCleanupPhase::WaitingForWriter
+                            } else {
+                                cleanup.phase
+                            }
+                        });
+                self.project(
+                    NativeDownloadCleanup {
+                        task_id: row.id,
+                        codec_version: 1,
+                        attempt: row.attempts,
+                        requested_at_unix_ms: row
+                            .cleanup
+                            .map_or(now, |cleanup| cleanup.requested_at_unix_ms),
+                        retry_requested: false,
+                    },
+                    phase,
+                );
+                self.context.snapshots.update(row.id, |current| {
+                    current.verification = row.verification;
+                    current.finished_at_unix_ms = Some(now);
+                    current.events.push(ChannelDownloadEvent {
+                        kind: ChannelDownloadEventKind::Cancelled,
+                        timestamp_unix_ms: now,
+                        elapsed_ms: current.duration_ms,
+                        failure_kind: None,
+                    });
+                    bound_lifecycle(current);
+                });
+                records.push(snapshot_record(&row)?);
+            }
+            records
+        };
+        if let Err(error) = self
+            .database
+            .stop_native_downloads(&records)
+            .map_err(persistence)
+        {
+            // Keep the stop fence and make a failed durable write explicit. An
+            // explicit Stop can retry it; never restart downloads as rollback.
+            for row in &records {
+                self.project(
+                    NativeDownloadCleanup {
+                        task_id: row.id,
+                        codec_version: 1,
+                        attempt: row.attempts,
+                        requested_at_unix_ms: now,
+                        retry_requested: false,
+                    },
+                    ChannelDownloadCleanupPhase::Failed(error.kind()),
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn restore(&mut self) -> Result<(), ApplicationError> {
         let mut cursor = 0;
         loop {
@@ -431,6 +542,12 @@ impl Owner {
     }
     fn handle(&mut self, command: Command) {
         match command {
+            Command::Stop(ids, reply) => {
+                let result = self.stop(&ids);
+                // Acknowledge durable intent, not the last filesystem deletion.
+                // Each task's cleanup projection owns that subsequent feedback.
+                let _ = reply.send(result);
+            }
             Command::Cancel(id, reply) => match self.begin(id) {
                 Ok(()) => {
                     self.replies.insert(id, reply);
@@ -515,16 +632,31 @@ impl Owner {
         if self.busy {
             return;
         }
+        let Ok(scheduled) = self.context.scheduled.lock() else {
+            return;
+        };
+        self.waiting_writers = scheduled.iter().any(|id| {
+            self.context
+                .snapshots
+                .read(*id, |row| {
+                    row.cleanup.is_some_and(|cleanup| {
+                        cleanup.phase == ChannelDownloadCleanupPhase::WaitingForWriter
+                    })
+                })
+                .unwrap_or(false)
+        });
         let Some(rows) = self.context.snapshots.select(
             |row| {
-                row.cleanup.is_some_and(|cleanup| {
-                    cleanup.phase == ChannelDownloadCleanupPhase::WaitingForWriter
-                })
+                !scheduled.contains(&row.id)
+                    && row.cleanup.is_some_and(|cleanup| {
+                        cleanup.phase == ChannelDownloadCleanupPhase::WaitingForWriter
+                    })
             },
             1,
         ) else {
             return;
         };
+        drop(scheduled);
         let Some(row) = rows.into_iter().next() else {
             return;
         };

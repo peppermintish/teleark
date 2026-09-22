@@ -1137,6 +1137,17 @@ impl DesktopTransfers {
         self.inner.cleanup_owner.cancel(id)
     }
 
+    /// Stop a selection as one admission decision. Returns after stop intent is
+    /// durable; per-task cleanup remains visible until all writers and files drain.
+    /// Background-only: callers must not wait for persistence on a UI reactor.
+    pub fn stop(&self, ids: &[u64]) -> Result<(), ApplicationError> {
+        if ids.len() > teleark_storage::NATIVE_DOWNLOAD_HISTORY_LIMIT {
+            return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
+        }
+        let ids = ids.iter().copied().collect::<BTreeSet<_>>();
+        self.inner.cleanup_owner.stop(ids.into_iter().collect())
+    }
+
     pub fn retry(&self, id: u64) -> Result<(), ApplicationError> {
         self.require_task_account(id)?;
         if self.inner.cleanup_owner.retry(id)? {
@@ -1743,7 +1754,6 @@ fn download_worker(
         let Ok(command) = command else {
             break;
         };
-        let _slot = library.download_slots.acquire();
         match command {
             TransferCommand::Download {
                 mut snapshot,
@@ -1751,6 +1761,20 @@ fn download_worker(
                 control,
             } => {
                 let id = snapshot.id;
+                let slot = library.download_slots.acquire_while(|| {
+                    !shutdown.load(Ordering::Acquire)
+                        && !matches!(
+                            control.load(Ordering::Acquire),
+                            CONTROL_CANCELLED | CONTROL_PAUSED
+                        )
+                });
+                if slot.is_none() {
+                    if let Ok(mut scheduled) = scheduled.lock() {
+                        scheduled.remove(&id);
+                    }
+                    let _ = pump.refill();
+                    continue;
+                }
                 loop {
                     run_download(
                         &*backend,
@@ -1834,6 +1858,13 @@ impl DownloadWorkerState<'_> {
         if control.load(Ordering::Acquire) == CONTROL_RETRY_PENDING {
             return None;
         }
+        if self
+            .snapshots
+            .read(id, |row| row.cleanup.is_some())
+            .unwrap_or(true)
+        {
+            return None;
+        }
         update_snapshot(self.snapshots, id, mutate)
     }
 }
@@ -1850,6 +1881,9 @@ fn run_download(
     let snapshots = state.snapshots;
     let queue_wait_ms = elapsed_millis(queued_at.elapsed());
     let started_at_unix_ms = unix_time_millis().ok();
+    let Ok(admission) = state.scheduled.lock() else {
+        return;
+    };
     let initial_control = match control.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         matches!(value, CONTROL_RESUME_PENDING | CONTROL_RETRY_PENDING).then_some(CONTROL_RUNNING)
     }) {
@@ -1876,6 +1910,7 @@ fn run_download(
             failure_kind: None,
         });
     });
+    drop(admission);
     if !admitted {
         return;
     }
@@ -2036,7 +2071,11 @@ fn run_download(
         ),
         Err(error) if shutdown.load(Ordering::Acquire) => {
             let interrupted = state.retire(&control, snapshot.id, |current| {
-                if current.state != ChannelDownloadState::Paused {
+                if !matches!(
+                    current.state,
+                    ChannelDownloadState::Paused | ChannelDownloadState::Cancelled
+                ) && current.cleanup.is_none()
+                {
                     current.state = ChannelDownloadState::Queued;
                 }
                 current.current_bytes_per_second = None;
@@ -2600,6 +2639,8 @@ fn parse_error_code(value: &str) -> Option<ApplicationErrorKind> {
 
 #[cfg(test)]
 mod tests {
+    #[path = "batch_stop.rs"]
+    mod batch_stop;
     use std::{
         fs,
         sync::{

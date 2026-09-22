@@ -368,7 +368,12 @@ impl TeleArkApp {
         for row in snapshots.iter().rev() {
             if let Some(batch) = row.batch_id {
                 if let Some(mut members) = native_batches.remove(&batch) {
-                    members.sort_by_key(|row| row.id);
+                    members.sort_by_key(|row| {
+                        (
+                            transfer_order(transfer_state(native_display_state(row))),
+                            std::cmp::Reverse(row.id),
+                        )
+                    });
                     if members.len() == 1 {
                         native.push(TransferItem::Native(members[0].clone(), false));
                         continue;
@@ -377,7 +382,6 @@ impl TeleArkApp {
                     native.extend(
                         members
                             .into_iter()
-                            .rev()
                             .map(|row| TransferItem::Native(row, true)),
                     );
                 }
@@ -402,7 +406,13 @@ impl TeleArkApp {
         let mut items = Vec::new();
         for row in snapshots.iter().rev() {
             if let Some(batch) = row.batch_id {
-                if let Some(members) = batches.remove(&batch) {
+                if let Some(mut members) = batches.remove(&batch) {
+                    members.sort_by_key(|row| {
+                        (
+                            transfer_order(vault_transfer_state(row)),
+                            std::cmp::Reverse(row.id),
+                        )
+                    });
                     if members.len() == 1 {
                         items.push(TransferItem::Vault(members[0].clone(), false));
                         continue;
@@ -1133,8 +1143,10 @@ impl TeleArkApp {
             .map(|row| row.row(self));
         let visible_transfer_keys = presentation.keys.clone();
         let selection_count = presentation.selected_count;
-        let all_visible_selected =
-            !visible_transfer_keys.is_empty() && selection_count == visible_transfer_keys.len();
+        let all_visible_selected = !visible_transfer_keys.is_empty()
+            && visible_transfer_keys
+                .iter()
+                .all(|key| self.selected_transfer_keys.contains(key));
         let summary = div()
             .flex_none()
             .px(px(padding))
@@ -1357,10 +1369,11 @@ impl TeleArkApp {
                         .on_click(cx.listener({
                             let visible_transfer_keys = visible_transfer_keys.clone();
                             move |this, checked: &bool, _, cx| {
-                                toggle_visible_selection(
+                                projection::set_selection(
+                                    &this.transfer_items(),
                                     &mut this.selected_transfer_keys,
                                     &visible_transfer_keys,
-                                    !*checked,
+                                    *checked,
                                 );
                                 cx.notify();
                             }
@@ -1621,11 +1634,17 @@ impl TeleArkApp {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancellation = cancelled.clone();
         let work = cx.background_spawn(async move {
+            if action == TransferAction::Cancel {
+                return (
+                    Vec::new(),
+                    transfers.stop(&ids).err().map(|error| error.kind()),
+                );
+            }
             execute_transfer_actions(action, &ids, &cancellation, |id| match action {
                 TransferAction::Pause => transfers.pause(id),
                 TransferAction::Resume => transfers.resume(id),
                 TransferAction::Retry => transfers.retry(id),
-                TransferAction::Cancel => transfers.cancel(id),
+                TransferAction::Cancel => unreachable!("stop is a single selection operation"),
                 TransferAction::Delete => transfers.delete(id),
             })
         });
@@ -2126,11 +2145,12 @@ impl TeleArkApp {
                             .checked(selected)
                             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                 cx.stop_propagation();
-                                if *checked {
-                                    this.selected_transfer_keys.insert(selection_key);
-                                } else {
-                                    this.selected_transfer_keys.remove(&selection_key);
-                                }
+                                projection::set_selection(
+                                    &this.transfer_items(),
+                                    &mut this.selected_transfer_keys,
+                                    &[selection_key],
+                                    *checked,
+                                );
                                 cx.notify();
                             })),
                     ),
@@ -3931,9 +3951,12 @@ impl TransferAction {
             {
                 return false;
             }
-            return self == Self::Retry
+            return (self == Self::Cancel
                 && (matches!(cleanup.phase, ChannelDownloadCleanupPhase::Failed(_))
-                    || !cleanup.retry_requested);
+                    || cleanup.retry_requested))
+                || self == Self::Retry
+                    && (matches!(cleanup.phase, ChannelDownloadCleanupPhase::Failed(_))
+                        || !cleanup.retry_requested);
         }
         self.supports(snapshot.state)
     }
@@ -3960,7 +3983,7 @@ impl TransferAction {
             Self::Resume => "action-resume",
             Self::Pause => "action-pause",
             Self::Retry => "action-retry",
-            Self::Cancel => "action-cancel",
+            Self::Cancel => "action-stop-transfer",
             Self::Delete => "action-delete-task",
         }
     }
@@ -4058,6 +4081,17 @@ fn transfer_tone(state: TransferState) -> Tone {
         TransferState::Waiting | TransferState::Paused => Tone::Amber,
         TransferState::Completed => Tone::Green,
         TransferState::Failed | TransferState::Cancelled => Tone::Red,
+    }
+}
+
+pub(crate) fn transfer_order(state: TransferState) -> u8 {
+    match state {
+        TransferState::Downloading | TransferState::Uploading => 0,
+        TransferState::Waiting => 1,
+        TransferState::Paused => 2,
+        TransferState::Failed => 3,
+        TransferState::Cancelled => 4,
+        TransferState::Completed => 5,
     }
 }
 
@@ -4371,6 +4405,7 @@ fn native_part_failure_message_id(kind: DownloadPartFailureKind) -> &'static str
     }
 }
 
+#[cfg(test)]
 fn toggle_visible_selection(
     selected: &mut std::collections::BTreeSet<u64>,
     visible: &[u64],
@@ -4491,6 +4526,8 @@ fn aggregate_transfer_states(states: &[TransferState]) -> TransferState {
 
 #[cfg(test)]
 mod tests {
+    #[path = "batch_ui.rs"]
+    mod batch_ui;
     use super::*;
 
     #[gpui_kit::test]
@@ -5763,11 +5800,11 @@ mod tests {
                         }))
                     );
                     assert!(TransferAction::Retry.supports_snapshot(snapshot));
+                    assert_eq!(TransferAction::Cancel.supports_snapshot(snapshot), failed);
                     for action in [
                         TransferAction::Delete,
                         TransferAction::Pause,
                         TransferAction::Resume,
-                        TransferAction::Cancel,
                     ] {
                         assert!(!action.supports_snapshot(snapshot));
                     }

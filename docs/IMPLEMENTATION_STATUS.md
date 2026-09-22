@@ -1,5 +1,15 @@
 # Implementation status — v0.4.12
 
+## Batch download stopping, cleanup and selection (2026-09-22)
+
+The transfer action is now **Stop transfer**. Native batch stopping signals every selected task behind one admission barrier before saving the whole decision in a single transaction. Queued members cannot start, slot waiters and pending metadata lookups observe the stop, and late worker callbacks cannot revive stopped rows. The action owner releases after persistence; per-task cleanup continues with visible waiting/removal/failure states. A blocked writer no longer prevents ready tasks from cleaning up. Stopped history becomes deletable after cleanup, and starting a smaller batch with overlapping remote files leaves the original batch stopped. Repeating Stop also revokes a retry requested during cleanup.
+
+Cleanup removes native temporary payloads, maps and empty destination reservations while retaining completed files and unrelated encrypted recovery data. Batch members display running tasks first, followed by pending tasks. Header selection updates the child checkboxes, child changes update the header, and collapsed partial selections retain their exact action scope. Large batch pop-outs have a persistent scrollbar and independently scrollable inspectors. Native window close uses deferred view removal, fixing an accessibility invalid-handle crash found during the Windows preview review. [ADR 0049](adr/0049-batch-download-stop-and-selection.md) records these ownership and selection contracts.
+
+Validation passed: 783 serial workspace tests (10 existing manual tests ignored), followed by the affected runtime and GUI tests after final adjustments; explicit Core/i18n tests; formatting, locked workspace check, strict Clippy, warning-denied rustdoc and cargo-deny. Line-ending policy/tests, distribution-credential checks and both platform payload regressions passed. New deterministic cases cover 48 downloads with blocked writers, no queued starts after Stop, partial cleanup, stale callbacks, overlapping replacement batches, deletion, retry revocation/restart and transaction rollback. English light-mode native previews were checked at 900×600 and actual full-screen, including selection, the last of 48 rows, independent inspector scrolling and native pop-out close.
+
+Validation uses synthetic data and fake remotes; a credentialed Telegram batch was not run. SQLite remains read/write schema 22 with automatic supported upgrades from 0–21; cleanup codec 1 and all payload/recovery formats are unchanged. No manual reset or migration is required, and the application version remains 0.4.12.
+
 ## Version 0.4.12 (2026-09-22)
 
 The Transfers table gives ETA and Progress wider responsive columns. At 900×600 the fixed cells leave at least 180 points for the name; at larger widths Progress has 280 points. Active Telegram cooldown text is shown once in the progress label, with no duplicate in the rate slot. The transfer inspector overlays the table until there is enough width to dock without compressing the new columns.

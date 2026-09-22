@@ -112,9 +112,10 @@ impl TransferProjectionCache {
                 .collect::<Vec<_>>(),
         );
         let key_indices = keys.iter().enumerate().map(|(i, key)| (*key, i)).collect();
-        let selected_count = keys
+        let selected_count = rows
             .iter()
-            .filter(|key| app.selected_transfer_keys.contains(key))
+            .enumerate()
+            .filter(|(index, item)| item.has_selection(*index, &app.selected_transfer_keys))
             .count();
         let snapshots = &app.native_transfer_view.items;
         let batches = snapshots
@@ -208,6 +209,16 @@ pub(super) enum TransferItem {
 }
 
 impl TransferItem {
+    fn has_selection(&self, index: usize, selected: &BTreeSet<u64>) -> bool {
+        selected.contains(&self.key(index))
+            || match self {
+                Self::NativeBatch(_, rows) => rows.iter().any(|row| selected.contains(&row.id)),
+                Self::VaultBatch(_, _, rows) => rows
+                    .iter()
+                    .any(|row| selected.contains(&vault_transfer_selection_key(row.id))),
+                _ => false,
+            }
+    }
     pub(super) fn row(&self, app: &TeleArkApp) -> TransferRow {
         #[cfg(test)]
         MATERIALIZED_ROWS.set(MATERIALIZED_ROWS.get() + 1);
@@ -528,28 +539,28 @@ pub(super) fn scope_ids(
     selected: &BTreeSet<u64>,
     snapshots: &[(u64, Option<u64>)],
 ) -> BTreeSet<u64> {
-    let has_selection = items
-        .iter()
-        .enumerate()
-        .any(|(index, item)| selected.contains(&item.key(index)));
     let mut batches: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (id, batch) in snapshots {
         if let Some(batch) = batch {
             batches.entry(*batch).or_default().push(*id);
         }
     }
-    let mut ids = BTreeSet::new();
-    for (_, item) in items
+    let has_selection = items
         .iter()
         .enumerate()
-        .filter(|(index, item)| !has_selection || selected.contains(&item.key(*index)))
-    {
-        if let Some(id) = item.native_id() {
+        .any(|(index, item)| item.has_selection(index, selected));
+    let mut ids = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let include = !has_selection || selected.contains(&item.key(index));
+        if let Some(id) = item.native_id()
+            && include
+        {
             ids.insert(id);
-        } else if let Some(batch) = item.native_batch()
+        } else if !item.child()
+            && let Some(batch) = item.native_batch()
             && let Some(members) = batches.get(&batch)
         {
-            ids.extend(members);
+            ids.extend(members.iter().filter(|id| include || selected.contains(id)));
         }
     }
     ids
@@ -560,29 +571,72 @@ pub(super) fn scope_vault_ids(
     selected: &BTreeSet<u64>,
     snapshots: &[(u64, Option<u64>)],
 ) -> BTreeSet<u64> {
-    let has_selection = items
-        .iter()
-        .enumerate()
-        .any(|(index, item)| selected.contains(&item.key(index)));
     let mut batches: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (id, batch) in snapshots {
         if let Some(batch) = batch {
             batches.entry(*batch).or_default().push(*id);
         }
     }
-    let mut ids = BTreeSet::new();
-    for (_, item) in items
+    let has_selection = items
         .iter()
         .enumerate()
-        .filter(|(index, item)| !has_selection || selected.contains(&item.key(*index)))
-    {
-        if let Some(id) = item.vault_id() {
-            ids.insert(id);
-        } else if let TransferItem::VaultBatch(batch, _, _) = item
-            && let Some(members) = batches.get(batch)
+        .any(|(index, item)| item.has_selection(index, selected));
+    let mut ids = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let include = !has_selection || selected.contains(&item.key(index));
+        if let Some(id) = item.vault_id()
+            && include
         {
-            ids.extend(members);
+            ids.insert(id);
+        } else if !item.child()
+            && let Some(batch) = item.vault_batch()
+            && let Some(members) = batches.get(&batch)
+        {
+            ids.extend(
+                members
+                    .iter()
+                    .filter(|id| include || selected.contains(&vault_transfer_selection_key(**id))),
+            );
         }
     }
     ids
+}
+
+/// A group checkbox and its children share one selection, including collapsed
+/// members and members in the auxiliary window. Keys survive state reordering.
+pub(super) fn set_selection(
+    items: &[TransferItem],
+    selected: &mut BTreeSet<u64>,
+    keys: &[u64],
+    checked: bool,
+) {
+    let mut groups = BTreeMap::<u64, Vec<u64>>::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.child()
+            && let Some(parent) = item.parent_key()
+        {
+            let group_key = if item.native_batch().is_some() {
+                0x4000_0000_0000_0000 | parent
+            } else {
+                parent
+            };
+            groups.entry(group_key).or_default().push(item.key(index));
+        }
+    }
+    for key in keys {
+        for key in std::iter::once(key).chain(groups.get(key).into_iter().flatten()) {
+            if checked {
+                selected.insert(*key);
+            } else {
+                selected.remove(key);
+            }
+        }
+    }
+    for (group, members) in groups {
+        if members.iter().all(|key| selected.contains(key)) {
+            selected.insert(group);
+        } else {
+            selected.remove(&group);
+        }
+    }
 }

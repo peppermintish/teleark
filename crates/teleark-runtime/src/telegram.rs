@@ -2306,11 +2306,17 @@ async fn download(
         .get(&chat_id)
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
     let connection = connection_ref(state)?;
-    let file = connection
-        .fetch_file(chat, message_id)
-        .await
-        .map_err(map_telegram_error)?
-        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
+    let file = native_download_lookup(
+        async {
+            connection
+                .fetch_file(chat, message_id)
+                .await
+                .map_err(map_telegram_error)
+        },
+        observer.as_deref(),
+    )
+    .await?
+    .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
     match observer {
         Some(observer) => connection
             .download_file_observed(&file, destination, observer.as_ref())
@@ -2320,6 +2326,26 @@ async fn download(
             .download_file(&file, destination)
             .await
             .map_err(map_telegram_error),
+    }
+}
+
+/// The metadata lookup precedes the transport observer loop. It must honor the
+/// same stop token, including when Telegram leaves the lookup RPC unanswered.
+async fn native_download_lookup<T>(
+    lookup: impl std::future::Future<Output = Result<T, ApplicationError>>,
+    observer: Option<&dyn DownloadObserver>,
+) -> Result<T, ApplicationError> {
+    tokio::pin!(lookup);
+    loop {
+        if observer.is_some_and(|observer| {
+            observer.control() != teleark_telegram::DownloadControl::Continue
+        }) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        tokio::select! {
+            result = &mut lookup => return result,
+            () = tokio::time::sleep(Duration::from_millis(20)) => {},
+        }
     }
 }
 
@@ -2486,6 +2512,56 @@ fn map_telegram_error(error: TelegramError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_metadata_lookup_stops_without_waiting_for_a_network_reply() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Observer(AtomicBool);
+        impl DownloadObserver for Observer {
+            fn control(&self) -> teleark_telegram::DownloadControl {
+                if self.0.load(Ordering::Acquire) {
+                    teleark_telegram::DownloadControl::Cancel
+                } else {
+                    teleark_telegram::DownloadControl::Continue
+                }
+            }
+            fn progressed(&self, _: u64) {}
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let observer = Observer(AtomicBool::new(false));
+            let lookup = std::future::poll_fn(|_| {
+                observer.0.store(true, Ordering::Release);
+                std::task::Poll::<Result<(), ApplicationError>>::Pending
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                native_download_lookup(lookup, Some(&observer)),
+            )
+            .await
+            .expect("stop interrupts pending lookup");
+            assert_eq!(
+                result.expect_err("stopped").kind(),
+                ApplicationErrorKind::Cancelled
+            );
+            let result = native_download_lookup(
+                async {
+                    panic!("stopped request must never be polled");
+                    #[allow(unreachable_code)]
+                    Ok::<(), ApplicationError>(())
+                },
+                Some(&observer),
+            )
+            .await;
+            assert_eq!(
+                result.expect_err("stopped before lookup").kind(),
+                ApplicationErrorKind::Cancelled
+            );
+        });
+    }
 
     #[test]
     fn cancelled_catalog_request_keeps_account_and_publishes_no_partial_roster() {
