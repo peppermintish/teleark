@@ -306,10 +306,10 @@ jobs:
         if: matrix.platform == 'windows'
         run: dotnet tool restore
 
-      - name: Install Inno Setup wizard compiler
+      - name: Install pinned Inno Setup wizard compiler
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: choco install innosetup --version=6.7.3 --yes --no-progress --allow-downgrade
+        run: ./scripts/install-innosetup.ps1
 
       - name: Package Windows executable, ZIP and EXE setup wizard
         if: matrix.platform == 'windows'

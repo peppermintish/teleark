@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$MsiPath,
     [Parameter(Mandatory)][string]$OutputPath,
     [string]$InstallerRegistryKey = 'Software\TeleArk\Installer',
-    [string]$LegacyAppId = '{9A67D26D-7281-4FE9-B942-D6D2A8719DF5}'
+    [string]$LegacyAppId = '{9A67D26D-7281-4FE9-B942-D6D2A8719DF5}',
+    [string]$ExpectedInnoSetupVersion = '6.7.3'
 )
 $ErrorActionPreference = 'Stop'
 $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
@@ -16,7 +17,19 @@ else {
         "$env:ProgramFiles/Inno Setup 6/ISCC.exe"
     ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 }
-if (-not $iscc) { throw 'Inno Setup 6.7.3 (ISCC.exe) is required to build the EXE installer.' }
+if (-not $iscc) { throw "Inno Setup $ExpectedInnoSetupVersion (ISCC.exe) is required to build the EXE installer." }
+$compilerVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($iscc).ProductVersion
+if ([string]::IsNullOrWhiteSpace($compilerVersion)) {
+    throw "ISCC.exe at '$iscc' does not report a product version."
+}
+$expectedVersion = [version]::Parse($ExpectedInnoSetupVersion)
+$actualVersion = [version]::Parse($compilerVersion)
+if ($actualVersion.Major -ne $expectedVersion.Major -or
+    $actualVersion.Minor -ne $expectedVersion.Minor -or
+    $actualVersion.Build -ne $expectedVersion.Build) {
+    throw "Expected Inno Setup $ExpectedInnoSetupVersion, but ISCC.exe at '$iscc' reports $compilerVersion."
+}
+Write-Output "Using Inno Setup $compilerVersion at $iscc"
 
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.OpenDatabase($MsiPath, 0)

@@ -10,7 +10,7 @@ The EXE embeds the existing MSI rather than transferring ownership between insta
 
 The wizard shows the registered directory on an upgrade and prevents a misleading relocation choice. A same-product reinstall explicitly repairs all files. Interactive installation invokes the native progress dialog with cancellation enabled; a nonzero failure or cancellation result stops the wizard before its completion and launch actions. Windows Installer handles rollback. Setup logging is always enabled, with an adjacent MSI log for the detailed outcome. Restart-required success is presented by the wizard; the engine cannot restart Windows itself.
 
-Inno Setup 6.7.3 is pinned in CI. Its permissive license allows the unmodified setup runtime in the EXE, with its copyright and website notices retained. WiX remains a build-only dependency. Original TeleArk code remains MIT OR Apache-2.0. Installer-owned messages are generated with teleark-i18n from synchronized catalogs; the standard wizard remains English, matching the previous EXE.
+Inno Setup 6.7.3 is pinned in CI. The workflow installs the immutable official upstream release because the Chocolatey community source does not publish the required package version; the bootstrap verifies the pinned SHA-256 digest and Authenticode signature, and the build helper verifies the installed `ISCC.exe` version before compiling. Its permissive license allows the unmodified setup runtime in the EXE, with its copyright and website notices retained. WiX remains a build-only dependency. Original TeleArk code remains MIT OR Apache-2.0. Installer-owned messages are generated with teleark-i18n from synchronized catalogs; the standard wizard remains English, matching the previous EXE.
 
 ## Verification
 
