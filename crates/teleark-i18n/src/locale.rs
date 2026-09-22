@@ -1,42 +1,68 @@
 use unic_langid::{LanguageIdentifier, langid};
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum SupportedLocale {
-    #[default]
-    EnUs,
-    ZhCn,
-    JaJp,
+// Register each language once. The catalog, settings selector and locale parser
+// all consume this registry; no frontend should maintain its own locale list.
+macro_rules! supported_locales {
+    ($($variant:ident => ($tag:literal, $name:literal, $badge:literal, $complete:literal)),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub enum SupportedLocale {
+            #[default]
+            EnUs,
+            $($variant,)+
+        }
+
+        impl SupportedLocale {
+            pub const ALL: [Self; 1 + supported_locales!(@count $($variant),+)] =
+                [Self::EnUs, $(Self::$variant,)+];
+            pub const FALLBACK: Self = Self::EnUs;
+
+            pub const fn as_str(self) -> &'static str {
+                match self { Self::EnUs => "en-US", $(Self::$variant => $tag,)+ }
+            }
+
+            /// Native language name, readable before localization loads.
+            pub const fn autonym(self) -> &'static str {
+                match self { Self::EnUs => "English", $(Self::$variant => $name,)+ }
+            }
+
+            pub const fn badge(self) -> &'static str {
+                match self { Self::EnUs => "A", $(Self::$variant => $badge,)+ }
+            }
+
+            pub fn language_identifier(self) -> LanguageIdentifier {
+                match self { Self::EnUs => langid!("en-US"), $(Self::$variant => langid!($tag),)+ }
+            }
+
+            pub(crate) const fn embedded_source(self) -> &'static str {
+                match self {
+                    Self::EnUs => include_str!("../resources/en-US/main.ftl"),
+                    $(Self::$variant => include_str!(concat!("../resources/", $tag, "/main.ftl")),)+
+                }
+            }
+
+            /// Complete catalogs require exact source-key parity. Incremental
+            /// catalogs must match every translated key and use English for gaps.
+            pub const fn has_complete_catalog(self) -> bool {
+                match self { Self::EnUs => true, $(Self::$variant => $complete,)+ }
+            }
+        }
+    };
+    (@count $head:ident $(,$tail:ident)*) => {1 $(+ supported_locales!(@count $tail))*};
+}
+
+supported_locales! {
+    ZhCn => ("zh-CN", "简体中文", "中", true),
+    JaJp => ("ja-JP", "日本語", "あ", true),
+    EsEs => ("es-ES", "Español", "ES", false),
+    FrFr => ("fr-FR", "Français", "FR", false),
+    DeDe => ("de-DE", "Deutsch", "DE", false),
+    PtBr => ("pt-BR", "Português (Brasil)", "PT", false),
+    RuRu => ("ru-RU", "Русский", "РУ", false),
+    KoKr => ("ko-KR", "한국어", "한", false),
+    HiIn => ("hi-IN", "हिन्दी", "हि", false),
 }
 
 impl SupportedLocale {
-    pub const ALL: [Self; 3] = [Self::EnUs, Self::ZhCn, Self::JaJp];
-    pub const FALLBACK: Self = Self::EnUs;
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::EnUs => "en-US",
-            Self::ZhCn => "zh-CN",
-            Self::JaJp => "ja-JP",
-        }
-    }
-
-    /// Autonym suitable for the language selector even before localization loads.
-    pub const fn autonym(self) -> &'static str {
-        match self {
-            Self::EnUs => "English",
-            Self::ZhCn => "简体中文",
-            Self::JaJp => "日本語",
-        }
-    }
-
-    pub fn language_identifier(self) -> LanguageIdentifier {
-        match self {
-            Self::EnUs => langid!("en-US"),
-            Self::ZhCn => langid!("zh-CN"),
-            Self::JaJp => langid!("ja-JP"),
-        }
-    }
-
     /// Negotiates the first supported locale from OS-style preference strings.
     ///
     /// Regional English maps to `en-US`; Japanese maps to `ja-JP`; Simplified
@@ -50,11 +76,12 @@ impl SupportedLocale {
     {
         requested
             .into_iter()
-            .find_map(|locale| Self::match_requested(locale.as_ref()))
+            .find_map(|locale| Self::parse_supported(locale.as_ref()))
             .unwrap_or(Self::FALLBACK)
     }
 
-    fn match_requested(requested: &str) -> Option<Self> {
+    /// Parses a supported language without substituting the English fallback.
+    pub fn parse_supported(requested: &str) -> Option<Self> {
         let without_encoding = requested
             .split_once('.')
             .map_or(requested, |(locale, _)| locale);
@@ -63,16 +90,11 @@ impl SupportedLocale {
             .map_or(without_encoding, |(locale, _)| locale);
         let normalized = without_modifier.replace('_', "-");
         let identifier: LanguageIdentifier = normalized.parse().ok()?;
-        let canonical = identifier.to_string().to_ascii_lowercase();
-
-        if canonical == "en-us" {
-            return Some(Self::EnUs);
-        }
-        if canonical == "zh-cn" {
-            return Some(Self::ZhCn);
-        }
-        if canonical == "ja-jp" {
-            return Some(Self::JaJp);
+        if let Some(locale) = Self::ALL
+            .into_iter()
+            .find(|locale| locale.language_identifier() == identifier)
+        {
+            return Some(locale);
         }
 
         let language = identifier.language.as_str();
@@ -90,7 +112,9 @@ impl SupportedLocale {
                     .is_some_and(|region| matches!(region.as_str(), "TW" | "HK" | "MO"));
                 (!traditional_script && !traditional_region).then_some(Self::ZhCn)
             }
-            _ => None,
+            _ => Self::ALL
+                .into_iter()
+                .find(|locale| locale.language_identifier().language == identifier.language),
         }
     }
 }
@@ -129,7 +153,40 @@ mod tests {
         );
         assert_eq!(SupportedLocale::negotiate(["zh-SG"]), SupportedLocale::ZhCn);
         assert_eq!(SupportedLocale::negotiate(["ja-JP"]), SupportedLocale::JaJp);
-        assert_eq!(SupportedLocale::negotiate(["fr-FR"]), SupportedLocale::EnUs);
+        assert_eq!(SupportedLocale::negotiate(["fr-FR"]), SupportedLocale::FrFr);
+        assert_eq!(SupportedLocale::negotiate(["ar-SA"]), SupportedLocale::EnUs);
+    }
+
+    #[test]
+    fn registered_locales_round_trip_and_accept_os_spellings() {
+        for locale in SupportedLocale::ALL {
+            assert_eq!(
+                SupportedLocale::parse_supported(locale.as_str()),
+                Some(locale)
+            );
+            assert_eq!(
+                SupportedLocale::parse_supported(&format!(
+                    "{}.UTF-8",
+                    locale.as_str().replace('-', "_")
+                )),
+                Some(locale)
+            );
+            assert!(!locale.autonym().is_empty());
+            assert!(!locale.badge().is_empty());
+        }
+        assert_eq!(
+            SupportedLocale::parse_supported("es-MX"),
+            Some(SupportedLocale::EsEs)
+        );
+        assert_eq!(
+            SupportedLocale::parse_supported("pt-PT"),
+            Some(SupportedLocale::PtBr)
+        );
+        assert_eq!(
+            SupportedLocale::parse_supported("fr-CA"),
+            Some(SupportedLocale::FrFr)
+        );
+        assert_eq!(SupportedLocale::parse_supported("not_a_locale"), None);
     }
 
     #[test]

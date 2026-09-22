@@ -358,7 +358,7 @@ nav-settings = Settings
 
 filter-all-channels = All Channels
 filter-video = Video
-filter-large-files = Larger than 1 GB
+filter-large-files = Larger than 1 GiB
 filter-all-statuses = All Statuses
 
 table-name = Name
@@ -413,8 +413,8 @@ transfer-summary-total-speed = Total Speed
 transfer-summary-today-data = Transferred Today
 transfer-summary-month-change = 28% more than yesterday
 transfer-footer-total = 166 tasks
-transfer-footer-downloading = Downloading 8 (78.27 GB)
-transfer-footer-waiting = Waiting 156 (210.43 GB)
+transfer-footer-downloading = Downloading 8 (78.27 GiB)
+transfer-footer-waiting = Waiting 156 (210.43 GiB)
 transfer-footer-unlimited = Limit: Unlimited
 transfer-footer-total-live = { $count } tasks
 transfer-footer-downloading-live = { $count } downloading
@@ -618,7 +618,7 @@ settings-telegram-credentials-removed = Removed
 settings-telegram-credentials-removed-using-distribution = Personal credentials removed; using built-in release credentials
 settings-telegram-api-id-invalid = Enter a positive numeric API ID and a 32-character hexadecimal API Hash.
 settings-telegram-api-id-failed = The credentials could not be saved. Check local storage and try again.
-settings-telegram-credentials-storage-note = Your API ID and API Hash are stored in TeleArk's local SQLite Library database. Protect your macOS account and backups. Personal credentials override any credentials supplied by the TeleArk distributor.
+settings-telegram-credentials-storage-note = Your API ID and API Hash use the credential storage selected above. Personal credentials override the credentials supplied with TeleArk.
 settings-telegram-credentials-distribution-note = This build is using API credentials registered by its TeleArk distributor, so sign-in works without additional setup. You can save your own application credentials above to override them. Shared Telegram Desktop credentials are never used.
 settings-telegram-api-panel-action = Open Telegram API development panel
 settings-preferences-ready = Settings are stored locally
@@ -1151,6 +1151,15 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.0 · Credential protection and filtered downloads
+
+    - macOS Keychain is enabled by default for API credentials, proxy passwords and encryption keys. Turning it off requires confirmation and moves secrets to the unencrypted private SQLite library. Windows and Linux use SQLite while native credential-store integration is unavailable.
+    - macOS packages use a persistent self-signed code-signing identity for consistent Keychain access. This is not Apple notarization, and first access or system policy may still require permission.
+    - Download all indexed files matching channel filters into a separate folder for each batch, with visible preparation, queueing and cancellation.
+    - Added Spanish, French, German, Brazilian Portuguese, Russian, Korean and Hindi for primary flows. Untranslated detailed diagnostics and release notes fall back to English.
+    - All displayed byte sizes and transfer rates use binary IEC units. Indexing runs automatically, and transfer notifications are in General settings.
+    - Application metadata is 0.5.0. SQLite read/write schema 23 automatically upgrades supported schemas 0–22. Encrypted-file, transfer and recovery codecs remain compatible.
+
     ## 0.4.14 · Contributor guidance corrections
 
     - Corrected contributor guidance for protecting private configuration on Windows and loading development settings in a separate shell process.
@@ -1862,3 +1871,69 @@ upload-part-map-grouping = { $count } blocks · Up to { $size } per cell. Hover 
 installer-preparing = Installing TeleArk. The installation window shows progress and lets you stop safely.
 installer-cancelled = Installation was stopped. You can retry or close Setup.
 installer-failed = Installation did not complete (code { $code }). See the installation log for the reason: { $log }
+
+settings-keychain-title = Keychain
+
+settings-keychain-description = Store API credentials, proxy passwords and encryption keys in macOS Keychain. It is enabled by default and protects secrets separately from the local library.
+
+settings-keychain-unavailable = Keychain is unavailable on Windows and Linux at this stage because secure native integration is not yet implemented. Credentials are stored in the private local SQLite library.
+
+settings-keychain-on = Keychain: On
+
+settings-keychain-off = Keychain: Off
+
+settings-keychain-failed = Credential storage could not be changed. Your previous storage remains intact. Unlock Keychain or restore access, then try again.
+
+settings-keychain-saved = Credential storage updated
+
+settings-keychain-activity = { $phase } · Phase { $duration } · Last activity { $activity } ago
+
+settings-keychain-disable-title = Keep your credentials protected
+
+settings-keychain-disable-warning = macOS Keychain protects credentials and encryption keys separately from your library. Turning it off stores them in the unencrypted local SQLite database without Keychain protection. We recommend keeping Keychain on.
+
+settings-keychain-keep = Keep Keychain on
+
+settings-keychain-disable-action = Use SQLite
+
+settings-language-fallback-note = Some detailed diagnostics and release notes are shown in English when a translation is not yet available.
+
+channel-filter-batch-action = Batch
+
+channel-filter-batch-help = Download every indexed file matching these filters into a new batch folder, including files outside this list. Older history is indexed automatically; only files already indexed are included. Limit: 5,000 files per batch.
+
+channel-filter-batch-discovering = Finding matches: { $matched } found · { $examined } checked · { $seconds }s in phase · last activity { $idle }s ago
+
+channel-filter-batch-folder = Preparing batch folder · { $seconds }s · last activity { $idle }s ago
+
+channel-filter-batch-admitting = Saving { $matched } downloads to the queue · { $seconds }s · last activity { $idle }s ago
+
+channel-filter-batch-queued = Queued { $count } downloads in { $folder }
+
+channel-filter-batch-capacity = More than 5,000 files match. Narrow the filters and try again.
+
+channel-filter-batch-cancelled = Batch preparation cancelled
+
+channel-filter-batch-cancel = Cancel batch preparation
+
+channel-filter-batch-open = Show batch downloads
+
+channel-filter-batch-phase-discovery = Finding matching files
+
+channel-filter-batch-phase-folder = Preparing batch folder
+
+channel-filter-batch-phase-queue = Saving download queue
+
+channel-filter-batch-phase-complete = Batch preparation complete
+
+channel-filter-batch-event = { $phase } · { $seconds }s after start
+
+settings-keychain-cleanup-pending = Credential storage is updated. Some older Keychain copies could not be removed yet; cleanup will retry on the next credential change.
+
+settings-keychain-unavailable-credentials = Some credentials belong to another device’s Keychain. Reenter API or proxy credentials and import your encryption recovery bundle to restore access.
+
+upload-options-title = Upload options
+
+channel-filter-batch-no-matches = No indexed files match these filters.
+
+channel-filter-batch-failed = Batch preparation failed. Check your download folder and account, then try again.

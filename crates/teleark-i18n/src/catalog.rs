@@ -7,18 +7,6 @@ use fluent_bundle::concurrent::FluentBundle as ConcurrentFluentBundle;
 
 use crate::{MessageArgs, MessageId, SupportedLocale};
 
-const EN_US_RESOURCE: &str = include_str!("../resources/en-US/main.ftl");
-const ZH_CN_RESOURCE: &str = include_str!("../resources/zh-CN/main.ftl");
-const JA_JP_RESOURCE: &str = include_str!("../resources/ja-JP/main.ftl");
-
-fn embedded_source(locale: SupportedLocale) -> &'static str {
-    match locale {
-        SupportedLocale::EnUs => EN_US_RESOURCE,
-        SupportedLocale::ZhCn => ZH_CN_RESOURCE,
-        SupportedLocale::JaJp => JA_JP_RESOURCE,
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ResourceValidationError {
@@ -156,7 +144,7 @@ impl Catalog {
             }
         })?;
         let mut bundle = ConcurrentFluentBundle::new_concurrent(vec![locale.language_identifier()]);
-        // All first-release locales are left-to-right, and UI tests/copy actions
+        // All registered locales are left-to-right, and UI tests/copy actions
         // require translations without invisible FSI/PDI marks. Revisit this when
         // adding a right-to-left locale or interpolating untrusted user content.
         bundle.set_use_isolating(false);
@@ -170,7 +158,9 @@ impl Catalog {
     }
 }
 
-/// Validates syntax, duplicates, key parity, and variable parity for all built-in catalogs.
+/// Validates syntax, duplicates, known keys and variable parity for all catalogs.
+/// Complete catalogs additionally require every canonical key. Incremental
+/// catalogs inherit missing messages through the validated English fallback.
 pub fn validate_embedded_resources() -> Result<(), ResourceValidationError> {
     let catalogs = parse_embedded_catalogs()?;
     validate_catalog_parity(&catalogs)
@@ -181,7 +171,7 @@ fn parse_embedded_catalogs() -> Result<BTreeMap<SupportedLocale, Catalog>, Resou
     SupportedLocale::ALL
         .into_iter()
         .map(|locale| {
-            Catalog::parse(locale, embedded_source(locale)).map(|catalog| (locale, catalog))
+            Catalog::parse(locale, locale.embedded_source()).map(|catalog| (locale, catalog))
         })
         .collect()
 }
@@ -203,7 +193,7 @@ fn validate_catalog_parity(
             .difference(&canonical_keys)
             .map(|key| (*key).clone())
             .collect();
-        if !missing.is_empty() || !unexpected.is_empty() {
+        if (locale.has_complete_catalog() && !missing.is_empty()) || !unexpected.is_empty() {
             return Err(ResourceValidationError::KeyMismatch {
                 locale,
                 missing,
@@ -212,7 +202,11 @@ fn validate_catalog_parity(
         }
 
         for (message_id, expected_variables) in canonical {
-            let actual_variables = &catalog.variables[message_id];
+            let Some(actual_variables) = catalog.variables.get(message_id) else {
+                // An untranslated message is resolved through the complete
+                // English catalog; never clone English into a translated file.
+                continue;
+            };
             if actual_variables != expected_variables {
                 return Err(ResourceValidationError::VariableMismatch {
                     locale,
@@ -361,11 +355,15 @@ impl Localizer {
             .unwrap_or_else(|_| message_id.to_string())
     }
 
+    /// Whether this message is available in the locale or its English fallback.
     pub fn contains(&self, locale: SupportedLocale, message_id: MessageId) -> bool {
         let fluent_key = message_id.fluent_key();
         self.catalogs[&locale]
             .bundle
             .has_message(fluent_key.as_ref())
+            || self.catalogs[&SupportedLocale::FALLBACK]
+                .bundle
+                .has_message(fluent_key.as_ref())
     }
 
     fn format_from(
@@ -424,6 +422,126 @@ mod tests {
     #[test]
     fn embedded_resources_parse_and_have_key_and_variable_parity() {
         validate_embedded_resources().unwrap();
+    }
+
+    #[test]
+    fn expanded_catalogs_cover_primary_flows_and_resolve_all_translated_messages() {
+        let catalogs = parse_embedded_catalogs().unwrap();
+        let required = [
+            "nav-settings",
+            "nav-transfers",
+            "common-cancel",
+            "common-save",
+            "telegram-login-title",
+            "telegram-batch-download-action",
+            "upload-dialog-title",
+            "settings-language-title",
+            "settings-keychain-disable-warning",
+            "channel-filter-batch-help",
+            "channel-filter-batch-phase-complete",
+            "settings-language-fallback-note",
+            "file-detail-title",
+            "transfer-state-failed",
+        ];
+        for locale in SupportedLocale::ALL {
+            let catalog = &catalogs[&locale];
+            for id in required {
+                assert!(
+                    catalog.bundle.has_message(id),
+                    "{} lacks {id}",
+                    locale.as_str()
+                );
+            }
+            if !locale.has_complete_catalog() {
+                assert!(
+                    catalog.variables.len() >= 650,
+                    "{} translation coverage regressed",
+                    locale.as_str()
+                );
+            }
+            // Exercise real Fluent references, variables and plural selection,
+            // without opening or rendering any non-English interface.
+            for (id, variables) in &catalog.variables {
+                let mut args = fluent_bundle::FluentArgs::new();
+                for variable in variables {
+                    args.set(variable.as_str(), 2);
+                }
+                let pattern = catalog.bundle.get_message(id).unwrap().value().unwrap();
+                let mut errors = Vec::new();
+                let output = catalog
+                    .bundle
+                    .format_pattern(pattern, Some(&args), &mut errors);
+                assert!(errors.is_empty(), "{} {id}: {errors:?}", locale.as_str());
+                assert!(!output.is_empty(), "{} {id} is empty", locale.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_catalogs_reject_unknown_keys_and_incompatible_variables() {
+        let mut catalogs = parse_embedded_catalogs().unwrap();
+        let locale = SupportedLocale::EsEs;
+        catalogs.insert(
+            locale,
+            Catalog::parse(locale, "invented-message = desconocido").unwrap(),
+        );
+        assert!(matches!(
+            validate_catalog_parity(&catalogs),
+            Err(ResourceValidationError::KeyMismatch { .. })
+        ));
+        catalogs.insert(
+            locale,
+            Catalog::parse(locale, "common-save = Guardar { $unexpected }").unwrap(),
+        );
+        assert!(matches!(
+            validate_catalog_parity(&catalogs),
+            Err(ResourceValidationError::VariableMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn every_english_message_formats_for_each_registered_language() {
+        let english = Localizer::new(SupportedLocale::EnUs).unwrap();
+        let mut args = MessageArgs::new();
+        for tail in SupportedLocale::FALLBACK
+            .embedded_source()
+            .split('$')
+            .skip(1)
+        {
+            let length = tail
+                .find(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+                })
+                .unwrap_or(tail.len());
+            args = args.with(&tail[..length], 2_u64);
+        }
+        let ids: Vec<_> = SupportedLocale::FALLBACK
+            .embedded_source()
+            .lines()
+            .filter(|line| !line.starts_with(char::is_whitespace) && !line.starts_with('#'))
+            .filter_map(|line| {
+                line.split_once('=')
+                    .map(|(key, _)| MessageId::new(key.trim()))
+            })
+            .collect();
+        for locale in SupportedLocale::ALL {
+            let selected = Localizer::new(locale).unwrap();
+            for id in &ids {
+                assert!(selected.contains(locale, *id));
+                assert!(
+                    selected.translate_with(*id, &args).is_ok(),
+                    "{} {id}",
+                    locale.as_str()
+                );
+            }
+            if !locale.has_complete_catalog() {
+                let fallback_id = MessageId::new("about-changelog-v040");
+                assert_eq!(
+                    selected.translate(fallback_id).unwrap(),
+                    english.translate(fallback_id).unwrap()
+                );
+            }
+        }
     }
 
     #[test]

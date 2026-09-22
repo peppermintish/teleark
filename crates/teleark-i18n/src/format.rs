@@ -1,14 +1,14 @@
 //! Central human-readable formatting policy.
 //!
-//! File sizes and rates use decimal SI units (base 1000) to match TeleArk's UI
-//! references: `MB`, `GB`, and `MB/s`. Exact protocol/configuration values remain
-//! explicit IEC values such as `1900 MiB`; this module must not relabel them.
+//! Every byte size and rate uses IEC binary units (base 1024): B, KiB, MiB,
+//! GiB, TiB, PiB, EiB and the corresponding /s rate. Use this policy for all
+//! application surfaces, including diagnostics, previews and status bars.
 
 use crate::SupportedLocale;
 use chrono::{DateTime, Local};
 
-const DECIMAL_BASE: f64 = 1_000.0;
-const DECIMAL_UNITS: [&str; 7] = ["B", "kB", "MB", "GB", "TB", "PB", "EB"];
+const BINARY_BASE: f64 = 1_024.0;
+const BINARY_UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
 
 pub fn format_integer(locale: SupportedLocale, value: u64) -> String {
     group_integer(locale, &value.to_string())
@@ -52,20 +52,20 @@ pub fn format_decimal(locale: SupportedLocale, value: f64, fraction_digits: usiz
 }
 
 pub fn format_bytes(locale: SupportedLocale, bytes: u64) -> String {
-    if bytes < DECIMAL_BASE as u64 {
+    if bytes < BINARY_BASE as u64 {
         return format!("{} B", format_integer(locale, bytes));
     }
 
     let mut scaled = bytes as f64;
     let mut unit_index = 0_usize;
-    while scaled >= DECIMAL_BASE && unit_index < DECIMAL_UNITS.len() - 1 {
-        scaled /= DECIMAL_BASE;
+    while scaled >= BINARY_BASE && unit_index < BINARY_UNITS.len() - 1 {
+        scaled /= BINARY_BASE;
         unit_index += 1;
     }
     format!(
         "{} {}",
         format_decimal(locale, scaled, 1),
-        DECIMAL_UNITS[unit_index]
+        BINARY_UNITS[unit_index]
     )
 }
 
@@ -78,17 +78,23 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
     if milliseconds < 1_000 {
         let value = format_integer(locale, milliseconds);
         return match locale {
-            SupportedLocale::EnUs => format!("{value} ms"),
+            SupportedLocale::RuRu => format!("{value} мс"),
+            SupportedLocale::KoKr => format!("{value}밀리초"),
+            SupportedLocale::HiIn => format!("{value} मिलीसेकंड"),
             SupportedLocale::ZhCn => format!("{value} 毫秒"),
             SupportedLocale::JaJp => format!("{value} ミリ秒"),
+            _ => format!("{value} ms"),
         };
     }
     if milliseconds < 60_000 {
         let value = format_decimal(locale, milliseconds as f64 / 1_000.0, 1);
         return match locale {
-            SupportedLocale::EnUs => format!("{value} s"),
+            SupportedLocale::RuRu => format!("{value} с"),
+            SupportedLocale::KoKr => format!("{value}초"),
+            SupportedLocale::HiIn => format!("{value} सेकंड"),
             SupportedLocale::ZhCn => format!("{value} 秒"),
             SupportedLocale::JaJp => format!("{value}秒"),
+            _ => format!("{value} s"),
         };
     }
     let total_seconds = milliseconds / 1_000;
@@ -97,15 +103,18 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
     let minutes = format_integer(locale, minutes);
     let seconds = format_integer(locale, seconds);
     match locale {
-        SupportedLocale::EnUs => format!("{minutes} min {seconds} s"),
+        SupportedLocale::RuRu => format!("{minutes} мин {seconds} с"),
+        SupportedLocale::KoKr => format!("{minutes}분 {seconds}초"),
+        SupportedLocale::HiIn => format!("{minutes} मिनट {seconds} सेकंड"),
         SupportedLocale::ZhCn => format!("{minutes} 分钟 {seconds} 秒"),
         SupportedLocale::JaJp => format!("{minutes}分{seconds}秒"),
+        _ => format!("{minutes} min {seconds} s"),
     }
 }
 
 /// Formats a Unix millisecond timestamp in the user's local time zone.
 ///
-/// The first-release locales share 24-hour time but use different conventional
+/// Registered locales share 24-hour time but use different conventional
 /// date orderings. Invalid/out-of-range instants remain visibly unavailable.
 pub fn format_unix_millis(locale: SupportedLocale, unix_millis: i64) -> String {
     let Some(utc) = DateTime::from_timestamp_millis(unix_millis) else {
@@ -115,6 +124,12 @@ pub fn format_unix_millis(locale: SupportedLocale, unix_millis: i64) -> String {
     match locale {
         SupportedLocale::EnUs => local.format("%m/%d/%Y %H:%M").to_string(),
         SupportedLocale::ZhCn | SupportedLocale::JaJp => local.format("%Y/%m/%d %H:%M").to_string(),
+        SupportedLocale::KoKr => local.format("%Y.%m.%d %H:%M").to_string(),
+        SupportedLocale::DeDe | SupportedLocale::RuRu => local.format("%d.%m.%Y %H:%M").to_string(),
+        SupportedLocale::EsEs
+        | SupportedLocale::FrFr
+        | SupportedLocale::PtBr
+        | SupportedLocale::HiIn => local.format("%d/%m/%Y %H:%M").to_string(),
     }
 }
 
@@ -126,15 +141,24 @@ pub fn format_percent(locale: SupportedLocale, ratio: f64, fraction_digits: usiz
     )
 }
 
-fn decimal_separator(_locale: SupportedLocale) -> char {
-    // All first-release locales conventionally use a decimal point. Keeping the
-    // decision here makes adding a comma-decimal locale a data-localized change.
-    '.'
+fn decimal_separator(locale: SupportedLocale) -> char {
+    match locale {
+        SupportedLocale::EsEs
+        | SupportedLocale::FrFr
+        | SupportedLocale::DeDe
+        | SupportedLocale::PtBr
+        | SupportedLocale::RuRu => ',',
+        _ => '.',
+    }
 }
 
-fn grouping_separator(_locale: SupportedLocale) -> char {
-    // en-US, zh-CN, and ja-JP all conventionally group decimal thousands with a comma.
-    ','
+fn grouping_separator(locale: SupportedLocale) -> char {
+    match locale {
+        SupportedLocale::EsEs | SupportedLocale::DeDe | SupportedLocale::PtBr => '.',
+        SupportedLocale::FrFr => '\u{202f}',
+        SupportedLocale::RuRu => '\u{00a0}',
+        _ => ',',
+    }
 }
 
 fn group_integer(locale: SupportedLocale, canonical: &str) -> String {
@@ -144,7 +168,12 @@ fn group_integer(locale: SupportedLocale, canonical: &str) -> String {
     let separator = grouping_separator(locale);
     let mut reversed = String::with_capacity(canonical.len() + canonical.len() / 3);
     for (position, digit) in digits.chars().rev().enumerate() {
-        if position != 0 && position % 3 == 0 {
+        let boundary = if locale == SupportedLocale::HiIn {
+            position >= 3 && (position - 3) % 2 == 0
+        } else {
+            position != 0 && position % 3 == 0
+        };
+        if boundary {
             reversed.push(separator);
         }
         reversed.push(digit);
@@ -158,18 +187,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decimal_si_file_sizes_match_reference_style() {
-        assert_eq!(
-            format_bytes(SupportedLocale::EnUs, 73_600_000_000),
-            "73.6 GB"
-        );
-        assert_eq!(format_bytes(SupportedLocale::ZhCn, 4_300_000_000), "4.3 GB");
-        assert_eq!(format_bytes(SupportedLocale::JaJp, 999), "999 B");
+    fn binary_units_cover_boundaries_and_large_sizes() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (999, "999 B"),
+            (1023, "1,023 B"),
+            (1024, "1 KiB"),
+            (1536, "1.5 KiB"),
+            (1024 * 1024, "1 MiB"),
+            (1024 * 1024 * 1024, "1 GiB"),
+            (1_u64 << 40, "1 TiB"),
+            (1_u64 << 50, "1 PiB"),
+            (1_u64 << 60, "1 EiB"),
+            (u64::MAX, "16 EiB"),
+        ] {
+            assert_eq!(format_bytes(SupportedLocale::EnUs, bytes), expected);
+        }
     }
 
     #[test]
     fn speed_reuses_exactly_the_same_size_policy() {
-        assert_eq!(format_speed(SupportedLocale::EnUs, 18_400_000), "18.4 MB/s");
+        assert_eq!(
+            format_speed(SupportedLocale::EnUs, 18 * 1024 * 1024),
+            "18 MiB/s"
+        );
+        assert_eq!(format_speed(SupportedLocale::EnUs, 1024), "1 KiB/s");
     }
 
     #[test]
@@ -201,6 +243,41 @@ mod tests {
             "12,345.6"
         );
         assert_eq!(format_decimal(SupportedLocale::EnUs, f64::NAN, 1), "—");
+    }
+
+    #[test]
+    fn registered_languages_use_their_number_conventions_and_binary_units() {
+        for locale in [
+            SupportedLocale::EsEs,
+            SupportedLocale::DeDe,
+            SupportedLocale::PtBr,
+        ] {
+            assert_eq!(format_decimal(locale, 12_345.6, 1), "12.345,6");
+            assert_eq!(format_bytes(locale, 1536), "1,5 KiB");
+        }
+        assert_eq!(
+            format_decimal(SupportedLocale::FrFr, 12_345.6, 1),
+            "12\u{202f}345,6"
+        );
+        assert_eq!(
+            format_decimal(SupportedLocale::RuRu, 12_345.6, 1),
+            "12\u{00a0}345,6"
+        );
+        assert_eq!(
+            format_integer(SupportedLocale::HiIn, 12_345_678),
+            "1,23,45,678"
+        );
+        assert_eq!(
+            format_signed_integer(SupportedLocale::HiIn, -123_456),
+            "-1,23,456"
+        );
+        assert_eq!(
+            format_decimal(SupportedLocale::KoKr, 12_345.6, 1),
+            "12,345.6"
+        );
+        for locale in SupportedLocale::ALL {
+            assert!(format_speed(locale, 1_048_576).ends_with("MiB/s"));
+        }
     }
 
     #[test]

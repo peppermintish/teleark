@@ -330,7 +330,7 @@ nav-settings = 设置
 
 filter-all-channels = 全部频道
 filter-video = 视频
-filter-large-files = 大于 1 GB
+filter-large-files = 大于 1 GiB
 filter-all-statuses = 全部状态
 
 table-name = 名称
@@ -385,8 +385,8 @@ transfer-summary-total-speed = 总速度
 transfer-summary-today-data = 今日下载
 transfer-summary-month-change = 比昨日增加 28%
 transfer-footer-total = 共 166 个任务
-transfer-footer-downloading = 下载中 8 个（78.27 GB）
-transfer-footer-waiting = 等待中 156 个（210.43 GB）
+transfer-footer-downloading = 下载中 8 个（78.27 GiB）
+transfer-footer-waiting = 等待中 156 个（210.43 GiB）
 transfer-footer-unlimited = 限速：无限制
 transfer-footer-total-live = 共 { $count } 个任务
 transfer-footer-downloading-live = { $count } 个下载中
@@ -590,7 +590,7 @@ settings-telegram-credentials-removed = 已移除
 settings-telegram-credentials-removed-using-distribution = 已移除个人凭据，正使用内置发行凭据
 settings-telegram-api-id-invalid = 请输入大于零的数字 API ID，以及由 32 个十六进制字符组成的 API Hash。
 settings-telegram-api-id-failed = 无法保存凭据。请检查本地存储后重试。
-settings-telegram-credentials-storage-note = 你的 API ID 和 API Hash 会存入 TeleArk 的本地 SQLite 资料库数据库。请保护好你的 macOS 账户和备份。个人凭据会覆盖 TeleArk 发行方随构建提供的凭据。
+settings-telegram-credentials-storage-note = API ID 和 API Hash 使用上方选择的凭据存储方式。个人凭据优先于 TeleArk 内置凭据。
 settings-telegram-credentials-distribution-note = 当前版本正在使用其 TeleArk 发行方注册的 API 凭据，因此无需额外设置即可登录。你可以在上方保存自己的应用凭据来覆盖它们。TeleArk 绝不会使用共享的 Telegram Desktop 凭据。
 settings-telegram-api-panel-action = 打开 Telegram API 开发面板
 settings-preferences-ready = 设置已存储在本机
@@ -1123,6 +1123,15 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.0 · 凭据保护与筛选下载
+
+    - macOS 默认启用钥匙串以保护 API 凭据、代理密码和加密密钥。关闭需确认，并将机密移至未加密的私有 SQLite 资料库。Windows 和 Linux 暂无原生凭据存储集成，使用 SQLite。
+    - macOS 安装包使用持久的自签名代码签名身份，保持钥匙串访问一致。这并非 Apple 公证，首次访问或系统策略仍可能要求授权。
+    - 将符合频道筛选条件的所有已索引文件下载到每个批次独立的文件夹，并显示准备、排队和取消状态。
+    - 为主要操作新增西班牙语、法语、德语、巴西葡萄牙语、俄语、韩语和印地语。尚未翻译的详细诊断及版本说明回退为英语。
+    - 所有字节大小和传输速率统一使用二进制 IEC 单位。索引自动运行，传输通知归入通用设置。
+    - 应用版本为 0.5.0。SQLite 读写架构 23 可从支持的架构 0–22 自动升级。加密文件、传输和恢复编码保持兼容。
+
     ## 0.4.14 · 修正贡献者指南
 
     - 修正了在 Windows 上保护私有配置的贡献者指南，并说明如何在独立的 shell 进程中加载开发设置。
@@ -1835,3 +1844,69 @@ upload-part-map-grouping = 共 { $count } 个块 · 每格最多 { $size } 个�
 installer-preparing = 正在安装 TeleArk。安装窗口会显示进度，您可以安全地停止安装。
 installer-cancelled = 安装已停止。您可以重试或关闭安装程序。
 installer-failed = 安装未完成（代码 { $code }）。请查看安装日志了解原因：{ $log }
+
+settings-keychain-title = 钥匙串
+
+settings-keychain-description = 将 API 凭据、代理密码和加密密钥存储在 macOS 钥匙串中。默认启用，将机密与本地资料库分开保护。
+
+settings-keychain-unavailable = 目前 Windows 和 Linux 尚未实现安全的原生集成，因此钥匙串不可用。凭据存储在私有的本地 SQLite 资料库中。
+
+settings-keychain-on = 钥匙串：已开启
+
+settings-keychain-off = 钥匙串：已关闭
+
+settings-keychain-failed = 无法更改凭据存储方式。原有存储保持完整。请解锁钥匙串或恢复访问权限后重试。
+
+settings-keychain-saved = 凭据存储已更新
+
+settings-keychain-activity = { $phase } · 阶段用时 { $duration } · 上次活动于 { $activity } 前
+
+settings-keychain-disable-title = 保持凭据安全
+
+settings-keychain-disable-warning = macOS 钥匙串将凭据和加密密钥与资料库分开保护。关闭后，它们将存储在未加密的本地 SQLite 数据库中，不再受钥匙串保护。建议保持钥匙串开启。
+
+settings-keychain-keep = 保持钥匙串开启
+
+settings-keychain-disable-action = 使用 SQLite
+
+settings-language-fallback-note = 部分详细诊断信息和版本说明尚无翻译时会显示英文。
+
+channel-filter-batch-action = 批量下载
+
+channel-filter-batch-help = 将符合筛选条件的所有已索引文件下载到新的批次文件夹，包括此列表之外的文件。旧记录会自动索引；仅包含已索引的文件。每批最多 5,000 个文件。
+
+channel-filter-batch-discovering = 正在查找：找到 { $matched } 个 · 已检查 { $examined } 个 · 阶段用时 { $seconds } 秒 · 上次活动于 { $idle } 秒前
+
+channel-filter-batch-folder = 正在准备批次文件夹 · { $seconds } 秒 · 上次活动于 { $idle } 秒前
+
+channel-filter-batch-admitting = 正在将 { $matched } 个下载保存到队列 · { $seconds } 秒 · 上次活动于 { $idle } 秒前
+
+channel-filter-batch-queued = 已将 { $count } 个下载加入队列，目录：{ $folder }
+
+channel-filter-batch-capacity = 匹配的文件超过 5,000 个。请缩小筛选范围后重试。
+
+channel-filter-batch-cancelled = 批次准备已取消
+
+channel-filter-batch-cancel = 取消批次准备
+
+channel-filter-batch-open = 显示批次下载
+
+channel-filter-batch-phase-discovery = 正在查找匹配文件
+
+channel-filter-batch-phase-folder = 正在准备批次文件夹
+
+channel-filter-batch-phase-queue = 正在保存下载队列
+
+channel-filter-batch-phase-complete = 批次准备完成
+
+channel-filter-batch-event = { $phase } · 开始后 { $seconds } 秒
+
+settings-keychain-cleanup-pending = 凭据存储已更新。部分旧钥匙串副本暂时无法移除；下次更改凭据时会重试清理。
+
+settings-keychain-unavailable-credentials = 部分凭据属于另一台设备的钥匙串。请重新输入 API 或代理凭据，并导入加密恢复包以恢复访问。
+
+upload-options-title = 上传选项
+
+channel-filter-batch-no-matches = 没有符合这些筛选条件的已索引文件。
+
+channel-filter-batch-failed = 批次准备失败。请检查下载文件夹和账户后重试。

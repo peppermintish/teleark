@@ -258,21 +258,7 @@ fn parse_window_size(value: &str) -> Option<(u32, u32)> {
 }
 
 fn parse_locale(value: &str) -> Option<SupportedLocale> {
-    let language = value
-        .split(['.', '@'])
-        .next()
-        .unwrap_or(value)
-        .split(['-', '_'])
-        .next()
-        .unwrap_or(value)
-        .to_ascii_lowercase();
-    let negotiated = SupportedLocale::negotiate([value]);
-    match (language.as_str(), negotiated) {
-        ("en", SupportedLocale::EnUs) => Some(SupportedLocale::EnUs),
-        ("zh", SupportedLocale::ZhCn) => Some(SupportedLocale::ZhCn),
-        ("ja", SupportedLocale::JaJp) => Some(SupportedLocale::JaJp),
-        _ => None,
-    }
+    SupportedLocale::parse_supported(value)
 }
 
 fn detect_system_locale() -> SupportedLocale {
@@ -305,7 +291,8 @@ mod tests {
         assert_eq!(parse_locale("zh-Hans-CN"), Some(SupportedLocale::ZhCn));
         assert_eq!(parse_locale("zh-Hant-TW"), None);
         assert_eq!(parse_locale("ja_JP"), Some(SupportedLocale::JaJp));
-        assert_eq!(parse_locale("fr-FR"), None);
+        assert_eq!(parse_locale("fr-FR"), Some(SupportedLocale::FrFr));
+        assert_eq!(parse_locale("ar-SA"), None);
     }
 
     #[test]

@@ -330,7 +330,7 @@ nav-settings = 設定
 
 filter-all-channels = すべてのチャンネル
 filter-video = ビデオ
-filter-large-files = 1 GB より大きい
+filter-large-files = 1 GiB より大きい
 filter-all-statuses = すべての状態
 
 table-name = 名前
@@ -385,8 +385,8 @@ transfer-summary-total-speed = 合計速度
 transfer-summary-today-data = 本日の転送量
 transfer-summary-month-change = 昨日より 28% 増加
 transfer-footer-total = 166 タスク
-transfer-footer-downloading = ダウンロード中 8 件（78.27 GB）
-transfer-footer-waiting = 待機中 156 件（210.43 GB）
+transfer-footer-downloading = ダウンロード中 8 件（78.27 GiB）
+transfer-footer-waiting = 待機中 156 件（210.43 GiB）
 transfer-footer-unlimited = 制限：無制限
 transfer-footer-total-live = { $count } タスク
 transfer-footer-downloading-live = ダウンロード中 { $count } 件
@@ -590,7 +590,7 @@ settings-telegram-credentials-removed = 削除しました
 settings-telegram-credentials-removed-using-distribution = 個人認証情報を削除し、組み込み配布認証情報を使用中
 settings-telegram-api-id-invalid = 0 より大きい数字の API ID と、32 桁の16進数 API Hash を入力してください。
 settings-telegram-api-id-failed = 認証情報を保存できませんでした。ローカルストレージを確認して、もう一度お試しください。
-settings-telegram-credentials-storage-note = あなたの API ID と API Hash は TeleArk のローカル SQLite ライブラリデータベースに保存されます。macOS アカウントとバックアップを保護してください。個人認証情報は TeleArk 配布元がビルドに提供した認証情報より優先されます。
+settings-telegram-credentials-storage-note = API ID と API Hash は上で選択した認証情報の保存先を使用します。個人の認証情報は TeleArk 付属の認証情報より優先されます。
 settings-telegram-credentials-distribution-note = このビルドは TeleArk 配布元が登録した API 認証情報を使用しているため、追加設定なしでサインインできます。上で自分のアプリ認証情報を保存すると上書きできます。共有の Telegram Desktop 認証情報は使用しません。
 settings-telegram-api-panel-action = Telegram API 開発パネルを開く
 settings-preferences-ready = 設定はこの Mac に保存されています
@@ -1123,6 +1123,15 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.0 · 認証情報の保護と条件付きダウンロード
+
+    - macOS では API 認証情報、プロキシのパスワード、暗号化キーをキーチェーンで既定で保護します。オフにするには確認が必要で、機密情報は暗号化されていない非公開の SQLite ライブラリに移されます。Windows と Linux はネイティブ連携が未実装のため SQLite を使用します。
+    - macOS パッケージは継続的な自己署名のコード署名 ID を使用し、キーチェーンへのアクセスを維持します。Apple の公証ではなく、初回アクセスやシステムポリシーによって許可が必要になる場合があります。
+    - チャンネルの条件に一致する索引済みファイルを、一括処理ごとのフォルダーにダウンロードできます。準備、キュー追加、キャンセルの状態を表示します。
+    - 主な操作にスペイン語、フランス語、ドイツ語、ブラジルポルトガル語、ロシア語、韓国語、ヒンディー語を追加しました。未翻訳の詳細な診断とリリースノートは英語で表示します。
+    - すべてのバイト数と転送速度を IEC の二進単位で表示します。索引は自動実行され、転送通知は一般設定にあります。
+    - アプリのバージョンは 0.5.0 です。SQLite 読み書きスキーマ 23 は対応するスキーマ 0–22 から自動更新されます。暗号化ファイル、転送、復旧のコーデック互換性は維持されます。
+
     ## 0.4.14 · コントリビューター向けガイドの修正
 
     - Windows で機密設定を保護するためのコントリビューター向けガイドを修正し、別のシェルプロセスで開発設定を読み込む方法を明確にしました。
@@ -1835,3 +1844,69 @@ upload-part-map-grouping = { $count } ブロック · 1 セル最大 { $size } �
 installer-preparing = TeleArk をインストールしています。インストール画面で進行状況を確認し、安全に停止できます。
 installer-cancelled = インストールを停止しました。再試行するか、セットアップを閉じてください。
 installer-failed = インストールは完了しませんでした（コード { $code }）。原因はインストールログを確認してください：{ $log }
+
+settings-keychain-title = キーチェーン
+
+settings-keychain-description = API 認証情報、プロキシのパスワード、暗号化キーを macOS キーチェーンに保存します。既定で有効になり、ローカルライブラリと分けて機密情報を保護します。
+
+settings-keychain-unavailable = Windows と Linux では安全なネイティブ連携が未実装のため、現段階でキーチェーンを使用できません。認証情報は非公開のローカル SQLite ライブラリに保存されます。
+
+settings-keychain-on = キーチェーン：オン
+
+settings-keychain-off = キーチェーン：オフ
+
+settings-keychain-failed = 認証情報の保存先を変更できませんでした。元の保存データは保持されています。キーチェーンを解除するかアクセスを復旧して、再試行してください。
+
+settings-keychain-saved = 認証情報の保存先を更新しました
+
+settings-keychain-activity = { $phase } · フェーズ { $duration } · 最終動作は { $activity } 前
+
+settings-keychain-disable-title = 認証情報を安全に保護
+
+settings-keychain-disable-warning = macOS キーチェーンは認証情報と暗号化キーをライブラリと分けて保護します。オフにすると、キーチェーンの保護なしで暗号化されていないローカル SQLite データベースに保存されます。キーチェーンをオンのままにすることをお勧めします。
+
+settings-keychain-keep = キーチェーンをオンのままにする
+
+settings-keychain-disable-action = SQLite を使用
+
+settings-language-fallback-note = 一部の詳細な診断情報やリリースノートは、翻訳がない場合に英語で表示されます。
+
+channel-filter-batch-action = 一括ダウンロード
+
+channel-filter-batch-help = この一覧外も含め、条件に一致する索引済みファイルを新しい一括フォルダーにダウンロードします。過去の履歴は自動で索引され、索引済みのファイルのみ対象です。上限：1 回 5,000 ファイル。
+
+channel-filter-batch-discovering = 一致を検索中：{ $matched } 件 · { $examined } 件確認済み · 経過 { $seconds } 秒 · 最終動作は { $idle } 秒前
+
+channel-filter-batch-folder = 一括フォルダーを準備中 · { $seconds } 秒 · 最終動作は { $idle } 秒前
+
+channel-filter-batch-admitting = { $matched } 件のダウンロードをキューに保存中 · { $seconds } 秒 · 最終動作は { $idle } 秒前
+
+channel-filter-batch-queued = { $count } 件のダウンロードを { $folder } に追加しました
+
+channel-filter-batch-capacity = 5,000 ファイルを超える一致があります。条件を絞って再試行してください。
+
+channel-filter-batch-cancelled = 一括準備をキャンセルしました
+
+channel-filter-batch-cancel = 一括準備をキャンセル
+
+channel-filter-batch-open = 一括ダウンロードを表示
+
+channel-filter-batch-phase-discovery = 一致するファイルを検索中
+
+channel-filter-batch-phase-folder = 一括フォルダーを準備中
+
+channel-filter-batch-phase-queue = ダウンロードキューを保存中
+
+channel-filter-batch-phase-complete = 一括準備が完了しました
+
+channel-filter-batch-event = { $phase } · 開始から { $seconds } 秒
+
+settings-keychain-cleanup-pending = 認証情報の保存先を更新しました。一部の古いキーチェーンのコピーはまだ削除できません。次の認証情報の変更時に削除を再試行します。
+
+settings-keychain-unavailable-credentials = 一部の認証情報は別のデバイスのキーチェーンに属しています。API またはプロキシの認証情報を再入力し、暗号化の復旧バンドルを読み込んでアクセスを復元してください。
+
+upload-options-title = アップロードのオプション
+
+channel-filter-batch-no-matches = この条件に一致する索引済みファイルはありません。
+
+channel-filter-batch-failed = 一括準備に失敗しました。ダウンロードフォルダーとアカウントを確認して再試行してください。
