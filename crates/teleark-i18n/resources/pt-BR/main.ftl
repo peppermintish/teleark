@@ -802,3 +802,5 @@ settings-keychain-status-failed = Não foi possível ler as configurações de c
 settings-keychain-unknown = Status das Chaves indisponível
 
 settings-keychain-cancelled = Alteração do armazenamento de credenciais cancelada
+
+settings-keychain-cancelling = Parando após a operação atual de credenciais terminar…

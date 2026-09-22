@@ -802,3 +802,5 @@ settings-keychain-status-failed = Impossible de lire les paramètres des identif
 settings-keychain-unknown = État du trousseau indisponible
 
 settings-keychain-cancelled = Modification du stockage des identifiants annulée
+
+settings-keychain-cancelling = Arrêt après la fin de l’opération sur les identifiants en cours…

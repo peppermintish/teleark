@@ -818,3 +818,5 @@ settings-keychain-status-failed = Не удалось прочитать нас�
 settings-keychain-unknown = Состояние связки ключей недоступно
 
 settings-keychain-cancelled = Изменение хранилища учётных данных отменено
+
+settings-keychain-cancelling = Остановка после завершения текущей операции с учётными данными…

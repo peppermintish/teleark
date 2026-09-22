@@ -802,3 +802,5 @@ settings-keychain-status-failed = Speichereinstellungen für Zugangsdaten konnte
 settings-keychain-unknown = Schlüsselbundstatus nicht verfügbar
 
 settings-keychain-cancelled = Änderung des Zugangsdaten-Speichers abgebrochen
+
+settings-keychain-cancelling = Wird nach Abschluss des aktuellen Zugangsdaten-Vorgangs gestoppt…

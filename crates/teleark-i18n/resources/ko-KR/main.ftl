@@ -770,3 +770,5 @@ settings-keychain-status-failed = 자격 증명 저장소 설정을 읽지 못�
 settings-keychain-unknown = 키체인 상태 확인 불가
 
 settings-keychain-cancelled = 자격 증명 저장소 변경 취소됨
+
+settings-keychain-cancelling = 현재 자격 증명 작업이 끝나면 중지합니다…

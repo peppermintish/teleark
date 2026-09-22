@@ -802,3 +802,5 @@ settings-keychain-status-failed = क्रेडेंशियल स्टो
 settings-keychain-unknown = कीचेन की स्थिति उपलब्ध नहीं
 
 settings-keychain-cancelled = क्रेडेंशियल स्टोरेज बदलाव रद्द हुआ
+
+settings-keychain-cancelling = मौजूदा क्रेडेंशियल कार्रवाई पूरी होने के बाद रुक रहा है…

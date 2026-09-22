@@ -802,3 +802,5 @@ settings-keychain-status-failed = No se pudieron leer los ajustes de credenciale
 settings-keychain-unknown = Estado del Llavero no disponible
 
 settings-keychain-cancelled = Cambio de almacenamiento de credenciales cancelado
+
+settings-keychain-cancelling = Se detendrá al terminar la operación de credenciales actual…

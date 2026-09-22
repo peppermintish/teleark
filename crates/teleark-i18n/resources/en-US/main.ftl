@@ -1945,3 +1945,5 @@ settings-keychain-status-failed = Credential storage settings could not be read.
 settings-keychain-unknown = Keychain status unavailable
 
 settings-keychain-cancelled = Credential storage change cancelled
+
+settings-keychain-cancelling = Stopping after the current credential operation finishes…

@@ -1918,3 +1918,5 @@ settings-keychain-status-failed = 認証情報の保存設定を読み込めま�
 settings-keychain-unknown = キーチェーンの状態を確認できません
 
 settings-keychain-cancelled = 認証情報の保存先の変更をキャンセルしました
+
+settings-keychain-cancelling = 現在の認証情報の操作が完了したら停止します…

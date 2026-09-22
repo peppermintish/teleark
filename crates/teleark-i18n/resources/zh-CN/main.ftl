@@ -1918,3 +1918,5 @@ settings-keychain-status-failed = 无法读取凭据存储设置。请恢复访�
 settings-keychain-unknown = 钥匙串状态不可用
 
 settings-keychain-cancelled = 凭据存储更改已取消
+
+settings-keychain-cancelling = 将在当前凭据操作完成后停止…
