@@ -9,11 +9,11 @@ mkdir -p "$stage/TeleArk.app/Contents/MacOS"
 cp /bin/echo "$stage/TeleArk.app/Contents/MacOS/teleark"
 cp "$root/crates/teleark-gui/assets/macos/Info.plist" "$stage/TeleArk.app/Contents/Info.plist"
 "$root/scripts/macos/sign-app.sh" "$stage/TeleArk.app" "$stage/teleark.bin"
-codesign -d -r- "$stage/TeleArk.app" 2> "$stage/first-requirement"
+codesign -d -r- "$stage/TeleArk.app" > "$stage/first-requirement" 2>&1
 # An update changes sealed resources but must retain the same designated requirement.
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 99.0.0' "$stage/TeleArk.app/Contents/Info.plist"
 "$root/scripts/macos/sign-app.sh" "$stage/TeleArk.app" "$stage/teleark.bin"
-codesign -d -r- "$stage/TeleArk.app" 2> "$stage/second-requirement"
+codesign -d -r- "$stage/TeleArk.app" > "$stage/second-requirement" 2>&1
 diff "$stage/first-requirement" "$stage/second-requirement"
 cp "$stage/TeleArk.app/Contents/MacOS/teleark" "$stage/bundle-code"
 cp "$stage/teleark.bin" "$stage/standalone-code"

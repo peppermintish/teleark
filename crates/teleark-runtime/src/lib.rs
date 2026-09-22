@@ -60,7 +60,9 @@ pub use channel_sync::{
     HistoryStatus, ManagedScanObserver, ManagedScanStatus,
 };
 pub use teleark_storage::{ManagedChannelChange, ManagedChannelChangeKind, ManagedChannelWatch};
+mod credential_store;
 mod credentials;
+pub use credential_store::KeychainStatus;
 mod proxy;
 pub use teleark_telegram::network::{
     NetworkPhase, NetworkRoute, NetworkSnapshot, NetworkUpdates, ProxyConfig, ProxyFailure,
@@ -85,11 +87,13 @@ pub use vault_progress::{
 };
 
 pub use channel_transfer::{
-    ChannelDownloadCleanup, ChannelDownloadCleanupPhase, ChannelDownloadEvent,
-    ChannelDownloadEventKind, ChannelDownloadFailure, ChannelDownloadFailureStage,
-    ChannelDownloadPartEvent, ChannelDownloadPartFailure, ChannelDownloadRequest,
-    ChannelDownloadSnapshot, ChannelDownloadState, ChannelDownloadVerification, DesktopTransfers,
-    PartEventHistory, TransferRates, available_download_destination,
+    ChannelBatchFilter, ChannelBatchPreparation, ChannelBatchPreparationPhase,
+    ChannelBatchPreparationSnapshot, ChannelDownloadCleanup, ChannelDownloadCleanupPhase,
+    ChannelDownloadEvent, ChannelDownloadEventKind, ChannelDownloadFailure,
+    ChannelDownloadFailureStage, ChannelDownloadPartEvent, ChannelDownloadPartFailure,
+    ChannelDownloadRequest, ChannelDownloadSnapshot, ChannelDownloadState,
+    ChannelDownloadVerification, DesktopTransfers, FilteredChannelBatch, PartEventHistory,
+    TransferRates, available_download_destination,
 };
 pub use credentials::TelegramCredentialSource;
 mod storage_channel;
@@ -376,6 +380,7 @@ pub fn classify_file(path: &Path) -> FileKind {
 /// Ready-to-use local library facade for desktop frontends.
 #[derive(Clone)]
 pub struct DesktopLibrary {
+    credential_store: credential_store::CredentialStore,
     pub(crate) download_slots: Arc<download_slots::DownloadSlots>,
     service: Arc<LibraryService<StorageWorker>>,
     worker: StorageWorker,
@@ -406,6 +411,7 @@ impl DesktopLibrary {
         Ok(Self {
             download_slots,
             bandwidth,
+            credential_store: credential_store::CredentialStore::open(worker.clone())?,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path.to_owned()),
@@ -435,6 +441,7 @@ impl DesktopLibrary {
         Ok(Self {
             download_slots,
             bandwidth,
+            credential_store: credential_store::CredentialStore::open(worker.clone())?,
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path),
@@ -482,49 +489,51 @@ impl DesktopLibrary {
         self.worker.set_locale_override(locale)
     }
 
-    /// Reports whether a complete, validated Telegram API credential pair is
-    /// stored without exposing the API Hash to the frontend.
+    /// Restores the explicitly configured route and its selected credential backend.
     pub fn proxy_configuration(&self) -> Result<NetworkRoute, ApplicationError> {
-        self.worker.request("proxy_configuration", |reply| {
-            StorageRequest::ProxyConfiguration { reply }
-        })
+        proxy::load_configuration(self)
     }
 
     pub(crate) fn set_proxy_configuration(
         &self,
         route: &NetworkRoute,
     ) -> Result<(), ApplicationError> {
-        self.worker.request("set_proxy_configuration", |reply| {
-            StorageRequest::SetProxyConfiguration {
-                route: route.clone(),
-                reply,
-            }
-        })
+        proxy::save_configuration(self, route)
     }
 
+    /// Reports saved credential presence without exposing the API hash.
     pub fn telegram_credentials_status(
         &self,
     ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
-        self.worker.telegram_credentials_status()
+        self.stored_telegram_credentials().map(|value| {
+            value.map(|value| TelegramCredentialsStatus {
+                api_id: value.api_id,
+                source: TelegramCredentialSource::User,
+            })
+        })
     }
 
-    /// Persists a complete Telegram API credential pair in the Library
-    /// database. Callers must not log or retain `api_hash` after this returns.
+    /// Persists a validated pair in the selected credential backend.
     pub fn set_telegram_credentials(
         &self,
         api_id: i32,
         api_hash: &str,
     ) -> Result<(), ApplicationError> {
-        if api_id <= 0 {
-            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
-        }
-        credentials::validate_api_hash(api_hash)?;
-        self.worker.set_telegram_credentials(api_id, api_hash)
+        let bytes = credentials::encode_user_pair(api_id, api_hash)?;
+        self.credential_write(credentials::USER_PAIR_SERVICE, "default", &bytes)?;
+        self.worker.clear_telegram_credentials()
     }
 
-    /// Removes both stored Telegram application credentials atomically.
+    /// Retires the legacy copy before deleting the current credential.
     pub fn clear_telegram_credentials(&self) -> Result<(), ApplicationError> {
-        self.worker.clear_telegram_credentials()
+        self.worker.clear_telegram_credentials()?;
+        self.credential_delete(credentials::USER_PAIR_SERVICE, "default")
+    }
+
+    pub(crate) fn migrate_legacy_credentials(&self) -> Result<(), ApplicationError> {
+        self.stored_telegram_credentials()?;
+        self.proxy_configuration()?;
+        Ok(())
     }
 
     pub fn preferences(&self) -> Result<DesktopPreferences, ApplicationError> {
@@ -737,7 +746,23 @@ impl DesktopLibrary {
     pub(crate) fn stored_telegram_credentials(
         &self,
     ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
-        self.worker.active_telegram_credentials()
+        let storage = self.worker.clone();
+        let Some(bytes) = self.credential_read_or_import_with(
+            credentials::USER_PAIR_SERVICE,
+            "default",
+            move || {
+                storage
+                    .active_telegram_credentials()?
+                    .map(|legacy| credentials::encode_user_pair(legacy.api_id, &legacy.api_hash))
+                    .transpose()
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        let pair = credentials::decode_user_pair(&bytes)?;
+        self.worker.clear_telegram_credentials()?;
+        Ok(Some(pair))
     }
 
     /// Persists the authorized account and its currently visible dialogs.
@@ -958,6 +983,50 @@ pub struct CachedChannelView {
 }
 
 enum StorageRequest {
+    EnqueueCredentialCleanup {
+        item: teleark_storage::CredentialCleanup,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    UnavailableCredentialCount {
+        reply: SyncSender<Result<u64, ApplicationError>>,
+    },
+    CredentialCleanup {
+        reply: SyncSender<Result<Vec<teleark_storage::CredentialCleanup>, ApplicationError>>,
+    },
+    CredentialCleanupCount {
+        reply: SyncSender<Result<u64, ApplicationError>>,
+    },
+    CompleteCredentialCleanup {
+        item: teleark_storage::CredentialCleanup,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    CredentialBackend {
+        reply: SyncSender<Result<teleark_storage::CredentialBackend, ApplicationError>>,
+    },
+    CredentialItem {
+        namespace: String,
+        identity: String,
+        reply: SyncSender<Result<Option<teleark_storage::CredentialItem>, ApplicationError>>,
+    },
+    CredentialItems {
+        reply: SyncSender<Result<Vec<teleark_storage::CredentialItem>, ApplicationError>>,
+    },
+    SaveCredentialItem {
+        expected: teleark_storage::CredentialBackend,
+        namespace: String,
+        identity: String,
+        item: Option<teleark_storage::CredentialItem>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    ReplaceCredentialBackend {
+        expected: teleark_storage::CredentialBackend,
+        enabled: bool,
+        items: Vec<teleark_storage::CredentialItem>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    CredentialVaultEpochs {
+        reply: SyncSender<Result<Vec<VaultMetadataRecord>, ApplicationError>>,
+    },
     SaveVaultUploads {
         records: Vec<teleark_storage::VaultUploadRecord>,
         reply: SyncSender<Result<(), ApplicationError>>,
@@ -975,10 +1044,11 @@ enum StorageRequest {
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     ProxyConfiguration {
-        reply: SyncSender<Result<NetworkRoute, ApplicationError>>,
+        reply: SyncSender<Result<proxy::StoredProxyPolicy, ApplicationError>>,
     },
     SetProxyConfiguration {
-        route: NetworkRoute,
+        expected: zeroize::Zeroizing<String>,
+        replacement: String,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     CachedChannelView {
@@ -1087,16 +1157,8 @@ enum StorageRequest {
         candidate: PathBuf,
         reply: SyncSender<Result<bool, ApplicationError>>,
     },
-    TelegramCredentialsStatus {
-        reply: SyncSender<Result<Option<TelegramCredentialsStatus>, ApplicationError>>,
-    },
     ActiveTelegramCredentials {
         reply: SyncSender<Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError>>,
-    },
-    SetTelegramCredentials {
-        api_id: i32,
-        api_hash: zeroize::Zeroizing<String>,
-        reply: SyncSender<Result<(), ApplicationError>>,
     },
     ClearTelegramCredentials {
         reply: SyncSender<Result<(), ApplicationError>>,
@@ -1197,6 +1259,12 @@ enum StorageRequest {
         account_id: teleark_core::AccountId,
         chat_id: teleark_core::ChatId,
         limit: usize,
+        reply: SyncSender<Result<Vec<CachedTelegramFileRecord>, ApplicationError>>,
+    },
+    ChannelBatchCandidates {
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        before: i64,
         reply: SyncSender<Result<Vec<CachedTelegramFileRecord>, ApplicationError>>,
     },
     TelegramIndexState {
@@ -1425,33 +1493,11 @@ impl StorageWorker {
         })
     }
 
-    fn telegram_credentials_status(
-        &self,
-    ) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
-        self.request("telegram_credentials_status", |reply| {
-            StorageRequest::TelegramCredentialsStatus { reply }
-        })
-    }
-
     fn active_telegram_credentials(
         &self,
     ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
         self.request("active_telegram_credentials", |reply| {
             StorageRequest::ActiveTelegramCredentials { reply }
-        })
-    }
-
-    fn set_telegram_credentials(
-        &self,
-        api_id: i32,
-        api_hash: &str,
-    ) -> Result<(), ApplicationError> {
-        self.request("set_telegram_credentials", |reply| {
-            StorageRequest::SetTelegramCredentials {
-                api_id,
-                api_hash: zeroize::Zeroizing::new(api_hash.to_owned()),
-                reply,
-            }
         })
     }
 
@@ -1622,6 +1668,102 @@ impl LibraryRepository for StorageWorker {
 fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>) {
     while let Ok(request) = receiver.recv() {
         match request {
+            StorageRequest::EnqueueCredentialCleanup { item, reply } => {
+                let _ = reply.send(
+                    database
+                        .enqueue_credential_cleanup(&item)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::UnavailableCredentialCount { reply } => {
+                let _ = reply.send(
+                    database
+                        .unavailable_credential_count()
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CredentialCleanup { reply } => {
+                let _ = reply.send(database.credential_cleanup().map_err(map_storage_error));
+            }
+            StorageRequest::CredentialCleanupCount { reply } => {
+                let _ = reply.send(
+                    database
+                        .credential_cleanup_count()
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CompleteCredentialCleanup { item, reply } => {
+                let _ = reply.send(
+                    database
+                        .complete_credential_cleanup(&item)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CredentialBackend { reply } => {
+                let _ = reply.send(
+                    database
+                        .credential_backend_for_platform(cfg!(target_os = "macos"))
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CredentialItem {
+                namespace,
+                identity,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .credential_item(&namespace, &identity)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CredentialItems { reply } => {
+                let _ = reply.send(database.credential_items().map_err(map_storage_error));
+            }
+            StorageRequest::SaveCredentialItem {
+                expected,
+                namespace,
+                identity,
+                item,
+                reply,
+            } => {
+                let result = database
+                    .save_credential_item(expected, &namespace, &identity, item.as_ref())
+                    .map_err(map_storage_error)
+                    .and_then(|saved| {
+                        if saved {
+                            Ok(())
+                        } else {
+                            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                        }
+                    });
+                let _ = reply.send(result);
+            }
+            StorageRequest::ReplaceCredentialBackend {
+                expected,
+                enabled,
+                items,
+                reply,
+            } => {
+                let result = database
+                    .replace_credential_backend(expected, enabled, &items)
+                    .map_err(map_storage_error)
+                    .and_then(|saved| {
+                        if saved {
+                            Ok(())
+                        } else {
+                            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                        }
+                    });
+                let _ = reply.send(result);
+            }
+            StorageRequest::CredentialVaultEpochs { reply } => {
+                let _ = reply.send(
+                    database
+                        .vault_key_epochs_for_credentials()
+                        .map_err(map_storage_error),
+                );
+            }
             StorageRequest::CachedChannelView {
                 account,
                 chat,
@@ -1751,6 +1893,17 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                     .map_err(map_storage_error);
                 let _ = reply.send(result);
             }
+            StorageRequest::ChannelBatchCandidates {
+                account,
+                chat,
+                before,
+                reply,
+            } => {
+                let result = database
+                    .channel_batch_candidates(account, chat, before)
+                    .map_err(map_storage_error);
+                let _ = reply.send(result);
+            }
             StorageRequest::Import { command, reply } => {
                 let _ = reply.send(import_into_database(&mut database, &command));
             }
@@ -1814,25 +1967,17 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 );
             }
             StorageRequest::ProxyConfiguration { reply } => {
-                let _ = reply.send(proxy::load(&database));
+                let _ = reply.send(proxy::read_policy(&database));
             }
-            StorageRequest::SetProxyConfiguration { route, reply } => {
-                let _ = reply.send(proxy::save(&mut database, &route));
-            }
-            StorageRequest::TelegramCredentialsStatus { reply } => {
-                let result = telegram_credentials_status(&database);
-                let _ = reply.send(result);
+            StorageRequest::SetProxyConfiguration {
+                expected,
+                replacement,
+                reply,
+            } => {
+                let _ = reply.send(proxy::save_reference(&mut database, &expected, replacement));
             }
             StorageRequest::ActiveTelegramCredentials { reply } => {
                 let result = active_telegram_credentials(&database);
-                let _ = reply.send(result);
-            }
-            StorageRequest::SetTelegramCredentials {
-                api_id,
-                api_hash,
-                reply,
-            } => {
-                let result = set_telegram_credentials(&mut database, api_id, &api_hash);
                 let _ = reply.send(result);
             }
             StorageRequest::ClearTelegramCredentials { reply } => {
@@ -2564,17 +2709,6 @@ fn bool_setting(value: bool) -> String {
     value.to_string()
 }
 
-fn telegram_credentials_status(
-    database: &Database,
-) -> Result<Option<TelegramCredentialsStatus>, ApplicationError> {
-    active_telegram_credentials(database).map(|credentials| {
-        credentials.map(|credentials| TelegramCredentialsStatus {
-            api_id: credentials.api_id,
-            source: TelegramCredentialSource::User,
-        })
-    })
-}
-
 fn active_telegram_credentials(
     database: &Database,
 ) -> Result<Option<credentials::ActiveTelegramCredentials>, ApplicationError> {
@@ -2602,33 +2736,6 @@ fn active_telegram_credentials(
         }
         _ => Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
     }
-}
-
-fn set_telegram_credentials(
-    database: &mut Database,
-    api_id: i32,
-    api_hash: &str,
-) -> Result<(), ApplicationError> {
-    if api_id <= 0 {
-        return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
-    }
-    credentials::validate_api_hash(api_hash)?;
-    let updated_at_unix_ms = system_time_unix_ms(SystemTime::now())
-        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
-    database
-        .set_settings(&[
-            SettingRecord {
-                key: TELEGRAM_API_ID_SETTING_KEY.to_owned(),
-                value: api_id.to_string(),
-                updated_at_unix_ms,
-            },
-            SettingRecord {
-                key: TELEGRAM_API_HASH_SETTING_KEY.to_owned(),
-                value: api_hash.to_owned(),
-                updated_at_unix_ms,
-            },
-        ])
-        .map_err(map_storage_error)
 }
 
 fn clear_telegram_credentials(database: &mut Database) -> Result<(), ApplicationError> {
@@ -2729,6 +2836,10 @@ fn map_io_error(error: std::io::Error) -> ApplicationError {
 
 fn map_storage_error(error: StorageError) -> ApplicationError {
     match error {
+        StorageError::InvalidInput {
+            field: "credential_capacity",
+            ..
+        } => ApplicationError::new(ApplicationErrorKind::Capacity),
         StorageError::InvalidInput { .. }
         | StorageError::InvalidCursor(_)
         | StorageError::Invariant(_)

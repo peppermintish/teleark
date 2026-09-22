@@ -12,7 +12,7 @@ created. Whole-file/container BLAKE3 share one source inspection pass.
 A separate [pending envelope v1](PENDING_UPLOAD_FORMAT.md) precedes upload and
 supports same-source, same-account/channel recovery on another device with the
 recovery key. Local executable contexts read v1/v2, preserving v1 geometry and
-wrapped keys; SQLite remains 22. Receipt counters update per RPC, ordinary rate
+wrapped keys; SQLite is version 23. Receipt counters update per RPC, ordinary rate
 publication is one second with a trailing three-second window, and global rates
 are incrementally maintained. Stable row identities and visible-row projections
 keep presentation independent of complete history/database scans.
@@ -51,7 +51,7 @@ Dependencies point toward project-owned contracts. Traits belong at meaningful s
 
 The GPUI Kit 0.6.0 facade uses the matching gpui-pre 0.3.3 family. `application()` chooses the native platform and `init()` initializes the enabled layers. Base provides behavior/focus/accessibility; Component provides styled controls, segmented tabs, Sidebar and DataTable. Native/raw and managed/transfer lists virtualize visible rows. Presentation owners live under GUI `app/`; screen composition lives under `screens/`. Palette and geometry are centralized. [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md) records the dependency and design decision.
 
-Desktop encryption keys are prepared automatically by the retained key owner after private-channel management completes. The macOS Keychain stores authenticated recovery bundles; file keys never depend on the optional application PIN. The PIN gates the whole UI, and Files, uploads, transfers and settings have no separate Vault unlock. Keychain failures remain visible and recoverable without replacing durable records. See [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md).
+Desktop encryption keys are prepared automatically by the retained key owner after private-channel management completes. The selected Keychain/SQLite credential backend stores authenticated recovery bundles; file keys never depend on the optional application PIN. The PIN gates the whole UI, and Files, uploads, transfers and settings have no separate Vault unlock. Keychain failures remain visible and recoverable without replacing durable records. See [ADR 0040](adr/0040-automatic-device-keys-and-optional-pin.md).
 
 ## Account and storage identity
 
@@ -99,11 +99,11 @@ All application data lists, channel/menu entries, selection lists, metadata rows
 
 ## Localization service
 
-`teleark-i18n` owns Fluent resources at `crates/teleark-i18n/resources/{en-US,zh-CN,ja-JP}/main.ftl`, locale negotiation, formatting and structured-error mappings. The catalogs are the terminology reference and share keys and named variable sets. Messages use semantic kebab-case IDs, complete grammatical units and Fluent selectors/plurals; legacy dotted/underscore aliases remain supported. The wrapper resolves top-level message values; terms/attributes require added lookup and validation support. User content is passed as literal parameters.
+`teleark-i18n` owns Fluent resources at `crates/teleark-i18n/resources/<locale>/main.ftl`, locale negotiation, formatting and structured-error mappings. One registry supplies the ten supported locales to both runtime lookup and Settings. English, Simplified Chinese and Japanese catalogs have full key parity; Spanish, French, German, Brazilian Portuguese, Russian, Korean and Hindi cover common flows and explicitly fall back to English for remaining messages. Every translated message must preserve its named variable set. See [Localization](I18N.md) for coverage and adding a language. Messages use semantic kebab-case IDs, complete grammatical units and Fluent selectors/plurals; legacy dotted/underscore aliases remain supported. The wrapper resolves top-level message values; terms/attributes require added lookup and validation support. User content is passed as literal parameters.
 
-Negotiation maps `en-*` to `en-US`, `zh-CN`/`zh-SG`/`zh-Hans-*` to `zh-CN`, and `ja-*` to `ja-JP`; unsupported or invalid tags, including unsupported Traditional Chinese, fall back to English. Tags use the locale parser. Settings changes apply live; explicit overrides persist, System Default removes the override, and a command-line locale wins for that launch. System discovery currently reads locale environment variables; native platform discovery is unfinished. Changing locale never rewrites remote channel descriptions or titles.
+Negotiation accepts registered tags and maps regional variants to the registered catalog for that language, such as `es-MX` to `es-ES` and `pt-PT` to `pt-BR`. Simplified Chinese maps to `zh-CN`; Traditional Chinese is not substituted with Simplified Chinese. It tries later preferences before falling back to English for unsupported or invalid tags. Tags use the locale parser. Settings changes apply live; explicit overrides persist, System Default removes the override, and a command-line locale wins for that launch. System discovery currently reads locale environment variables; native platform discovery is unfinished. Changing locale never rewrites remote channel descriptions or titles.
 
-Central `format` functions render dates, counts, percentages, durations, speeds and sizes. Human file/storage values use SI (`kB`, `MB`, `GB`, `MB/s`); exact format/configuration sizes use IEC (`MiB`, `GiB`). Timestamps are UTC instants displayed in the OS local time zone. Protocol IDs, hashes, offsets and versions stay canonical ASCII. Unknown rate/ETA is distinct from zero. Catalog validation covers parsing, duplicate IDs, key/variable parity, fallback, negotiation, formatting and error mappings; static caller IDs and actual layout need separate checks.
+Central `format` functions render dates, counts, percentages, durations, speeds and sizes. Every displayed byte size and transfer rate uses base-1024 IEC units (`B`, `KiB`, `MiB`, `GiB`, `TiB`, and `/s` for rates), including dialogs, inspectors, charts, notifications, logs and status bars. Decimal SI size/rate labels are prohibited by the contributor rule; raw persisted/protocol values remain bytes. Timestamps are UTC instants displayed in the OS local time zone. Protocol IDs, hashes, offsets and versions stay canonical ASCII. Unknown rate/ETA is distinct from zero. Catalog validation covers parsing, duplicate IDs, key/variable parity, fallback, negotiation, formatting and error mappings; static caller IDs and actual layout need separate checks.
 
 ## Technical references
 

@@ -13,7 +13,7 @@ Browse channel files, store encrypted files in your own private Telegram channel
 - **Transfer management** — Follow progress, queues, retries and live or historical diagnostics. Ordinary Telegram downloads support pause, resume, cancel, retry and restart recovery. Upload history survives restarts; separate upload and download speed limits apply to active transfers.
 - **Local and remote library** — Browse downloaded/imported files separately from indexed Telegram files, with search, filters and file actions. Background checks identify missing or changed local downloads.
 - **Key management and recovery** — Unlock with a password or recovery material, export and restore recovery bundles, change passwords and retain older key versions for existing files.
-- **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and English, Simplified Chinese and Japanese interfaces.
+- **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and ten interface languages with English fallback for untranslated messages.
 
 ## How it works
 
@@ -112,7 +112,7 @@ In Git Bash, run `scripts/run.sh` or `scripts/build-local.sh`. If editing `.env.
 
 The helpers load `.env.local`, validate both values and reject the public sample API ID (`17349`). If `.env.local` is missing, the helper stops immediately with an error and will never fall back to `.env.example`.
 
-Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time** via `option_env!`, so supply them on each build and rebuild after changing them. A direct `cargo run --release -p teleark-gui --bin teleark --locked` without environment variables builds without embedded credentials; when launched, TeleArk will prompt for personal API credentials in the UI (Settings / Login) and save them to your local SQLite library. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
+Neither Cargo nor TeleArk loads environment files automatically: application identifiers are embedded **at compile time** via `option_env!`, so supply them on each build and rebuild after changing them. A direct `cargo run --release -p teleark-gui --bin teleark --locked` without environment variables builds without embedded credentials; when launched, TeleArk will prompt for personal API credentials in the UI (Settings / Login) and save them through the selected Keychain/SQLite credential backend. Personal credentials saved in Settings take precedence; the built executable needs no environment file alongside it.
 
 Source only your trusted local configuration and keep it out of logs and packages. Embedded application identifiers are extractable from binaries.
 

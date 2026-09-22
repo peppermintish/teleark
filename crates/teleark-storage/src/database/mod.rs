@@ -16,6 +16,11 @@ pub use managed_watch::{
     ManagedChannelChangeKind, ManagedChannelWatch,
 };
 mod collections;
+mod credentials;
+pub use credentials::{
+    CREDENTIAL_ITEM_LIMIT, CREDENTIAL_TOTAL_BYTES_LIMIT, CredentialBackend, CredentialCleanup,
+    CredentialItem,
+};
 mod downloaded_files;
 mod index;
 mod native_downloads;

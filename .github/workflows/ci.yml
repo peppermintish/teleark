@@ -192,6 +192,11 @@ jobs:
           TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
           TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: ./scripts/check-distribution-credentials.ps1
+      - name: Validate persistent macOS signing identity
+        shell: bash
+        env:
+          TELEARK_MACOS_SIGNING_P12_BASE64: ${{ secrets.TELEARK_MACOS_SIGNING_P12_BASE64 }}
+        run: bash scripts/check-macos-signing.sh
 
   package:
     name: 3 · Package (${{ matrix.name }})
@@ -331,6 +336,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/test-macos-signing.sh
+          bash scripts/macos/verify-keychain-signing.sh
           label='${{ needs.version.outputs.label }}'
           base="teleark-${label}-macos-universal"
           mkdir -p "dist/$base"

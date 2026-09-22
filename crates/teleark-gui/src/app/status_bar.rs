@@ -689,8 +689,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&directory).expect("temporary fixture");
-        let library =
-            DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("temporary catalog");
+        let library = DesktopLibrary::open_synthetic(directory.join("catalog.sqlite3"))
+            .expect("temporary catalog");
         library
             .managed_directories()
             .expect("temporary output directories");

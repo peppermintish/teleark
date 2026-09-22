@@ -245,3 +245,5 @@ The existing Rustls dependency is updated from 0.23.43 to 0.23.45 for
 [RUSTSEC-2026-0285 / GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc).
 Its Apache-2.0 OR ISC OR MIT license policy remains unchanged. No new package
 names or dependency-license exceptions are introduced by this patch update.
+
+The selectable credential backend also uses the existing `zeroize` 1.9.0 dependency directly in Storage (MIT OR Apache-2.0). Its `Zeroizing` ownership clears credential payload buffers held in storage requests and migration snapshots on completion, cancellation and failure. No new third-party package or license exception was introduced.

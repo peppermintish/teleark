@@ -94,7 +94,7 @@ Index rows persist account/chat, inclusive message-ID bounds, partial/complete s
 
 ## Settings and wrapped keys
 
-The `settings` table stores explicitly versioned preferences, locale override, API application credentials, storage-channel bindings and the one-time native-account marker. [Preferences format](PREFERENCES_FORMAT.md) defines active encodings. A personal API ID/Hash pair is saved/removed transactionally; the GUI receives only its ID/source status. The SQLite database is not encrypted. Telegram user sessions are in a separate adapter-owned protected cache.
+The `settings` table stores explicitly versioned preferences, locale override, legacy API application credentials, storage-channel bindings and the one-time native-account marker. [Preferences format](PREFERENCES_FORMAT.md) defines active encodings. A personal API ID/Hash pair is saved/removed transactionally; the GUI receives only its ID/source status. The SQLite database is not encrypted. Telegram user sessions are in a separate adapter-owned protected cache.
 
 `vault_metadata` is a singleton with the 16-byte Vault ID, explicit Password/Recovery Wrap bytes, nonzero generations and timestamps. It contains no raw password, Recovery Key, unwrapped Master Key, File Key or KEK. OS credential bindings are absent. The remotely authoritative crypto/manifest codecs do not change when this row's in-memory model changes.
 
@@ -248,3 +248,14 @@ bounded history projection uses this ordering before applying its 256-row cap.
 Existing direction/cursor reads remain available for deeper history consumers.
 The regression includes 300 terminal receipts following an older queued job and
 checks that no temporary sorting tree appears in the filtered query plan.
+
+
+## Credential storage (schema 23)
+
+Current SQLite read/write version is **23**. Supported automatic upgrades are **0–22 → 23**, including skipped releases, through the existing visible transactional migration owner. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
+
+macOS defaults on; Windows/Linux default off and reject enabling. A copied macOS library on other platforms retains unavailable Keychain references while switching to local mode, with explicit reentry/recovery guidance. No missing secret is guessed or overwritten. See [ADR 0053](adr/0053-selectable-system-credentials.md) for bounds, cleanup, cancellation and recovery semantics.
+
+The API credential codec is exactly 37 bytes: version byte 1, a positive four-byte little-endian API ID, and 32 ASCII hexadecimal API Hash bytes. Proxy policy readers retain version 1; version 2 has exactly `version`, `mode: credential`, and a 64-hex `credential_id`. Credential payloads retain the explicit version-1 proxy JSON codec. Each new proxy configuration gets a fresh opaque identity; the policy reference commits only if the original record still matches, so delayed migration cannot restore an old route after a newer change. Direct mode remains version 1 with no credentials. Future/damaged values fail closed and are preserved.
+
+Filtered channel batches use existing download schema/codec versions. [ADR 0054](adr/0054-filter-driven-channel-downloads.md) describes bounded filtered discovery and unique per-batch directories.

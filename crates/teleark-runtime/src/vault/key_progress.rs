@@ -53,13 +53,21 @@ impl VaultKeyProgress {
     pub fn snapshot(&self) -> VaultKeySnapshot {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-    pub(super) fn check_cancelled(&self) -> Result<(), ApplicationError> {
+    pub(crate) fn check_cancelled(&self) -> Result<(), ApplicationError> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
         }
         Ok(())
     }
-    pub(super) fn phase(&self, phase: VaultKeyPhase) -> Result<(), ApplicationError> {
+    pub(crate) fn activity(&self) -> Result<(), ApplicationError> {
+        self.check_cancelled()?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.finished {
+            state.last_activity = Instant::now();
+        }
+        Ok(())
+    }
+    pub(crate) fn phase(&self, phase: VaultKeyPhase) -> Result<(), ApplicationError> {
         self.check_cancelled()?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.finished && state.phase != phase {
@@ -79,7 +87,7 @@ impl VaultKeyProgress {
         }
         Ok(())
     }
-    pub(super) fn finish(&self, error: Option<ApplicationErrorKind>) {
+    pub(crate) fn finish(&self, error: Option<ApplicationErrorKind>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.error = error;
         state.finished = true;

@@ -9,7 +9,7 @@ pub(super) trait DeviceKeyStore: Send + Sync {
 
 // The record's random ID isolates epochs. The authenticated wrap digest also
 // isolates concurrent rotations with the same generation before SQLite CAS.
-fn identity(record: &VaultMetadataRecord) -> String {
+pub(super) fn identity(record: &VaultMetadataRecord) -> String {
     format!(
         "{}/{}/{}",
         hex_id(&record.vault_id),
@@ -18,59 +18,43 @@ fn identity(record: &VaultMetadataRecord) -> String {
     )
 }
 
-#[cfg(not(test))]
-struct PlatformStore;
+pub(super) fn validate_stored_bundle(identity: &str, bytes: &[u8]) -> Result<(), ApplicationError> {
+    let invalid = || ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable);
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let (key, wrap) = decode_recovery_bundle(text)?;
+    let expected = format!(
+        "{}/{}/{}",
+        hex_id(&wrap.vault_id),
+        wrap.recovery_generation,
+        blake3::hash(&wrap.encode()).to_hex()
+    );
+    if expected != identity {
+        return Err(invalid());
+    }
+    let _master = unwrap_master_key_with_recovery(&wrap, &key).map_err(|_| invalid())?;
+    Ok(())
+}
 
-#[cfg(all(target_os = "macos", not(test)))]
-impl DeviceKeyStore for PlatformStore {
+struct LibraryStore(DesktopLibrary);
+
+impl DeviceKeyStore for LibraryStore {
     fn read(&self, identity: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ApplicationError> {
-        use security_framework::passwords::{PasswordOptions, generic_password};
-        match generic_password(PasswordOptions::new_generic_password(
-            "app.teleark.encryption-key.v1",
-            identity,
-        )) {
-            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
-            // Apple's errSecItemNotFound. Other errors must never look like an empty store.
-            Err(error) if error.code() == -25300 => Ok(None),
-            Err(_) => Err(ApplicationError::new(
-                ApplicationErrorKind::PermissionDenied,
-            )),
-        }
+        self.0
+            .credential_read(crate::credential_store::VAULT_NAMESPACE, identity)
     }
-
     fn write(&self, identity: &str, bundle: &[u8]) -> Result<(), ApplicationError> {
-        security_framework::passwords::set_generic_password(
-            "app.teleark.encryption-key.v1",
-            identity,
-            bundle,
-        )
-        .map_err(|_| ApplicationError::new(ApplicationErrorKind::PermissionDenied))
+        self.0
+            .credential_write(crate::credential_store::VAULT_NAMESPACE, identity, bundle)
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
-impl DeviceKeyStore for PlatformStore {
-    fn read(&self, _: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ApplicationError> {
-        Err(ApplicationError::new(
-            ApplicationErrorKind::PermissionDenied,
-        ))
-    }
-    fn write(&self, _: &str, _: &[u8]) -> Result<(), ApplicationError> {
-        Err(ApplicationError::new(
-            ApplicationErrorKind::PermissionDenied,
-        ))
-    }
+pub(super) fn library_store(library: DesktopLibrary) -> Arc<dyn DeviceKeyStore> {
+    Arc::new(LibraryStore(library))
 }
 
+#[cfg(test)]
 pub(super) fn platform_store() -> Arc<dyn DeviceKeyStore> {
-    #[cfg(test)]
-    {
-        Arc::new(MemoryStore::default())
-    }
-    #[cfg(not(test))]
-    {
-        Arc::new(PlatformStore)
-    }
+    Arc::new(MemoryStore::default())
 }
 
 #[cfg(test)]
@@ -337,6 +321,101 @@ mod tests {
             .submit_recovery_export(VaultKeyProgress::new())?
             .wait()
             .map(|secret| secret.to_string())
+    }
+
+    #[test]
+    fn copied_keychain_references_become_local_missing_material_and_import_repairs_them()
+    -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("synthetic.sqlite");
+        let library = DesktopLibrary::open_synthetic(&path)?;
+        let telegram = DesktopTelegram::open_direct(temp.path().join("synthetic.session"))?;
+        let vault = DesktopVault::new(telegram, library.clone())?;
+        prepare(&vault)?;
+        let record = library.worker.vault_metadata()?.expect("vault metadata");
+        let bundle = export(&vault)?;
+        let mut db = teleark_storage::Database::open(&path)?;
+        let backend = db.credential_backend(true)?;
+        let mut items = db.credential_items()?;
+        for item in &mut items {
+            item.payload = None;
+        }
+        assert!(db.replace_credential_backend(backend, true, &items)?);
+        let converted = db.credential_backend_for_platform(false)?;
+        assert!(!converted.keychain_enabled);
+        assert_eq!(db.unavailable_credential_count()?, 1);
+        assert_eq!(db.vault_metadata()?, Some(record.clone()));
+        drop(db);
+        vault.lock()?;
+        assert_eq!(
+            prepare(&vault)
+                .expect_err("foreign OS key unavailable")
+                .kind(),
+            ApplicationErrorKind::VaultKeyUnavailable
+        );
+        assert!(!library.keychain_status()?.enabled);
+        assert_eq!(library.keychain_status()?.unavailable_credentials, 1);
+        vault
+            .submit_recovery_import(bundle.clone(), VaultKeyProgress::new())?
+            .wait()?;
+        assert_eq!(library.keychain_status()?.unavailable_credentials, 0);
+        assert_eq!(export(&vault)?, bundle);
+        assert_eq!(library.worker.vault_metadata()?, Some(record));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn selected_backend_migrates_legacy_and_historical_authenticated_keys() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("synthetic.sqlite");
+        let library = DesktopLibrary::open_synthetic(&path)?;
+        let telegram = DesktopTelegram::open_direct(temp.path().join("synthetic.session"))?;
+        let vault = DesktopVault::new(telegram, library.clone())?;
+        prepare(&vault)?;
+        let old = library.worker.vault_metadata()?.expect("first epoch");
+        let old_bundle = export(&vault)?;
+        vault
+            .submit_new_managed_key(VaultKeyProgress::new())?
+            .wait()?;
+        let active_bundle = export(&vault)?;
+
+        // Simulate a pre-v23 key, which exists in Keychain without a registry row.
+        let mut db = teleark_storage::Database::open(&path)?;
+        let backend = db.credential_backend(true)?;
+        assert!(db.save_credential_item(
+            backend,
+            crate::credential_store::VAULT_NAMESPACE,
+            &identity(&old),
+            None
+        )?);
+        drop(db);
+        library.set_keychain_enabled(false, VaultKeyProgress::new())?;
+        vault.lock()?;
+        prepare(&vault)?;
+        assert_eq!(export(&vault)?, active_bundle);
+        assert_eq!(
+            library
+                .credential_read(crate::credential_store::VAULT_NAMESPACE, &identity(&old))?
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(old_bundle.as_bytes())
+        );
+
+        let rotated = vault
+            .submit_recovery_rotation(VaultKeyProgress::new())?
+            .wait()?;
+        library.set_keychain_enabled(true, VaultKeyProgress::new())?;
+        vault.lock()?;
+        prepare(&vault)?;
+        assert_eq!(export(&vault)?, rotated.to_string());
+        let db = teleark_storage::Database::open(&path)?;
+        assert!(
+            db.credential_items()?
+                .iter()
+                .all(|item| item.payload.is_none())
+        );
+        Ok(())
     }
 
     #[test]

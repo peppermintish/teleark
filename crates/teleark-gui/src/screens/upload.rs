@@ -301,7 +301,7 @@ pub fn render_upload_overlay(
                 .child(
                     components::button(
                         "upload-options",
-                        app.tr("settings-advanced"),
+                        app.tr("upload-options-title"),
                         Some(if app.upload_advanced_expanded {
                             IconName::ChevronDown
                         } else {

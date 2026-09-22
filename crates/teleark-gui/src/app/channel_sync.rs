@@ -1534,8 +1534,8 @@ pub(super) mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&directory).expect("fixture directory");
-        let library =
-            DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("fixture database");
+        let library = DesktopLibrary::open_synthetic(directory.join("catalog.sqlite3"))
+            .expect("fixture database");
         let account = TelegramAccount {
             id: 1,
             display_name: "Fixture".into(),

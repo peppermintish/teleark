@@ -1,5 +1,5 @@
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName, Sizable as _,
+    Disableable as _, Icon, IconName,
     button::ButtonVariants as _,
     input::{Input, InputState},
     scroll::ScrollableElement as _,
@@ -108,43 +108,7 @@ impl TeleArkApp {
                 .p_1()
                 .children(main_sections.into_iter().map(|(icon, id, section)| {
                     self.settings_nav_item(icon, self.tr(id), section, cx)
-                }))
-                .child(
-                    components::button(
-                        "settings-advanced-disclosure",
-                        self.tr("settings-advanced"),
-                        Some(if self.settings_advanced_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        }),
-                        false,
-                    )
-                    .xsmall()
-                    .ghost()
-                    .mt_4()
-                    .w_full()
-                    .h(theme::ROW_HEIGHT)
-                    .text_size(theme::LIST_TEXT_SIZE)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_advanced_expanded = !this.settings_advanced_expanded;
-                        cx.notify();
-                    })),
-                )
-                .when(self.settings_advanced_expanded, |nav| {
-                    nav.child(self.settings_nav_item(
-                        IconName::Search,
-                        self.tr("settings-indexing"),
-                        SettingsSection::Indexing,
-                        cx,
-                    ))
-                    .child(self.settings_nav_item(
-                        IconName::Bell,
-                        self.tr("settings-notifications"),
-                        SettingsSection::Notifications,
-                        cx,
-                    ))
-                });
+                }));
 
         let language = components::card()
             .p_5()
@@ -165,27 +129,15 @@ impl TeleArkApp {
                     .grid_cols(2)
                     .gap_3()
                     .child(self.system_locale_card(cx))
-                    .child(self.locale_card(
-                        "settings-locale-en",
-                        SupportedLocale::EnUs,
-                        self.tr("settings-language-english"),
-                        "en-US",
-                        cx,
-                    ))
-                    .child(self.locale_card(
-                        "settings-locale-zh",
-                        SupportedLocale::ZhCn,
-                        self.tr("settings-language-chinese"),
-                        "zh-CN",
-                        cx,
-                    ))
-                    .child(self.locale_card(
-                        "settings-locale-ja",
-                        SupportedLocale::JaJp,
-                        self.tr("settings-language-japanese"),
-                        "ja-JP",
-                        cx,
-                    )),
+                    .children(SupportedLocale::ALL.into_iter().map(|locale| {
+                        self.locale_card(
+                            locale.as_str(),
+                            locale,
+                            locale.autonym().into(),
+                            locale.as_str(),
+                            cx,
+                        )
+                    })),
             )
             .child(
                 div()
@@ -201,6 +153,15 @@ impl TeleArkApp {
                     .child(Icon::new(IconName::Info).text_color(theme::blue()))
                     .child(self.tr("settings-language-runtime-note")),
             )
+            .when(!self.locale().has_complete_catalog(), |card| {
+                card.child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("settings-language-fallback-note")),
+                )
+            })
             .child(div().mt_3().child(components::badge(
                 self.tr(match self.locale_persistence {
                     LocalePersistence::Idle => "settings-language-persistence-ready",
@@ -372,7 +333,9 @@ impl TeleArkApp {
                 .flex()
                 .flex_col()
                 .gap_4()
+                .child(self.render_keychain_settings(cx))
                 .child(self.render_app_pin_settings(cx))
+                .child(self.render_notification_settings(cx))
                 .child(language)
                 .into_any_element(),
             SettingsSection::Network => div()
@@ -448,8 +411,6 @@ impl TeleArkApp {
             SettingsSection::Downloads => self.render_download_settings(cx),
             SettingsSection::Uploads => self.render_upload_settings(cx),
             SettingsSection::KeyVault => self.render_key_vault_settings(cx),
-            SettingsSection::Indexing => self.render_indexing_settings(cx),
-            SettingsSection::Notifications => self.render_notification_settings(cx),
             SettingsSection::Appearance => self.render_appearance_settings(layout, cx),
         };
 
@@ -1217,35 +1178,6 @@ impl TeleArkApp {
             .into_any_element()
     }
 
-    fn render_indexing_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let options = [200_u16, 500, 1_000].into_iter().map(|batch_size| {
-            selection_option(
-                ("settings-index-batch", usize::from(batch_size)),
-                self.tr_with(
-                    "settings-index-batch-option",
-                    teleark_i18n::MessageArgs::new().with(
-                        "count",
-                        format_integer(self.locale(), u64::from(batch_size)),
-                    ),
-                ),
-                self.tr("settings-index-batch-option-description"),
-                self.preferences.index_batch_size == batch_size,
-                cx.listener(move |this, _, _, cx| {
-                    if this.preference_persistence != PreferencePersistence::Saving {
-                        this.preferences.index_batch_size = batch_size;
-                        this.persist_preferences(cx);
-                    }
-                }),
-            )
-        });
-        settings_card(
-            self.tr("settings-index-title"),
-            self.tr("settings-index-description"),
-        )
-        .child(div().mt_4().grid().grid_cols(3).gap_3().children(options))
-        .into_any_element()
-    }
-
     fn render_notification_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         settings_card(
             self.tr("settings-notification-title"),
@@ -1393,11 +1325,7 @@ impl TeleArkApp {
                         theme::text_secondary()
                     })
                     .font_weight(FontWeight::BOLD)
-                    .child(match locale {
-                        SupportedLocale::EnUs => "A",
-                        SupportedLocale::ZhCn => "中",
-                        SupportedLocale::JaJp => "あ",
-                    }),
+                    .child(locale.badge()),
             )
             .child(
                 div()
@@ -1834,58 +1762,6 @@ fn theme_option(
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child(title),
-                )
-                .when(selected, |row| {
-                    row.child(Icon::new(IconName::CircleCheck).text_color(theme::blue()))
-                }),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_xs()
-                .text_color(theme::text_muted())
-                .child(description),
-        )
-        .into_any_element()
-}
-
-fn selection_option(
-    id: impl Into<gpui_kit::ElementId>,
-    title: impl Into<SharedString>,
-    description: SharedString,
-    selected: bool,
-    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id)
-        .p_4()
-        .rounded(theme::RADIUS_MEDIUM)
-        .border_1()
-        .border_color(if selected {
-            theme::blue()
-        } else {
-            theme::border()
-        })
-        .bg(if selected {
-            theme::blue_pale()
-        } else {
-            theme::surface()
-        })
-        .cursor_pointer()
-        .focusable()
-        .tab_index(0)
-        .hover(|option| option.bg(theme::blue_pale()))
-        .on_click(on_click)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(title.into()),
                 )
                 .when(selected, |row| {
                     row.child(Icon::new(IconName::CircleCheck).text_color(theme::blue()))

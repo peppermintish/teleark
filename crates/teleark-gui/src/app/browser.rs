@@ -437,50 +437,10 @@ impl TeleArkApp {
         cx.notify();
     }
 
-    pub(crate) fn index_selected_telegram_chat(&mut self, cx: &mut Context<Self>) {
-        if self.page == Page::Channel {
-            self.request_channel_history(cx);
-            return;
-        }
-        if self.telegram_activity == TelegramActivity::Working {
-            return;
-        }
-        let (Some(telegram), Some(library), Some(account), Some(chat_id)) = (
-            self.telegram.clone(),
-            self.library.clone(),
-            self.telegram_account.clone(),
-            self.selected_chat_id,
-        ) else {
-            return;
-        };
-        let before = self
-            .telegram_index
-            .as_ref()
-            .and_then(|page| page.next_before_message_id);
-        let batch_size = usize::from(self.preferences.index_batch_size);
-        self.telegram_activity = TelegramActivity::Working;
-        let work = cx.background_spawn(async move {
-            library.index_telegram_page(&telegram, account.id, chat_id, before, batch_size)
-        });
-        self.telegram_task = Some(cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| match result {
-                Ok(page) => {
-                    this.telegram_index = Some(page);
-                    this.telegram_activity = TelegramActivity::Idle;
-                    this.refresh_library(cx);
-                }
-                Err(error) => {
-                    this.telegram_activity = TelegramActivity::Failed(error.kind());
-                    cx.notify();
-                }
-            });
-        }));
-    }
-
     pub(crate) fn download_filtered_telegram_files(&mut self, cx: &mut Context<Self>) {
-        if self.channel_batch_activity == ChannelBatchActivity::Preparing {
+        if self.channel_batch_activity == ChannelBatchActivity::Preparing
+            || self.filtered_batch_active()
+        {
             return;
         }
         let (Some(library), Some(transfers), Some(chat_id)) = (
@@ -598,7 +558,7 @@ mod tests {
         let table = app.update(cx, |app, cx| {
             // Assign isolated, unconfigured owners after startup: no session is restored.
             app.library = Some(
-                DesktopLibrary::open(directory.join("library.sqlite3"))
+                DesktopLibrary::open_synthetic(directory.join("library.sqlite3"))
                     .expect("open isolated database"),
             );
             app.telegram = Some(

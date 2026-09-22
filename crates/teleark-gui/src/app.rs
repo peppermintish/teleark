@@ -2,9 +2,11 @@ mod app_lock;
 mod auth;
 mod background;
 mod browser;
+mod channel_batch;
 mod channel_layout;
 mod channel_sync;
 mod dialogs;
+mod keychain;
 mod library;
 pub(crate) mod lifecycle;
 mod local_files;
@@ -159,8 +161,6 @@ pub(crate) enum SettingsSection {
     Downloads,
     Uploads,
     KeyVault,
-    Indexing,
-    Notifications,
     Appearance,
     About,
 }
@@ -237,6 +237,7 @@ pub struct AppStartup {
 }
 
 pub struct RuntimeConfiguration {
+    keychain: Result<teleark_runtime::KeychainStatus, teleark_core::ApplicationErrorKind>,
     app_pin: Result<Option<teleark_runtime::AppPinRecord>, teleark_core::ApplicationErrorKind>,
     network_route: Result<teleark_runtime::NetworkRoute, teleark_core::ApplicationErrorKind>,
     credential_status: Result<
@@ -252,6 +253,10 @@ impl RuntimeConfiguration {
         telegram: &Result<DesktopTelegram, ApplicationError>,
     ) -> Self {
         Self {
+            keychain: library
+                .as_ref()
+                .map_err(|e| e.kind())
+                .and_then(|library| library.keychain_status().map_err(|e| e.kind())),
             app_pin: library
                 .as_ref()
                 .map_err(|e| e.kind())
@@ -306,6 +311,7 @@ pub struct TeleArkApp {
     authorization_snapshot: Option<teleark_runtime::AuthorizationSnapshot>,
     main_window: gpui_kit::AnyWindowHandle,
     pub(crate) proxy: proxy::ProxyUi,
+    pub(crate) keychain: keychain::KeychainUi,
     pub(crate) page: Page,
     pub(crate) storage_status: teleark_runtime::StorageChannelStatus,
     pub(crate) storage_loading: bool,
@@ -321,7 +327,6 @@ pub struct TeleArkApp {
     storage_retry_task: Option<Task<()>>,
     pub(crate) storage_error: Option<teleark_core::ApplicationErrorKind>,
     pub(crate) show_storage_guide: bool,
-    pub(crate) settings_advanced_expanded: bool,
     pub(crate) about_show_licenses: bool,
     pub(crate) upload_advanced_expanded: bool,
     pub(crate) vault_advanced_expanded: bool,
@@ -458,6 +463,8 @@ pub struct TeleArkApp {
     pub(crate) channel_batch_kinds: std::collections::HashSet<FileKind>,
     pub(crate) channel_batch_activity: ChannelBatchActivity,
     pub(crate) channel_batch_expanded: bool,
+    pub(crate) filtered_channel_batch: Option<channel_batch::FilteredBatchUi>,
+    filtered_channel_batch_task: Option<Task<()>>,
     pub(crate) channel_file_table: Entity<TableState<ChannelFileTableDelegate>>,
     pub(crate) telegram_api_id: Entity<InputState>,
     pub(crate) telegram_api_hash: Entity<InputState>,
@@ -565,6 +572,7 @@ impl TeleArkApp {
         } = runtime;
         let configuration =
             configuration.unwrap_or_else(|| RuntimeConfiguration::read(&library, &telegram));
+        let keychain = keychain::KeychainUi::new(configuration.keychain, visual_preview);
         let app_lock = app_lock::AppLockUi::new(configuration.app_pin, visual_preview, window, cx);
         let proxy = proxy::ProxyUi::new(configuration.network_route, visual_preview, window, cx);
         let credential_status = configuration.credential_status;
@@ -720,6 +728,7 @@ impl TeleArkApp {
             authorization_snapshot: None,
             main_window: window.window_handle(),
             proxy,
+            keychain,
             page,
             storage_status: teleark_runtime::StorageChannelStatus::Missing,
             storage_loading: false,
@@ -735,7 +744,6 @@ impl TeleArkApp {
             storage_retry_task: None,
             storage_error: None,
             show_storage_guide: false,
-            settings_advanced_expanded: false,
             about_show_licenses: false,
             upload_advanced_expanded: false,
             vault_advanced_expanded: false,
@@ -877,6 +885,8 @@ impl TeleArkApp {
             channel_batch_kinds: std::collections::HashSet::new(),
             channel_batch_activity: ChannelBatchActivity::Idle,
             channel_batch_expanded: false,
+            filtered_channel_batch: None,
+            filtered_channel_batch_task: None,
             channel_file_table,
             telegram_api_id,
             telegram_api_hash,
@@ -1217,7 +1227,8 @@ impl TeleArkApp {
             || self.show_upload
             || self.show_telegram_api_id_prompt
             || self.vault_new_epoch_confirmation
-            || self.confirm_account_switch;
+            || self.confirm_account_switch
+            || self.keychain.confirmation;
         if modal_open != self.modal_was_open {
             window.focus(
                 if modal_open {
@@ -1349,8 +1360,14 @@ impl TeleArkApp {
             .when(self.upload_preparing && !self.show_upload, |root| {
                 root.child(self.render_upload_selection_progress(true, cx))
             })
+            .when(self.keychain.busy, |root| {
+                root.child(self.render_keychain_activity(cx))
+            })
             .child(self.render_bandwidth_status(cx))
             .child(self.render_status_bar(cx))
+            .when(self.keychain.confirmation, |root| {
+                root.child(self.render_keychain_confirmation(cx))
+            })
             .when(
                 self.vault_key_details
                     && self.vault_key_progress.is_some()

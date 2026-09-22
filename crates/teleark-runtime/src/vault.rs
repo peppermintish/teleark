@@ -42,6 +42,18 @@ use crate::{
 mod catalog;
 mod control;
 mod device_keys;
+
+pub(crate) fn device_key_identity(record: &VaultMetadataRecord) -> String {
+    device_keys::identity(record)
+}
+
+pub(crate) fn validate_device_credential(
+    identity: &str,
+    bytes: &[u8],
+) -> Result<(), ApplicationError> {
+    device_keys::validate_stored_bundle(identity, bytes)
+}
+
 mod health;
 mod key_progress;
 mod shutdown;
@@ -629,7 +641,8 @@ impl DesktopVault {
         telegram: DesktopTelegram,
         library: DesktopLibrary,
     ) -> Result<Self, ApplicationError> {
-        Self::with_device_keys(telegram, library, device_keys::platform_store())
+        let device_keys = device_keys::library_store(library.clone());
+        Self::with_device_keys(telegram, library, device_keys)
     }
 
     fn with_device_keys(

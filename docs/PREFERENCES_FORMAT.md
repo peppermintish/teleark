@@ -31,7 +31,7 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `transfer_soft_limit_policy` | retained legacy: `respect`, `adaptive_override`, or `ignore`; inactive | `adaptive_override` |
 | `manual_transfer_v1` | nine comma-separated integers, order and bounds below | `3,10,2,2,4,3,8,2,4` |
 | `lock_vault_when_hidden` | retired and ignored | none |
-| `index_batch_size` | `200`, `500`, or `1000` | `1000` |
+| `index_batch_size` | retained legacy value: `200`, `500`, or `1000`; inactive | `1000` |
 | `notify_download_completed` | boolean | `true` |
 | `notify_download_failed` | boolean | `true` |
 | `sidebar_collapsed` | boolean | `true` |
@@ -179,7 +179,7 @@ a configured connection is returned. See [Data model](DATA_MODEL.md) for schema
 
 ## Network proxy policy: version 1
 
-The SQLite `settings` key `network.proxy` stores a JSON object, independently versioned from preferences and app releases. Schema 14 creates `{"version":1,"mode":"direct"}` for existing/new installations. Current read/write codec is 1. No implicit direct default is permitted at runtime.
+The SQLite `settings` key `network.proxy` stores a JSON object, independently versioned from preferences and app releases. Schema 14 creates `{"version":1,"mode":"direct"}` for existing/new installations. Readers retain codec 1; authenticated proxy policies automatically migrate to credential-reference codec 2. Direct routing remains codec 1. No implicit direct default is permitted at runtime.
 
 | Mode | Exact fields |
 | --- | --- |
@@ -188,7 +188,7 @@ The SQLite `settings` key `network.proxy` stores a JSON object, independently ve
 
 `address` is a numeric socket address such as `127.0.0.1:1080` or `[::1]:8080`, with nonzero port and no unspecified/multicast IP. Hostnames are unsupported. Authentication fields are strings, each at most 255 UTF-8 bytes; an empty username requires an empty password. HTTP usernames cannot contain `:`. Unknown versions/modes/fields, invalid values and objects over 8,192 bytes fail closed. Writers first validate the existing record and preserve unsupported or corrupt bytes. The setting update is transactional; schema upgrades preserve all other data/keys and are restartable.
 
-Synthetic compatibility fixtures live in `crates/teleark-runtime/src/fixtures/proxy-v1-*.json`. JSON field order is insignificant. Proxy authentication is stored in the protected local SQLite database, which is not encrypted; masked editor fields and sanitized diagnostics never imply encrypted-at-rest credentials. Password buffers in proxy configurations are zeroized on drop. [ADR 0024](adr/0024-fail-closed-proxy-routing.md) specifies route switching and failure behavior.
+Synthetic compatibility fixtures live in `crates/teleark-runtime/src/fixtures/proxy-v1-*.json`. JSON field order is insignificant. Proxy authentication is stored in the selected Keychain/SQLite credential backend; the local SQLite option is not encrypted; masked editor fields and sanitized diagnostics never imply encrypted-at-rest credentials. Password buffers in proxy configurations are zeroized on drop. [ADR 0024](adr/0024-fail-closed-proxy-routing.md) specifies route switching and failure behavior.
 
 ## Channel directory restart cache
 
@@ -206,3 +206,7 @@ random key. It contains no PIN or file encryption key. See
 Current readers/writers support only envelope v1. Malformed/newer records are
 preserved and keep the access gate closed. Settings saves do not rewrite the PIN;
 PIN changes use a separate serialized compare-and-replace operation.
+
+Indexing is automatic. The legacy `index_batch_size` value remains readable for compatibility, but does not control indexing. Runtime scanning uses a bounded automatic batch; Settings exposes no indexing controls. Download notifications are ordinary General settings.
+
+Credential-reference proxy codec 2 is documented in [Data model](DATA_MODEL.md#credential-storage-schema-23). The Keychain preference is owned separately from ordinary desktop preferences so unrelated settings saves cannot change credential storage.

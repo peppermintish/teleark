@@ -12,10 +12,11 @@ pub use migration::MigrationProgress;
 mod model;
 
 pub use database::{
-    CachedManifestCandidate, ChannelSyncCommit, ChannelSyncCommitOutcome, ChannelSyncState,
-    Database, LATEST_SCHEMA_VERSION, MANAGED_CHANGE_HISTORY_LIMIT, ManagedChannelChange,
-    ManagedChannelChangeKind, ManagedChannelWatch, NATIVE_DOWNLOAD_HISTORY_LIMIT,
-    NativeDownloadCleanup,
+    CREDENTIAL_ITEM_LIMIT, CREDENTIAL_TOTAL_BYTES_LIMIT, CachedManifestCandidate,
+    ChannelSyncCommit, ChannelSyncCommitOutcome, ChannelSyncState, CredentialBackend,
+    CredentialCleanup, CredentialItem, Database, LATEST_SCHEMA_VERSION,
+    MANAGED_CHANGE_HISTORY_LIMIT, ManagedChannelChange, ManagedChannelChangeKind,
+    ManagedChannelWatch, NATIVE_DOWNLOAD_HISTORY_LIMIT, NativeDownloadCleanup,
 };
 pub use error::{
     CursorError, EntityKind, InputReason, InvariantViolation, StorageError, StorageResult,

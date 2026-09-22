@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 22;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 23;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -681,6 +681,29 @@ CREATE TABLE native_download_cleanup (
     Migration {
         version: 22,
         sql: "CREATE INDEX vault_pending_uploads_batch ON vault_pending_uploads(account_id,batch_id,state,id); CREATE INDEX vault_transfer_jobs_history ON vault_transfer_jobs(account_id,direction,CASE WHEN state IN ('queued','running','pausing','cancelling') THEN 0 WHEN state IN ('paused','retryable','blocked') THEN 1 ELSE 2 END,id DESC);",
+    },
+    Migration {
+        version: 23,
+        sql: r#"
+CREATE TABLE credential_backend (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    keychain_enabled INTEGER NOT NULL CHECK (keychain_enabled IN (0,1)),
+    revision INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+CREATE TABLE credential_items (
+    namespace TEXT NOT NULL CHECK (length(namespace) BETWEEN 1 AND 128),
+    identity TEXT NOT NULL CHECK (length(identity) BETWEEN 1 AND 512),
+    codec_version INTEGER NOT NULL CHECK (codec_version = 1),
+    keychain_account TEXT NOT NULL CHECK (length(keychain_account) BETWEEN 1 AND 640),
+    payload BLOB CHECK (length(payload) BETWEEN 1 AND 65536),
+    PRIMARY KEY (namespace,identity)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE credential_cleanup (
+    namespace TEXT NOT NULL CHECK (length(namespace) BETWEEN 1 AND 128),
+    keychain_account TEXT NOT NULL CHECK (length(keychain_account) BETWEEN 1 AND 640),
+    PRIMARY KEY (namespace,keychain_account)
+) STRICT, WITHOUT ROWID;
+"#,
     },
 ];
 

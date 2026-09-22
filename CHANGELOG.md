@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 · Credential storage, filtered batches and languages
+
+- macOS defaults to system Keychain for API credentials, proxy passwords and encryption recovery material. Settings offers an explicit warning before switching to unencrypted private SQLite storage. Windows and Linux use SQLite with Keychain unavailable and an explanation. Existing supported data migrates automatically.
+- macOS app and standalone releases reuse a self-signed certificate for a stable Keychain identity. Access is noninteractive; locked or inaccessible items report recovery guidance. This does not provide Apple notarization or Gatekeeper trust.
+- Download matching indexed channel files by time/type filters, including files outside the visible page, into a unique per-batch folder. Discovery is bounded and cancellable; oversized matches require narrower filters.
+- Added Spanish, French, German, Brazilian Portuguese, Russian, Korean and Hindi. Common flows are translated and remaining diagnostic/release text explicitly falls back to English.
+- Removed Advanced and user-adjustable indexing controls; notifications are in General. Every displayed byte size/rate uses binary IEC units.
+- SQLite read/write schema 23 supports automatic upgrades from 0–22, including skipped releases. Existing encrypted file, manifest, transfer and recovery codecs remain supported and unchanged. API credential codec 1 and proxy-reference codec 2 are documented separately.
+
 ## 0.4.14 · Contributor guidance corrections
 
 - Corrected contributor guidance for protecting private configuration on Windows and loading development settings in a separate shell process.

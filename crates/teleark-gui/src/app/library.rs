@@ -608,7 +608,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&directory).expect("directory");
-        let library = DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("library");
+        let library =
+            DesktopLibrary::open_synthetic(directory.join("catalog.sqlite3")).expect("library");
         let account = TelegramAccount {
             id: 7,
             display_name: "Fixture".into(),

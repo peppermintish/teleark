@@ -668,7 +668,7 @@ impl TeleArkApp {
                 row.activity = Some("FLOOD_WAIT_6 (3s)".into());
                 row.eta = "16 min 37 s".into();
                 row.progress = 17.0;
-                row.transferred = "2.48 GB".into();
+                row.transferred = "2.48 GiB".into();
                 row.speed = "—".into();
                 self.preview_transfer_rows = vec![row];
             }
