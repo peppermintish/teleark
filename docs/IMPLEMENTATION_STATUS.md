@@ -1,4 +1,8 @@
-# Implementation status — v0.5.1
+# Implementation status — v0.5.2
+
+## Version 0.5.2 · Reliable headless macOS signing (2026-09-23)
+
+Hosted macOS signing now imports the persistent PKCS#12 identity into the disposable signing keychain as one identity, verifies the pinned public fingerprint before applying noninteractive partition access, and falls back to explicitly typed PEM imports when a runner rejects the PKCS#12 envelope. Signing phases report only sanitized progress and public identity metadata; private key material and CI secrets remain undisclosed. Native package qualification and publication run from the matching release tag.
 
 ## Version 0.5.1 · Deterministic release regressions (2026-09-23)
 

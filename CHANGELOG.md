@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 · Reliable headless macOS signing
+
+- Fixed hosted macOS release signing by importing the persistent PKCS#12 identity into the temporary keychain as a complete signing identity, verifying its public fingerprint before configuring noninteractive access, and retaining an explicit PEM fallback for older import behavior.
+- Added sanitized signing phases and identity diagnostics without exposing private key material or CI secrets.
+- Application metadata is 0.5.2. Runtime behavior, SQLite read/write schema 23, automatic upgrades from 0–22, and supported credential, encrypted-file, transfer and recovery codecs are unchanged.
+
 ## 0.5.1 · Reliable release regression checks
 
 - Fixed a timing-sensitive download-cleanup regression test and a proxy migration assertion that depended on JSON field order. The checks continue to verify that blocked cleanup permits unrelated downloads and that stale migration preserves the newer route.
