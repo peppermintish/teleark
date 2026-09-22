@@ -1,12 +1,13 @@
 param(
     [Parameter(Mandatory)][string]$Version,
     [Parameter(Mandatory)][string]$Label,
-    [Parameter(Mandatory)][ValidateSet('x86_64')][string]$Architecture
+    [Parameter(Mandatory)][ValidateSet('x86_64')][string]$Architecture,
+    [switch]$Isolated
 )
 
 $ErrorActionPreference = 'Stop'
 $base = "teleark-$Label-windows-$Architecture"
-$setupName = "TeleArk-Setup-$Label-windows-$Architecture.msi"
+$setupName = "TeleArk-Setup-$Label-windows-$Architecture.exe"
 foreach ($name in @("$base.exe", "$base.zip", $setupName, 'SHA256SUMS')) {
     $path = Join-Path dist $name
     if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {
@@ -51,6 +52,12 @@ foreach ($line in $lines) {
     }
 }
 
-& "$PSScriptRoot/test-windows-msi.ps1" -InstallerPath "dist/$setupName" -PayloadDir $unpacked -Version $Version
-Write-Output "Verified Windows $Architecture standalone executable, portable ZIP and native MSI."
+if ((Get-Item -LiteralPath "dist/$setupName").VersionInfo.ProductVersion.Trim() -ne $Version) {
+    throw 'EXE installer metadata does not match the application version.'
+}
+if (-not $Isolated) {
+    & "$PSScriptRoot/test-windows-msi.ps1" -InstallerPath 'dist/.windows-installer/TeleArk.msi' -PayloadDir $unpacked -Version $Version
+}
+& "$PSScriptRoot/test-windows-exe.ps1" -InstallerPath "dist/$setupName" -MsiPath 'dist/.windows-installer/TeleArk.msi' -Isolated:$Isolated
+Write-Output "Verified Windows $Architecture standalone executable, portable ZIP and EXE setup wizard."
 exit 0

@@ -293,14 +293,19 @@ jobs:
         if: matrix.platform == 'windows'
         run: dotnet tool restore
 
-      - name: Package Windows executable, ZIP and MSI
+      - name: Install Inno Setup wizard compiler
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install innosetup --version=6.7.3 --yes --no-progress --allow-downgrade
+
+      - name: Package Windows executable, ZIP and EXE setup wizard
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           ./scripts/package-windows.ps1 "target/${{ matrix.target }}/release/teleark.exe" dist `
             '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
 
-      - name: Verify Windows artifacts and MSI transactions
+      - name: Verify Windows artifacts, setup wizard and upgrade transactions
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
@@ -311,8 +316,10 @@ jobs:
         if: ${{ failure() && matrix.platform == 'windows' }}
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: windows-msi-test-logs
-          path: ${{ runner.temp }}/teleark-msi-*/*.log
+          name: windows-installer-test-logs
+          path: |
+            ${{ runner.temp }}/teleark-msi-*/*.log
+            ${{ runner.temp }}/teleark-exe-*/*.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -363,7 +370,6 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.exe
-            dist/*.msi
             dist/*.deb
             dist/*.pkg
             dist/*.bin
@@ -397,7 +403,7 @@ jobs:
           }
           copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.exe"
           copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.zip"
-          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.msi"
+          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.exe"
           copy_asset macos-universal "teleark-${label}-macos-universal.bin"
           copy_asset macos-universal "teleark-${label}-macos-universal.tar.gz"
           copy_asset macos-universal "TeleArk-${label}-macos-universal.pkg"

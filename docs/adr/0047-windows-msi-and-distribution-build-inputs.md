@@ -1,6 +1,6 @@
 # ADR 0047: Windows MSI and distribution build inputs
 
-Status: Accepted. Supersedes the Windows Inno installer choice in ADRs 0043 and 0044. Retains ADR 0045's three targets and ADR 0046's tag-only push trigger.
+Status: Windows delivery format superseded by [ADR 0052](0052-visible-windows-exe-installer.md). The transactional engine and distribution build-input decisions remain accepted. Supersedes the Windows Inno installer choice in ADRs 0043 and 0044. Retains ADR 0045's three targets and ADR 0046's tag-only push trigger.
 
 ## Decision
 

@@ -1842,3 +1842,8 @@ transfer-eta-heading = ETA
 upload-part-group = Blocks { $first }–{ $last } · { $confirmed } confirmed · { $state }
 storage-channel-pending-explanation = This upload is incomplete. Restore its recovery key and select the same original file to continue; only published, verified containers can be reused.
 upload-part-map-grouping = { $count } blocks · Up to { $size } per cell. Hover for exact ranges.
+
+## Windows setup wizard
+installer-preparing = Installing TeleArk. The installation window shows progress and lets you stop safely.
+installer-cancelled = Installation was stopped. You can retry or close Setup.
+installer-failed = Installation did not complete (code { $code }). See the installation log for the reason: { $log }

@@ -1815,3 +1815,8 @@ transfer-eta-heading = 预计剩余
 upload-part-group = 块 { $first }–{ $last } · 已确认 { $confirmed } · { $state }
 storage-channel-pending-explanation = 此上传尚未完成。恢复对应密钥并选择相同的原文件后可继续；仅复用已发布且验证通过的容器。
 upload-part-map-grouping = 共 { $count } 个块 · 每格最多 { $size } 个。悬停可查看具体范围。
+
+## Windows setup wizard
+installer-preparing = 正在安装 TeleArk。安装窗口会显示进度，您可以安全地停止安装。
+installer-cancelled = 安装已停止。您可以重试或关闭安装程序。
+installer-failed = 安装未完成（代码 { $code }）。请查看安装日志了解原因：{ $log }

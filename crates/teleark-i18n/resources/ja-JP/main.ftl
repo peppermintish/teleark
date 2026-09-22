@@ -1815,3 +1815,8 @@ transfer-eta-heading = 残り時間
 upload-part-group = ブロック { $first }–{ $last } · 確認済み { $confirmed } · { $state }
 storage-channel-pending-explanation = アップロードは未完了です。復旧キーを復元し、同じ元ファイルを選んで続行できます。公開済みで検証できたコンテナのみ再利用します。
 upload-part-map-grouping = { $count } ブロック · 1 セル最大 { $size } 個。範囲はホバーで確認できます。
+
+## Windows setup wizard
+installer-preparing = TeleArk をインストールしています。インストール画面で進行状況を確認し、安全に停止できます。
+installer-cancelled = インストールを停止しました。再試行するか、セットアップを閉じてください。
+installer-failed = インストールは完了しませんでした（コード { $code }）。原因はインストールログを確認してください：{ $log }

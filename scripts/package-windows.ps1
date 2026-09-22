@@ -1,4 +1,4 @@
-# Assemble Windows release packages (standalone EXE, portable ZIP and MSI).
+# Assemble Windows release packages (standalone EXE, portable ZIP and EXE setup wizard).
 # Run cargo build before invoking this script.
 $ErrorActionPreference = 'Stop'
 
@@ -64,8 +64,8 @@ if ($dry_run) {
     Write-Output "  Staging: $staging_dir"
     Write-Output "  Portable ZIP: $zip_path"
     Write-Output "  Standalone executable: $standalone_path"
-    Write-Output "  Installer: $(Join-Path $dist_dir "$setup_base.msi")"
-    Write-Output "Would copy binary, README.md, LICENSE-*, and THIRD_PARTY_NOTICES.md, compress ZIP, and compile a native MSI."
+    Write-Output "  Installer: $(Join-Path $dist_dir "$setup_base.exe")"
+    Write-Output "Would copy binary, README.md, LICENSE-*, and THIRD_PARTY_NOTICES.md, compress ZIP, and compile a visible EXE setup wizard."
     exit 0
 }
 
@@ -94,8 +94,13 @@ if (Test-Path -LiteralPath $zip_path) {
 Compress-Archive -Path "$staging_dir\*" -DestinationPath $zip_path -Force
 Write-Output "Created portable archive: $zip_path"
 
-$installer_path = Join-Path $dist_dir "$setup_base.msi"
-& "$PSScriptRoot/build-windows-msi.ps1" -SourceDir $staging_dir -OutputPath $installer_path -Version $version
+$installer_path = Join-Path $dist_dir "$setup_base.exe"
+# Keep the transactional payload out of the portable archive and published assets.
+$installer_work = Join-Path $dist_dir '.windows-installer'
+New-Item -ItemType Directory -Force -Path $installer_work | Out-Null
+$msi_path = Join-Path $installer_work 'TeleArk.msi'
+& "$PSScriptRoot/build-windows-msi.ps1" -SourceDir $staging_dir -OutputPath $msi_path -Version $version
+& "$PSScriptRoot/build-windows-exe.ps1" -MsiPath $msi_path -OutputPath $installer_path
 Write-Output "Created installer: $installer_path"
 
 # Generate SHA256 checksums
