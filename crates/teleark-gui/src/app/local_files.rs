@@ -160,21 +160,40 @@ impl TeleArkApp {
             let Ok(monitor) = work.await else { return };
             let mut subscription = monitor.subscribe();
             let Some(entity) = this.upgrade() else { return };
-            entity.update(cx, |app, cx| {
+            let task = entity.update(cx, |app, cx| {
                 app.local_file_monitor = Some(monitor);
                 app.sync_local_file_context(cx);
+                let mut initial = true;
+                Self::observe_local_file_updates(
+                    async move || {
+                        if !initial && !subscription.changed().await {
+                            return None;
+                        }
+                        initial = false;
+                        Some(subscription.take_updates())
+                    },
+                    cx,
+                )
             });
             drop(entity);
-            loop {
-                let update = subscription.take_updates();
+            task.await;
+        }));
+    }
+
+    // Keeping the revision source separate lets UI ownership and repaint tests
+    // use a controlled executor, while Runtime tests exercise the real workers.
+    fn observe_local_file_updates(
+        mut next: impl AsyncFnMut() -> Option<teleark_runtime::LocalDownloadUpdates> + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = next().await {
                 let Some(entity) = this.upgrade() else { return };
                 entity.update(cx, |app, cx| app.apply_local_file_updates(update, cx));
+                // Never retain the window while waiting for another revision.
                 drop(entity);
-                if !subscription.changed().await {
-                    return;
-                }
             }
-        }));
+        })
     }
 
     fn sync_local_file_context(&mut self, cx: &mut Context<Self>) {
@@ -409,70 +428,93 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
-        let directory = std::env::temp_dir().join(format!(
-            "teleark-probe-lifetime-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&directory).expect("temporary fixture");
-        let library =
-            DesktopLibrary::open(directory.join("catalog.sqlite3")).expect("temporary catalog");
-        library
-            .managed_directories()
-            .expect("temporary output directories");
+        #[derive(Default)]
+        struct Revisions {
+            queued: std::collections::VecDeque<teleark_runtime::LocalDownloadUpdates>,
+            waker: Option<std::task::Waker>,
+        }
+        impl Revisions {
+            fn publish(&mut self, update: teleark_runtime::LocalDownloadUpdates) {
+                self.queued.push_back(update);
+                if let Some(waker) = self.waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+        // The native monitor is covered by Runtime's worker/drop tests. Waking
+        // GPUI's deterministic executor from an OS worker is not a valid UI test.
+        let revisions = std::rc::Rc::new(std::cell::RefCell::new(Revisions::default()));
+        let source = revisions.clone();
         let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
         let counter = notifications.clone();
-        let _subscription =
+        let subscription =
             cx.update(|_, cx| cx.observe(&app, move |_, _| counter.set(counter.get() + 1)));
         app.update(cx, |app, cx| {
-            app.library = Some(library.clone());
-            app.start_local_file_refresh(cx);
+            app.local_files_task = Some(TeleArkApp::observe_local_file_updates(
+                async move || {
+                    std::future::poll_fn(|cx| {
+                        let mut source = source.borrow_mut();
+                        if let Some(update) = source.queued.pop_front() {
+                            std::task::Poll::Ready(Some(update))
+                        } else {
+                            source.waker = Some(cx.waker().clone());
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await
+                },
+                cx,
+            ));
         });
-        let started = std::time::Instant::now();
-        while app.read_with(cx, |app, _| app.local_file_monitor.is_none()) {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "observer starts"
-            );
-            cx.run_until_parked();
-            std::thread::yield_now();
-        }
         cx.run_until_parked();
+        let scope = app.read_with(cx, |app, _| {
+            app.telegram_account
+                .as_ref()
+                .map(|account| (account.id, app.telegram_login_generation))
+        });
+        let item = observation(1, 1, LocalFilePresence::Present);
+        let update = || teleark_runtime::LocalDownloadUpdates {
+            scope,
+            changes: std::collections::BTreeMap::from([(
+                item.file.destination.clone(),
+                Some(item.clone()),
+            )]),
+            ..Default::default()
+        };
+        let before_change = notifications.get();
+        revisions.borrow_mut().publish(update());
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), before_change + 1);
         let baseline = notifications.get();
+        revisions.borrow_mut().publish(update());
+        cx.run_until_parked();
         cx.background_executor.advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         assert_eq!(notifications.get(), baseline);
-        app.update(cx, |app, cx| app.refresh_volume_space(cx));
-        cx.run_until_parked();
-        app.update(cx, |app, _| {
-            app.library = None;
-            app.local_files_task = None;
-            app.local_file_monitor = None;
-            app.local_files_context = None;
-        });
-        cx.run_until_parked();
-        drop(_subscription);
+        assert!(
+            revisions.borrow().waker.is_some(),
+            "consumer waits for a revision"
+        );
+        drop(subscription);
         let weak = app.downgrade();
         cx.update(|window, _| window.remove_window());
         drop(app);
-        cx.background_executor
-            .advance_clock(Duration::from_secs(10));
         cx.run_until_parked();
         assert!(
             weak.upgrade().is_none(),
-            "background timers must not retain the app"
+            "waiting consumer must not retain the app"
         );
-        drop(library);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while let Err(err) = std::fs::remove_dir_all(&directory) {
-            if std::time::Instant::now() >= deadline {
-                panic!("clean temporary fixture: {err}");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // A late revision after the window closes must not revive the consumer.
+        revisions.borrow_mut().publish(update());
+        cx.background_executor
+            .advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), baseline);
+        assert_eq!(
+            std::rc::Rc::strong_count(&revisions),
+            1,
+            "source released on close"
+        );
     }
 
     fn observation(id: u64, message: i64, presence: LocalFilePresence) -> LocalDownloadObservation {
