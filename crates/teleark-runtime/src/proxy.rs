@@ -260,6 +260,11 @@ mod tests {
         let library = DesktopLibrary::open_synthetic(&path).expect("library");
         let stale = read_current(&library).expect("capture legacy");
         save_configuration(&library, &NetworkRoute::Direct).expect("newer direct");
+        let db = Database::open(&path).expect("inspect");
+        let committed = db
+            .setting(POLICY_KEY)
+            .expect("committed record")
+            .expect("present");
         assert_eq!(
             replace_policy(&library, stale, &legacy)
                 .expect_err("stale migration")
@@ -270,13 +275,11 @@ mod tests {
             load_configuration(&library).expect("newer preserved"),
             NetworkRoute::Direct
         );
-        let db = Database::open(&path).expect("inspect");
+        // Dependency features can change JSON object ordering. The stale write
+        // must preserve the actual committed bytes and timestamp in either mode.
         assert_eq!(
-            db.setting(POLICY_KEY)
-                .expect("record")
-                .expect("present")
-                .value,
-            r#"{"mode":"direct","version":1}"#
+            db.setting(POLICY_KEY).expect("record").expect("present"),
+            committed
         );
     }
 
