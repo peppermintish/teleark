@@ -309,7 +309,9 @@ jobs:
       - name: Install pinned Inno Setup wizard compiler
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: ./scripts/install-innosetup.ps1
+        run: |
+          ./scripts/test-install-innosetup.ps1
+          ./scripts/install-innosetup.ps1
 
       - name: Package Windows executable, ZIP and EXE setup wizard
         if: matrix.platform == 'windows'
@@ -343,6 +345,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/test-macos-signing-import.sh
           bash scripts/test-macos-signing.sh
           bash scripts/macos/verify-keychain-signing.sh
           label='${{ needs.version.outputs.label }}'

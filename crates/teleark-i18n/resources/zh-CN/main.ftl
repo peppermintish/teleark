@@ -1123,6 +1123,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.3 · Windows 和 macOS 发行修复
+
+    - 将 Inno Setup 安装到明确的用户目录，并导出经过验证的准确路径，修复 Windows 编译器查找失败的问题。
+    - 修复 macOS 签名检查，使其无需系统信任即可识别固定的自签名身份。增加了隔离的签名与安装回归测试。
+    - 应用元数据为 0.5.3。SQLite 读写架构 23、从 0–22 自动升级的能力，以及受支持的凭据、加密文件、传输和恢复编码均保持不变。
+
     ## 0.5.2 · 稳定的无交互 macOS 签名
 
     - 修复了托管 macOS 发行版签名：将持久化 PKCS#12 身份作为完整签名身份导入临时钥匙串，在配置非交互访问前验证公钥指纹，并为较旧的导入行为保留明确的 PEM 回退路径。

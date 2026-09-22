@@ -7,8 +7,8 @@
 <key>CFBundleExecutable</key><string>teleark</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>TeleArk</string>
-<key>CFBundleShortVersionString</key><string>0.5.2</string>
-<key>CFBundleVersion</key><string>0.5.2</string>
+<key>CFBundleShortVersionString</key><string>0.5.3</string>
+<key>CFBundleVersion</key><string>0.5.3</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>CFBundleDevelopmentRegion</key><string>en</string>

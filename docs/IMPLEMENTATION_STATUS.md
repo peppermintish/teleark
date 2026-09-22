@@ -1,4 +1,12 @@
-# Implementation status — v0.5.2
+# Implementation status — v0.5.3
+
+## Version 0.5.3 · Windows and macOS CI packaging (2026-09-23)
+
+Windows installs the pinned Inno Setup 6.7.3 compiler at an explicit per-user path including the Programs directory, validates that exact executable and exports it to subsequent CI steps. The bootstrap retains checksum, publisher and version checks. macOS enumerates all signing identities so its deliberately self-signed certificate is not excluded by system trust policy; fingerprint pinning and final signature verification remain required. A rejected PKCS#12 import reports its status and uses the PEM fallback once.
+
+New regressions cover installer paths with spaces, PATH export and checksum/signature/installation failures, plus native untrusted macOS signing, forced PEM import, mismatched identity rejection and Keychain continuity. Application metadata, both lockfiles, bundle metadata and About release records are synchronized at 0.5.3. SQLite read/write schema 23 and supported upgrades from 0–22 remain unchanged; credential, encrypted-file, transfer and recovery codecs and third-party dependencies are unchanged.
+
+Final local validation passed: formatting, locked workspace/all-target checking, strict Clippy, all 857 serial workspace tests (10 existing manual probes ignored), explicit Core/i18n tests, warning-denied rustdoc, cargo-deny, LF policy/regressions, distribution-credential and platform payload regressions, workflow structural lint, changed-shell-script lint and the matching v0.5.3 release-version check. Native synthetic signing and Keychain qualification passed. Five Windows bootstrap scenarios passed with mocked download/install boundaries on macOS using temporary copies with only the Windows host guards removed; the checked-in regression runs on Windows in CI. Native Windows installation and hosted package qualification/publication remain checks of the new tagged run. Existing dependency duplicate/future-compatibility warnings remain; no live Telegram or user data was used.
 
 ## Version 0.5.2 · Reliable headless macOS signing (2026-09-23)
 

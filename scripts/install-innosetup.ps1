@@ -28,6 +28,8 @@ $runnerTemp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]
 $downloadDirectory = Join-Path ([System.IO.Path]::GetFullPath($runnerTemp)) "teleark-innosetup-$Version-$([guid]::NewGuid().ToString('N'))"
 $downloadPath = Join-Path $downloadDirectory $release.Asset
 $downloadUrl = "https://github.com/jrsoftware/issrc/releases/download/$($release.Tag)/$($release.Asset)"
+$installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6'
+$isccPath = Join-Path $installDirectory 'ISCC.exe'
 
 function Test-Version([string]$Path) {
     $expected = [version]::Parse($Version)
@@ -44,37 +46,6 @@ function Test-Version([string]$Path) {
     }
 
     return $fileVersion
-}
-
-function Find-VerifiedCompiler {
-    $candidatePaths = [System.Collections.Generic.List[string]]::new()
-    $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-    if ($command) {
-        [void]$candidatePaths.Add($command.Source)
-    }
-
-    $roots = @(
-        $env:LOCALAPPDATA,
-        ${env:ProgramFiles(x86)},
-        $env:ProgramFiles
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-
-    foreach ($root in $roots) {
-        [void]$candidatePaths.Add((Join-Path $root 'Inno Setup 6\ISCC.exe'))
-    }
-
-    foreach ($candidate in ($candidatePaths | Select-Object -Unique)) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            try {
-                [void](Test-Version $candidate)
-                return $candidate
-            } catch {
-                continue
-            }
-        }
-    }
-
-    throw "Could not find ISCC.exe for verified Inno Setup $Version after installation."
 }
 
 try {
@@ -101,18 +72,22 @@ try {
         throw "Unexpected Inno Setup installer publisher: $publisher."
     }
 
-    Write-Output "Installing Inno Setup $Version silently."
+    Write-Output "Installing Inno Setup $Version silently in $installDirectory."
     $process = Start-Process -FilePath $downloadPath -ArgumentList @(
         '/VERYSILENT',
         '/SUPPRESSMSGBOXES',
         '/NORESTART',
-        '/SP-'
+        '/SP-',
+        '/CURRENTUSER',
+        "/DIR=`"$installDirectory`""
     ) -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Inno Setup $Version installer failed with exit code $($process.ExitCode)."
     }
 
-    $isccPath = Find-VerifiedCompiler
+    if (-not (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
+        throw "Inno Setup $Version installed without the expected compiler: $isccPath"
+    }
     $fileVersion = Test-Version $isccPath
     $isccDirectory = Split-Path -Parent $isccPath
     $env:PATH = "$isccDirectory;$env:PATH"

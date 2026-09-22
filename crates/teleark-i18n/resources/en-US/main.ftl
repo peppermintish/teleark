@@ -1151,6 +1151,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.3 · Windows and macOS release fixes
+
+    - Fixed Windows compiler discovery by installing Inno Setup in an explicit per-user directory and exporting that exact verified path.
+    - Fixed macOS signing checks to recognize the pinned self-signed identity without requiring system trust. Added isolated signing and installer regressions.
+    - Application metadata is 0.5.3. SQLite read/write schema 23, automatic upgrades from 0–22, and supported credential, encrypted-file, transfer and recovery codecs are unchanged.
+
     ## 0.5.2 · Reliable headless macOS signing
 
     - Fixed hosted macOS release signing by importing the persistent PKCS#12 identity into the temporary keychain as a complete signing identity, verifying its public fingerprint before configuring noninteractive access, and retaining an explicit PEM fallback for older import behavior.

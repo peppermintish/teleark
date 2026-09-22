@@ -40,7 +40,9 @@ create_keychain() {
 }
 
 identity_summary() {
-  security find-identity -v -p codesigning "$keychain" 2>&1 || true
+  # -v filters out untrusted self-signed identities, even when their key is present.
+  # Pin the certificate/key pair here; codesign verifies the resulting signatures below.
+  security find-identity -p codesigning "$keychain" 2>&1 || true
 }
 
 verify_identity() {
@@ -68,12 +70,10 @@ import_pem_identity() {
 phase 'creating the isolated temporary keychain'
 create_keychain
 phase 'importing the PKCS#12 signing identity'
-if ! security import "$stage/identity.p12" -f pkcs12 -P '' -k "$keychain" -T /usr/bin/codesign >/dev/null 2>&1; then
-  security delete-keychain "$keychain" >/dev/null 2>&1 || true
-  create_keychain
-  import_pem_identity
-fi
-if ! verify_identity; then
+if security import "$stage/identity.p12" -f pkcs12 -P '' -k "$keychain" -T /usr/bin/codesign >/dev/null 2>&1; then
+  verify_identity
+else
+  phase "PKCS#12 import failed (status $?); retrying with PEM"
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
   create_keychain
   import_pem_identity
