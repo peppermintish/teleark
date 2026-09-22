@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 · Reliable release regression checks
+
+- Fixed a timing-sensitive download-cleanup regression test and a proxy migration assertion that depended on JSON field order. The checks continue to verify that blocked cleanup permits unrelated downloads and that stale migration preserves the newer route.
+- Added clear local macOS packaging commands, signing requirements and final output paths, including the required Apple Silicon and Intel build steps.
+- Application metadata is 0.5.1. Runtime behavior, SQLite read/write schema 23, automatic upgrades from 0–22, and supported credential, encrypted-file, transfer and recovery codecs are unchanged.
+
 ## 0.5.0 · Credential storage, filtered batches and languages
 
 - macOS defaults to system Keychain for API credentials, proxy passwords and encryption recovery material. Settings offers an explicit warning before switching to unencrypted private SQLite storage. Windows and Linux use SQLite with Keychain unavailable and an explanation. Existing supported data migrates automatically.

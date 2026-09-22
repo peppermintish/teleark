@@ -2922,6 +2922,54 @@ mod tests {
         }
     }
 
+    struct CleanupRelease(Option<mpsc::SyncSender<Result<(), ApplicationError>>>);
+
+    impl CleanupRelease {
+        fn release(mut self) {
+            self.0
+                .take()
+                .expect("cleanup release sender")
+                .send(Ok(()))
+                .expect("release cleanup");
+        }
+    }
+
+    impl Drop for CleanupRelease {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                // Unwind must release the fixture without letting it touch files
+                // after the temporary directory has been removed.
+                let _ =
+                    sender.try_send(Err(ApplicationError::new(ApplicationErrorKind::Cancelled)));
+            }
+        }
+    }
+
+    fn cleanup_gate() -> (CleanupRelease, mpsc::Receiver<Result<(), ApplicationError>>) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        (CleanupRelease(Some(sender)), receiver)
+    }
+
+    fn assert_schedule_available_during_cleanup(transfers: &DesktopTransfers) {
+        let scheduled = transfers.inner.scheduled.clone();
+        let (acquired, acknowledgement) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            let available = scheduled.lock().is_ok();
+            let _ = acquired.send(available);
+        });
+        // Live workers may briefly acquire this lock for retirement or refill.
+        // Require acquisition while cleanup remains gated, not at one instant.
+        let result = acknowledgement.recv_timeout(Duration::from_secs(3));
+        if result.is_ok() {
+            waiter.join().expect("schedule lock observer");
+        }
+        assert_eq!(
+            result,
+            Ok(true),
+            "blocked filesystem cleanup must not retain the scheduling lock"
+        );
+    }
+
     fn wait_for_terminal(transfers: &DesktopTransfers, id: u64) -> ChannelDownloadSnapshot {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -4294,7 +4342,7 @@ mod tests {
         struct CleanupBackend {
             attempts: AtomicUsize,
             entered: mpsc::SyncSender<()>,
-            release: StdMutex<mpsc::Receiver<()>>,
+            release: StdMutex<mpsc::Receiver<Result<(), ApplicationError>>>,
         }
         impl ChannelDownloadBackend for CleanupBackend {
             fn download(
@@ -4321,15 +4369,15 @@ mod tests {
                 self.release
                     .lock()
                     .expect("release lock")
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("cleanup release");
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))??;
                 Ok(())
             }
         }
         let directory = tempfile::tempdir().expect("temporary directory");
         let library = library(&directory);
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = cleanup_gate();
         let backend = Arc::new(CleanupBackend {
             attempts: AtomicUsize::new(0),
             entered: entered_tx,
@@ -4342,10 +4390,7 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("cleanup blocked");
-        assert!(
-            transfers.inner.scheduled.try_lock().is_ok(),
-            "cleanup must release global scheduling lock"
-        );
+        assert_schedule_available_during_cleanup(&transfers);
         transfers.retry(id).expect("request retry during cleanup");
         assert_eq!(
             transfers.snapshot_state(id).expect("state"),
@@ -4367,7 +4412,7 @@ mod tests {
             1,
             "retry cannot share old partial owner"
         );
-        release_tx.send(()).expect("release cleanup");
+        release_tx.release();
         assert_eq!(
             wait_for_terminal(&transfers, id).state,
             ChannelDownloadState::Completed
@@ -4406,7 +4451,7 @@ mod tests {
             fail_cleanup: bool,
             discarded: AtomicUsize,
             cleanup_started: mpsc::SyncSender<()>,
-            cleanup_release: StdMutex<mpsc::Receiver<()>>,
+            cleanup_release: StdMutex<mpsc::Receiver<Result<(), ApplicationError>>>,
             started: mpsc::SyncSender<()>,
             release: StdMutex<mpsc::Receiver<()>>,
         }
@@ -4448,8 +4493,8 @@ mod tests {
                 self.cleanup_release
                     .lock()
                     .expect("cleanup gate")
-                    .recv_timeout(Duration::from_secs(3))
-                    .expect("cleanup release");
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))??;
                 if self.fail_cleanup {
                     return Err(ApplicationError::new(
                         ApplicationErrorKind::PermissionDenied,
@@ -4466,7 +4511,7 @@ mod tests {
             let (started_tx, started_rx) = mpsc::sync_channel(1);
             let (release_tx, release_rx) = mpsc::sync_channel(1);
             let (cleanup_started_tx, cleanup_started_rx) = mpsc::sync_channel(1);
-            let (cleanup_release_tx, cleanup_release_rx) = mpsc::sync_channel(1);
+            let (cleanup_release_tx, cleanup_release_rx) = cleanup_gate();
             let backend = Arc::new(RetryBackend {
                 active: AtomicBool::new(false),
                 fail_cleanup,
@@ -4504,14 +4549,11 @@ mod tests {
             cleanup_started_rx
                 .recv_timeout(Duration::from_secs(3))
                 .expect("cleanup after writer release");
+            assert_schedule_available_during_cleanup(&transfers);
             transfers
                 .activate_pending_downloads()
                 .expect("refill during cleanup");
             assert_eq!(backend.attempts.load(Ordering::Acquire), 1);
-            assert!(
-                transfers.inner.scheduled.try_lock().is_ok(),
-                "cleanup cannot hold scheduling lock"
-            );
             assert_eq!(
                 transfers
                     .delete(id)
@@ -4519,9 +4561,7 @@ mod tests {
                     .kind(),
                 ApplicationErrorKind::Conflict
             );
-            cleanup_release_tx
-                .send(())
-                .expect("allow cleanup to finish");
+            cleanup_release_tx.release();
             let cancellation = cancellation.join().expect("cancel caller");
             if fail_cleanup {
                 assert_eq!(
@@ -5003,7 +5043,7 @@ mod tests {
             database_path: PathBuf,
             entered: mpsc::SyncSender<()>,
             cleanup_entered: mpsc::SyncSender<()>,
-            release: Mutex<mpsc::Receiver<()>>,
+            release: Mutex<mpsc::Receiver<Result<(), ApplicationError>>>,
         }
         impl ChannelDownloadBackend for Initial {
             fn download(
@@ -5040,8 +5080,8 @@ mod tests {
                 self.release
                     .lock()
                     .expect("release")
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("release cleanup");
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))??;
                 Err(ApplicationError::new(
                     ApplicationErrorKind::PermissionDenied,
                 ))
@@ -5049,7 +5089,7 @@ mod tests {
         }
         struct Restarted {
             entered: mpsc::SyncSender<()>,
-            release: Mutex<mpsc::Receiver<()>>,
+            release: Mutex<mpsc::Receiver<Result<(), ApplicationError>>>,
             calls: Mutex<Vec<PathBuf>>,
         }
         impl ChannelDownloadBackend for Restarted {
@@ -5071,8 +5111,8 @@ mod tests {
                 self.release
                     .lock()
                     .expect("release")
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("release restored cleanup");
+                    .recv()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))??;
                 fs::remove_file(path.with_extension("owned-partial")).expect("owned partial");
                 Ok(())
             }
@@ -5087,7 +5127,7 @@ mod tests {
         .expect("partial");
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (cleanup_tx, cleanup_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = cleanup_gate();
         let transfers = test_transfers(
             Arc::new(Initial {
                 database_path: library.database_path.as_ref().clone(),
@@ -5109,6 +5149,7 @@ mod tests {
         cleanup_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("cleaning");
+        assert_schedule_available_during_cleanup(&transfers);
         transfers.retry(id).expect("durable retry while cleaning");
         let db = teleark_storage::Database::open(library.database_path.as_ref())
             .expect("independent database");
@@ -5118,7 +5159,7 @@ mod tests {
                 .expect("saved obligation")
                 .retry_requested
         );
-        release_tx.send(()).expect("release failure");
+        release_tx.release();
         assert_eq!(
             cancel
                 .join()
@@ -5140,7 +5181,7 @@ mod tests {
         ));
         drop(transfers);
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = cleanup_gate();
         let backend = Arc::new(Restarted {
             entered: entered_tx,
             release: Mutex::new(release_rx),
@@ -5156,6 +5197,7 @@ mod tests {
             backend.calls.lock().expect("calls").is_empty(),
             "no retry before cleanup acknowledgment"
         );
+        assert_schedule_available_during_cleanup(&transfers);
         let other = dir.path().join("unrelated.zip");
         let other_id = transfers
             .enqueue_channel_download(request(other.clone()))
@@ -5165,8 +5207,8 @@ mod tests {
             ChannelDownloadState::Completed
         );
         assert_eq!(*backend.calls.lock().expect("calls"), vec![other]);
-        assert!(transfers.inner.scheduled.try_lock().is_ok());
-        release_tx.send(()).expect("release cleanup");
+        assert_schedule_available_during_cleanup(&transfers);
+        release_tx.release();
         let completed = wait_for_terminal(&transfers, id);
         assert_eq!(completed.state, ChannelDownloadState::Completed);
         assert!(completed.cleanup.is_none());

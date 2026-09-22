@@ -1,4 +1,16 @@
-# Implementation status — v0.5.0
+# Implementation status — v0.5.1
+
+## Version 0.5.1 · Deterministic release regressions (2026-09-23)
+
+The proxy migration regression now captures the newly committed direct-route record and verifies that a rejected stale migration preserves its exact bytes and timestamp. Its previous assertion assumed one JSON field order, which changes when Cargo unifies the `serde_json/preserve_order` dependency feature. The original failure was reproduced locally with that feature enabled; all six proxy tests now pass both with and without it. The runtime codec already treats JSON field order as insignificant, so no stored data or production routing behavior changes.
+
+Three live-worker cleanup regressions now require a bounded scheduling-lock acquisition acknowledgment while filesystem cleanup remains explicitly blocked. This tolerates short retirement/refill lock acquisitions without weakening the requirement that unrelated work stays available. The restart case checks lock availability before durable retry and before/after another download completes. Cleanup gates no longer expire and accidentally allow a held-lock regression to pass; a release guard sends cancellation on test unwinding, preventing the secondary disconnected-receiver panic and late fixture file removal. Isolated single-owner lock assertions remain unchanged. All implementation edits are inside test modules.
+
+Workspace manifests, both lockfiles, macOS bundle metadata and the English/Chinese/Japanese About release records are synchronized at 0.5.1. SQLite remains read/write schema 23 with supported automatic upgrades from 0–22; payload, credential, transfer and recovery codec versions are unchanged. No third-party dependencies changed. This patch also includes the local packaging documentation checkpoint below.
+
+Final local checks passed: formatting, locked workspace/all-target check, strict workspace Clippy, all 857 serial workspace tests across the final GUI and non-GUI runs (10 existing manual probes ignored), explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. All six proxy regressions pass with both default JSON ordering and explicit `serde_json/preserve_order`; the three changed cleanup regressions pass twenty consecutive runs each against the final source. The 45-test related transfer suite also passes. An independent read-only review found no weakened assertions or additional issues.
+
+LF policy/regressions, thirteen synthetic distribution-credential cases, both platform payload fixture suites, macOS signing continuity/tamper checks, workflow structure validation and the matching `v0.5.1` release-version resolver passed. Existing dependency duplicate/future-compatibility warnings remain. No UI layout changed and no live Telegram transfers or native installation tests were run locally for this patch. Native package qualification and publication run in the tagged CI workflow; their outcome has not been verified here.
 
 ## Local macOS packaging instructions (2026-09-23)
 
