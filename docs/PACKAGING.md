@@ -18,7 +18,7 @@ Each package job checks native architecture, files, checksums and installer meta
 
 ## Windows
 
-Build the `x86_64-pc-windows-msvc` target with `RUSTFLAGS="-C target-feature=+crt-static"`. Install Inno Setup 6.7.3 and the .NET 8 SDK on the build machine, run `dotnet tool restore` for WiX 5.0.2, then run `scripts/package-windows.ps1` with the `x86_64` architecture argument. Release assets contain the standalone app EXE, portable ZIP and **TeleArk-Setup EXE**. Double-click the Setup EXE for Welcome, destination, confirmation, installation progress and completion screens, with an optional launch action. The wizard uses English, as the previous EXE installer did; the application retains all three locales.
+Build the `x86_64-pc-windows-msvc` target with `RUSTFLAGS="-C target-feature=+crt-static"`. Install Inno Setup 6.7.3 and the .NET 8 SDK on the build machine, run `dotnet tool restore` for WiX 5.0.2, then run `scripts/package-windows.ps1` with the `x86_64` architecture argument. Release assets contain the standalone app EXE, portable ZIP and **TeleArk-Setup EXE**. Double-click the Setup EXE for Welcome, destination, confirmation, installation progress and completion screens, with an optional launch action. The wizard uses English, as the previous EXE installer did; the application supports ten locales with English fallback.
 
 The EXE embeds the transactional MSI as a private payload. Users do not open or download an MSI separately, and no .NET, WiX, Inno Setup or Visual C++ redistributable is needed on their computer. The internal MSI stays under `dist/.windows-installer/`, outside the portable ZIP and published asset set. Inno creates no second uninstall entry and does not own application files. Windows Installer retains ownership so existing MSI installations upgrade normally, rollback remains transactional, and Settings offers one installed product. [ADR 0052](adr/0052-visible-windows-exe-installer.md) records this choice.
 
@@ -36,7 +36,15 @@ The workflow validates the repository secrets `TELEARK_DISTRIBUTION_TELEGRAM_API
 
 The release job builds `aarch64-apple-darwin` and `x86_64-apple-darwin` on an Apple Silicon runner with `MACOSX_DEPLOYMENT_TARGET=11.0`, joins them with `lipo`, and creates the app archive, raw executable and product package using `scripts/package-macos.sh`. macOS 11 is the declared minimum. The raw executable uses Apple system frameworks only; the `.app` includes the icon and legal files. Install through Finder or `sudo installer -pkg TeleArk-<label>-macos-universal.pkg -target /`.
 
-The `.app` and `.pkg` are currently unsigned and unnotarized. Public distribution through Gatekeeper needs Apple signing, notarization and clean-machine checks.
+The `.app` and standalone executable are signed with the pinned self-signed certificate in `scripts/macos/release-certificate.pem`. `scripts/macos/sign-app.sh` supplies the same explicit designated requirement (bundle identifier plus certificate fingerprint) to every release, so Keychain can recognize an updated executable. The installer remains unsigned; this identity does not provide Developer ID, notarization, or Gatekeeper trust. macOS can still refuse access to locked Keychains or legacy items created by a different identity. Runtime requests fail without opening authentication popups and preserve recovery material.
+
+### Persistent self-signed release identity
+
+The original identity was generated once using `scripts/macos/create-signing-identity.sh` into a private directory outside the checkout. Never regenerate it per build. The public certificate is committed; `private-key.pem` and `identity.p12` are private, mode 0600 inside a 0700 directory, and must be backed up securely. The certificate is valid for twenty years. Rotation requires an explicit compatible identity/recovery migration; simply replacing the certificate breaks Keychain continuity.
+
+Set GitHub Actions repository secret `TELEARK_MACOS_SIGNING_P12_BASE64` from the base64-encoded private `identity.p12`. Feed it through standard input or a private file, never command arguments or logs. The macOS package step requires this secret and fails if it is absent or differs from the pinned public certificate. Local packaging uses `TELEARK_MACOS_SIGNING_P12` pointing to the private file. OpenSSL 3 and Apple command-line tools are required. The PKCS#12 envelope has an empty passphrase because the private directory and GitHub encrypted secret store protect it; no passphrase or key is passed in process arguments.
+
+Signing imports into an isolated temporary Keychain, grants only Apple signing tools access, signs both distribution forms, verifies the pinned requirement and removes temporary material on exit. It never changes the system certificate trust store. Bundle and standalone resource signatures differ; the release verifier compares executable code after removing signatures from temporary copies. `scripts/test-macos-signing.sh` verifies identity continuity across an update, code equivalence, and rejection of altered resources using synthetic files. CI also runs it before packaging. See [ADR 0055](adr/0055-stable-macos-signing-identity.md).
 
 ## Linux
 

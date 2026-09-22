@@ -11,3 +11,8 @@
 /.env.local
 /.env.*
 !/.env.example
+
+# Signing keys belong outside this checkout; only the public certificate is tracked.
+*.p12
+*.pfx
+*private-key.pem

@@ -52,9 +52,9 @@ scripts/build-local.sh &&
   scripts/package-macos.sh target/release/teleark dist/TeleArk.app
 ```
 
-The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. The release archive contains this unsigned bundle.
+The packaging script creates a native `.app` with Info.plist, the original application icon at standard/Retina sizes and license resources. Local and release packaging require the persistent self-signed identity described in [Packaging](PACKAGING.md#persistent-self-signed-release-identity). The release archive contains the signed bundle.
 
-GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. The tagged workflow builds both Apple Silicon and Intel slices; signing/notarization and clean-machine validation of the macOS 11 floor remain separate qualification.
+GPUI Kit enables the macOS runtime-shader path, allowing development with Apple Command Line Tools without the standalone Metal compiler. Preserve that feature unless a replacement is validated. The tagged workflow builds both Apple Silicon and Intel slices; Apple notarization and clean-machine validation of the macOS 11 floor remain separate qualification.
 
 Source builds use their own Telegram API ID/Hash configured from the login/settings UI. Release and package-preview builds require the repository secrets `TELEARK_DISTRIBUTION_TELEGRAM_API_ID` and `TELEARK_DISTRIBUTION_TELEGRAM_API_HASH`; CI validates them and passes them to every native release compilation. Both must be valid; personal saved credentials override them. Embedded identifiers are extractable and do not authorize a Telegram user. For local testing, `.env.example` provides the [officially published TEST ONLY pair](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). These identifiers are server-limited and must not be used for distribution; obtain your own pair before publishing. Never log personal pairs or commit them to fixtures.
 

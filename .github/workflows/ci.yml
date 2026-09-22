@@ -325,9 +325,12 @@ jobs:
 
       - name: Package and verify macOS release
         if: matrix.platform == 'macos'
+        env:
+          TELEARK_MACOS_SIGNING_P12_BASE64: ${{ secrets.TELEARK_MACOS_SIGNING_P12_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/test-macos-signing.sh
           label='${{ needs.version.outputs.label }}'
           base="teleark-${label}-macos-universal"
           mkdir -p "dist/$base"

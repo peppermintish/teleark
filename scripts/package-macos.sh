@@ -46,7 +46,7 @@ if "$dry_run"; then
 fi
 
 test -f "$binary"
-for tool in pkgbuild productbuild plutil lipo ditto /usr/libexec/PlistBuddy; do
+for tool in codesign security openssl pkgbuild productbuild plutil lipo ditto /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Required macOS packaging tool is missing: $tool" >&2; exit 1; }
 done
 for required_architecture in arm64 x86_64; do
@@ -79,6 +79,8 @@ else
   iconutil -c icns "$stage/TeleArk.iconset" -o "$destination/Contents/Resources/TeleArk.icns"
 fi
 cp "$repository_root/README.md" "$repository_root/LICENSE-MIT" "$repository_root/LICENSE-APACHE" "$repository_root/THIRD_PARTY_NOTICES.md" "$destination/Contents/Resources/"
+
+"$repository_root/scripts/macos/sign-app.sh" "$destination" "$standalone_path"
 
 # Root payloads install at a fixed path and cannot relocate to an older app copy.
 mkdir -p "$stage/payload" "$stage/scripts"
