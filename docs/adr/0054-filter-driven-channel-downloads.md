@@ -26,7 +26,10 @@ This is not a database-wide snapshot or a remote completeness guarantee.
 Each successful filter admission creates a separate `batch-<timestamp>-<suffix>`
 folder under managed Downloads through exclusive directory creation. Unix folder
 permissions are 0700. Remote basenames cannot escape that folder, and colliding
-names receive distinct suffixes. Persisted task destinations preserve the folder
+names receive distinct suffixes. A bounded private directory of empty reservation
+names asks the destination filesystem to arbitrate case and Unicode aliases for
+final files, partials and maps; it is removed before queue admission and never
+contains payload data. Persisted task destinations preserve the folder
 across restart, retry and history inspection. Failed preparation only attempts to
 remove its empty folder; it never recursively removes an accepted output.
 

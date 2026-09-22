@@ -201,6 +201,7 @@ impl DesktopTransfers {
         let mut claimed = Vec::new();
         let mut admission_started = false;
         let result = (|| {
+            let mut names = FilesystemReservations::new(&directory)?;
             let mut reserved = BTreeSet::new();
             let mut requests = Vec::with_capacity(files.len());
             for file in files {
@@ -214,7 +215,16 @@ impl DesktopTransfers {
                             .iter()
                             .any(|path| reserved.contains(path)))
                     },
-                    claim_destination,
+                    |path| {
+                        if !names.claim(path)? {
+                            return Ok(false);
+                        }
+                        if claim_destination(path)? {
+                            Ok(true)
+                        } else {
+                            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+                        }
+                    },
                 )?;
                 claimed.push(destination.clone());
                 reserved.extend(destination_paths(&destination)?);
@@ -231,6 +241,7 @@ impl DesktopTransfers {
                 });
             }
             let count = requests.len();
+            names.finish()?;
             // Serializes cancellation against the start of durable admission.
             progress.update(ChannelBatchPreparationPhase::Queuing, examined, count)?;
             admission_started = true;
@@ -319,6 +330,85 @@ fn destination_paths(destination: &Path) -> Result<[PathBuf; 4], ApplicationErro
         partial,
         map,
     ])
+}
+
+// Comparing PathBuf values cannot model the destination volume's case and
+// Unicode equivalence. Empty names in a private sibling directory let that
+// filesystem arbitrate every output/partial/map alias before workers start.
+// These are bounded reservation metadata, never ciphertext or file payloads.
+struct FilesystemReservations {
+    directory: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+impl FilesystemReservations {
+    fn new(directory: &Path) -> Result<Self, ApplicationError> {
+        let directory = directory.join(".teleark-batch-reservations");
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&directory)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        Ok(Self {
+            directory,
+            paths: Vec::new(),
+        })
+    }
+
+    fn claim(&mut self, destination: &Path) -> Result<bool, ApplicationError> {
+        let start = self.paths.len();
+        for path in destination_paths(destination)? {
+            let name = path
+                .file_name()
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?;
+            let probe = self.directory.join(name);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&probe) {
+                Ok(_) => self.paths.push(probe),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    while self.paths.len() > start {
+                        let path = self.paths.last().expect("owned reservation");
+                        std::fs::remove_file(path).map_err(|_| {
+                            ApplicationError::new(ApplicationErrorKind::Persistence)
+                        })?;
+                        self.paths.pop();
+                    }
+                    return Ok(false);
+                }
+                Err(_) => return Err(ApplicationError::new(ApplicationErrorKind::Persistence)),
+            }
+        }
+        Ok(true)
+    }
+
+    fn finish(&mut self) -> Result<(), ApplicationError> {
+        while let Some(path) = self.paths.last() {
+            std::fs::remove_file(path)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            self.paths.pop();
+        }
+        std::fs::remove_dir(&self.directory)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))
+    }
+}
+
+impl Drop for FilesystemReservations {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(&self.directory);
+    }
 }
 
 // Let the filesystem arbitrate basename equivalence (including case and Unicode
@@ -476,6 +566,47 @@ mod tests {
             reserved.extend(paths);
         }
         assert_eq!(reserved.len(), 16);
+    }
+
+    #[test]
+    fn artifact_reservations_follow_the_volumes_filename_equivalence() {
+        let root = tempfile::tempdir().expect("folder");
+        let mut names = FilesystemReservations::new(root.path()).expect("private names");
+        assert!(
+            names
+                .claim(&root.path().join("Report"))
+                .expect("first output")
+        );
+        assert!(
+            !names
+                .claim(&root.path().join(".Report.teleark-partial"))
+                .expect("artifact is protected")
+        );
+        // Detect the actual volume's behavior instead of assuming every macOS
+        // volume is case insensitive or every Linux volume is case sensitive.
+        let case_insensitive = names.directory.join("report").exists();
+        assert_eq!(
+            names
+                .claim(&root.path().join(".report.teleark-partial"))
+                .expect("alias check"),
+            !case_insensitive
+        );
+        assert!(
+            names
+                .claim(&root.path().join("résumé"))
+                .expect("composed output")
+        );
+        let normalization_equivalent = names.directory.join("re\u{301}sume\u{301}").exists();
+        assert_eq!(
+            names
+                .claim(&root.path().join(".re\u{301}sume\u{301}.teleark-partial"))
+                .expect("normalization alias"),
+            !normalization_equivalent
+        );
+        names
+            .finish()
+            .expect("remove preparation metadata before admission");
+        assert!(!root.path().join(".teleark-batch-reservations").exists());
     }
 
     #[test]
