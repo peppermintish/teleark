@@ -665,21 +665,21 @@ channel-filter-batch-phase-complete = 일괄 준비 완료
 
 channel-filter-batch-event = { $phase } · 시작 후 { $seconds }초
 
-common-account-count = { $count }개 계정
+common-account-count = 계정 { $count }개
 
-library-item-count = { $count }개 항목
+library-item-count = 항목 { $count }개
 
-library-result-count-dynamic = { $count }개 결과
+library-result-count-dynamic = 결과 { $count }개
 
-library-total-files-dynamic = { $count }개 파일
+library-total-files-dynamic = 파일 { $count }개
 
-file-detail-part-count = { $count }개 파트
+file-detail-part-count = 파트 { $count }개
 
-transfer-summary-task-count = { $count }개 작업
+transfer-summary-task-count = 작업 { $count }개
 
-transfer-footer-total-live = { $count }개 작업
+transfer-footer-total-live = 작업 { $count }개
 
-settings-index-batch-option = { $count }개 메시지
+settings-index-batch-option = 메시지 { $count }개
 
 upload-part-count = 파트: { $count }
 

@@ -1151,14 +1151,14 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
-    ## 0.5.0 · Credential protection and filtered downloads
+    ## 0.5.0 · Credential storage, filtered batches and languages
 
-    - macOS Keychain is enabled by default for API credentials, proxy passwords and encryption keys. Turning it off requires confirmation and moves secrets to the unencrypted private SQLite library. Windows and Linux use SQLite while native credential-store integration is unavailable.
-    - macOS packages use a persistent self-signed code-signing identity for consistent Keychain access. This is not Apple notarization, and first access or system policy may still require permission.
-    - Download all indexed files matching channel filters into a separate folder for each batch, with visible preparation, queueing and cancellation.
-    - Added Spanish, French, German, Brazilian Portuguese, Russian, Korean and Hindi for primary flows. Untranslated detailed diagnostics and release notes fall back to English.
-    - All displayed byte sizes and transfer rates use binary IEC units. Indexing runs automatically, and transfer notifications are in General settings.
-    - Application metadata is 0.5.0. SQLite read/write schema 23 automatically upgrades supported schemas 0–22. Encrypted-file, transfer and recovery codecs remain compatible.
+    - macOS defaults to system Keychain for API credentials, proxy passwords and encryption recovery material. Settings offers an explicit warning before switching to unencrypted private SQLite storage. Windows and Linux use SQLite with Keychain unavailable and an explanation. Existing supported data migrates automatically.
+    - macOS app and standalone releases reuse a self-signed certificate for a stable Keychain identity. Access is noninteractive; locked or inaccessible items report recovery guidance. This does not provide Apple notarization or Gatekeeper trust.
+    - Download matching indexed channel files by time/type filters, including files outside the visible page, into a unique per-batch folder. Discovery is bounded and cancellable; oversized matches require narrower filters.
+    - Added Spanish, French, German, Brazilian Portuguese, Russian, Korean and Hindi. Common flows are translated and remaining diagnostic/release text explicitly falls back to English.
+    - Removed Advanced and user-adjustable indexing controls; notifications are in General. Every displayed byte size/rate uses binary IEC units.
+    - SQLite read/write schema 23 supports automatic upgrades from 0–22, including skipped releases. Existing encrypted file, manifest, transfer and recovery codecs remain supported and unchanged. API credential codec 1 and proxy-reference codec 2 are documented separately.
 
     ## 0.4.14 · Contributor guidance corrections
 
