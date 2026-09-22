@@ -34,6 +34,11 @@ use crate::{
 };
 
 mod batch_retry;
+mod filter_batch;
+pub use filter_batch::{
+    ChannelBatchFilter, ChannelBatchPreparation, ChannelBatchPreparationPhase,
+    ChannelBatchPreparationSnapshot, FilteredChannelBatch,
+};
 mod cleanup;
 mod reservation;
 pub use cleanup::{ChannelDownloadCleanup, ChannelDownloadCleanupPhase};
@@ -2644,6 +2649,8 @@ mod tests {
     mod batch_redownload;
     #[path = "batch_stop.rs"]
     mod batch_stop;
+    #[path = "filter_batch.rs"]
+    mod filter_batch;
     use std::{
         fs,
         sync::{

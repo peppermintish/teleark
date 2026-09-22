@@ -13,7 +13,59 @@ use crate::{StorageError, StorageResult};
 const MAX_REMOTE_KEY_BYTES: usize = 16 * 1024;
 const MAX_CACHED_TELEGRAM_FILES: usize = 5_000;
 
+// Message identity provides a stable deep cursor, independent of mutable,
+// tied or missing display timestamps. The source identity index serves both
+// the cursor and ordering; no OFFSET or unbounded materialization is needed.
+const BATCH_CANDIDATES_SQL: &str = r#"
+SELECT ro.message_id, f.name, f.caption, f.mime_type, f.size_bytes,
+       COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0),
+       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0)
+FROM remote_objects ro
+JOIN logical_files f ON f.id = ro.logical_file_id
+WHERE ro.account_id = ?1 AND ro.chat_id = ?2 AND ro.message_id < ?3
+  AND NOT EXISTS (SELECT 1 FROM channel_sync_tombstones t
+      WHERE t.account_id = ro.account_id AND t.chat_id = ro.chat_id
+        AND t.message_id = ro.message_id)
+ORDER BY ro.message_id DESC LIMIT 256
+"#;
+
 impl Database {
+    /// Bounded candidates for a filter-driven download, including indexed
+    /// rows outside the browser's retained page. Deleted messages are excluded.
+    pub fn channel_batch_candidates(
+        &self,
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        before: i64,
+    ) -> StorageResult<Vec<CachedTelegramFileRecord>> {
+        let mut statement = self.connection.prepare(BATCH_CANDIDATES_SQL)?;
+        let rows = statement.query_map(params![account.get(), chat.get(), before], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, i64>(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, file_name, caption, mime_type, size, sent_at_unix_ms, modified_at_unix_ms) =
+                row?;
+            Ok(CachedTelegramFileRecord {
+                message_id: teleark_core::MessageId::new(id),
+                file_name,
+                caption,
+                mime_type,
+                size_bytes: stored_u64("size_bytes", size)?,
+                sent_at_unix_ms,
+                modified_at_unix_ms,
+            })
+        })
+        .collect()
+    }
+
     /// Atomically upserts a Telegram identity and its file-centric projection.
     /// Older revisions are ignored; equal conflicting revisions are rejected.
     pub fn upsert_remote_file(
@@ -370,4 +422,79 @@ INSERT INTO remote_objects (
         modified_at_unix_ms: incoming.modified_at_unix_ms,
     };
     Ok((file, remote))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crate::{AccountRecord, ChatRecord};
+    use teleark_core::{AccountId, ChatId, FileKind, MessageId};
+
+    #[test]
+    fn batch_candidates_page_deleted_rows_and_use_index_at_deep_cursors() -> StorageResult<()> {
+        let mut db = Database::open_in_memory()?;
+        db.upsert_account(&AccountRecord {
+            id: AccountId::new(1),
+            display_name: "fixture".into(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })?;
+        db.upsert_chat(&ChatRecord {
+            account_id: AccountId::new(1),
+            id: ChatId::new(2),
+            title: "channel".into(),
+            username: None,
+            updated_at_unix_ms: 0,
+        })?;
+        for id in 1..=600 {
+            db.upsert_remote_file(&RemoteFileUpsert {
+                account_id: AccountId::new(1),
+                chat_id: ChatId::new(2),
+                message_id: MessageId::new(id),
+                revision: 1,
+                remote_key: vec![1],
+                name: format!("{id}.zip"),
+                size_bytes: 1,
+                kind: FileKind::Archive,
+                mime_type: None,
+                caption: None,
+                sent_at_unix_ms: 0,
+                modified_at_unix_ms: 0,
+            })?;
+        }
+        db.connection
+            .execute("INSERT INTO channel_sync_tombstones VALUES (1, 2, 345)", [])?;
+        db.connection.execute("UPDATE logical_files SET created_at_unix_ms = NULL, modified_at_unix_ms = NULL WHERE id % 2 = 0", [])?;
+        let mut before = i64::MAX;
+        let mut ids = Vec::new();
+        loop {
+            let page = db.channel_batch_candidates(AccountId::new(1), ChatId::new(2), before)?;
+            assert!(page.len() <= 256);
+            if page.is_empty() {
+                break;
+            }
+            before = page.last().expect("page").message_id.get();
+            ids.extend(page.into_iter().map(|file| file.message_id.get()));
+        }
+        assert_eq!(ids.len(), 599);
+        assert!(!ids.contains(&345));
+        assert!(ids.windows(2).all(|pair| pair[0] > pair[1]));
+        assert!(
+            db.channel_batch_candidates(AccountId::new(2), ChatId::new(2), i64::MAX)?
+                .is_empty()
+        );
+        for cursor in [i64::MAX, 300, 3] {
+            let mut query = db
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {BATCH_CANDIDATES_SQL}"))?;
+            let details = query
+                .query_map(params![1, 2, cursor], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            assert!(details.contains("SEARCH ro USING INDEX"), "{details}");
+            assert!(details.contains("message_id<?"), "{details}");
+            assert!(!details.contains("TEMP B-TREE"), "{details}");
+        }
+        Ok(())
+    }
 }

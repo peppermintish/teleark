@@ -132,6 +132,7 @@ impl TeleArkApp {
             progress.cancel();
         }
         self.cancel_dialog_load(cx);
+        self.cancel_filtered_channel_batch(cx);
         self.cancel_telegram_file_load(cx);
         self.cancel_managed_scan();
         self.library_scan_cancellation.cancel();

@@ -90,6 +90,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn reset_telegram_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_filtered_channel_batch(cx);
         self.account_restoring = false;
         self.account_restore_retry_at = None;
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
@@ -109,6 +110,7 @@ impl TeleArkApp {
         if !self.confirm_account_switch || self.telegram_activity == TelegramActivity::Working {
             return;
         }
+        self.cancel_filtered_channel_batch(cx);
         if self.transition_has_work() {
             self.show_account_switch = true;
             self.request_transition(super::lifecycle::TransitionAction::SwitchAccount, cx);
@@ -180,6 +182,7 @@ impl TeleArkApp {
     }
 
     pub(super) fn finish_telegram_sign_out(&mut self, cx: &mut Context<Self>) {
+        self.cancel_filtered_channel_batch(cx);
         self.telegram_auth = TelegramAuthState::Unauthorized;
         self.telegram_activity = TelegramActivity::Idle;
         self.telegram_account = None;

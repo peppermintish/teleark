@@ -566,6 +566,54 @@ impl TeleArkApp {
                                 })),
                         )
                     })
+                    .when_some(self.filtered_batch_status(), |left, (label, tone)| {
+                        let active = self.filtered_batch_active();
+                        left.child(
+                            components::compact_button("shell-filter-batch", "", None, false)
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_color(tone.foreground())
+                                        .child(label.clone()),
+                                )
+                                .ghost()
+                                .h(px(24.0))
+                                .px_1()
+                                .min_w_0()
+                                .max_w(px(190.0))
+                                .overflow_hidden()
+                                .accessibility_label(label.clone())
+                                .tooltip(format!("{label}\n{}", self.filtered_batch_timeline()))
+                                .debug_selector(|| "shell-filter-batch".into())
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    if active {
+                                        if let Some(chat_id) = app
+                                            .filtered_channel_batch
+                                            .as_ref()
+                                            .map(|batch| batch.chat_id)
+                                        {
+                                            app.select_channel(chat_id, cx);
+                                        }
+                                    } else {
+                                        if let Some(Ok(Some(batch))) = app
+                                            .filtered_channel_batch
+                                            .as_ref()
+                                            .and_then(|ui| ui.result.as_ref())
+                                        {
+                                            app.expanded_transfer_batches.insert(batch.batch_id);
+                                            app.focused_transfer_key = app
+                                                .native_transfer_view
+                                                .items
+                                                .iter()
+                                                .find(|task| task.batch_id == Some(batch.batch_id))
+                                                .map(|task| task.id);
+                                        }
+                                        app.nav_selection = "nav-downloads";
+                                        app.set_page(Page::Transfers, cx);
+                                    }
+                                })),
+                        )
+                    })
                     .when_some(key_status, |left, state| {
                         let (label, icon) = if state.error.is_some() {
                             (self.tr("vault-key-status-failed"), IconName::TriangleAlert)

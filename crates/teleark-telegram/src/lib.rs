@@ -2045,6 +2045,16 @@ fn partial_download_map_path(destination: &Path) -> Result<PathBuf, TelegramErro
     Ok(PathBuf::from(partial))
 }
 
+/// Paths exclusively owned by a native download before final publication.
+/// Batch planners reserve these alongside destinations so a remote filename
+/// cannot collide with another member's private partial or checkpoint map.
+pub fn native_download_artifact_paths(destination: &Path) -> Result<[PathBuf; 2], TelegramError> {
+    Ok([
+        partial_download_path(destination)?,
+        partial_download_map_path(destination)?,
+    ])
+}
+
 /// Removes the private resumable partial for an explicitly cancelled native
 /// download. A missing partial is already the desired state.
 pub fn discard_partial_download(destination: impl AsRef<Path>) -> Result<(), TelegramError> {

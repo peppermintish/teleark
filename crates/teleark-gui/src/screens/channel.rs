@@ -1159,7 +1159,8 @@ impl TeleArkApp {
     }
 
     fn render_channel_batch_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        let preparing = self.channel_batch_activity == ChannelBatchActivity::Preparing;
+        let preparing = self.channel_batch_activity == ChannelBatchActivity::Preparing
+            || self.filtered_batch_active();
         // Use the same projection as the table. Re-filtering on every render
         // repeats file classification and can drift across a time boundary.
         let result_count = self.channel_file_table.read(cx).delegate().rows.len();
@@ -1236,6 +1237,16 @@ impl TeleArkApp {
                     )
                     .child(
                         components::compact_button(
+                            "channel-filter-batch", self.tr("channel-filter-batch-action"),
+                            Some(IconName::ArrowDown), false,
+                        )
+                        .tooltip(self.tr("channel-filter-batch-help"))
+                        .debug_selector(|| "channel-filter-batch-download".into())
+                        .disabled(preparing)
+                        .on_click(cx.listener(|this, _, _, cx| this.download_channel_filter(cx))),
+                    )
+                    .child(
+                        components::compact_button(
                             "telegram-files-select-all-results",
                             self.tr("channel-select-all-compact"),
                             None,
@@ -1281,6 +1292,9 @@ impl TeleArkApp {
             )
             .when(self.channel_batch_expanded, |card| {
                 card.child(
+                    div().mt_2().text_xs().text_color(theme::text_secondary())
+                        .child(self.tr("channel-filter-batch-help")),
+                ).child(
                     div()
                         .mt_2()
                         .text_xs()
@@ -1377,23 +1391,22 @@ impl TeleArkApp {
                             ),
                         ),
                 )
-                .child(
-                    div().flex().mt_2().child(
-                        components::compact_button(
-                            "telegram-index-next",
-                            self.tr("telegram-index-next-action"),
-                            Some(IconName::Search),
-                            false,
-                        )
-                        .ghost()
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.index_selected_telegram_chat(cx)),
-                        ),
-                    ),
-                )
+                .child(div().mt_2().text_xs().text_color(theme::text_muted())
+                    .child(self.tr("channel-sync-local-only")))
             })
             .when_some(channel_batch_status(self), |toolbar, (label, tone)| {
                 toolbar.child(div().mt_2().child(components::badge(label, tone)))
+            })
+            .when_some(self.filtered_batch_status().filter(|_| self.filtered_channel_batch.as_ref()
+                .is_some_and(|batch| Some(batch.chat_id) == self.selected_chat_id)), |toolbar, (label, tone)| {
+                toolbar.child(div().mt_2().flex().flex_wrap().items_center().gap_2()
+                    .child(div().min_w_0().text_xs().text_color(tone.foreground()).child(label))
+                    .when(self.filtered_batch_active(), |row| row.child(
+                        components::compact_button("channel-filter-batch-cancel", self.tr("channel-filter-batch-cancel"), None, false)
+                            .disabled(self.filtered_channel_batch.as_ref().is_some_and(|batch| matches!(batch.snapshot.phase,
+                                teleark_runtime::ChannelBatchPreparationPhase::Queuing | teleark_runtime::ChannelBatchPreparationPhase::Cancelled)))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_filtered_channel_batch(cx))),
+                    )))
             })
             .into_any_element()
     }
