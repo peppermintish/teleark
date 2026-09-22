@@ -794,3 +794,11 @@ upload-options-title = अपलोड विकल्प
 channel-filter-batch-no-matches = इन फ़िल्टरों से मेल खाने वाली कोई इंडेक्स की गई फ़ाइल नहीं है।
 
 channel-filter-batch-failed = बैच की तैयारी विफल हुई। डाउनलोड फ़ोल्डर और खाता जाँचें, फिर कोशिश करें।
+
+settings-keychain-checking = क्रेडेंशियल स्टोरेज सेटिंग पढ़ी जा रही हैं
+
+settings-keychain-status-failed = क्रेडेंशियल स्टोरेज सेटिंग पढ़ी नहीं जा सकीं। पहुँच बहाल करें और फिर कोशिश करें।
+
+settings-keychain-unknown = कीचेन की स्थिति उपलब्ध नहीं
+
+settings-keychain-cancelled = क्रेडेंशियल स्टोरेज बदलाव रद्द हुआ

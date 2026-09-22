@@ -810,3 +810,11 @@ upload-options-title = Параметры загрузки
 channel-filter-batch-no-matches = Нет проиндексированных файлов по этим фильтрам.
 
 channel-filter-batch-failed = Не удалось подготовить пакет. Проверьте папку скачиваний и учётную запись, затем повторите попытку.
+
+settings-keychain-checking = Чтение настроек хранилища учётных данных
+
+settings-keychain-status-failed = Не удалось прочитать настройки хранилища. Восстановите доступ и повторите попытку.
+
+settings-keychain-unknown = Состояние связки ключей недоступно
+
+settings-keychain-cancelled = Изменение хранилища учётных данных отменено

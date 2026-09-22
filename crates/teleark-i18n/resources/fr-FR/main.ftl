@@ -794,3 +794,11 @@ upload-options-title = Options de téléversement
 channel-filter-batch-no-matches = Aucun fichier indexé ne correspond à ces filtres.
 
 channel-filter-batch-failed = La préparation du lot a échoué. Vérifiez le dossier de téléchargement et le compte, puis réessayez.
+
+settings-keychain-checking = Lecture des paramètres de stockage des identifiants
+
+settings-keychain-status-failed = Impossible de lire les paramètres des identifiants. Rétablissez l’accès et réessayez.
+
+settings-keychain-unknown = État du trousseau indisponible
+
+settings-keychain-cancelled = Modification du stockage des identifiants annulée

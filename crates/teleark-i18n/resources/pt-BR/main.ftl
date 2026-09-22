@@ -794,3 +794,11 @@ upload-options-title = Opções de envio
 channel-filter-batch-no-matches = Nenhum arquivo indexado corresponde a estes filtros.
 
 channel-filter-batch-failed = A preparação do lote falhou. Verifique a pasta de downloads e a conta e tente novamente.
+
+settings-keychain-checking = Lendo configurações de armazenamento de credenciais
+
+settings-keychain-status-failed = Não foi possível ler as configurações de credenciais. Restaure o acesso e tente novamente.
+
+settings-keychain-unknown = Status das Chaves indisponível
+
+settings-keychain-cancelled = Alteração do armazenamento de credenciais cancelada

@@ -1937,3 +1937,11 @@ upload-options-title = Upload options
 channel-filter-batch-no-matches = No indexed files match these filters.
 
 channel-filter-batch-failed = Batch preparation failed. Check your download folder and account, then try again.
+
+settings-keychain-checking = Reading credential storage settings
+
+settings-keychain-status-failed = Credential storage settings could not be read. Restore access and retry.
+
+settings-keychain-unknown = Keychain status unavailable
+
+settings-keychain-cancelled = Credential storage change cancelled

@@ -1910,3 +1910,11 @@ upload-options-title = アップロードのオプション
 channel-filter-batch-no-matches = この条件に一致する索引済みファイルはありません。
 
 channel-filter-batch-failed = 一括準備に失敗しました。ダウンロードフォルダーとアカウントを確認して再試行してください。
+
+settings-keychain-checking = 認証情報の保存設定を読み込み中
+
+settings-keychain-status-failed = 認証情報の保存設定を読み込めませんでした。アクセスを復旧して再試行してください。
+
+settings-keychain-unknown = キーチェーンの状態を確認できません
+
+settings-keychain-cancelled = 認証情報の保存先の変更をキャンセルしました

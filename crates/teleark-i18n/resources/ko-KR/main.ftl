@@ -762,3 +762,11 @@ upload-options-title = 업로드 옵션
 channel-filter-batch-no-matches = 이 필터와 일치하는 색인된 파일이 없습니다.
 
 channel-filter-batch-failed = 일괄 준비에 실패했습니다. 다운로드 폴더와 계정을 확인한 후 다시 시도하세요.
+
+settings-keychain-checking = 자격 증명 저장소 설정 읽는 중
+
+settings-keychain-status-failed = 자격 증명 저장소 설정을 읽지 못했습니다. 접근을 복원한 뒤 다시 시도하세요.
+
+settings-keychain-unknown = 키체인 상태 확인 불가
+
+settings-keychain-cancelled = 자격 증명 저장소 변경 취소됨

@@ -1910,3 +1910,11 @@ upload-options-title = 上传选项
 channel-filter-batch-no-matches = 没有符合这些筛选条件的已索引文件。
 
 channel-filter-batch-failed = 批次准备失败。请检查下载文件夹和账户后重试。
+
+settings-keychain-checking = 正在读取凭据存储设置
+
+settings-keychain-status-failed = 无法读取凭据存储设置。请恢复访问权限后重试。
+
+settings-keychain-unknown = 钥匙串状态不可用
+
+settings-keychain-cancelled = 凭据存储更改已取消

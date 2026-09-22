@@ -794,3 +794,11 @@ upload-options-title = Upload-Optionen
 channel-filter-batch-no-matches = Keine indizierten Dateien passen zu diesen Filtern.
 
 channel-filter-batch-failed = Stapelvorbereitung fehlgeschlagen. Downloadordner und Konto prüfen und erneut versuchen.
+
+settings-keychain-checking = Speichereinstellungen für Zugangsdaten werden gelesen
+
+settings-keychain-status-failed = Speichereinstellungen für Zugangsdaten konnten nicht gelesen werden. Zugriff wiederherstellen und erneut versuchen.
+
+settings-keychain-unknown = Schlüsselbundstatus nicht verfügbar
+
+settings-keychain-cancelled = Änderung des Zugangsdaten-Speichers abgebrochen
