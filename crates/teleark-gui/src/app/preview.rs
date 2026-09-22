@@ -603,6 +603,41 @@ impl TeleArkApp {
                 .sort_by_key(|row| crate::screens::transfers::transfer_order(row.state));
         }
         match state.as_str() {
+            "local-availability" => {
+                self.page = Page::Channel;
+                self.storage_view = StorageView::RawFiles;
+                self.local_downloads.clear();
+                for (file, presence) in self.telegram_files.iter().take(5).zip([
+                    teleark_runtime::LocalFilePresence::Checking,
+                    teleark_runtime::LocalFilePresence::Missing,
+                    teleark_runtime::LocalFilePresence::SizeChanged,
+                    teleark_runtime::LocalFilePresence::Unavailable,
+                    teleark_runtime::LocalFilePresence::Present,
+                ]) {
+                    let destination =
+                        std::path::PathBuf::from(format!("/Preview/Downloads/{}", file.file_name));
+                    self.local_downloads.insert(
+                        destination.clone(),
+                        teleark_runtime::LocalDownloadObservation {
+                            file: teleark_runtime::DownloadedFileRecord {
+                                cursor: teleark_runtime::DownloadedFilesCursor {
+                                    kind: 0,
+                                    id: file.message_id.unsigned_abs(),
+                                },
+                                account_id: 1,
+                                chat_id: self.selected_chat_id.expect("preview channel"),
+                                message_id: Some(file.message_id),
+                                package_id: None,
+                                destination,
+                                size_bytes: file.size_bytes,
+                                completed_at_unix_ms: 1_788_624_000_000,
+                            },
+                            presence,
+                        },
+                    );
+                }
+                self.local_downloads.limited = true;
+            }
             "quit-confirm" | "quit-pausing" | "quit-failed" => {
                 self.app_lock.locked = true;
                 self.upload_in_flight = true;

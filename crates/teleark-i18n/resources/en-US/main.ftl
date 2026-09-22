@@ -1140,6 +1140,7 @@ local-file-missing = Deleted from disk
 local-file-size-changed = Local file changed
 local-file-unavailable = Local file unavailable
 local-file-checking = Checking local file
+local-file-observation-limit = Local checks cover the 10,000 most recent download locations.
 
 local-file-status = Local file
 transfer-download-again = Download again

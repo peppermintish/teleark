@@ -1,12 +1,9 @@
 //! Owns bounded background observations; no filesystem work runs on the UI thread.
 use super::*;
-use teleark_runtime::{DownloadedFileRecord, DownloadedFilesCursor, LocalFilePresence};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LocalDownloadObservation {
-    pub file: DownloadedFileRecord,
-    pub presence: LocalFilePresence,
-}
+pub(crate) use teleark_runtime::LocalDownloadObservation;
+use teleark_runtime::LocalFilePresence;
+#[cfg(test)]
+use teleark_runtime::{DownloadedFileRecord, DownloadedFilesCursor};
 
 // Keep every candidate for a source so a missing/newer copy can fall back to
 // an older present copy without scanning unrelated download history.
@@ -19,6 +16,7 @@ type Candidate = (bool, i64, std::path::PathBuf);
 
 #[derive(Default)]
 pub(crate) struct LocalDownloadCache {
+    pub(crate) limited: bool,
     paths: std::collections::BTreeMap<std::path::PathBuf, LocalDownloadObservation>,
     sources: std::collections::BTreeMap<LocalSource, BTreeSet<Candidate>>,
     ages: BTreeSet<(i64, std::path::PathBuf)>,
@@ -28,6 +26,7 @@ impl LocalDownloadCache {
     const CAPACITY: usize = 10_000;
 
     pub(crate) fn clear(&mut self) {
+        self.limited = false;
         self.paths.clear();
         self.sources.clear();
         self.ages.clear();
@@ -106,6 +105,7 @@ impl LocalDownloadCache {
         true
     }
 
+    #[cfg(test)]
     fn unavailable(&mut self) -> bool {
         let changed: Vec<_> = self
             .paths
@@ -136,119 +136,89 @@ impl LocalDownloadCache {
     }
 }
 
-fn probe_interval(page: Page, active_transfer: bool) -> Duration {
-    if active_transfer || !matches!(page, Page::Settings | Page::Account) {
-        Duration::from_secs(3)
-    } else {
-        Duration::from_secs(30)
-    }
-}
-
 impl TeleArkApp {
     pub(super) fn start_local_file_refresh(&mut self, cx: &mut Context<Self>) {
         let Some(library) = self.library.clone() else {
             return;
         };
+        self.local_files_context = Some(cx.observe(&cx.entity(), |this, _, cx| {
+            this.sync_local_file_context(cx);
+        }));
+        let work =
+            cx.background_spawn(async move { teleark_runtime::LocalDownloadMonitor::new(library) });
         self.local_files_task = Some(cx.spawn(async move |this, cx| {
-            let mut observed_scope = None;
-            let mut cursor = None;
-            let mut last_probe = None;
+            let Ok(monitor) = work.await else { return };
+            let mut subscription = monitor.subscribe();
+            let Some(entity) = this.upgrade() else { return };
+            entity.update(cx, |app, cx| {
+                app.local_file_monitor = Some(monitor);
+                app.sync_local_file_context(cx);
+            });
+            drop(entity);
             loop {
+                let update = subscription.take_updates();
                 let Some(entity) = this.upgrade() else { return };
-                let (scope, interval) = entity.update(cx, |this, _| {
-                    (
-                        this.telegram_account
-                            .as_ref()
-                            .map(|account| (account.id, this.telegram_login_generation)),
-                        probe_interval(this.page, this.has_active_transfer()),
-                    )
-                });
-                if scope != observed_scope {
-                    observed_scope = scope;
-                    cursor = None;
-                    last_probe = None;
-                    entity.update(cx, |this, cx| {
-                        this.local_downloads.clear();
-                        cx.notify();
-                    });
-                }
+                entity.update(cx, |app, cx| app.apply_local_file_updates(update, cx));
                 drop(entity);
-                let now = cx.background_executor().now();
-                if let Some((account_id, generation)) = scope
-                    && last_probe.is_none_or(|last| now.duration_since(last) >= interval)
-                {
-                    last_probe = Some(now);
-                    let library = library.clone();
-                    let result = cx
-                        .background_spawn(async move {
-                            let page = library.downloaded_files_page(account_id, cursor)?;
-                            let next = page.last().map(|file| file.cursor);
-                            // Refresh the newest outputs of both kinds each pass while
-                            // an independent cursor revisits older history in bounded pages.
-                            let mut files = if cursor.is_none() {
-                                Vec::new()
-                            } else {
-                                library.downloaded_files_page(account_id, None)?
-                            };
-                            files.extend(library.downloaded_files_page(
-                                account_id,
-                                Some(DownloadedFilesCursor { kind: 0, id: 0 }),
-                            )?);
-                            files.extend(page);
-                            let mut unique = std::collections::BTreeMap::new();
-                            for file in files {
-                                unique
-                                    .entry(file.destination.clone())
-                                    .and_modify(|previous: &mut DownloadedFileRecord| {
-                                        if file.completed_at_unix_ms > previous.completed_at_unix_ms
-                                        {
-                                            *previous = file.clone();
-                                        }
-                                    })
-                                    .or_insert(file);
-                            }
-                            let observations = unique
-                                .into_values()
-                                .map(|file| {
-                                    let presence = teleark_runtime::local_file_presence(
-                                        &file.destination,
-                                        file.size_bytes,
-                                    );
-                                    LocalDownloadObservation { file, presence }
-                                })
-                                .collect::<Vec<_>>();
-                            Ok::<_, ApplicationError>((next, observations))
-                        })
-                        .await;
-                    let Some(entity) = this.upgrade() else { return };
-                    entity.update(cx, |this, cx| {
-                        if this.telegram_account.as_ref().map(|account| account.id)
-                            != Some(account_id)
-                            || this.telegram_login_generation != generation
-                        {
-                            return;
-                        }
-                        if let Ok((next, observations)) = result {
-                            cursor = next;
-                            let mut changed = false;
-                            for observation in observations {
-                                changed |= this
-                                    .local_downloads
-                                    .insert(observation.file.destination.clone(), observation);
-                            }
-                            if changed {
-                                this.channel_file_table.update(cx, |_, cx| cx.notify());
-                                cx.notify();
-                            }
-                        } else if this.local_downloads.unavailable() {
-                            this.channel_file_table.update(cx, |_, cx| cx.notify());
-                            cx.notify();
-                        }
-                    });
+                if !subscription.changed().await {
+                    return;
                 }
-                cx.background_executor().timer(Duration::from_secs(3)).await;
             }
         }));
+    }
+
+    fn sync_local_file_context(&mut self, cx: &mut Context<Self>) {
+        let scope = self
+            .telegram_account
+            .as_ref()
+            .map(|account| (account.id, self.telegram_login_generation));
+        if self.local_files_scope != scope {
+            self.local_files_scope = scope;
+            self.local_downloads.clear();
+            self.channel_file_table.update(cx, |_, cx| cx.notify());
+            cx.notify();
+        }
+        if let Some(monitor) = &self.local_file_monitor {
+            let chat = matches!(
+                self.page,
+                Page::Channel | Page::Storage | Page::LegacyRecovery
+            )
+            .then_some(self.selected_chat_id)
+            .flatten();
+            monitor.set_context(scope, chat);
+        }
+    }
+
+    fn apply_local_file_updates(
+        &mut self,
+        update: teleark_runtime::LocalDownloadUpdates,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = self
+            .telegram_account
+            .as_ref()
+            .map(|account| (account.id, self.telegram_login_generation));
+        if update.scope != scope {
+            return;
+        }
+        let mut changed = update.reset && !self.local_downloads.paths.is_empty();
+        if update.reset {
+            self.local_downloads.clear();
+        }
+        changed |= self.local_downloads.limited != update.limited;
+        self.local_downloads.limited = update.limited;
+        for (path, observation) in update.changes {
+            if let Some(observation) = observation {
+                changed |= self.local_downloads.insert(path, observation);
+            } else {
+                changed |= self.local_downloads.paths.contains_key(&path);
+                self.local_downloads.remove(&path);
+            }
+        }
+        if changed {
+            self.channel_file_table.update(cx, |_, cx| cx.notify());
+            cx.notify();
+        }
     }
 
     pub(crate) fn local_download_actions(
@@ -310,7 +280,7 @@ impl TeleArkApp {
             Some(LocalFilePresence::Missing) => "local-file-missing",
             Some(LocalFilePresence::SizeChanged) => "local-file-size-changed",
             Some(LocalFilePresence::Unavailable) => "local-file-unavailable",
-            None => "local-file-checking",
+            None | Some(LocalFilePresence::Checking) => "local-file-checking",
         })
     }
 }
@@ -318,6 +288,111 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn channel_badges_follow_fresh_observations_and_reject_old_account_results(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        for full in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), full);
+            });
+            app.update(cx, |app, cx| {
+                app.local_downloads.clear();
+                app.show_channel_detail = false;
+                cx.notify();
+            });
+            for presence in [
+                LocalFilePresence::Present,
+                LocalFilePresence::Checking,
+                LocalFilePresence::Missing,
+                LocalFilePresence::SizeChanged,
+                LocalFilePresence::Unavailable,
+                LocalFilePresence::Present,
+            ] {
+                let message = app.update(cx, |app, cx| {
+                    let message = app.telegram_files[0].message_id;
+                    let mut item = observation(1, message, presence);
+                    item.file.chat_id = app.selected_chat_id.expect("channel");
+                    let scope = Some((1, app.telegram_login_generation));
+                    app.apply_local_file_updates(
+                        teleark_runtime::LocalDownloadUpdates {
+                            scope,
+                            changes: std::collections::BTreeMap::from([(
+                                item.file.destination.clone(),
+                                Some(item),
+                            )]),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    message
+                });
+                cx.run_until_parked();
+                assert_eq!(message, 5000);
+                let selector = match presence {
+                    LocalFilePresence::Present => "channel-local-state-5000-Present",
+                    LocalFilePresence::Checking => "channel-local-state-5000-Checking",
+                    LocalFilePresence::Missing => "channel-local-state-5000-Missing",
+                    LocalFilePresence::SizeChanged => "channel-local-state-5000-SizeChanged",
+                    LocalFilePresence::Unavailable => "channel-local-state-5000-Unavailable",
+                };
+                assert!(cx.debug_bounds(selector).is_some());
+                if presence != LocalFilePresence::Present {
+                    assert!(
+                        cx.debug_bounds("channel-local-state-5000-Present")
+                            .is_none()
+                    );
+                }
+            }
+            app.update(cx, |app, cx| {
+                let message = app.telegram_files[0].message_id;
+                let mut item = observation(1, message, LocalFilePresence::Missing);
+                item.file.chat_id = app.selected_chat_id.expect("channel");
+                let scope = Some((1, app.telegram_login_generation));
+                let changes = std::collections::BTreeMap::from([(
+                    item.file.destination.clone(),
+                    Some(item.clone()),
+                )]);
+                app.apply_local_file_updates(
+                    teleark_runtime::LocalDownloadUpdates {
+                        scope,
+                        changes,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                item.presence = LocalFilePresence::Present;
+                app.apply_local_file_updates(
+                    teleark_runtime::LocalDownloadUpdates {
+                        scope: Some((1, app.telegram_login_generation.wrapping_sub(1))),
+                        reset: true,
+                        changes: std::collections::BTreeMap::from([(
+                            item.file.destination.clone(),
+                            Some(item),
+                        )]),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    app.local_download_for_source(
+                        app.selected_chat_id.expect("channel"),
+                        Some(message),
+                        None
+                    )
+                    .expect("current observation")
+                    .presence,
+                    LocalFilePresence::Missing
+                );
+            });
+        }
+    }
 
     #[gpui_kit::test]
     fn unchanged_local_probes_do_not_repaint_or_retain_a_closed_window(
@@ -346,6 +421,15 @@ mod tests {
             app.library = Some(library.clone());
             app.start_local_file_refresh(cx);
         });
+        let started = std::time::Instant::now();
+        while app.read_with(cx, |app, _| app.local_file_monitor.is_none()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "observer starts"
+            );
+            cx.run_until_parked();
+            std::thread::yield_now();
+        }
         cx.run_until_parked();
         let baseline = notifications.get();
         cx.background_executor.advance_clock(Duration::from_secs(3));
@@ -356,6 +440,8 @@ mod tests {
         app.update(cx, |app, _| {
             app.library = None;
             app.local_files_task = None;
+            app.local_file_monitor = None;
+            app.local_files_context = None;
         });
         cx.run_until_parked();
         drop(_subscription);
@@ -462,29 +548,6 @@ mod tests {
         assert!(cache.source(20, Some(100), None).is_some());
         let evicted = observation(1, 1, LocalFilePresence::Present);
         assert!(!cache.insert(evicted.file.destination.clone(), evicted));
-    }
-
-    #[test]
-    fn hidden_file_probes_back_off_without_delaying_visible_or_active_outputs() {
-        assert_eq!(
-            probe_interval(Page::Settings, false),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            probe_interval(Page::Account, false),
-            Duration::from_secs(30)
-        );
-        for page in [
-            Page::Channel,
-            Page::Storage,
-            Page::LegacyRecovery,
-            Page::Library,
-            Page::FileDetail,
-            Page::Transfers,
-        ] {
-            assert_eq!(probe_interval(page, false), Duration::from_secs(3));
-        }
-        assert_eq!(probe_interval(Page::Settings, true), Duration::from_secs(3));
     }
 
     #[test]

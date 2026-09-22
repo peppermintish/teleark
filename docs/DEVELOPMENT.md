@@ -103,7 +103,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `batch-groups`, `batch-large`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
+| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `local-availability`, `batch-groups`, `batch-large`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
 | `--locale` | `en-US` only for interface tests and previews |
 | `--window-size` | 900×600 is required; also review actual native full-screen mode. Other window sizes are supplemental |
 
@@ -114,6 +114,8 @@ Channel sync fixtures show an active difference or a server wait with queue/timi
 `--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check the message and wrapping in English only.
 
 `--preview-state=channel-selected` opens a synthetic channel with the second row focused and checked, so selection overlays, text and checkbox visibility can be reviewed together.
+
+`--screen=channel --preview-state=local-availability --locale=en-US` shows Checking, Deleted from disk, Local file changed, Local file unavailable and Available locally on consecutive synthetic channel rows, plus the bounded-observation notice. Inspect the row details at 900×600 and actual native full-screen in light mode. This fixture does not inspect or modify real files.
 
 `--preview-state=batch-groups` shows adjacent expanded download/upload groups between ordinary tasks. Use `--screen=transfers --preview-state=batch-large` and activate the 48-file upload header to review the same hierarchy, selection and scrollbar in its auxiliary window.
 

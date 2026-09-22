@@ -1112,6 +1112,7 @@ local-file-missing = 已从磁盘删除
 local-file-size-changed = 本地文件已更改
 local-file-unavailable = 无法访问本地文件
 local-file-checking = 正在检查本地文件
+local-file-observation-limit = 本地检查覆盖最近的 10,000 个下载位置。
 
 local-file-status = 本地文件
 transfer-download-again = 重新下载

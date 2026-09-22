@@ -1112,6 +1112,7 @@ local-file-missing = ディスクから削除済み
 local-file-size-changed = ローカルファイルが変更されました
 local-file-unavailable = ローカルファイルにアクセスできません
 local-file-checking = ローカルファイルを確認中
+local-file-observation-limit = ローカル確認の対象は、直近のダウンロード先 10,000 件です。
 
 local-file-status = ローカルファイル
 transfer-download-again = 再ダウンロード

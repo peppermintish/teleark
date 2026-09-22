@@ -17,7 +17,9 @@ pub use local_library::{
 };
 pub use session_log_writer::session_log_dropped_record_count;
 
+mod local_downloads;
 mod local_files;
+pub use local_downloads::{LocalDownloadMonitor, LocalDownloadObservation, LocalDownloadUpdates};
 pub use local_files::{
     LOCAL_FILE_PROBE_LIMIT, LocalFilePresence, VolumeSpace, local_file_presence, probe_local_files,
     volume_space,
@@ -379,6 +381,7 @@ pub struct DesktopLibrary {
     worker: StorageWorker,
     database_path: Arc<PathBuf>,
     pub(crate) bandwidth: teleark_telegram::TransferBandwidth,
+    downloaded_files_revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -406,6 +409,7 @@ impl DesktopLibrary {
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path.to_owned()),
+            downloaded_files_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -434,6 +438,7 @@ impl DesktopLibrary {
             service: Arc::new(LibraryService::new(worker.clone())),
             worker,
             database_path: Arc::new(path),
+            downloaded_files_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -634,7 +639,12 @@ impl DesktopLibrary {
         &self,
         task: NativeDownloadTaskRecord,
     ) -> Result<(), ApplicationError> {
-        self.worker.save_native_download(task)
+        let completed = task.state == teleark_storage::StoredNativeDownloadState::Completed;
+        self.worker.save_native_download(task)?;
+        if completed {
+            self.downloaded_files_changed();
+        }
+        Ok(())
     }
 
     /// Best-effort progress sample. State transitions use acknowledged writes.
@@ -653,7 +663,9 @@ impl DesktopLibrary {
         self.worker
             .request("resolve_legacy_download_accounts", |reply| {
                 StorageRequest::ResolveLegacyDownloadAccounts { account_id, reply }
-            })
+            })?;
+        self.downloaded_files_changed();
+        Ok(())
     }
 
     pub(crate) fn record_vault_download(
@@ -662,7 +674,14 @@ impl DesktopLibrary {
     ) -> Result<(), ApplicationError> {
         self.worker.request("record_vault_download", |reply| {
             StorageRequest::RecordVaultDownload { record, reply }
-        })
+        })?;
+        self.downloaded_files_changed();
+        Ok(())
+    }
+
+    fn downloaded_files_changed(&self) {
+        self.downloaded_files_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) fn delete_vault_transfer(

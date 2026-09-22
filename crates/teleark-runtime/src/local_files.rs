@@ -59,6 +59,8 @@ pub fn volume_space(path: &Path) -> Result<VolumeSpace, ApplicationError> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalFilePresence {
+    /// No current observation; never treat historical completion as presence.
+    Checking,
     Present,
     Missing,
     SizeChanged,

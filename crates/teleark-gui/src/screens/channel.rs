@@ -254,14 +254,19 @@ impl TableDelegate for ChannelFileTableDelegate {
                     )
                     .child(div().min_w_0().flex_1().truncate().child(row.name))
                     .when_some(local, |cell, (label, presence)| {
-                        cell.child(components::badge(
-                            label,
-                            if presence == teleark_runtime::LocalFilePresence::Present {
-                                Tone::Green
-                            } else {
-                                Tone::Amber
-                            },
-                        ))
+                        cell.child(
+                            components::badge(
+                                label,
+                                if presence == teleark_runtime::LocalFilePresence::Present {
+                                    Tone::Green
+                                } else {
+                                    Tone::Amber
+                                },
+                            )
+                            .debug_selector(move || {
+                                format!("channel-local-state-{}-{presence:?}", row.message_id)
+                            }),
+                        )
                     })
                     .into_any_element()
             }
@@ -1480,6 +1485,12 @@ impl TeleArkApp {
                     && !self.telegram_files.is_empty(),
                 |table| table.child(self.render_telegram_fetch_footer(cx)),
             )
+            .when(self.local_downloads.limited, |table| {
+                table.child(
+                    components::list_footer("local-check-limit")
+                        .child(self.tr("local-file-observation-limit")),
+                )
+            })
             .when(
                 !self.telegram_files_loading
                     && !self.telegram_files.is_empty()
