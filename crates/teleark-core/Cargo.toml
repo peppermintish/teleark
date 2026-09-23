@@ -1,6 +1,6 @@
 [package]
 name = "teleark-core"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Frontend-neutral domain types and state machines for TeleArk"
