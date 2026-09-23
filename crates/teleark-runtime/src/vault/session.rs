@@ -104,6 +104,7 @@ impl VaultSession {
         self.status.locked = true;
         self.status.active_key_locked = true;
         self.status.historical_key_unlocked = false;
+        self.status.key_selection = None;
         self.generation
     }
 

@@ -1164,6 +1164,9 @@ mod tests {
         let telegram = DesktopTelegram::open_direct(temp.path().join("synthetic.session"))?;
         let vault = DesktopVault::new(telegram, first.clone())?;
         vault.submit_prepare_key(VaultKeyProgress::new())?.wait()?;
+        vault
+            .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+            .wait()?;
         let bundle = vault
             .submit_recovery_export(VaultKeyProgress::new())?
             .wait()?
@@ -1191,6 +1194,9 @@ mod tests {
             assert!(vault.status().locked);
             vault
                 .submit_recovery_import(bundle.clone(), VaultKeyProgress::new())?
+                .wait()?;
+            vault
+                .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
                 .wait()?;
             assert!(!vault.status().locked);
             assert_eq!(first.worker.vault_metadata()?, Some(original.clone()));

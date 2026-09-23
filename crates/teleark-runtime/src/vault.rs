@@ -36,7 +36,7 @@ use crate::transfer::{hex_id, package_id_from_bytes};
 use crate::vault_progress::{VaultUploadActivity, VaultUploadObserver, VaultUploadPhase};
 use crate::{
     DesktopLibrary, DesktopTelegram, EncryptedRemoteTransport, ManifestPublishRequest,
-    TelegramObjectStore, encrypted_part_sizes, recover_remote_manifests,
+    TelegramObjectStore, encrypted_part_sizes,
 };
 
 mod catalog;
@@ -106,6 +106,7 @@ impl std::fmt::Debug for VaultRecoverySecret {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultStatus {
+    pub key_selection: Option<VaultKeySelection>,
     pub active_key_locked: bool,
     pub historical_key_unlocked: bool,
     pub active_vault_id: Option<[u8; 16]>,
@@ -119,6 +120,7 @@ pub struct VaultStatus {
 impl VaultStatus {
     const fn unconfigured() -> Self {
         Self {
+            key_selection: None,
             active_key_locked: true,
             historical_key_unlocked: false,
             active_vault_id: None,
@@ -129,6 +131,13 @@ impl VaultStatus {
             recovery_generation: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultKeySelection {
+    Ready,
+    NoKeys,
+    Undecryptable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,7 +465,6 @@ impl<T> VaultJob<T> {
 
 #[derive(Clone, Copy)]
 pub enum ManagedScanMode {
-    Remote,
     Cached,
     CheckHealth,
 }
@@ -484,6 +492,12 @@ enum ManagedKeyAction {
 }
 
 enum VaultCommand {
+    SelectChannelKey {
+        account: i64,
+        chat: i64,
+        progress: VaultKeyProgress,
+        reply: mpsc::SyncSender<Result<VaultKeySelection, ApplicationError>>,
+    },
     ManageKey {
         action: ManagedKeyAction,
         progress: VaultKeyProgress,
@@ -566,7 +580,6 @@ enum VaultCommand {
     Scan {
         verify_health: bool,
         observer: Option<crate::ManagedScanObserver>,
-        cached: bool,
         account_id: i64,
         chat_id: i64,
         cancellation: crate::TelegramScanCancellation,
@@ -637,6 +650,26 @@ struct VaultOwner {
 }
 
 impl DesktopVault {
+    /// Selects the one stored key that authenticates the managed channel's files.
+    /// Call after the channel cache has received its initial catalog.
+    pub fn submit_select_channel_key(
+        &self,
+        account: i64,
+        chat: i64,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultKeySelection>, ApplicationError> {
+        let observer = progress.clone();
+        let result = self.submit(|reply| VaultCommand::SelectChannelKey {
+            account,
+            chat,
+            progress,
+            reply,
+        });
+        if let Err(error) = &result {
+            observer.finish(Some(error.kind()));
+        }
+        result
+    }
     pub fn new(
         telegram: DesktopTelegram,
         library: DesktopLibrary,
@@ -949,23 +982,6 @@ impl DesktopVault {
         self.request(|reply| VaultCommand::RotateRecovery { reply })
     }
 
-    pub fn scan_managed_files(
-        &self,
-        account_id: i64,
-        chat_id: i64,
-        cancellation: crate::TelegramScanCancellation,
-    ) -> Result<ManagedVaultScan, ApplicationError> {
-        self.request(|reply| VaultCommand::Scan {
-            verify_health: false,
-            observer: None,
-            cached: false,
-            account_id,
-            chat_id,
-            cancellation,
-            reply,
-        })
-    }
-
     /// Uses the unified local message catalog; authenticates only changed manifests.
     pub fn scan_cached_managed_files(
         &self,
@@ -976,7 +992,6 @@ impl DesktopVault {
         self.request(|reply| VaultCommand::Scan {
             verify_health: false,
             observer: None,
-            cached: true,
             account_id,
             chat_id,
             cancellation,
@@ -995,7 +1010,6 @@ impl DesktopVault {
         let result = self.request(|reply| VaultCommand::Scan {
             verify_health: false,
             observer: Some(observer),
-            cached: true,
             account_id,
             chat_id,
             cancellation,
@@ -1018,7 +1032,6 @@ impl DesktopVault {
         self.request(|reply| VaultCommand::Scan {
             verify_health: true,
             observer,
-            cached: true,
             account_id,
             chat_id,
             cancellation,
@@ -1248,7 +1261,6 @@ impl DesktopVault {
         let result = self.submit(|reply| VaultCommand::Scan {
             account_id,
             chat_id,
-            cached: !matches!(mode, ManagedScanMode::Remote),
             verify_health: matches!(mode, ManagedScanMode::CheckHealth),
             cancellation,
             observer,
@@ -1283,13 +1295,16 @@ impl DesktopVault {
     ) -> Result<VaultJob<T>, ApplicationError> {
         let (reply, response) = mpsc::sync_channel(1);
         let command = build(reply);
-        let session = self
+        let mut session = self
             .inner
             .session
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         if revision.is_some_and(|revision| revision != session.scan_revision()) {
             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        if matches!(command, VaultCommand::SelectChannelKey { .. }) {
+            session.status.key_selection = None;
         }
         let envelope = session.admit(command)?;
         drop(session);
@@ -1426,6 +1441,16 @@ impl VaultOwner {
 
     fn execute(&mut self, command: VaultCommand) {
         match command {
+            VaultCommand::SelectChannelKey {
+                account,
+                chat,
+                progress,
+                reply,
+            } => {
+                let result = self.select_channel_key(account, chat, &progress);
+                progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                let _ = reply.send(result);
+            }
             VaultCommand::ManageKey {
                 action,
                 progress,
@@ -1557,7 +1582,6 @@ impl VaultOwner {
             VaultCommand::Scan {
                 verify_health,
                 observer,
-                cached,
                 account_id,
                 chat_id,
                 cancellation,
@@ -1565,7 +1589,7 @@ impl VaultOwner {
             } => {
                 let observer =
                     observer.unwrap_or_else(|| crate::ManagedScanObserver::silent(chat_id));
-                if verify_health && cached {
+                if verify_health {
                     if self
                         .health_worker
                         .as_ref()
@@ -1621,10 +1645,8 @@ impl VaultOwner {
                 }
                 let result = if cancellation.is_cancelled() {
                     Err(ApplicationError::new(ApplicationErrorKind::Cancelled))
-                } else if cached {
-                    self.scan_cached(account_id, chat_id, cancellation, &observer)
                 } else {
-                    self.scan(account_id, chat_id, cancellation)
+                    self.scan_cached(account_id, chat_id, cancellation, &observer)
                 };
                 observer.finish(result.as_ref().err().map(ApplicationError::kind));
                 let _ = reply.send(result);
@@ -2119,51 +2141,6 @@ impl VaultOwner {
         self.record = Some(record);
         self.refresh_status();
         Ok(bundle.to_string())
-    }
-
-    fn scan(
-        &self,
-        account_id: i64,
-        chat_id: i64,
-        cancellation: crate::TelegramScanCancellation,
-    ) -> Result<ManagedVaultScan, ApplicationError> {
-        let master = self
-            .master_key
-            .as_ref()
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Authorization))?;
-        let mut store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
-            .with_tuning(self.library.preferences()?.transfer_tuning)
-            .with_cancellation(cancellation.clone());
-        let report = recover_remote_manifests(&mut store, master, MAX_MANIFEST_SCAN)
-            .map_err(map_transfer_error)?;
-        let mut files = report
-            .recovered
-            .iter()
-            .map(managed_file_from_recovered)
-            .collect::<Result<Vec<_>, _>>()?;
-        files.sort_by(|left, right| {
-            right
-                .created_at_unix_ms
-                .cmp(&left.created_at_unix_ms)
-                .then_with(|| left.logical_name.cmp(&right.logical_name))
-        });
-        let pending = store
-            .search_exact_caption(remote_upload::CAPTION, MAX_MANIFEST_SCAN)
-            .map_err(map_transfer_error)?;
-        files.extend(self.pending_remote_files(
-            account_id,
-            chat_id,
-            pending,
-            &files,
-            cancellation,
-        )?);
-        Ok(ManagedVaultScan {
-            health_checked_files: None,
-            files,
-            rejected_manifests: report.rejected.len(),
-            catalog_pending: false,
-            catalog_limited: false,
-        })
     }
 
     fn scan_cached(
@@ -3150,8 +3127,8 @@ impl VaultOwner {
             .as_ref()
             .map(|owner| owner.cancellation.clone());
         // Destination policy is enforced before touching plaintext or allocating
-        // keys. A frontend cannot turn Saved Messages or an arbitrary channel
-        // into a TeleArk upload target by supplying its numeric id.
+        // keys. A frontend cannot turn an arbitrary channel into a TeleArk
+        // upload target by supplying its numeric id.
         if let Some(plan) = queued {
             VaultUploadObserver::new(self.transfers.clone(), plan.id)
                 .phase(VaultUploadPhase::CheckingTarget);
@@ -4649,6 +4626,7 @@ fn upper_hex_nibble(value: u8) -> Result<u8, ApplicationError> {
 
 fn status_for(record: Option<&VaultMetadataRecord>, locked: bool) -> VaultStatus {
     record.map_or_else(VaultStatus::unconfigured, |record| VaultStatus {
+        key_selection: None,
         active_key_locked: locked,
         historical_key_unlocked: false,
         active_vault_id: Some(record.vault_id),

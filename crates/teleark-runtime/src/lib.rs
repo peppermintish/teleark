@@ -123,11 +123,11 @@ pub use transfer::{
 };
 pub use vault::{
     DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultJob, VaultKeyPhase,
-    VaultKeyProgress, VaultKeySnapshot, VaultRecoverySecret, VaultStatus, VaultTransferControl,
-    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadControl,
-    VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
-    VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
-    inspect_upload_sources, inspect_upload_sources_observed,
+    VaultKeyProgress, VaultKeySelection, VaultKeySnapshot, VaultRecoverySecret, VaultStatus,
+    VaultTransferControl, VaultTransferDirection, VaultTransferSnapshot, VaultTransferState,
+    VaultUploadControl, VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport,
+    VaultUploadSelectionPhase, VaultUploadSelectionProgress, VaultUploadSelectionSnapshot,
+    VaultUploadSource, inspect_upload_sources, inspect_upload_sources_observed,
 };
 
 pub use teleark_telegram::{

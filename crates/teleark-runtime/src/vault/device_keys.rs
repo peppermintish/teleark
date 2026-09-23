@@ -76,6 +76,134 @@ impl DeviceKeyStore for MemoryStore {
 }
 
 impl VaultOwner {
+    pub(super) fn select_channel_key(
+        &mut self,
+        account: i64,
+        chat: i64,
+        progress: &VaultKeyProgress,
+    ) -> Result<VaultKeySelection, ApplicationError> {
+        progress.phase(VaultKeyPhase::Loading)?;
+        let records = self
+            .library
+            .worker
+            .request("credential_vault_epochs", |reply| {
+                crate::StorageRequest::CredentialVaultEpochs { reply }
+            })?;
+        let preferred = self.library.worker.vault_metadata()?;
+        let mut available = Vec::new();
+        for record in records {
+            progress.check_cancelled()?;
+            // The selected credential backend is authoritative. A missing or
+            // unreadable reference is not a usable key.
+            match self.read_device_key(&record) {
+                Ok(bundle) => {
+                    let master = authenticate_bundle(&record, &bundle)?;
+                    available.push((record, Arc::new(master)));
+                }
+                Err(error) if error.kind() == ApplicationErrorKind::VaultKeyUnavailable => {}
+                Err(error) => return Err(error),
+            }
+            progress.activity()?;
+        }
+        let choice = if available.is_empty() {
+            None
+        } else {
+            let mut candidates = self.library.cached_manifest_candidates(account, chat)?;
+            candidates.retain(|candidate| candidate.file.file_name.ends_with(".tarkm"));
+            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.file.message_id.get()));
+            candidates.truncate(MAX_MANIFEST_SCAN);
+            if candidates.is_empty() {
+                preferred
+                    .as_ref()
+                    .and_then(|record| {
+                        available
+                            .iter()
+                            .position(|(item, _)| item.vault_id == record.vault_id)
+                    })
+                    .or(Some(0))
+            } else {
+                let mut store = TelegramObjectStore::new(self.telegram.clone(), account, chat);
+                let mut selected = None;
+                for candidate in candidates {
+                    progress.check_cancelled()?;
+                    let object = catalog::byte_object(&candidate)?;
+                    let bytes = store
+                        .download(object.object_id)
+                        .map_err(map_transfer_error)?;
+                    if bytes.len() as u64 != object.encoded_size {
+                        selected = None;
+                        break;
+                    }
+                    let id = match teleark_crypto::manifest_vault_id_hint(
+                        &bytes,
+                        teleark_crypto::ManifestLimits::default(),
+                    ) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            selected = None;
+                            break;
+                        }
+                    };
+                    let index = available
+                        .iter()
+                        .position(|(record, _)| record.vault_id == id);
+                    let Some(index) = index else {
+                        selected = None;
+                        break;
+                    };
+                    if selected.is_some_and(|previous| previous != index)
+                        || teleark_crypto::open_manifest(
+                            &bytes,
+                            &available[index].1,
+                            teleark_crypto::ManifestLimits::default(),
+                        )
+                        .is_err()
+                    {
+                        selected = None;
+                        break;
+                    }
+                    selected = Some(index);
+                    progress.activity()?;
+                }
+                selected
+            }
+        };
+        self.check_key_generation()?;
+        let outcome = if available.is_empty() {
+            VaultKeySelection::NoKeys
+        } else if let Some(index) = choice {
+            let (record, master) = available.swap_remove(index);
+            self.record = Some(record);
+            self.master_key = Some(master);
+            self.historical_key = None;
+            VaultKeySelection::Ready
+        } else {
+            self.record = preferred.clone();
+            self.master_key = None;
+            self.historical_key = None;
+            VaultKeySelection::Undecryptable
+        };
+        if outcome == VaultKeySelection::NoKeys {
+            self.record = preferred;
+            self.master_key = None;
+            self.historical_key = None;
+        }
+        self.catalog.clear();
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        session.current_keys(self.session_generation)?;
+        session.publish(
+            self.session_generation,
+            self.record.clone(),
+            self.master_key.clone(),
+            None,
+        );
+        session.status.key_selection = Some(outcome);
+        Ok(outcome)
+    }
+
     pub(super) fn check_key_generation(&self) -> Result<(), ApplicationError> {
         self.session
             .lock()
@@ -197,12 +325,24 @@ impl VaultOwner {
     ) -> Result<String, ApplicationError> {
         // Multiple admitted operations may precede the first load. Read the
         // current lease only on this serialized owner, after validating logout.
-        let keys = self
+        let session = self
             .session
             .lock()
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-            .current_keys(self.session_generation)?;
-        self.record = self.library.worker.vault_metadata()?;
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let keys = session.current_keys(self.session_generation)?;
+        if matches!(action, ManagedKeyAction::Export)
+            && session.status.key_selection != Some(VaultKeySelection::Ready)
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::VaultKeyUnavailable,
+            ));
+        }
+        drop(session);
+        self.record = if matches!(action, ManagedKeyAction::Export) {
+            keys.record.clone()
+        } else {
+            self.library.worker.vault_metadata()?
+        };
         if let Some(record) = &self.record {
             validate_record(record)?;
         }
@@ -247,7 +387,11 @@ impl VaultOwner {
                 Ok(String::new())
             }
             ManagedKeyAction::Export => {
-                self.prepare_managed_key(progress)?;
+                if self.master_key.is_none() {
+                    return Err(ApplicationError::new(
+                        ApplicationErrorKind::VaultKeyUnavailable,
+                    ));
+                }
                 let record = self
                     .record
                     .as_ref()
@@ -313,7 +457,13 @@ mod tests {
         vault
             .submit_prepare_key(VaultKeyProgress::new())?
             .wait()
-            .map(|_| ())
+            .map(|_| ())?;
+        if vault.status().key_selection != Some(VaultKeySelection::Ready) {
+            vault
+                .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+                .wait()?;
+        }
+        Ok(())
     }
 
     fn export(vault: &DesktopVault) -> Result<String, ApplicationError> {
@@ -321,6 +471,28 @@ mod tests {
             .submit_recovery_export(VaultKeyProgress::new())?
             .wait()
             .map(|secret| secret.to_string())
+    }
+
+    #[test]
+    fn channel_selection_reports_missing_keys_and_selects_only_a_readable_epoch() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let store = platform_store();
+        let (vault, _library) = open(temp.path(), store)?;
+        let select = || {
+            vault
+                .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+                .wait()
+        };
+        assert_eq!(select()?, VaultKeySelection::NoKeys);
+        assert_eq!(
+            vault.status().key_selection,
+            Some(VaultKeySelection::NoKeys)
+        );
+        prepare(&vault)?;
+        assert_eq!(select()?, VaultKeySelection::Ready);
+        assert_eq!(vault.status().key_selection, Some(VaultKeySelection::Ready));
+        assert!(!export(&vault)?.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -358,6 +530,9 @@ mod tests {
         vault
             .submit_recovery_import(bundle.clone(), VaultKeyProgress::new())?
             .wait()?;
+        vault
+            .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+            .wait()?;
         assert_eq!(library.keychain_status()?.unavailable_credentials, 0);
         assert_eq!(export(&vault)?, bundle);
         assert_eq!(library.worker.vault_metadata()?, Some(record));
@@ -377,6 +552,9 @@ mod tests {
         let old_bundle = export(&vault)?;
         vault
             .submit_new_managed_key(VaultKeyProgress::new())?
+            .wait()?;
+        vault
+            .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
             .wait()?;
         let active_bundle = export(&vault)?;
 
@@ -432,6 +610,9 @@ mod tests {
             "setup does not disclose a recovery secret"
         );
         second.wait()?;
+        vault
+            .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+            .wait()?;
         let record = library.worker.vault_metadata()?.expect("automatic record");
         let revision = vault
             .inner
