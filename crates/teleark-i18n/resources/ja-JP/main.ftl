@@ -1119,6 +1119,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.7 · Automatic channel key setup
+
+    - The Keychain preference now uses a labeled switch on the right.
+    - TeleArk creates a key with a new managed channel and can finish interrupted key setup for an empty channel on a later login. Channels with managed files are not automatically rekeyed.
+    - SQLite schema 23 and encrypted-file, manifest and recovery-bundle codecs are unchanged.
+
     ## 0.5.6 · One current channel key
 
     - TeleArk selects one stored key that can open the managed channel. Files shows a key warning when no key fits; Raw Files still shows Telegram objects.
