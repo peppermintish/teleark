@@ -12,7 +12,7 @@ Browse channel files, store encrypted files in your own private Telegram channel
 - **Encrypted storage** — Upload individual files or batches to a dedicated private channel. Authenticated manifests keep each file discoverable and let TeleArk verify its contents during restoration.
 - **Transfer management** — Follow progress, queues, retries and live or historical diagnostics. Ordinary Telegram downloads support pause, resume, cancel, retry and restart recovery. Upload history survives restarts; separate upload and download speed limits apply to active transfers.
 - **Local and remote library** — Browse downloaded/imported files separately from indexed Telegram files, with search, filters and file actions. Background checks identify missing or changed local downloads.
-- **Key management and recovery** — Unlock with a password or recovery material, export and restore recovery bundles, change passwords and retain older key versions for existing files.
+- **Key management and recovery** — TeleArk selects one stored key that opens the managed channel's files. Import a key when none of the stored keys fit, and export the current key for safekeeping.
 - **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and ten interface languages with English fallback for untranslated messages.
 
 ## How it works
@@ -144,7 +144,7 @@ For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-r
 
 1. **Sign in** with QR or phone/code, including two-step verification when enabled.
 2. **Open TeleArk** to create or rediscover the dedicated private channel owned by your account.
-3. **Set up the Key Vault**, export a recovery bundle and keep it offline. Then upload files, browse **Files**, and follow work in **Transfers**.
+3. **Keep the current key safe.** Export it from Settings → Encryption keys once TeleArk confirms it opens the managed channel. Then upload files, browse **Files**, and follow work in **Transfers**.
 
 Encrypted uploads go to the private TeleArk channel.
 
@@ -162,7 +162,7 @@ Use English (`en-US`) and light mode for visual previews and layout reviews, che
 
 Encrypted storage protects remote file contents and original names. Telegram can still observe channel relationships, ciphertext sizes and timing. The local SQLite catalog is unencrypted and contains metadata and saved personal API credentials; Telegram sessions use a separate adapter cache. On macOS, the catalog defaults to `~/Library/Application Support/TeleArk/library.sqlite3`; storage paths are configurable in Settings.
 
-Recovery after database loss requires a valid recovery bundle, access to the Telegram account, and retained manifests and encrypted parts. Keep recovery material separately from the stored files. Rotating a recovery record does not revoke older exported bundles that wrap the same Master Key. See [Security and data integrity](docs/SECURITY.md) for details.
+Recovery after database loss requires the matching key bundle, access to the Telegram account, and retained manifests and encrypted parts. Keep the exported key separately from the stored files. TeleArk uses one current key per session; a stored or imported key is usable only after it authenticates the channel's files. See [Security and data integrity](docs/SECURITY.md) for details.
 
 **Current limits:** interrupted encrypted uploads retain history but do not automatically resume. Encrypted transfers use a temporary 60 MiB plaintext part ceiling; ordinary Telegram downloads verify byte length rather than a cryptographic content hash. OS Credential unlock is disabled, and macOS packages are unsigned. [Implementation status](docs/IMPLEMENTATION_STATUS.md) tracks remaining work and validation; [Changelog](CHANGELOG.md) records release history.
 

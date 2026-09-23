@@ -1,4 +1,10 @@
-# Implementation status — v0.5.5
+# Implementation status — v0.5.6
+
+## Version 0.5.6 · Single current channel key (2026-09-24)
+
+The managed channel now selects one readable key from the configured SQLite or Keychain backend by authenticating its discovered manifests. The selected key alone authorizes session uploads and export. A missing key shows a no-keys helper in Files; stored keys that cannot open the channel show an undecryptable-channel helper. Raw Files still displays the actual Telegram objects. Import reruns selection. Settings offers import and current-key export, and the legacy remote recovery route is removed. This is an intentional breaking change to the former multi-key desktop behavior; stored credentials and encrypted bytes are not deleted. [ADR 0057](adr/0057-single-current-channel-key.md) supersedes the affected desktop portions of ADRs 0025 and 0040.
+
+Managed-channel events now retain a catalog-change signal even after bounded delta eviction. Runtime commits wake the GUI selection and Files projection promptly; protocol reconciliation remains a fallback. SQLite read/write schema 23 and the encrypted-file, manifest and recovery-bundle codecs are unchanged. Validation results are recorded in the release commit and local check output.
 
 ## Version 0.5.5 · Event-driven local availability (2026-09-23)
 
