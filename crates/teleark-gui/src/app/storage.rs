@@ -50,13 +50,14 @@ impl TeleArkApp {
         let generation = self.telegram_login_generation;
         let title = self.tr("storage-remote-title").to_string();
         let description = self.tr("storage-remote-description").to_string();
-        // Presentation-only ticks expose phase duration and cancellation while
-        // the retained background task owns network and storage operations.
+        let mut changes = progress.subscribe();
+        // Phase events repaint immediately; the clock only advances elapsed labels.
         self.storage_maintenance_presentation = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { return; },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => {},
+                }
                 let Some(entity) = this.upgrade() else { return };
                 let done = entity.update(cx, |this, cx| {
                     if this.telegram_login_generation != generation {
@@ -127,12 +128,14 @@ impl TeleArkApp {
         self.storage_loading = true;
         self.storage_error = None;
         let progress = teleark_runtime::StorageSetupProgress::new();
+        let mut changes = progress.subscribe();
         self.storage_setup_progress = Some(progress.clone());
         self.storage_setup_presentation = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { return; },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => {},
+                }
                 let Some(entity) = this.upgrade() else { return };
                 if entity.update(cx, |this, cx| {
                     if this.telegram_login_generation != generation {

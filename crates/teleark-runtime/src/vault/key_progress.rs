@@ -1,4 +1,5 @@
 use super::*;
+use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultKeyPhase {
@@ -15,6 +16,7 @@ pub enum VaultKeyPhase {
 pub struct VaultKeyProgress {
     state: Arc<Mutex<VaultKeySnapshot>>,
     cancelled: Arc<AtomicBool>,
+    changed: Arc<watch::Sender<u64>>,
 }
 #[derive(Clone, Debug)]
 pub struct VaultKeySnapshot {
@@ -45,6 +47,7 @@ impl VaultKeyProgress {
                 error: None,
             })),
             cancelled: Arc::new(AtomicBool::new(false)),
+            changed: Arc::new(watch::channel(0).0),
         }
     }
     pub fn cancel(&self) {
@@ -52,6 +55,9 @@ impl VaultKeyProgress {
     }
     pub fn snapshot(&self) -> VaultKeySnapshot {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
     pub(crate) fn check_cancelled(&self) -> Result<(), ApplicationError> {
         if self.cancelled.load(Ordering::Acquire) {
@@ -62,15 +68,22 @@ impl VaultKeyProgress {
     pub(crate) fn activity(&self) -> Result<(), ApplicationError> {
         self.check_cancelled()?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.finished {
+        let active = !state.finished;
+        if active {
             state.last_activity = Instant::now();
+        }
+        drop(state);
+        if active {
+            self.changed
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
         }
         Ok(())
     }
     pub(crate) fn phase(&self, phase: VaultKeyPhase) -> Result<(), ApplicationError> {
         self.check_cancelled()?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.finished && state.phase != phase {
+        let changed = !state.finished && state.phase != phase;
+        if changed {
             state.phase = phase;
             state.phase_since = Instant::now();
             state.last_activity = state.phase_since;
@@ -84,6 +97,11 @@ impl VaultKeyProgress {
             if state.timeline.len() < 16 {
                 state.timeline.push((phase, millis));
             }
+        }
+        drop(state);
+        if changed {
+            self.changed
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
         }
         Ok(())
     }
@@ -104,5 +122,26 @@ impl VaultKeyProgress {
                 state.timeline.push((VaultKeyPhase::Completed, millis));
             }
         }
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn key_phase_and_terminal_state_wake_presentation() {
+        let progress = VaultKeyProgress::new();
+        let mut changes = progress.subscribe();
+        assert!(!changes.has_changed().expect("open signal"));
+        progress.phase(VaultKeyPhase::Loading).expect("phase");
+        assert!(changes.has_changed().expect("phase event"));
+        changes.borrow_and_update();
+        progress.finish(None);
+        assert!(changes.has_changed().expect("terminal event"));
+        assert!(progress.snapshot().finished);
     }
 }

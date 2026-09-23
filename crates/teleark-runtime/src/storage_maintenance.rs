@@ -7,6 +7,7 @@ use std::{
 };
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use teleark_storage::{Database, SettingRecord};
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub struct StorageMaintenanceSnapshot {
@@ -23,6 +24,7 @@ pub struct StorageMaintenanceSnapshot {
 pub struct StorageMaintenance {
     inner: Arc<Mutex<StorageMaintenanceSnapshot>>,
     pub(crate) cancellation: TelegramScanCancellation,
+    changed: Arc<watch::Sender<u64>>,
 }
 impl Default for StorageMaintenance {
     fn default() -> Self {
@@ -44,6 +46,7 @@ impl StorageMaintenance {
                 error: None,
             })),
             cancellation: TelegramScanCancellation::new(),
+            changed: Arc::new(watch::channel(0).0),
         }
     }
     pub fn cancel(&self) {
@@ -51,6 +54,9 @@ impl StorageMaintenance {
     }
     pub fn snapshot(&self) -> StorageMaintenanceSnapshot {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
     pub(crate) fn phase(&self, phase: StorageMaintenancePhase) {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -73,6 +79,9 @@ impl StorageMaintenance {
             }
             state.timeline.push_back((phase, millis));
         }
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
     pub(crate) fn finish(&self, error: Option<ApplicationErrorKind>) {
         if error.is_none() {
@@ -82,6 +91,9 @@ impl StorageMaintenance {
         state.error = error;
         state.finished = true;
         state.last_activity = Instant::now();
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 }
 
@@ -150,11 +162,16 @@ mod tests {
     #[test]
     fn timeline_retains_terminal_state_and_discloses_omissions() {
         let progress = StorageMaintenance::new();
+        let mut changes = progress.subscribe();
+        assert!(!changes.has_changed().expect("open signal"));
         for _ in 0..40 {
             progress.phase(StorageMaintenancePhase::Repairing);
             progress.phase(StorageMaintenancePhase::Verifying);
         }
         progress.finish(Some(ApplicationErrorKind::Network));
+        assert!(changes.has_changed().expect("phase and terminal event"));
+        changes.borrow_and_update();
+        assert!(!changes.has_changed().expect("coalesced signal"));
         progress.phase(StorageMaintenancePhase::Completed);
         let state = progress.snapshot();
         assert!(state.finished);

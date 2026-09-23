@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 use teleark_core::ApplicationErrorKind;
+use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageSetupPhase {
@@ -32,7 +33,10 @@ pub struct StorageSetupSnapshot {
 }
 
 #[derive(Clone)]
-pub struct StorageSetupProgress(Arc<Mutex<StorageSetupSnapshot>>);
+pub struct StorageSetupProgress {
+    state: Arc<Mutex<StorageSetupSnapshot>>,
+    changed: Arc<watch::Sender<u64>>,
+}
 
 impl Default for StorageSetupProgress {
     fn default() -> Self {
@@ -43,24 +47,31 @@ impl Default for StorageSetupProgress {
 impl StorageSetupProgress {
     pub fn new() -> Self {
         let now = Instant::now();
-        Self(Arc::new(Mutex::new(StorageSetupSnapshot {
-            phase: StorageSetupPhase::CheckingBinding,
-            started: now,
-            phase_since: now,
-            last_activity: now,
-            timeline: VecDeque::from([(StorageSetupPhase::CheckingBinding, 0)]),
-            omitted: 0,
-            finished: false,
-            error: None,
-        })))
+        Self {
+            state: Arc::new(Mutex::new(StorageSetupSnapshot {
+                phase: StorageSetupPhase::CheckingBinding,
+                started: now,
+                phase_since: now,
+                last_activity: now,
+                timeline: VecDeque::from([(StorageSetupPhase::CheckingBinding, 0)]),
+                omitted: 0,
+                finished: false,
+                error: None,
+            })),
+            changed: Arc::new(watch::channel(0).0),
+        }
     }
 
     pub fn snapshot(&self) -> StorageSetupSnapshot {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     pub fn phase(&self, phase: StorageSetupPhase) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.finished {
             return;
         }
@@ -80,16 +91,22 @@ impl StorageSetupProgress {
                 .min(u128::from(u64::MAX)) as u64;
             state.timeline.push_back((phase, millis));
         }
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     pub fn finish(&self, error: Option<ApplicationErrorKind>) {
         if error.is_none() {
             self.phase(StorageSetupPhase::Completed);
         }
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.error = error;
         state.finished = true;
         state.last_activity = Instant::now();
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 }
 
@@ -100,11 +117,16 @@ mod tests {
     #[test]
     fn setup_history_bounds_transitions_and_keeps_terminal_result() {
         let progress = StorageSetupProgress::new();
+        let mut changes = progress.subscribe();
+        assert!(!changes.has_changed().expect("open signal"));
         for _ in 0..20 {
             progress.phase(StorageSetupPhase::ReadingDialogs);
             progress.phase(StorageSetupPhase::VerifyingChannel);
         }
         progress.finish(Some(ApplicationErrorKind::StorageAccessDenied));
+        assert!(changes.has_changed().expect("phase and terminal event"));
+        changes.borrow_and_update();
+        assert!(!changes.has_changed().expect("coalesced signal"));
         let snapshot = progress.snapshot();
         assert!(snapshot.finished);
         assert_eq!(

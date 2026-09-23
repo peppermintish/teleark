@@ -205,14 +205,21 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) {
         let refresh_files = !reveal_recovery || self.vault_status.active_key_locked;
+        let mut changes = progress.subscribe();
         self.vault_key_progress = Some(progress);
         self.vault_key_details = false;
         self.vault_activity = VaultActivity::Working;
         self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
+                let event = tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { return; } else { true },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => false,
+                };
+                if event {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                }
                 let Some(entity) = this.upgrade() else { return };
                 if entity.update(cx, |this, cx| {
                     cx.notify();

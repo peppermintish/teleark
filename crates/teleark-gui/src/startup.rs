@@ -28,12 +28,14 @@ use crate::{
 struct Progress {
     events: VecDeque<(MigrationProgress, Instant)>,
     dropped: u64,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 impl Progress {
     fn new() -> Self {
         Self {
             events: VecDeque::from([(MigrationProgress::Detecting, Instant::now())]),
             dropped: 0,
+            changed: tokio::sync::watch::channel(0).0,
         }
     }
     fn publish(&mut self, phase: MigrationProgress) {
@@ -45,6 +47,8 @@ impl Progress {
             self.dropped = self.dropped.saturating_add(1);
         }
         self.events.push_back((phase, Instant::now()));
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 }
 
@@ -90,6 +94,11 @@ impl StartupView {
         self.failure = None;
         self.progress = Arc::new(Mutex::new(Progress::new()));
         let progress = Arc::clone(&self.progress);
+        let mut changes = progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changed
+            .subscribe();
         let preview = self.visual_preview;
         let work = cx.background_spawn(async move { prepare(preview, progress) });
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -109,9 +118,10 @@ impl StartupView {
         }));
         self.clock = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { break; },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => {},
+                }
                 let Some(entity) = this.upgrade() else { break };
                 entity.update(cx, |_, cx| cx.notify());
             }
@@ -339,10 +349,15 @@ mod tests {
     #[test]
     fn startup_timeline_bounds_preserve_the_final_phase() {
         let mut progress = Progress::new();
+        let mut changes = progress.changed.subscribe();
+        assert!(!changes.has_changed().expect("open signal"));
         for version in 1..=100 {
             progress.publish(MigrationProgress::Converting { version });
         }
         progress.publish(MigrationProgress::Completed);
+        assert!(changes.has_changed().expect("phase and terminal event"));
+        changes.borrow_and_update();
+        assert!(!changes.has_changed().expect("coalesced signal"));
         assert_eq!(progress.events.len(), 64);
         assert_eq!(progress.dropped, 38);
         assert_eq!(

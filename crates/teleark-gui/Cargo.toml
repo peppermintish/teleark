@@ -18,7 +18,7 @@ teleark-core.workspace = true
 teleark-i18n.workspace = true
 teleark-runtime.workspace = true
 tracing.workspace = true
-tokio = { version = "1.52.3", default-features = false, features = ["macros"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "sync"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
