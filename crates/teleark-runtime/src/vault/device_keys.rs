@@ -91,17 +91,18 @@ impl VaultOwner {
             })?;
         let preferred = self.library.worker.vault_metadata()?;
         let mut available = Vec::new();
+        let mut stored_material_found = false;
         for record in records {
             progress.check_cancelled()?;
             // The selected credential backend is authoritative. A missing or
             // unreadable reference is not a usable key.
-            match self.read_device_key(&record) {
-                Ok(bundle) => {
-                    let master = authenticate_bundle(&record, &bundle)?;
+            if let Some(bytes) = self.device_keys.read(&identity(&record))? {
+                stored_material_found = true;
+                if let Ok(text) = std::str::from_utf8(&bytes)
+                    && let Ok(master) = authenticate_bundle(&record, text)
+                {
                     available.push((record, Arc::new(master)));
                 }
-                Err(error) if error.kind() == ApplicationErrorKind::VaultKeyUnavailable => {}
-                Err(error) => return Err(error),
             }
             progress.activity()?;
         }
@@ -169,7 +170,7 @@ impl VaultOwner {
             }
         };
         self.check_key_generation()?;
-        let outcome = if available.is_empty() {
+        let outcome = if !stored_material_found {
             VaultKeySelection::NoKeys
         } else if let Some(index) = choice {
             let (record, master) = available.swap_remove(index);
@@ -521,6 +522,14 @@ mod tests {
             VaultKeySelection::Ready
         );
         assert_eq!(vault.status().active_vault_id, Some(current.vault_id));
+        store.0.lock().expect("store").remove(&identity(&current));
+        assert_eq!(
+            vault
+                .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Undecryptable,
+            "a damaged stored key exists, even though it cannot be used"
+        );
         Ok(())
     }
 
