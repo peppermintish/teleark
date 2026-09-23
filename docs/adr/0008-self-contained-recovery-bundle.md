@@ -9,7 +9,7 @@ The historical provisional-format policy below is superseded by [ADR 0017](0017-
 
 ## Context
 
-A raw Recovery Key can unlock a Recovery Wrap only when the local Library database still contains that wrap. TeleArk's recovery goal also covers loss of the local database while encrypted packages remain in Telegram Saved Messages. Exporting only the raw key would therefore provide a misleading backup, while uploading the recovery material beside ciphertext would defeat the intended separation.
+A raw Recovery Key can unlock a Recovery Wrap only when the local Library database still contains that wrap. TeleArk's recovery goal also covers loss of the local database while encrypted packages remain in the private TeleArk channel. Exporting only the raw key would therefore provide a misleading backup, while uploading the recovery material beside ciphertext would defeat the intended separation.
 
 ## Decision
 

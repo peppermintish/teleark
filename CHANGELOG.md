@@ -161,7 +161,6 @@
 - Create or rediscover a private channel owned by your Telegram account, with a distinct TeleArk destination in the sidebar.
 - Files shows authenticated manifests as complete logical files. Raw Files exposes ordinary files, encrypted parts, and manifests with their original names and metadata.
 - A built-in guide explains channel ownership, encryption, raw objects, recovery keys, and why manifests and parts must be kept.
-- Existing files in Saved Messages remain recoverable through Settings → Key Vault. New encrypted uploads target the private channel.
 
 ### Everything in its place
 - Transfer selection, batches, pause, resume, cancel, retry, safe deletion, file inspection, and live/replay diagnostics remain available. Advanced controls and details are tucked away until needed.

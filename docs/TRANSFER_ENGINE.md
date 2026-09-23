@@ -111,7 +111,7 @@ background writer and disclose dropped records; logging cannot block transport.
 
 ## Connected encrypted storage
 
-New uploads validate the account's bound, currently owned private TeleArk channel before touching plaintext/keys. Saved Messages is available only as an explicit legacy recovery source. Retained operation leases carry the required key to independent background owners; key operations remain serialized.
+New uploads validate the account's bound, currently owned private TeleArk channel before touching plaintext/keys. Retained operation leases carry the required key to independent background owners; key operations remain serialized.
 
 Upload first acknowledges preparation and hashes source bytes with bounded
 buffers. A streaming encryption pass checks each container digest against that

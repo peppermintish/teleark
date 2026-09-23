@@ -10,7 +10,7 @@ The narrow inspector uses a neutral summary surface, restrained status color, di
 
 ## Navigation is presentation
 
-Channel and TeleArk navigation sends no observe/prioritize/refresh command to synchronization. It neither cancels nor starts managed verification. Account-owned managed projection updates run on relevant committed catalog changes, initial storage availability and key-unlock events, regardless of the selected ordinary page. The existing generation/account/channel fences, retained task and explicit cancellation remain. Switching between ordinary pages retains the same managed rows and active work. Explicit legacy Saved Messages recovery remains a separate user-requested operation.
+Channel and TeleArk navigation sends no observe/prioritize/refresh command to synchronization. It neither cancels nor starts managed verification. Account-owned managed projection updates run on relevant committed catalog changes, initial storage availability and key-unlock events, regardless of the selected ordinary page. The existing generation/account/channel fences, retained task and explicit cancellation remain. Switching between ordinary pages retains the same managed rows and active work.
 
 Channel views retain bounded local rows together with their revision and exhaustion state, including a known-empty result. Reopening applies retained deltas; only a cold/evicted or invalidated baseline needs a local read. Mounting a table never demands remote history: downward scrolling or keyboard navigation arms near-end history once, and the explicit earlier-history action supports short lists and accessibility. Leaving cancels a viewport-only history request, while live account updates continue.
 

@@ -146,7 +146,7 @@ For a packaging preview with custom paths, use `scripts/package-macos.sh --dry-r
 2. **Open TeleArk** to create or rediscover the dedicated private channel owned by your account.
 3. **Set up the Key Vault**, export a recovery bundle and keep it offline. Then upload files, browse **Files**, and follow work in **Transfers**.
 
-New uploads go to the private TeleArk channel. Older Saved Messages packages remain recoverable through **Settings → Key Vault → Advanced**.
+Encrypted uploads go to the private TeleArk channel.
 
 ### UI preview
 

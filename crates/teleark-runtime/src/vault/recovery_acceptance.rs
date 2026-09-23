@@ -641,12 +641,6 @@ fn another_device_reuses_authenticated_published_containers_and_rejects_wrong_so
     vault
         .restore_with_recovery(bundle, PASSWORD.into())
         .expect("same recovery key");
-    let scan = vault
-        .scan_managed_files(7, 11, crate::TelegramScanCancellation::new())
-        .expect("discover incomplete upload");
-    assert_eq!(scan.files.len(), 1);
-    assert_eq!(scan.files[0].health, crate::VaultFileHealth::PendingUpload);
-    assert_eq!(scan.files[0].part_message_ids.len(), 1);
     let wrong = second.path().join("wrong.bin");
     std::fs::write(&wrong, vec![0; length as usize]).expect("different source");
     assert_eq!(
@@ -692,11 +686,6 @@ fn another_device_reuses_authenticated_published_containers_and_rejects_wrong_so
         std::fs::read(output).expect("output"),
         std::fs::read(source).expect("source")
     );
-    let scan = vault
-        .scan_managed_files(7, 11, crate::TelegramScanCancellation::new())
-        .expect("completed discovery");
-    assert_eq!(scan.files.len(), 1);
-    assert_ne!(scan.files[0].health, crate::VaultFileHealth::PendingUpload);
     let spool = library.database_path.with_extension("upload-spool");
     for account in std::fs::read_dir(spool).expect("tiny metadata") {
         for task in std::fs::read_dir(account.expect("account").path()).expect("tasks") {

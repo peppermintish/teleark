@@ -36,13 +36,11 @@ a dedicated welcome surface for fresh login and a returning-account surface.
 Vault prerequisites are actionable and preserve the interrupted navigation.
 
 New encrypted packages belong in a dedicated private broadcast channel owned
-by the authorized account. Saved Messages is never a new upload destination.
+by the authorized account. The bound channel is the upload destination.
 Channel identity is account scoped, checked by the adapter, and discoverable
 by a versioned description marker rather than a translated/display title.
 Raw documents and authenticated logical files are two projections of this
 channel. No crypto or manifest bytes change as part of this destination change.
-Existing Saved Messages packages remain recoverable through an explicit
-legacy recovery entry; they are never moved or deleted implicitly.
 
 ## Durable account and discovery state
 

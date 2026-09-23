@@ -238,7 +238,7 @@ impl TelegramConnection {
             Ok(updates) => updates,
             Err(error) if missing_temporary_parts(&error) => {
                 // Persist a new temporary identity before requesting a bounded
-                // restart from Runtime (only legacy recovery can replay a ciphertext spool).
+                // restart from Runtime before retrying an interrupted upload.
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|_| TelegramError::new(TelegramErrorKind::Session))?

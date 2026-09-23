@@ -43,7 +43,7 @@ const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"TARKCP01";
 
 /// Current conservative plaintext ceiling used by the connected encrypted
-/// Saved Messages workflow. This is deliberately exposed for frontend-neutral
+/// remote manifest workflow. This is deliberately exposed for frontend-neutral
 /// presentation so the GUI never advertises a size the runtime will ignore.
 pub const fn encrypted_part_plaintext_limit() -> u64 {
     ENCRYPTED_PART_PLAINTEXT_BYTES

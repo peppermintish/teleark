@@ -41,7 +41,6 @@ impl DesktopVault {
                 self.submit_in_session(Some(revision), |reply| VaultCommand::Scan {
                     account_id,
                     chat_id,
-                    cached: true,
                     verify_health: false,
                     cancellation: cancellation.clone(),
                     observer: Some(observer.clone()),
@@ -234,7 +233,6 @@ mod tests {
         let result = vault.submit_in_session(Some(revision), |reply| VaultCommand::Scan {
             account_id: 7,
             chat_id: 11,
-            cached: true,
             verify_health: false,
             cancellation: crate::TelegramScanCancellation::new(),
             observer: None,
