@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 · One current channel key
+
+- Select one stored key that authenticates the managed channel files at account sign-in; ignore former keys for this session. Files shows a no-keys or undecryptable-channel helper until a matching key is selected, while Raw Files still shows Telegram objects.
+- Settings now offers key import and current-key export only. Export requires an authenticated session key, and import reruns selection. Remove the legacy remote recovery route. This is a breaking change to the former multi-key desktop behavior; stored credentials and encrypted bytes are retained.
+- Managed-channel catalog changes remain event-driven even after bounded delta history is evicted. SQLite read/write schema 23 and encrypted file, manifest and recovery-bundle codecs are unchanged.
+
 ## 0.5.5 · Event-driven local availability
 
 - Downloaded-file badges react to native filesystem notifications and successful transfer events. Startup, watch registration, wake, watcher errors and a five-minute quiet fallback trigger bounded rechecks; paths without a working watch use slower fallback checks.
