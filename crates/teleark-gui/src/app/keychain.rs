@@ -189,6 +189,13 @@ impl TeleArkApp {
         let enabled = self.keychain.status.is_some_and(|s| s.enabled);
         let supported = self.keychain.status.is_some_and(|s| s.supported);
         let interactive = supported && !self.keychain.busy;
+        let description_id = if self.keychain.status.is_none() {
+            "settings-keychain-unknown"
+        } else if supported {
+            "settings-keychain-description"
+        } else {
+            "settings-keychain-unavailable"
+        };
         components::card()
             .p_5()
             .child(
@@ -197,7 +204,12 @@ impl TeleArkApp {
                     .debug_selector(|| "settings-keychain-toggle".into())
                     .role(Role::Switch)
                     .aria_label(self.tr("settings-keychain-title"))
-                    .aria_toggled(Toggled::from(enabled))
+                    .aria_description(self.tr(description_id))
+                    .aria_toggled(if self.keychain.status.is_some() {
+                        Toggled::from(enabled)
+                    } else {
+                        Toggled::Mixed
+                    })
                     .flex()
                     .items_center()
                     .gap_4()
@@ -230,13 +242,7 @@ impl TeleArkApp {
                                     .mt_1()
                                     .text_xs()
                                     .text_color(theme::text_muted())
-                                    .child(self.tr(if self.keychain.status.is_none() {
-                                        "settings-keychain-unknown"
-                                    } else if supported {
-                                        "settings-keychain-description"
-                                    } else {
-                                        "settings-keychain-unavailable"
-                                    })),
+                                    .child(self.tr(description_id)),
                             ),
                     )
                     .child(
