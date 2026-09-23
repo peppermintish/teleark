@@ -1,6 +1,7 @@
 //! Credential settings and retained migration feedback; all I/O runs in Runtime owners.
 use super::*;
 use gpui_kit::component::{Disableable as _, Sizable as _, button::ButtonVariants as _};
+use gpui_kit::{FontWeight, StatefulInteractiveElement as _};
 use teleark_runtime::{KeychainStatus, VaultKeyProgress};
 
 pub(crate) struct KeychainUi {
@@ -187,39 +188,64 @@ impl TeleArkApp {
     pub(crate) fn render_keychain_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let enabled = self.keychain.status.is_some_and(|s| s.enabled);
         let supported = self.keychain.status.is_some_and(|s| s.supported);
+        let interactive = supported && !self.keychain.busy;
         components::card()
             .p_5()
-            .child(components::section_title(
-                self.tr("settings-keychain-title"),
-            ))
             .child(
                 div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(theme::text_secondary())
-                    .child(self.tr(if cfg!(target_os = "macos") {
-                        "settings-keychain-description"
-                    } else {
-                        "settings-keychain-unavailable"
-                    })),
-            )
-            .child(
-                components::button(
-                    "settings-keychain-toggle",
-                    self.tr(if self.keychain.status.is_none() {
-                        "settings-keychain-unknown"
-                    } else if enabled {
-                        "settings-keychain-on"
-                    } else {
-                        "settings-keychain-off"
-                    }),
-                    Some(IconName::Asterisk),
-                    enabled,
-                )
-                .debug_selector(|| "settings-keychain-toggle".into())
-                .mt_3()
-                .disabled(self.keychain.busy || !supported)
-                .on_click(cx.listener(|app, _, _, cx| app.request_keychain_toggle(cx))),
+                    .id("settings-keychain-toggle")
+                    .debug_selector(|| "settings-keychain-toggle".into())
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .when(interactive, |row| {
+                        row.cursor_pointer()
+                            .focusable()
+                            .tab_index(0)
+                            .on_click(cx.listener(|app, _, _, cx| app.request_keychain_toggle(cx)))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .debug_selector(|| "settings-keychain-label".into())
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(self.tr("settings-keychain-title")),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(self.tr(if self.keychain.status.is_none() {
+                                        "settings-keychain-unknown"
+                                    } else if supported {
+                                        "settings-keychain-description"
+                                    } else {
+                                        "settings-keychain-unavailable"
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "settings-keychain-switch".into())
+                            .w(px(36.0))
+                            .h(px(20.0))
+                            .flex_none()
+                            .p(px(2.0))
+                            .flex()
+                            .when(enabled, |track| track.justify_end())
+                            .rounded_full()
+                            .bg(if enabled {
+                                theme::green()
+                            } else {
+                                theme::border()
+                            })
+                            .child(div().size(px(16.0)).rounded_full().bg(theme::surface())),
+                    ),
             )
             .when(
                 self.keychain.status.is_some_and(|s| s.cleanup_pending > 0),
@@ -474,6 +500,48 @@ impl TeleArkApp {
 mod tests {
     use super::*;
     use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn keychain_switch_sits_right_of_label_and_enables_storage(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        for full in [false, true] {
+            let (width, height) = if full {
+                (1440.0, 900.0)
+            } else {
+                (900.0, 600.0)
+            };
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.update(|window, cx| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), full);
+                app.update(cx, |app, cx| {
+                    theme::apply_appearance(AppearancePreference::Light, window, cx);
+                    app.settings_section = SettingsSection::General;
+                    app.keychain.status = Some(KeychainStatus {
+                        enabled: false,
+                        supported: true,
+                        cleanup_pending: 0,
+                        unavailable_credentials: 0,
+                    });
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            let label = cx.debug_bounds("settings-keychain-label").expect("label");
+            let switch = cx.debug_bounds("settings-keychain-switch").expect("switch");
+            assert!(
+                label.right() < switch.left(),
+                "switch is right of the label"
+            );
+            assert!(switch.right() <= px(width) && switch.bottom() <= px(height));
+            cx.simulate_click(switch.center(), gpui::Modifiers::default());
+            app.read_with(cx, |app, _| {
+                assert!(app.keychain.status.expect("preview status").enabled);
+            });
+        }
+    }
 
     #[gpui::test]
     fn keychain_disable_requires_explicit_confirmation_and_cancel_preserves_default(
