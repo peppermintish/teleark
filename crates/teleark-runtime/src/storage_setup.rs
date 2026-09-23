@@ -17,6 +17,7 @@ pub enum StorageSetupPhase {
     CreatingChannel,
     PreparingChannel,
     SavingBinding,
+    CreatingKey,
     Completed,
 }
 

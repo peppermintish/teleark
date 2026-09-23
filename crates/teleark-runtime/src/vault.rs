@@ -495,6 +495,7 @@ enum VaultCommand {
     SelectChannelKey {
         account: i64,
         chat: i64,
+        initialize_empty: bool,
         progress: VaultKeyProgress,
         reply: mpsc::SyncSender<Result<VaultKeySelection, ApplicationError>>,
     },
@@ -662,6 +663,30 @@ impl DesktopVault {
         let result = self.submit(|reply| VaultCommand::SelectChannelKey {
             account,
             chat,
+            initialize_empty: false,
+            progress,
+            reply,
+        });
+        if let Err(error) = &result {
+            observer.finish(Some(error.kind()));
+        }
+        result
+    }
+
+    /// Selects a stored key, or initializes an empty managed channel when no
+    /// usable stored key or managed catalog object exists. Call after catalog
+    /// synchronization has finished for this account and channel.
+    pub fn submit_select_or_initialize_channel_key(
+        &self,
+        account: i64,
+        chat: i64,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultKeySelection>, ApplicationError> {
+        let observer = progress.clone();
+        let result = self.submit(|reply| VaultCommand::SelectChannelKey {
+            account,
+            chat,
+            initialize_empty: true,
             progress,
             reply,
         });
@@ -1444,10 +1469,11 @@ impl VaultOwner {
             VaultCommand::SelectChannelKey {
                 account,
                 chat,
+                initialize_empty,
                 progress,
                 reply,
             } => {
-                let result = self.select_channel_key(account, chat, &progress);
+                let result = self.select_channel_key(account, chat, initialize_empty, &progress);
                 progress.finish(result.as_ref().err().map(ApplicationError::kind));
                 let _ = reply.send(result);
             }

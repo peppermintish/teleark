@@ -113,9 +113,10 @@ impl TeleArkApp {
             return;
         }
         self.storage_retry_task = None;
-        let (Some(telegram), Some(library), Some(account)) = (
+        let (Some(telegram), Some(library), Some(vault), Some(account)) = (
             self.telegram.clone(),
             self.library.clone(),
+            self.vault.clone(),
             self.telegram_account.clone(),
         ) else {
             return;
@@ -153,8 +154,9 @@ impl TeleArkApp {
         }));
         cx.notify();
         let work = cx.background_spawn(async move {
-            let managed = telegram.ensure_storage_channel_observed(
+            let managed = telegram.ensure_storage_channel_with_key_observed(
                 &library,
+                &vault,
                 account_id,
                 title,
                 description,

@@ -411,6 +411,46 @@ impl DesktopTelegram {
         description: String,
         progress: crate::StorageSetupProgress,
     ) -> Result<ManagedStorageChannel, ApplicationError> {
+        self.ensure_storage_channel_observed_inner(
+            library,
+            account_id,
+            title,
+            description,
+            progress,
+            None,
+        )
+    }
+
+    /// Creates a fresh key before presenting a newly created channel as ready.
+    /// Existing channels are selected after their catalog is synchronized.
+    pub fn ensure_storage_channel_with_key_observed(
+        &self,
+        library: &DesktopLibrary,
+        vault: &crate::DesktopVault,
+        account_id: i64,
+        title: String,
+        description: String,
+        progress: crate::StorageSetupProgress,
+    ) -> Result<ManagedStorageChannel, ApplicationError> {
+        self.ensure_storage_channel_observed_inner(
+            library,
+            account_id,
+            title,
+            description,
+            progress,
+            Some(vault),
+        )
+    }
+
+    fn ensure_storage_channel_observed_inner(
+        &self,
+        library: &DesktopLibrary,
+        account_id: i64,
+        title: String,
+        description: String,
+        progress: crate::StorageSetupProgress,
+        vault: Option<&crate::DesktopVault>,
+    ) -> Result<ManagedStorageChannel, ApplicationError> {
         let result = (|| {
             let preferred = library.storage_channel_id(account_id)?;
             let create = Some((title, description));
@@ -457,12 +497,24 @@ impl DesktopTelegram {
             } else {
                 library.save_storage_channel_id(account_id, channel.id)?;
             }
-            Ok(ManagedStorageChannel {
+            let managed = ManagedStorageChannel {
                 channel,
                 created,
                 replaced: replaced_channel.is_some(),
                 health,
-            })
+            };
+            if managed.created
+                && managed.health == crate::StorageChannelHealth::Healthy
+                && let Some(vault) = vault
+            {
+                progress.phase(crate::StorageSetupPhase::CreatingKey);
+                // The recovery bundle is stored by Runtime in the selected
+                // credential backend; it must not be exposed through setup.
+                let _secret = vault
+                    .submit_new_managed_key(crate::VaultKeyProgress::new())?
+                    .wait()?;
+            }
+            Ok(managed)
         })();
         let failure = result
             .as_ref()

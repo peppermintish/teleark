@@ -1503,6 +1503,7 @@ storage-setup-phase-discovering = 利用可能な管理チャンネルを検索�
 storage-setup-phase-creating = プライベートチャンネルを作成中
 storage-setup-phase-preparing = 管理チャンネルを検証・準備中
 storage-setup-phase-saving = 確認済みのアカウントとチャンネルの連携を保存中
+storage-setup-phase-key = 新しいチャンネルの鍵を作成中
 storage-setup-phase-completed = プライベートチャンネルの準備完了
 storage-health-unsafe = 保存チャンネルは非公開で、他のメンバーがいない必要があります。Telegram で設定を修正して再確認してください。
 storage-health-unsupported = このチャンネルは新しい識別形式を使用しています。TeleArk を更新してください。データは保持されています。

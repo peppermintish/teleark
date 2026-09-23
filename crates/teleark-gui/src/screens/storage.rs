@@ -1368,6 +1368,7 @@ fn storage_setup_phase_id(phase: StorageSetupPhase) -> &'static str {
         StorageSetupPhase::CreatingChannel => "storage-setup-phase-creating",
         StorageSetupPhase::PreparingChannel => "storage-setup-phase-preparing",
         StorageSetupPhase::SavingBinding => "storage-setup-phase-saving",
+        StorageSetupPhase::CreatingKey => "storage-setup-phase-key",
         StorageSetupPhase::Completed => "storage-setup-phase-completed",
     }
 }

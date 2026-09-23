@@ -33,6 +33,7 @@ struct State {
     uploads: Vec<(i64, [u8; 32])>,
     downloads: Vec<i64>,
     validations: Vec<bool>,
+    storage_created: bool,
     fail_once: Option<GateKind>,
 }
 struct ConcurrentGate {
@@ -215,6 +216,43 @@ impl TestVaultRemote {
 
     pub(super) fn handle(&self, request: TelegramRequest) {
         match request {
+            TelegramRequest::DiscoverStorage {
+                account_id,
+                preferred,
+                create,
+                progress,
+                reply,
+            } => {
+                let result = (|| {
+                    if account_id != 7 {
+                        return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+                    }
+                    if let Some(progress) = &progress {
+                        progress.phase(crate::StorageSetupPhase::ReadingDialogs);
+                    }
+                    let mut state = self.state.lock().expect("state");
+                    let created = !state.storage_created && create.is_some();
+                    if created {
+                        if let Some(progress) = &progress {
+                            progress.phase(crate::StorageSetupPhase::CreatingChannel);
+                        }
+                        state.storage_created = true;
+                    }
+                    let status = if state.storage_created && preferred.is_none_or(|id| id == 11) {
+                        crate::StorageChannelStatus::Ready(TelegramChatSummary {
+                            id: 11,
+                            name: "Synthetic private storage".into(),
+                            username: None,
+                            kind: TelegramChatKind::Channel,
+                            sync_pts: None,
+                        })
+                    } else {
+                        crate::StorageChannelStatus::Missing
+                    };
+                    Ok((status, created))
+                })();
+                let _ = reply.send(result);
+            }
             TelegramRequest::ValidateStorage {
                 account_id,
                 chat_id,

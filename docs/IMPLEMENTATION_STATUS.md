@@ -1,4 +1,8 @@
-# Implementation status — v0.5.6
+# Implementation status — v0.5.7
+
+## Version 0.5.7 · Automatic managed channel key (2026-09-24)
+
+Login already discovers or creates one eligible private managed channel. Newly created channels now receive a fresh device key before setup reports success, even when an older key exists from another channel. Setup displays the key-creation phase. If creation was interrupted after the remote channel was established, selection on a later login creates a key for an empty channel only after the synchronized catalog and fresh remote manifest and pending-upload checks show no managed objects. A channel with managed files and no usable key remains unavailable in Files; Raw Files stays visible. Tests cover fresh setup, failed key persistence followed by restart, and manifest/pending-upload guards. The Keychain setting uses a left label and a native-style switch at the right. [ADR 0057](adr/0057-single-current-channel-key.md) records the key-selection contract. Schema and encrypted-file codecs are unchanged.
 
 ## Version 0.5.6 · Single current channel key (2026-09-24)
 

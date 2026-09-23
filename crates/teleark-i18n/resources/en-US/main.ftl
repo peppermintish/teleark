@@ -1530,6 +1530,7 @@ storage-setup-phase-discovering = Looking for an available managed channel
 storage-setup-phase-creating = Creating a private channel
 storage-setup-phase-preparing = Verifying and preparing the managed channel
 storage-setup-phase-saving = Saving the verified account/channel binding
+storage-setup-phase-key = Creating a key for the new channel
 storage-setup-phase-completed = Private channel ready
 storage-health-unsafe = This channel must be private and have no other members. Correct its settings in Telegram, then recheck.
 storage-health-unsupported = This channel uses a newer identity format. Update TeleArk; its data has been preserved.

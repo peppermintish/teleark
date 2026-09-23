@@ -80,6 +80,7 @@ impl VaultOwner {
         &mut self,
         account: i64,
         chat: i64,
+        initialize_empty: bool,
         progress: &VaultKeyProgress,
     ) -> Result<VaultKeySelection, ApplicationError> {
         progress.phase(VaultKeyPhase::Loading)?;
@@ -105,6 +106,50 @@ impl VaultOwner {
                 }
             }
             progress.activity()?;
+        }
+        if initialize_empty && available.is_empty() {
+            progress.phase(VaultKeyPhase::CheckingChannel)?;
+            let manifests = self.library.cached_manifest_candidates(account, chat)?;
+            let pending = self
+                .library
+                .cached_pending_upload_candidates(account, chat)?;
+            // The initial managed sync seeds manifests, but a concurrent
+            // upload can publish after that read. Recheck both locators just
+            // before initializing an apparently empty channel.
+            let remote_has_managed = if manifests.is_empty() && pending.is_empty() {
+                !self
+                    .telegram
+                    .search_files_exact_caption(
+                        account,
+                        chat,
+                        crate::transfer::MANIFEST_CAPTION,
+                        1,
+                        None,
+                    )?
+                    .is_empty()
+                    || !self
+                        .telegram
+                        .search_files_exact_caption(account, chat, remote_upload::CAPTION, 1, None)?
+                        .is_empty()
+            } else {
+                true
+            };
+            if !remote_has_managed {
+                // The initial managed catalog has been read. A lost key must
+                // never cause a replacement while recoverable remote objects
+                // are present; an actually empty channel can be initialized.
+                let password = random_wrapping_password()?;
+                let _secret =
+                    Zeroizing::new(self.create_key_epoch_persisted(&password, progress, true)?);
+                self.check_key_generation()?;
+                let mut session = self
+                    .session
+                    .lock()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+                session.current_keys(self.session_generation)?;
+                session.status.key_selection = Some(VaultKeySelection::Ready);
+                return Ok(VaultKeySelection::Ready);
+            }
         }
         let choice = if available.is_empty() {
             None
@@ -496,6 +541,182 @@ mod tests {
         assert_eq!(select()?, VaultKeySelection::Ready);
         assert_eq!(vault.status().key_selection, Some(VaultKeySelection::Ready));
         assert!(!export(&vault)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_channel_recovers_after_failed_key_write_on_restart() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let store = Arc::new(FailingStore {
+            base: MemoryStore::default(),
+            reject: AtomicBool::new(true),
+            lose_writes: false,
+        });
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let vault =
+            DesktopVault::with_device_keys(telegram.clone(), library.clone(), store.clone())?;
+        let first_progress = crate::StorageSetupProgress::new();
+        let first = telegram.ensure_storage_channel_with_key_observed(
+            &library,
+            &vault,
+            7,
+            "Synthetic private storage".into(),
+            "Synthetic description".into(),
+            first_progress.clone(),
+        );
+        assert_eq!(
+            first.expect_err("device store rejects key").kind(),
+            ApplicationErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            first_progress.snapshot().error,
+            Some(ApplicationErrorKind::PermissionDenied)
+        );
+        assert_eq!(library.storage_channel_id(7)?, Some(11));
+        assert!(library.worker.vault_metadata()?.is_none());
+        drop(vault);
+
+        store.reject.store(false, Ordering::Release);
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let restarted = DesktopVault::with_device_keys(telegram.clone(), library.clone(), store)?;
+        let rediscovered = telegram.ensure_storage_channel_with_key_observed(
+            &library,
+            &restarted,
+            7,
+            "Synthetic private storage".into(),
+            "Synthetic description".into(),
+            crate::StorageSetupProgress::new(),
+        )?;
+        assert!(!rediscovered.created);
+        assert_eq!(
+            restarted
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        let record = library.worker.vault_metadata()?.expect("new key persisted");
+        assert_eq!(restarted.status().active_vault_id, Some(record.vault_id));
+        assert_eq!(
+            restarted
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        assert_eq!(library.worker.vault_metadata()?, Some(record));
+        Ok(())
+    }
+
+    #[test]
+    fn new_channel_setup_persists_a_fresh_key_before_completion() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let vault = DesktopVault::with_device_keys(
+            telegram.clone(),
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        vault
+            .submit_new_managed_key(VaultKeyProgress::new())?
+            .wait()?;
+        let previous = library.worker.vault_metadata()?.expect("older key");
+        let progress = crate::StorageSetupProgress::new();
+        let managed = telegram.ensure_storage_channel_with_key_observed(
+            &library,
+            &vault,
+            7,
+            "Synthetic private storage".into(),
+            "Synthetic description".into(),
+            progress.clone(),
+        )?;
+        assert!(managed.created);
+        assert_eq!(managed.channel.id, 11);
+        let current = library.worker.vault_metadata()?.expect("channel key");
+        assert_ne!(current.vault_id, previous.vault_id);
+        let snapshot = progress.snapshot();
+        assert!(snapshot.finished);
+        assert!(snapshot.error.is_none());
+        let phases: Vec<_> = snapshot.timeline.iter().map(|(phase, _)| *phase).collect();
+        assert!(phases.contains(&crate::StorageSetupPhase::CreatingKey));
+        assert_eq!(phases.last(), Some(&crate::StorageSetupPhase::Completed));
+        assert_eq!(library.storage_channel_id(7)?, Some(11));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_manifest_prevents_automatic_key_replacement() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        library.save_telegram_sources(
+            &crate::TelegramAccount {
+                id: 7,
+                display_name: "Fixture".into(),
+                username: None,
+            },
+            &[crate::TelegramChatSummary {
+                id: 11,
+                name: "Fixture".into(),
+                username: None,
+                kind: crate::TelegramChatKind::Channel,
+                sync_pts: None,
+            }],
+        )?;
+        library.cache_telegram_files(
+            7,
+            11,
+            &[crate::TelegramFileSummary {
+                message_id: 42,
+                sent_at_unix_ms: 1_000,
+                modified_at_unix_ms: 1_000,
+                file_name: "42.v1.manifest.tam".into(),
+                caption: crate::transfer::MANIFEST_CAPTION.into(),
+                mime_type: None,
+                size_bytes: 42,
+            }],
+        )?;
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let vault = DesktopVault::with_device_keys(
+            telegram,
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        assert_eq!(
+            vault
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::NoKeys
+        );
+        assert!(library.worker.vault_metadata()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn uncached_remote_pending_upload_prevents_automatic_key_replacement() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        telegram.upload_bytes(7, 11, "pending.tarku", remote_upload::CAPTION, vec![1])?;
+        let vault = DesktopVault::with_device_keys(
+            telegram,
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        assert_eq!(
+            vault
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::NoKeys
+        );
+        assert!(library.worker.vault_metadata()?.is_none());
         Ok(())
     }
 

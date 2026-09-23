@@ -155,14 +155,15 @@ impl TeleArkApp {
         self.show_channel_detail = false;
         cx.notify();
         // Paint the phase before Keychain, database, network or crypto work starts.
-        let job = match vault.submit_select_channel_key(account, chat, progress.clone()) {
-            Ok(job) => job,
-            Err(error) => {
-                self.vault_activity = VaultActivity::Failed(error.kind());
-                cx.notify();
-                return;
-            }
-        };
+        let job =
+            match vault.submit_select_or_initialize_channel_key(account, chat, progress.clone()) {
+                Ok(job) => job,
+                Err(error) => {
+                    self.vault_activity = VaultActivity::Failed(error.kind());
+                    cx.notify();
+                    return;
+                }
+            };
         self.sync_vault_status();
         let mut events = progress.subscribe();
         self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {

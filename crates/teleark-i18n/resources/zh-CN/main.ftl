@@ -1503,6 +1503,7 @@ storage-setup-phase-discovering = 查找可用的托管频道
 storage-setup-phase-creating = 创建私有频道
 storage-setup-phase-preparing = 验证并准备托管频道
 storage-setup-phase-saving = 保存已验证的账号与频道绑定
+storage-setup-phase-key = 正在为新频道创建密钥
 storage-setup-phase-completed = 私有频道已就绪
 storage-health-unsafe = 存储频道必须私有且没有其他成员。请在 Telegram 中调整配置后重新检查。
 storage-health-unsupported = 此频道使用较新的身份格式。请升级 TeleArk；数据已保留。
