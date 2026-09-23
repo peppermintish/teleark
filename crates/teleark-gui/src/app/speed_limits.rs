@@ -143,10 +143,24 @@ impl TeleArkApp {
         let Some(library) = self.library.clone() else {
             return;
         };
-        self.speed_limits.snapshots = Some(library.bandwidth_snapshot());
+        let mut changes = library.bandwidth_subscribe();
+        let initial = library.bandwidth_snapshot();
+        let initially_waiting = initial.0.waiting > 0 || initial.1.waiting > 0;
+        self.speed_limits.snapshots = Some(initial);
         self.speed_limits.observer = Some(cx.spawn(async move |this, cx| {
+            let mut waiting = initially_waiting;
             loop {
-                // Presentation sampling only: bounded memory snapshots, never service/SQL polling.
+                // State revisions drive updates. A visible wait alone gets a
+                // one-second presentation clock for its elapsed-time label.
+                if waiting {
+                    tokio::select! {
+                        changed = changes.changed() => if !changed { break; },
+                        () = cx.background_executor().timer(Duration::from_secs(1)) => {},
+                    }
+                } else if !changes.changed().await {
+                    break;
+                }
+                // Coalesce bursts of byte admissions before materializing history.
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;
@@ -154,19 +168,18 @@ impl TeleArkApp {
                 let Some(this) = this.upgrade() else {
                     break;
                 };
-                this.update(cx, |this, cx| {
+                waiting = this.update(cx, |this, cx| {
                     let old = this.speed_limits.snapshots.as_ref();
                     let changed = old.is_none_or(|old| {
                         old.0.revision != snapshots.0.revision
                             || old.1.revision != snapshots.1.revision
                     });
-                    let ticking = snapshots.0.waiting > 0
-                        || snapshots.1.waiting > 0
-                        || (this.speed_limits.open && this.speed_limits.history);
+                    let ticking = snapshots.0.waiting > 0 || snapshots.1.waiting > 0;
                     this.speed_limits.snapshots = Some(snapshots);
                     if changed || ticking {
                         cx.notify();
                     }
+                    ticking
                 });
             }
         }));

@@ -839,6 +839,7 @@ impl DesktopTransfers {
             scheduled: scheduled.clone(),
             shutdown: shutdown.clone(),
             cancel_cleanup: Mutex::new(BTreeMap::new()),
+            cleanup_wake: cleanup::CleanupSignal::default(),
         });
         let worker_pump = pump.clone();
         let worker_snapshots = Arc::clone(&snapshots);
@@ -1221,6 +1222,7 @@ impl DesktopTransfers {
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
             .remove(&id);
+        self.inner.pump.cleanup_wake.notify();
         persisted?;
         self.try_schedule(snapshot, control)
     }
@@ -1498,6 +1500,7 @@ struct QueuePump {
     scheduled: Arc<Mutex<BTreeSet<u64>>>,
     shutdown: Arc<AtomicBool>,
     cancel_cleanup: Mutex<BTreeMap<u64, bool>>,
+    cleanup_wake: cleanup::CleanupSignal,
 }
 
 impl QueuePump {
@@ -1591,6 +1594,8 @@ impl QueuePump {
             });
         if let Err(error) = send_result {
             scheduled.remove(&snapshot.id);
+            drop(scheduled);
+            self.cleanup_wake.notify();
             match error {
                 mpsc::TrySendError::Full(_) => {
                     tracing::debug!(
@@ -1612,6 +1617,7 @@ impl QueuePump {
 impl Drop for TransferWorkerInner {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.pump.cleanup_wake.notify();
         // Do not wait for Telegram or SQLite from a frontend destructor. Submit
         // the latest sample without copying replay histories; a saturated queue
         // retains the previous checkpoint and the independently saved part map.
@@ -1778,6 +1784,7 @@ fn download_worker(
                     if let Ok(mut scheduled) = scheduled.lock() {
                         scheduled.remove(&id);
                     }
+                    pump.cleanup_wake.notify();
                     let _ = pump.refill();
                     continue;
                 }
@@ -1819,6 +1826,8 @@ fn download_worker(
                         }
                     }
                     scheduled.remove(&id);
+                    drop(scheduled);
+                    pump.cleanup_wake.notify();
                     break;
                 }
             }

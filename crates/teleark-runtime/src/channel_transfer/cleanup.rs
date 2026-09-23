@@ -36,6 +36,65 @@ enum Command {
     Retry(u64, Reply<bool>),
     Removing(u64),
     Finished(u64, u32, Result<(), ApplicationError>),
+    WriterSettled,
+}
+
+#[derive(Default)]
+pub(super) struct CleanupSignal {
+    sender: Mutex<Option<mpsc::SyncSender<Command>>>,
+    gate: Mutex<()>,
+    changed: std::sync::Condvar,
+}
+
+impl CleanupSignal {
+    fn attach(&self, sender: mpsc::SyncSender<Command>) {
+        *self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+    }
+
+    pub(super) fn notify(&self) {
+        let _guard = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.changed.notify_all();
+        drop(_guard);
+        if let Some(sender) = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let _ = sender.try_send(Command::WriterSettled);
+        }
+    }
+
+    fn wait_for_writer(
+        &self,
+        scheduled: &Mutex<BTreeSet<u64>>,
+        shutdown: &AtomicBool,
+        id: u64,
+    ) -> Result<(), ApplicationError> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut gate = self.gate.lock().map_err(persistence)?;
+        while scheduled.lock().map_err(persistence)?.contains(&id) {
+            if shutdown.load(Ordering::Acquire) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(conflict());
+            }
+            gate = self
+                .changed
+                .wait_timeout(gate, remaining)
+                .map_err(persistence)?
+                .0;
+        }
+        Ok(())
+    }
 }
 struct Work {
     id: u64,
@@ -92,10 +151,12 @@ pub(super) fn sync_cleanup_directory(destination: &Path) -> Result<(), Applicati
 impl CleanupOwner {
     pub fn start(mut context: CleanupContext) -> Result<Self, ApplicationError> {
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_DOWNLOAD_QUEUE_CAPACITY);
+        context.pump.cleanup_wake.attach(sender.clone());
         let (work_sender, work_receiver) = mpsc::sync_channel::<Work>(1);
         let completion = sender.clone();
         let backend = context.backend.clone();
         let scheduled = context.scheduled.clone();
+        let signal = context.pump.clone();
         let shutdown = context.shutdown.clone();
         let completed_reservations = std::mem::take(&mut context.completed_reservations);
         let reservation_worker = if completed_reservations.is_empty() {
@@ -129,16 +190,9 @@ impl CleanupOwner {
             .spawn(move || {
                 while let Ok(work) = work_receiver.recv() {
                     let result = (|| {
-                        let deadline = Instant::now() + Duration::from_secs(30);
-                        while scheduled.lock().map_err(persistence)?.contains(&work.id) {
-                            if shutdown.load(Ordering::Acquire) {
-                                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
-                            }
-                            if Instant::now() >= deadline {
-                                return Err(conflict());
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
+                        signal
+                            .cleanup_wake
+                            .wait_for_writer(&scheduled, &shutdown, work.id)?;
                         if shutdown.load(Ordering::Acquire) {
                             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
                         }
@@ -191,7 +245,14 @@ impl CleanupOwner {
                     if owner.context.shutdown.load(Ordering::Acquire) {
                         break;
                     }
-                    match receiver.recv_timeout(Duration::from_millis(100)) {
+                    let received = if owner.waiting_writers {
+                        receiver.recv_timeout(Duration::from_secs(30))
+                    } else {
+                        receiver
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    };
+                    match received {
                         Ok(command) => {
                             owner.handle(command);
                             owner.dispatch();
@@ -542,6 +603,7 @@ impl Owner {
     }
     fn handle(&mut self, command: Command) {
         match command {
+            Command::WriterSettled => {}
             Command::Stop(ids, reply) => {
                 let result = self.stop(&ids);
                 // Acknowledge durable intent, not the last filesystem deletion.
@@ -686,5 +748,36 @@ impl Owner {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn writer_retirement_wakes_cleanup_without_a_short_poll() {
+        let signal = Arc::new(CleanupSignal::default());
+        let scheduled = Arc::new(Mutex::new(BTreeSet::from([7])));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (ready, started) = mpsc::sync_channel(1);
+        let (finished, result) = mpsc::sync_channel(1);
+        let waiting_signal = signal.clone();
+        let waiting_scheduled = scheduled.clone();
+        let waiting_shutdown = shutdown.clone();
+        let worker = thread::spawn(move || {
+            ready.send(()).expect("start");
+            finished
+                .send(waiting_signal.wait_for_writer(&waiting_scheduled, &waiting_shutdown, 7))
+                .expect("result");
+        });
+        started.recv().expect("worker started");
+        scheduled.lock().expect("scheduled").remove(&7);
+        signal.notify();
+        result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("event wake")
+            .expect("writer retired");
+        worker.join().expect("worker");
     }
 }

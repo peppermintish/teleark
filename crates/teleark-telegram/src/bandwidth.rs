@@ -75,6 +75,7 @@ struct Inner {
     state: Mutex<State>,
     turn: Semaphore,
     changed: watch::Sender<u64>,
+    projected: watch::Sender<u64>,
 }
 #[derive(Clone)]
 pub struct BandwidthBudget(Arc<Inner>);
@@ -94,6 +95,7 @@ impl Default for BandwidthBudget {
             }),
             turn: Semaphore::new(1),
             changed: watch::channel(0).0,
+            projected: watch::channel(0).0,
         }))
     }
 }
@@ -110,6 +112,7 @@ impl BandwidthBudget {
         state.revision = state.revision.saturating_add(1);
         state.event(BandwidthEventKind::LimitChanged);
         self.0.changed.send_replace(state.revision);
+        self.0.projected.send_replace(state.revision);
     }
     pub fn snapshot(&self) -> BandwidthSnapshot {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -177,6 +180,7 @@ impl BandwidthBudget {
                         state.credit -= bytes as f64;
                         state.last_activity = Some(now);
                         state.revision = state.revision.saturating_add(1);
+                        self.0.projected.send_replace(state.revision);
                         None
                     } else {
                         Some(Duration::from_secs_f64(
@@ -205,6 +209,7 @@ impl Waiting {
             }
             state.waiting += 1;
             state.revision = state.revision.saturating_add(1);
+            budget.0.projected.send_replace(state.revision);
         }
         Self(budget)
     }
@@ -218,6 +223,21 @@ impl Drop for Waiting {
             state.event(BandwidthEventKind::Resumed);
         }
         state.revision = state.revision.saturating_add(1);
+        self.0.0.projected.send_replace(state.revision);
+    }
+}
+
+pub struct BandwidthSubscription {
+    upload: watch::Receiver<u64>,
+    download: watch::Receiver<u64>,
+}
+
+impl BandwidthSubscription {
+    pub async fn changed(&mut self) -> bool {
+        tokio::select! {
+            result = self.upload.changed() => result.is_ok(),
+            result = self.download.changed() => result.is_ok(),
+        }
     }
 }
 #[derive(Clone, Default)]
@@ -229,6 +249,13 @@ impl TransferBandwidth {
     pub fn set_limits(&self, limits: TransferSpeedLimits) {
         self.upload.set_limit(limits.upload);
         self.download.set_limit(limits.download);
+    }
+
+    pub fn subscribe(&self) -> BandwidthSubscription {
+        BandwidthSubscription {
+            upload: self.upload.0.projected.subscribe(),
+            download: self.download.0.projected.subscribe(),
+        }
     }
 }
 
@@ -297,6 +324,22 @@ impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn presentation_subscription_waits_for_real_budget_changes() {
+        let shared = TransferBandwidth::default();
+        let mut subscription = shared.subscribe();
+        let mut pending = Box::pin(subscription.changed());
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(pending.as_mut().poll(&mut context), Poll::Pending));
+        shared.upload.set_limit(4096);
+        assert!(pending.await);
+
+        let mut pending = Box::pin(subscription.changed());
+        assert!(matches!(pending.as_mut().poll(&mut context), Poll::Pending));
+        shared.download.set_limit(2048);
+        assert!(pending.await);
+    }
     #[tokio::test(start_paused = true)]
     async fn aggregate_budget_paces_all_workers_and_directions_are_independent() {
         let shared = TransferBandwidth::default();

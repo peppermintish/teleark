@@ -42,8 +42,8 @@ mod bandwidth;
 mod byte_progress;
 use bandwidth::LimitedReader;
 pub use bandwidth::{
-    BandwidthBudget, BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferBandwidth,
-    TransferSpeedLimits,
+    BandwidthBudget, BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, BandwidthSubscription,
+    TransferBandwidth, TransferSpeedLimits,
 };
 mod authorization;
 mod connection;

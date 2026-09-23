@@ -131,7 +131,8 @@ pub use vault::{
 };
 
 pub use teleark_telegram::{
-    BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, TransferSpeedLimits,
+    BandwidthEvent, BandwidthEventKind, BandwidthSnapshot, BandwidthSubscription,
+    TransferSpeedLimits,
 };
 
 pub use teleark_crypto::aes256gcm_hardware_available;
@@ -567,6 +568,10 @@ impl DesktopLibrary {
             self.bandwidth.upload.snapshot(),
             self.bandwidth.download.snapshot(),
         )
+    }
+
+    pub fn bandwidth_subscribe(&self) -> BandwidthSubscription {
+        self.bandwidth.subscribe()
     }
 
     /// Returns and prepares the managed layout. Call from a background owner;
