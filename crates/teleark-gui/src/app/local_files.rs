@@ -208,12 +208,9 @@ impl TeleArkApp {
             cx.notify();
         }
         if let Some(monitor) = &self.local_file_monitor {
-            let chat = matches!(
-                self.page,
-                Page::Channel | Page::Storage | Page::LegacyRecovery
-            )
-            .then_some(self.selected_chat_id)
-            .flatten();
+            let chat = matches!(self.page, Page::Channel | Page::Storage)
+                .then_some(self.selected_chat_id)
+                .flatten();
             monitor.set_context(scope, chat);
         }
     }

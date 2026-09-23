@@ -108,8 +108,8 @@ impl VaultOwner {
         let choice = if available.is_empty() {
             None
         } else {
+            progress.phase(VaultKeyPhase::CheckingChannel)?;
             let mut candidates = self.library.cached_manifest_candidates(account, chat)?;
-            candidates.retain(|candidate| candidate.file.file_name.ends_with(".tarkm"));
             candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.file.message_id.get()));
             candidates.truncate(MAX_MANIFEST_SCAN);
             if candidates.is_empty() {
@@ -248,7 +248,10 @@ impl VaultOwner {
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
-        let _ = authenticate_bundle(record, text)?;
+        // A damaged or mismatched stored bundle cannot stop a later key from
+        // authenticating this channel. Device-store access errors still fail.
+        let _ = authenticate_bundle(record, text)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::VaultKeyUnavailable))?;
         Ok(Zeroizing::new(text.to_owned()))
     }
 
@@ -492,6 +495,90 @@ mod tests {
         assert_eq!(select()?, VaultKeySelection::Ready);
         assert_eq!(vault.status().key_selection, Some(VaultKeySelection::Ready));
         assert!(!export(&vault)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn damaged_former_key_does_not_block_selection_of_current_key() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(MemoryStore::default());
+        let (vault, library) = open(temp.path(), store.clone())?;
+        prepare(&vault)?;
+        let former = library.worker.vault_metadata()?.expect("former key");
+        vault
+            .submit_new_managed_key(VaultKeyProgress::new())?
+            .wait()?;
+        let current = library.worker.vault_metadata()?.expect("current key");
+        assert_ne!(former.vault_id, current.vault_id);
+        store.0.lock().expect("store").insert(
+            identity(&former),
+            Zeroizing::new(b"damaged bundle".to_vec()),
+        );
+        assert_eq!(
+            vault
+                .submit_select_channel_key(1, 2, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        assert_eq!(vault.status().active_vault_id, Some(current.vault_id));
+        Ok(())
+    }
+
+    #[test]
+    fn channel_manifest_selects_matching_former_key_and_rejects_missing_match() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(MemoryStore::default());
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let vault = DesktopVault::with_device_keys(telegram, library.clone(), store.clone())?;
+        prepare(&vault)?;
+        let former = library.worker.vault_metadata()?.expect("former key");
+        let source = temp.path().join("file.bin");
+        std::fs::write(&source, b"single-key channel fixture")?;
+        vault.upload_file(7, 11, source)?;
+        library.save_telegram_sources(
+            &crate::TelegramAccount {
+                id: 7,
+                display_name: "Fixture".into(),
+                username: None,
+            },
+            &[crate::TelegramChatSummary {
+                id: 11,
+                name: "Fixture".into(),
+                username: None,
+                kind: crate::TelegramChatKind::Channel,
+                sync_pts: None,
+            }],
+        )?;
+        library.cache_telegram_files(7, 11, &remote.summaries())?;
+        assert!(
+            !library.cached_manifest_candidates(7, 11)?.is_empty(),
+            "uploaded manifest must be visible in the channel catalog"
+        );
+        vault
+            .submit_new_managed_key(VaultKeyProgress::new())?
+            .wait()?;
+        assert_ne!(
+            library.worker.vault_metadata()?.expect("new key").vault_id,
+            former.vault_id
+        );
+        assert_eq!(
+            vault
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        assert_eq!(vault.status().active_vault_id, Some(former.vault_id));
+        store.0.lock().expect("store").remove(&identity(&former));
+        assert_eq!(
+            vault
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Undecryptable
+        );
+        assert!(vault.status().active_key_locked);
         Ok(())
     }
 

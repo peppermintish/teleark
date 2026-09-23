@@ -325,9 +325,6 @@ impl TeleArkApp {
     }
 
     pub(super) fn apply_managed_channel_changes(&mut self, cx: &mut Context<Self>) {
-        if self.vault_locked || self.managed_scan_loading || self.page == Page::LegacyRecovery {
-            return;
-        }
         let (Some(sync), Some(chat)) = (&self.channel_sync, self.storage_channel_id()) else {
             return;
         };
@@ -354,12 +351,34 @@ impl TeleArkApp {
             .telegram_account
             .as_ref()
             .map(|account| (account.id, chat));
+        if let Some((account, chat)) = scope
+            && self
+                .channel_sync_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.managed_watch.as_ref())
+                .is_some_and(|watch| watch.catalog_ready)
+            && (self.vault_key_selection_scope.is_none()
+                || changes.reset_required
+                || changes.managed_catalog_changed)
+            && self.vault_key_selection_scope != Some((account, chat, changes.revision))
+            && self.vault_key_selection_task.is_none()
+        {
+            self.select_channel_key(account, chat, changes.revision, cx);
+            return;
+        }
+        if self.vault_status.key_selection != Some(teleark_runtime::VaultKeySelection::Ready) {
+            self.managed_vault_files = Default::default();
+            self.selected_telegram_message_id = None;
+            self.show_channel_detail = false;
+            cx.notify();
+            return;
+        }
+        if self.vault_locked || self.managed_scan_loading {
+            return;
+        }
         if self.managed_projection_scope != scope
             || changes.reset_required
-            || changes
-                .deltas
-                .iter()
-                .any(|delta| delta.managed_files_changed)
+            || changes.managed_catalog_changed
         {
             self.scan_managed_vault_files(cx);
         } else {
@@ -1352,23 +1371,6 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn explicit_legacy_recovery_preserves_the_private_projection(cx: &mut TestAppContext) {
-        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
-        app.update(cx, |app, cx| {
-            let private_files = app.managed_vault_files.clone();
-            app.open_legacy_recovery(cx);
-            assert!(app.managed_vault_files.is_empty());
-            app.managed_vault_files = std::sync::Arc::new(vec![private_files[0].clone()]);
-            app.set_page(Page::Channel, cx);
-            assert!(std::sync::Arc::ptr_eq(
-                &app.managed_vault_files,
-                &private_files
-            ));
-            assert!(app.managed_view_before_legacy.is_none());
-        });
-    }
-
-    #[gpui::test]
     fn cached_channel_reopening_preserves_revision_and_empty_results(cx: &mut TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
         app.update(cx, |app, cx| {
@@ -1745,7 +1747,6 @@ pub(super) mod tests {
                     Page::Account,
                     Page::Channel,
                     Page::Storage,
-                    Page::LegacyRecovery,
                     Page::Library,
                     Page::Transfers,
                     Page::Settings,
@@ -1843,6 +1844,7 @@ pub(super) mod tests {
                 teleark_runtime::ChannelChanges {
                     revision: 4,
                     reset_required: false,
+                    managed_catalog_changed: false,
                     deltas: vec![
                         delta(3, vec![renamed.clone()], vec![]),
                         delta(4, vec![f(3)], vec![1]),
@@ -1859,6 +1861,7 @@ pub(super) mod tests {
                 teleark_runtime::ChannelChanges {
                     revision: 5,
                     reset_required: false,
+                    managed_catalog_changed: false,
                     deltas: vec![delta(5, vec![], vec![2])],
                 },
                 cx,

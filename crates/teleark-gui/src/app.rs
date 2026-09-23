@@ -78,7 +78,6 @@ use crate::{
 pub enum Page {
     Account,
     Storage,
-    LegacyRecovery,
     Library,
     Transfers,
     FileDetail,
@@ -88,7 +87,6 @@ pub enum Page {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VaultAction {
-    Browse,
     QueueUpload,
     Upload,
     Download(u64),
@@ -528,6 +526,8 @@ pub struct TeleArkApp {
         teleark_runtime::TransferSnapshotView<teleark_runtime::VaultTransferSnapshot>,
     status_rate_cache: std::cell::RefCell<status_bar::RateCache>,
     vault_task: Option<Task<()>>,
+    vault_key_selection_task: Option<Task<()>>,
+    vault_key_selection_scope: Option<(i64, i64, i64)>,
     vault_upload_task: Option<Task<()>>,
     vault_recovery_task: Option<Task<()>>,
     pub(crate) vault_transfer_jobs: std::collections::BTreeMap<(i64, u64, bool), Task<()>>,
@@ -537,7 +537,6 @@ pub struct TeleArkApp {
     pub(crate) managed_scan_loading: bool,
     managed_scan_generation: u64,
     managed_projection_scope: Option<(i64, i64)>,
-    managed_view_before_legacy: Option<vault::ManagedViewCache>,
     managed_scan_cancellation: Option<TelegramScanCancellation>,
     vault_scan_task: Option<Task<()>>,
     vault_download_task: Option<Task<()>>,
@@ -685,7 +684,7 @@ impl TeleArkApp {
         );
         let nav_selection = match page {
             Page::Account => "nav-account",
-            Page::Storage | Page::LegacyRecovery => "nav-storage",
+            Page::Storage => "nav-storage",
             Page::Library | Page::FileDetail => "nav-all",
             Page::Transfers => "nav-transfers-all",
             Page::Channel => "nav-channel",
@@ -708,6 +707,7 @@ impl TeleArkApp {
             .as_ref()
             .map(DesktopVault::status)
             .unwrap_or(VaultStatus {
+                key_selection: None,
                 active_key_locked: true,
                 historical_key_unlocked: false,
                 active_vault_id: None,
@@ -949,6 +949,8 @@ impl TeleArkApp {
             vault_transfer_view: Default::default(),
             status_rate_cache: Default::default(),
             vault_task: None,
+            vault_key_selection_task: None,
+            vault_key_selection_scope: None,
             vault_upload_task: None,
             vault_recovery_task: None,
             vault_transfer_jobs: Default::default(),
@@ -958,7 +960,6 @@ impl TeleArkApp {
             managed_scan_loading: false,
             managed_scan_generation: 0,
             managed_projection_scope: None,
-            managed_view_before_legacy: None,
             managed_scan_cancellation: None,
             vault_scan_task: None,
             vault_download_task: None,
@@ -1026,26 +1027,15 @@ impl TeleArkApp {
         self.pending_transfer_delete = None;
         self.pending_transfer_bulk_delete.clear();
         self.selected_transfer_keys.clear();
-        if matches!(
-            self.page,
-            Page::Channel | Page::Storage | Page::LegacyRecovery
-        ) && self.page != page
-        {
+        if matches!(self.page, Page::Channel | Page::Storage) && self.page != page {
             self.cancel_channel_history();
             self.cancel_telegram_file_load(cx);
-        }
-        let leaving_legacy = self.page == Page::LegacyRecovery && self.page != page;
-        if leaving_legacy {
-            self.cancel_managed_scan();
         }
         if self.page == Page::Library && page != Page::Library {
             self.library_scan_cancellation.cancel();
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
         }
         self.page = page;
-        if leaving_legacy {
-            self.restore_managed_view_after_legacy(cx);
-        }
         self.show_upload = false;
         if page == Page::Account {
             self.ensure_telegram_qr_login(cx);

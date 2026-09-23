@@ -339,7 +339,7 @@ vault-recovery-title = 복구 키
 vault-recovery-backed-up = 백업됨
 vault-show-recovery = 복구 키 표시
 vault-hide-recovery = 복구 키 숨기기
-vault-export-recovery = 복구 키 내보내기
+vault-export-recovery = Export the key
 vault-profile-title = 기본 암호화 프로필
 vault-option-hidden-filenames = 파일명 숨김
 vault-option-encrypted-metadata = 암호화된 메타데이터
@@ -509,7 +509,7 @@ vault-unlock-recovery-action = 복구 키로 잠금 해제
 vault-new-password-label = 새 비밀번호
 vault-rotate-recovery-action = 복구 키 교체
 vault-recovery-save-now-title = 지금 이 복구 키를 저장하세요
-vault-recovery-bundle-label = 복구 번들
+vault-recovery-bundle-label = Key bundle
 vault-restore-action = 키 보관함 복원
 vault-os-credential-title = 운영체제 자격 증명
 upload-file-picker-prompt = 파일 선택
@@ -589,13 +589,13 @@ app-lock-unlock = 로그인
 app-lock-state = 잠김
 sync-column-event = 활동
 managed-key-title = 암호화 키
-managed-key-preparing = 암호화 키 준비 중…
-managed-key-ready = 준비됨 · 자동 관리
-managed-key-unavailable = 암호화 키 확인 필요
-managed-key-retry = 키 접근 재시도
+managed-key-preparing = Checking channel keys…
+managed-key-ready = Current key can open this channel
+managed-key-unavailable = No usable channel key
+managed-key-retry = Retry key check
 managed-key-recovery-options = 복구 옵션
 managed-key-show-recovery = 복구 번들 보기
-managed-key-import = 복구 번들 가져오기
+managed-key-import = Import a key
 managed-key-phase-loading = 시스템 키체인 읽는 중
 managed-key-phase-securing = 키체인 항목 저장 및 검증 중
 action-cancel = { common-cancel }
@@ -772,3 +772,11 @@ settings-keychain-unknown = 키체인 상태 확인 불가
 settings-keychain-cancelled = 자격 증명 저장소 변경 취소됨
 
 settings-keychain-cancelling = 현재 자격 증명 작업이 끝나면 중지합니다…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

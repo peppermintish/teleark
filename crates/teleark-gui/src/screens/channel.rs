@@ -1492,12 +1492,6 @@ impl TeleArkApp {
                     )
                 },
             )
-            .when(
-                self.page == Page::LegacyRecovery
-                    && self.telegram_files_loading
-                    && !self.telegram_files.is_empty(),
-                |table| table.child(self.render_telegram_fetch_footer(cx)),
-            )
             .when(self.local_downloads.limited, |table| {
                 table.child(
                     components::list_footer("local-check-limit")
@@ -1552,56 +1546,6 @@ impl TeleArkApp {
                             .child(self.render_telegram_message_detail(Some(message), layout)),
                     )
                 },
-            )
-            .into_any_element()
-    }
-
-    fn render_telegram_fetch_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        components::list_footer("channel-fetch-footer")
-            .bg(theme::surface())
-            .child(Spinner::new().small().color(theme::blue().into()))
-            .child(
-                div().text_xs().text_color(theme::text_secondary()).child(
-                    self.tr_with(
-                        "telegram-files-fetching-progress",
-                        MessageArgs::new()
-                            .with(
-                                "scanned",
-                                format_integer(self.locale(), self.telegram_files_scanned),
-                            )
-                            .with(
-                                "target",
-                                format_integer(self.locale(), self.telegram_files_scan_target),
-                            ),
-                    ),
-                ),
-            )
-            .when(self.telegram_files_slow, |footer| {
-                footer.child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme::text_muted())
-                        .child(self.tr("telegram-files-fetching-slow")),
-                )
-            })
-            .when(!self.telegram_files_slow, |footer| {
-                footer.child(div().flex_1())
-            })
-            .child(
-                components::button(
-                    "channel-files-cancel-footer",
-                    self.tr("telegram-files-cancel-action"),
-                    None,
-                    false,
-                )
-                .h(px(22.0))
-                .flex_none()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cancel_telegram_file_load(cx);
-                })),
             )
             .into_any_element()
     }

@@ -128,11 +128,7 @@ impl TeleArkApp {
             .when(
                 matches!(
                     self.page,
-                    Page::Channel
-                        | Page::Storage
-                        | Page::LegacyRecovery
-                        | Page::Transfers
-                        | Page::Library
+                    Page::Channel | Page::Storage | Page::Transfers | Page::Library
                 ),
                 |bar| {
                     bar.child(
@@ -758,9 +754,7 @@ impl TeleArkApp {
     ) -> AnyElement {
         match self.page {
             Page::Account => self.render_account(window, layout, cx),
-            Page::Storage | Page::LegacyRecovery => {
-                self.render_storage_workspace(window, layout, cx)
-            }
+            Page::Storage => self.render_storage_workspace(window, layout, cx),
             Page::Library => self.render_library(window, layout, cx),
             Page::Transfers => self.render_transfers(window, layout, cx),
             Page::FileDetail => self.render_file_detail(window, layout, cx),

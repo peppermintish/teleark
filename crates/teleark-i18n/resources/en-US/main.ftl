@@ -533,7 +533,7 @@ vault-recovery-title = Recovery Key
 vault-recovery-backed-up = Backed Up
 vault-show-recovery = Show Recovery Key
 vault-hide-recovery = Hide Recovery Key
-vault-export-recovery = Export Recovery Key
+vault-export-recovery = Export the key
 vault-profile-title = Default Encryption Profile
 vault-option-hidden-filenames = Hidden Filenames
 vault-option-hidden-filenames-description = Do not expose original names in Telegram.
@@ -815,7 +815,7 @@ vault-recovery-save-now-title = Save this recovery key now
 vault-recovery-save-now-description = This is the only time TeleArk displays this self-contained recovery bundle. Store it offline before hiding it. Replacing the current recovery key does not revoke older exported disaster-recovery bundles; protect or securely remove old copies.
 vault-restore-title = Restore after local data loss
 vault-restore-description = Enter a self-contained recovery bundle above and choose the new local password in both password fields.
-vault-recovery-bundle-label = Recovery bundle
+vault-recovery-bundle-label = Key bundle
 vault-recovery-export-default-name = TeleArk Recovery Bundle.txt
 vault-restore-action = Restore Key Vault
 vault-os-credential-title = OS Credential
@@ -1060,13 +1060,10 @@ storage-guide-raw-body = Raw Files shows the Telegram objects, including ordinar
 
 storage-guide-key-title = 4. Save your recovery key
 
-storage-guide-key-body = Keys are prepared automatically. Keep a recovery bundle outside this Mac; Telegram cannot recover your keys. Recovery tools are in Settings → Encryption keys.
+storage-guide-key-body = Keep an exported channel key outside this device. Import the matching key in Settings → Encryption keys if TeleArk cannot open the Files tab.
 
-storage-legacy-title = Legacy Recovery
 
-storage-legacy-description = Recover existing TeleArk files from Saved Messages. New uploads use your private channel.
 
-storage-legacy-action = Recover from Saved Messages…
 
 settings-about = About
 
@@ -1102,7 +1099,6 @@ about-changelog-v040 =
     - Create or rediscover a private channel owned by your Telegram account, with a distinct TeleArk destination in the sidebar.
     - Files shows authenticated manifests as complete logical files. Raw Files exposes ordinary files, encrypted parts, and manifests with their original names and metadata.
     - A built-in guide explains channel ownership, encryption, raw objects, recovery keys, and why manifests and parts must be kept.
-    - Existing files in Saved Messages remain recoverable through Settings → Key Vault. New encrypted uploads target the private channel.
 
     ### Everything in its place
     - Transfer selection, batches, pause, resume, cancel, retry, safe deletion, file inspection, and live/replay diagnostics remain available. Advanced controls and details are tucked away until needed.
@@ -1151,6 +1147,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.6 · One current channel key
+
+    - Select one stored key that authenticates the managed channel files at account sign-in; ignore former keys for this session. Files shows a no-keys or undecryptable-channel helper until a matching key is selected, while Raw Files still shows Telegram objects.
+    - Settings now offers key import and current-key export only. Export requires an authenticated session key, and import reruns selection. Remove the legacy remote recovery route. This is a breaking change to the former multi-key desktop behavior; stored credentials and encrypted bytes are retained.
+    - Managed-channel catalog changes remain event-driven even after bounded delta history is evicted. SQLite read/write schema 23 and encrypted file, manifest and recovery-bundle codecs are unchanged.
+
     ## 0.5.5 · Event-driven local availability
 
     - Downloaded-file badges react to native filesystem notifications and successful transfer events. Startup, watch registration, wake, watcher errors and a five-minute quiet fallback trigger bounded rechecks; paths without a working watch use slower fallback checks.
@@ -1851,25 +1853,25 @@ session-loss-history-omitted = { $count } earlier activity entries omitted
 
 managed-key-title = Encryption keys
 
-managed-key-description = Keys are generated automatically and protected by the system keychain. Your optional app PIN only locks TeleArk; it does not change file encryption.
+managed-key-description = TeleArk uses one key for this channel. Import a key to regain access or export the current key for safekeeping.
 
-managed-key-preparing = Preparing encryption keys…
+managed-key-preparing = Checking channel keys…
 
-managed-key-ready = Ready · Managed automatically
+managed-key-ready = Current key can open this channel
 
-managed-key-unavailable = Encryption key needs attention
+managed-key-unavailable = No usable channel key
 
-managed-key-unavailable-help = Retry key access in Settings → Encryption keys, or import a recovery bundle if the key is missing. Other pages remain available.
+managed-key-unavailable-help = Import the key for this channel in Settings → Encryption keys. If checking failed, retry key access there.
 
-managed-key-retry = Retry key access
+managed-key-retry = Retry key check
 
 managed-key-recovery-options = Recovery options
 
-managed-key-recovery-description = Keep a recovery bundle outside this device so you can recover encrypted files if the device or its keychain is lost. Importing an older key preserves the current upload key.
+managed-key-recovery-description = Keep a copy of the current key outside this device.
 
 managed-key-show-recovery = View recovery bundle
 
-managed-key-import = Import recovery bundle
+managed-key-import = Import a key
 
 managed-key-phase-loading = Reading the system keychain
 
@@ -1977,3 +1979,11 @@ settings-keychain-unknown = Keychain status unavailable
 settings-keychain-cancelled = Credential storage change cancelled
 
 settings-keychain-cancelling = Stopping after the current credential operation finishes…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

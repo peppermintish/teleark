@@ -339,7 +339,7 @@ vault-recovery-title = Ключ восстановления
 vault-recovery-backed-up = Копия сохранена
 vault-show-recovery = Показать ключ восстановления
 vault-hide-recovery = Скрыть ключ восстановления
-vault-export-recovery = Экспортировать ключ восстановления
+vault-export-recovery = Export the key
 vault-profile-title = Профиль шифрования по умолчанию
 vault-option-hidden-filenames = Скрытые имена файлов
 vault-option-encrypted-metadata = Зашифрованные метаданные
@@ -509,7 +509,7 @@ vault-unlock-recovery-action = Разблокировать ключом вос�
 vault-new-password-label = Новый пароль
 vault-rotate-recovery-action = Заменить ключ восстановления
 vault-recovery-save-now-title = Сохраните ключ восстановления сейчас
-vault-recovery-bundle-label = Пакет восстановления
+vault-recovery-bundle-label = Key bundle
 vault-restore-action = Восстановить хранилище ключей
 vault-os-credential-title = Системные учётные данные
 upload-file-picker-prompt = Выбрать файлы
@@ -589,13 +589,13 @@ app-lock-unlock = Войти
 app-lock-state = Заблокировано
 sync-column-event = Активность
 managed-key-title = Ключи шифрования
-managed-key-preparing = Подготовка ключей шифрования…
-managed-key-ready = Готово · Управляется автоматически
-managed-key-unavailable = Ключ шифрования требует внимания
-managed-key-retry = Повторить доступ к ключу
+managed-key-preparing = Checking channel keys…
+managed-key-ready = Current key can open this channel
+managed-key-unavailable = No usable channel key
+managed-key-retry = Retry key check
 managed-key-recovery-options = Параметры восстановления
 managed-key-show-recovery = Просмотреть пакет восстановления
-managed-key-import = Импортировать пакет восстановления
+managed-key-import = Import a key
 managed-key-phase-loading = Чтение системной связки ключей
 managed-key-phase-securing = Сохранение и проверка записи связки ключей
 action-cancel = { common-cancel }
@@ -820,3 +820,11 @@ settings-keychain-unknown = Состояние связки ключей нед�
 settings-keychain-cancelled = Изменение хранилища учётных данных отменено
 
 settings-keychain-cancelling = Остановка после завершения текущей операции с учётными данными…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

@@ -505,7 +505,7 @@ vault-recovery-title = 恢复密钥
 vault-recovery-backed-up = 已备份
 vault-show-recovery = 显示恢复密钥
 vault-hide-recovery = 隐藏恢复密钥
-vault-export-recovery = 导出恢复密钥
+vault-export-recovery = Export the key
 vault-profile-title = 默认加密配置
 vault-option-hidden-filenames = 隐藏文件名
 vault-option-hidden-filenames-description = 不在 Telegram 中暴露原始文件名。
@@ -787,7 +787,7 @@ vault-recovery-save-now-title = 立即保存此恢复密钥
 vault-recovery-save-now-description = TeleArk 只会在此时显示这份自包含恢复包。隐藏前请离线保存。更换当前恢复密钥不会撤销之前导出的灾难恢复包，请妥善保护或安全销毁旧副本。
 vault-restore-title = 本地数据丢失后恢复
 vault-restore-description = 在上方输入自包含恢复包，并在两个密码栏位中设置新的本地密码。
-vault-recovery-bundle-label = 恢复包
+vault-recovery-bundle-label = Key bundle
 vault-recovery-export-default-name = TeleArk 恢复包.txt
 vault-restore-action = 恢复密钥库
 vault-os-credential-title = OS Credential
@@ -1032,13 +1032,10 @@ storage-guide-raw-body = 原始文件模式显示 Telegram 中的普通上传、
 
 storage-guide-key-title = 4. 保存恢复密钥
 
-storage-guide-key-body = 密钥自动准备。请在此 Mac 之外保存恢复包；Telegram 无法恢复密钥。恢复工具位于设置 → 加密密钥。
+storage-guide-key-body = Keep an exported channel key outside this device. Import the matching key in Settings → Encryption keys if TeleArk cannot open the Files tab.
 
-storage-legacy-title = 旧版文件恢复
 
-storage-legacy-description = 从 Saved Messages 恢复原有 TeleArk 文件。新上传的文件会使用专属私有频道。
 
-storage-legacy-action = 从 Saved Messages 恢复…
 
 settings-about = 关于
 
@@ -1074,7 +1071,6 @@ about-changelog-v040 =
     - 创建或重新发现由当前 Telegram 账户拥有的私有频道，在侧栏中显示独特的 TeleArk 入口。
     - 文件模式将经过认证的清单呈现为完整文件。原始文件模式保留普通文件、加密分片及清单的原始名称与元数据。
     - 内置引导说明频道归属、加密方式、原始对象、恢复密钥，以及保留清单和全部分片的原因。
-    - 原来存放在 Saved Messages 中的文件仍可通过“设置 → 密钥库”恢复。新的加密上传使用专属私有频道。
 
     ### 功能各归其位
     - 保留传输多选、批次、暂停、继续、取消、重试、安全删除、文件检查，以及实时和回放诊断。高级选项和详情按需展开。
@@ -1123,6 +1119,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.6 · One current channel key
+
+    - TeleArk selects one stored key that can open the managed channel. Files shows a key warning when no key fits; Raw Files still shows Telegram objects.
+    - Settings offers key import and current-key export. Legacy remote recovery is removed. Channel events refresh the managed catalog, with fallback reconciliation.
+    - SQLite schema 23 and encrypted-file, manifest and recovery-bundle codecs are unchanged.
+
     ## 0.5.5 · 事件驱动的本地文件状态
 
     - 已下载文件的状态会响应系统文件变更通知和传输完成事件。启动、监视注册、唤醒、监视失败以及五分钟无事件后的兜底检查会触发有界复查；无法监视的路径采用较慢的兜底检查。
@@ -1824,17 +1826,17 @@ session-loss-history-omitted = 已省略 { $count } 条较早的活动记录
 
 managed-key-title = 加密密钥
 
-managed-key-description = 密钥自动安全生成，由系统钥匙串保护。应用 PIN 可选，仅用于锁定 TeleArk，不影响文件加密。
+managed-key-description = TeleArk uses one key for this channel. Import a key to regain access or export the current key for safekeeping.
 
-managed-key-preparing = 正在准备加密密钥…
+managed-key-preparing = Checking channel keys…
 
-managed-key-ready = 已就绪 · 自动管理
+managed-key-ready = Current key can open this channel
 
-managed-key-unavailable = 加密密钥需要处理
+managed-key-unavailable = No usable channel key
 
-managed-key-unavailable-help = 请在设置 → 加密密钥中重试读取；若密钥缺失，可导入恢复包。其他页面仍可使用。
+managed-key-unavailable-help = Import the key for this channel in Settings → Encryption keys. If checking failed, retry key access there.
 
-managed-key-retry = 重试读取密钥
+managed-key-retry = Retry key check
 
 managed-key-recovery-options = 恢复选项
 
@@ -1842,7 +1844,7 @@ managed-key-recovery-description = 请在此设备之外保存恢复包，以便
 
 managed-key-show-recovery = 查看恢复包
 
-managed-key-import = 导入恢复包
+managed-key-import = Import a key
 
 managed-key-phase-loading = 正在读取系统钥匙串
 
@@ -1950,3 +1952,11 @@ settings-keychain-unknown = 钥匙串状态不可用
 settings-keychain-cancelled = 凭据存储更改已取消
 
 settings-keychain-cancelling = 将在当前凭据操作完成后停止…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

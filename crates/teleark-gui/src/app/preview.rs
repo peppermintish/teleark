@@ -170,11 +170,24 @@ impl TeleArkApp {
         self.storage_notice = Some("storage-auto-found");
         self.selected_chat_id = Some(9000);
         self.vault_status.configured = true;
+        self.vault_status.key_selection = Some(teleark_runtime::VaultKeySelection::Ready);
         self.app_lock.locked = matches!(state.as_str(), "locked" | "locked-transfers");
         self.vault_status.locked =
             matches!(state.as_str(), "managed-key-loading" | "managed-key-error");
         self.vault_status.active_key_locked = self.vault_status.locked;
         self.vault_locked = self.vault_status.locked;
+        if matches!(state.as_str(), "managed-no-keys" | "managed-undecryptable") {
+            self.page = Page::Storage;
+            self.storage_view = StorageView::Files;
+            self.vault_status.key_selection = Some(if state == "managed-no-keys" {
+                teleark_runtime::VaultKeySelection::NoKeys
+            } else {
+                teleark_runtime::VaultKeySelection::Undecryptable
+            });
+            self.vault_status.active_key_locked = true;
+            self.vault_status.locked = true;
+            self.vault_locked = true;
+        }
         let names = [
             "Coastal Journey.mov",
             "Project Aurora — 设计稿.zip",

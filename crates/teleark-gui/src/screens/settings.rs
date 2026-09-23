@@ -861,44 +861,38 @@ impl TeleArkApp {
 
     fn render_key_vault_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let working = self.vault_activity == VaultActivity::Working;
+        let usable =
+            self.vault_status.key_selection == Some(teleark_runtime::VaultKeySelection::Ready);
         settings_card(
             self.tr("managed-key-title"),
             self.tr("managed-key-description"),
         )
         .debug_selector(|| "managed-key-settings".into())
-        .child(
-            div()
-                .mt_4()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(components::badge(
-                    self.tr(if working {
-                        "managed-key-preparing"
-                    } else if self.vault_status.active_key_locked {
-                        "managed-key-unavailable"
-                    } else {
-                        "managed-key-ready"
-                    }),
-                    if self.vault_status.active_key_locked {
-                        Tone::Amber
-                    } else {
-                        Tone::Green
-                    },
-                ))
-                .when(self.vault_status.active_key_locked, |row| {
-                    row.child(
-                        components::button(
-                            "managed-key-retry",
-                            self.tr("managed-key-retry"),
-                            Some(IconName::Redo2),
-                            false,
-                        )
-                        .disabled(working)
-                        .on_click(cx.listener(|this, _, _, cx| this.prepare_vault_key(cx))),
+        .child(div().mt_4().child(components::badge(
+            self.tr(if working {
+                "managed-key-preparing"
+            } else if usable {
+                "managed-key-ready"
+            } else {
+                "managed-key-unavailable"
+            }),
+            if usable { Tone::Green } else { Tone::Amber },
+        )))
+        .when(
+            self.vault_status.key_selection.is_none()
+                && matches!(self.vault_activity, VaultActivity::Failed(_)),
+            |card| {
+                card.child(
+                    components::button(
+                        "managed-key-retry",
+                        self.tr("managed-key-retry"),
+                        Some(IconName::Redo2),
+                        false,
                     )
-                }),
+                    .mt_3()
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_channel_key_selection(cx))),
+                )
+            },
         )
         .when_some(vault_activity_message(self), |card, (message, tone)| {
             card.child(
@@ -909,179 +903,42 @@ impl TeleArkApp {
                     .child(message),
             )
         })
+        .child(vault_input(
+            self.tr("vault-recovery-bundle-label"),
+            &self.vault_recovery_key,
+        ))
         .child(
-            components::button(
-                "vault-advanced-disclosure",
-                self.tr("managed-key-recovery-options"),
-                Some(IconName::ChevronDown),
-                false,
-            )
-            .mt_4()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.vault_advanced_expanded = !this.vault_advanced_expanded;
-                cx.notify();
-            })),
-        )
-        .when(self.vault_advanced_expanded, |card| {
-            card.child(self.render_vault_advanced_settings(cx))
-        })
-        .into_any_element()
-    }
-
-    fn render_vault_advanced_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let working = self.vault_activity == VaultActivity::Working;
-        let card = div()
-            .mt_4()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .text_sm()
-                    .child(self.tr("managed-key-recovery-description")),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        components::button(
-                            "managed-key-show-recovery",
-                            self.tr("managed-key-show-recovery"),
-                            Some(IconName::ExternalLink),
-                            true,
-                        )
-                        .disabled(working)
-                        .on_click(cx.listener(|this, _, _, cx| this.show_vault_recovery_key(cx))),
+            div()
+                .mt_3()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    components::button(
+                        "managed-key-import",
+                        self.tr("managed-key-import"),
+                        None,
+                        true,
                     )
-                    .child(
+                    .disabled(working)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.unlock_vault_with_recovery(window, cx)
+                    })),
+                )
+                .when(usable, |row| {
+                    row.child(
                         components::button(
-                            "settings-rotate-vault-recovery",
-                            self.tr("vault-rotate-recovery-action"),
-                            Some(IconName::Redo2),
+                            "settings-export-vault-recovery",
+                            self.tr("vault-export-recovery"),
+                            None,
                             false,
                         )
                         .disabled(working)
-                        .on_click(cx.listener(|this, _, _, cx| this.rotate_vault_recovery_key(cx))),
-                    ),
-            )
-            .child(vault_input(
-                self.tr("vault-recovery-bundle-label"),
-                &self.vault_recovery_key,
-            ))
-            .child(
-                components::button(
-                    "managed-key-import",
-                    self.tr("managed-key-import"),
-                    Some(IconName::Redo2),
-                    false,
-                )
-                .mt_3()
-                .disabled(working)
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.unlock_vault_with_recovery(window, cx)),
-                ),
-            )
-            .child(
-                div()
-                    .mt_4()
-                    .text_sm()
-                    .child(self.tr("vault-epoch-preserved-description")),
-            )
-            .child(
-                components::button(
-                    "settings-lost-all-keys",
-                    self.tr("vault-epoch-lost-action"),
-                    None,
-                    false,
-                )
-                .mt_3()
-                .disabled(working)
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.request_new_key_epoch(window, cx)),
-                ),
-            )
-            .when_some(
-                self.vault_recovery_secret
-                    .as_ref()
-                    .filter(|_| self.recovery_visible),
-                |card, secret| {
-                    card.child(
-                        div()
-                            .mt_4()
-                            .p_4()
-                            .rounded(theme::RADIUS_MEDIUM)
-                            .border_1()
-                            .border_color(theme::amber())
-                            .bg(theme::amber_soft())
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.tr("vault-recovery-save-now-title")),
-                            )
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .text_xs()
-                                    .text_color(theme::text_secondary())
-                                    .child(self.tr("vault-recovery-save-now-description")),
-                            )
-                            .child(
-                                div()
-                                    .mt_3()
-                                    .p_3()
-                                    .rounded(theme::RADIUS_SMALL)
-                                    .bg(theme::surface())
-                                    .text_xs()
-                                    .child(secret.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .mt_3()
-                                    .flex()
-                                    .gap_2()
-                                    .child(
-                                        components::button(
-                                            "settings-export-vault-recovery",
-                                            self.tr("vault-export-recovery"),
-                                            Some(IconName::ExternalLink),
-                                            true,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.export_vault_recovery_key(cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        components::button(
-                                            "settings-hide-vault-recovery",
-                                            self.tr("vault-hide-recovery"),
-                                            Some(IconName::EyeOff),
-                                            false,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.hide_vault_recovery_key(cx);
-                                            }),
-                                        ),
-                                    ),
-                            ),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_vault_recovery_key(cx);
+                        })),
                     )
-                },
-            );
-        card.child(
-            components::button(
-                "settings-legacy-recovery",
-                self.tr("storage-legacy-action"),
-                Some(IconName::Redo2),
-                false,
-            )
-            .mt_4()
-            .disabled(self.telegram_account.is_none())
-            .on_click(cx.listener(|this, _, _, cx| this.open_legacy_recovery(cx))),
+                }),
         )
         .into_any_element()
     }

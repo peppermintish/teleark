@@ -1304,7 +1304,7 @@ impl DesktopVault {
             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
         }
         if matches!(command, VaultCommand::SelectChannelKey { .. }) {
-            session.status.key_selection = None;
+            session.begin_key_selection();
         }
         let envelope = session.admit(command)?;
         drop(session);

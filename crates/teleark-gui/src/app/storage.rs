@@ -218,7 +218,6 @@ impl TeleArkApp {
                             } else {
                                 this.telegram_chats.push(channel.clone());
                             }
-                            this.prepare_vault_key(cx);
                             this.start_channel_sync(cx);
                             if let Some(sync) = &this.channel_sync
                                 && let Err(error) = sync.watch_managed_channel(chat_id)

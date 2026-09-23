@@ -247,6 +247,7 @@ pub(crate) fn key_phase_id(phase: teleark_runtime::VaultKeyPhase) -> &'static st
     match phase {
         VaultKeyPhase::Queued => "vault-key-phase-queued",
         VaultKeyPhase::Loading => "managed-key-phase-loading",
+        VaultKeyPhase::CheckingChannel => "managed-key-phase-checking-channel",
         VaultKeyPhase::Securing => "managed-key-phase-securing",
         VaultKeyPhase::Generating => "vault-key-phase-generating",
         VaultKeyPhase::WrappingPassword => "vault-key-phase-password",

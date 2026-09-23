@@ -790,7 +790,6 @@ mod tests {
                     Page::Transfers,
                     Page::Library,
                     Page::FileDetail,
-                    Page::LegacyRecovery,
                 ] {
                     app.set_page(page, cx);
                     assert_eq!(app.page, Page::Account);

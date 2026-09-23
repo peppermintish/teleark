@@ -505,7 +505,7 @@ vault-recovery-title = 復旧キー
 vault-recovery-backed-up = バックアップ済み
 vault-show-recovery = 復旧キーを表示
 vault-hide-recovery = 復旧キーを隠す
-vault-export-recovery = 復旧キーを書き出す
+vault-export-recovery = Export the key
 vault-profile-title = 既定の暗号化プロファイル
 vault-option-hidden-filenames = ファイル名を隠す
 vault-option-hidden-filenames-description = Telegram に元のファイル名を公開しません。
@@ -787,7 +787,7 @@ vault-recovery-save-now-title = この復旧キーを今すぐ保存してくだ
 vault-recovery-save-now-description = TeleArk がこの自己完結型復旧バンドルを表示するのは今回だけです。隠す前にオフラインで保存してください。現在の復旧キーを置き換えても、以前に書き出した災害復旧バンドルは失効しないため、古いコピーも保護または安全に削除してください。
 vault-restore-title = ローカルデータ消失後に復元
 vault-restore-description = 上に自己完結型復旧バンドルを入力し、2 つのパスワード欄に新しいローカルパスワードを設定します。
-vault-recovery-bundle-label = 復旧バンドル
+vault-recovery-bundle-label = Key bundle
 vault-recovery-export-default-name = TeleArk 復旧バンドル.txt
 vault-restore-action = Key Vault を復元
 vault-os-credential-title = OS Credential
@@ -1032,13 +1032,10 @@ storage-guide-raw-body = 元のファイルには通常のアップロード、�
 
 storage-guide-key-title = 4. 復旧キーを保存
 
-storage-guide-key-body = キーは自動的に準備されます。この Mac 以外に復元バンドルを保管してください。Telegram はキーを復元できません。復元ツールは設定 → 暗号化キーにあります。
+storage-guide-key-body = Keep an exported channel key outside this device. Import the matching key in Settings → Encryption keys if TeleArk cannot open the Files tab.
 
-storage-legacy-title = 旧バージョンの復元
 
-storage-legacy-description = 保存済みメッセージから既存の TeleArk ファイルを復元します。新規アップロードは専用チャンネルを使用します。
 
-storage-legacy-action = 保存済みメッセージから復元…
 
 settings-about = このアプリについて
 
@@ -1074,7 +1071,6 @@ about-changelog-v040 =
     - Telegram アカウントが所有する専用チャンネルを作成または再検出。サイドバーには専用の TeleArk 項目を表示。
     - ファイル表示では認証済みマニフェストを完全なファイルとして表示。元のファイル表示では通常ファイル、暗号化片、マニフェストの元の名前とメタデータを保持。
     - 所有権、暗号化、元のオブジェクト、復旧キー、マニフェストと全分割片を保存する理由をアプリ内ガイドで説明。
-    - 保存済みメッセージの既存ファイルは「設定 → Key Vault」から復元可能。新しい暗号化アップロードは専用チャンネルを使用。
 
     ### 機能をわかりやすい場所に
     - 複数選択、バッチ、一時停止、再開、キャンセル、再試行、安全な削除、ファイル詳細、ライブ／リプレイ診断を保持。詳細操作は必要に応じて展開。
@@ -1123,6 +1119,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.6 · One current channel key
+
+    - TeleArk selects one stored key that can open the managed channel. Files shows a key warning when no key fits; Raw Files still shows Telegram objects.
+    - Settings offers key import and current-key export. Legacy remote recovery is removed. Channel events refresh the managed catalog, with fallback reconciliation.
+    - SQLite schema 23 and encrypted-file, manifest and recovery-bundle codecs are unchanged.
+
     ## 0.5.5 · イベント駆動のローカルファイル状態
 
     - ダウンロード済みファイルの状態は、OS のファイル変更通知と転送完了イベントに反応します。起動、監視の登録、復帰、監視エラー、5 分間イベントがない場合の補完確認で対象を再確認します。監視できないパスは間隔を延ばした補完確認を使います。
@@ -1824,17 +1826,17 @@ session-loss-history-omitted = 過去のアクティビティ { $count } 件を�
 
 managed-key-title = 暗号化キー
 
-managed-key-description = キーは自動生成され、システムのキーチェーンで保護されます。任意のアプリ PIN は TeleArk のロック専用で、ファイル暗号化には影響しません。
+managed-key-description = TeleArk uses one key for this channel. Import a key to regain access or export the current key for safekeeping.
 
-managed-key-preparing = 暗号化キーを準備中…
+managed-key-preparing = Checking channel keys…
 
-managed-key-ready = 準備完了 · 自動管理
+managed-key-ready = Current key can open this channel
 
-managed-key-unavailable = 暗号化キーの確認が必要です
+managed-key-unavailable = No usable channel key
 
-managed-key-unavailable-help = 設定 → 暗号化キーで再試行するか、キーがない場合は復元バンドルをインポートしてください。他の画面は引き続き使用できます。
+managed-key-unavailable-help = Import the key for this channel in Settings → Encryption keys. If checking failed, retry key access there.
 
-managed-key-retry = キーへのアクセスを再試行
+managed-key-retry = Retry key check
 
 managed-key-recovery-options = 復元オプション
 
@@ -1842,7 +1844,7 @@ managed-key-recovery-description = デバイスやキーチェーンを失った
 
 managed-key-show-recovery = 復元バンドルを表示
 
-managed-key-import = 復元バンドルをインポート
+managed-key-import = Import a key
 
 managed-key-phase-loading = システムキーチェーンを読み取り中
 
@@ -1950,3 +1952,11 @@ settings-keychain-unknown = キーチェーンの状態を確認できません
 settings-keychain-cancelled = 認証情報の保存先の変更をキャンセルしました
 
 settings-keychain-cancelling = 現在の認証情報の操作が完了したら停止します…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

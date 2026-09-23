@@ -339,7 +339,7 @@ vault-recovery-title = Clé de récupération
 vault-recovery-backed-up = Sauvegardé
 vault-show-recovery = Afficher la clé de récupération
 vault-hide-recovery = Masquer la clé de récupération
-vault-export-recovery = Exporter la clé de récupération
+vault-export-recovery = Export the key
 vault-profile-title = Profil de chiffrement par défaut
 vault-option-hidden-filenames = Noms de fichiers masqués
 vault-option-encrypted-metadata = Métadonnées chiffrées
@@ -509,7 +509,7 @@ vault-unlock-recovery-action = Déverrouiller par clé de récupération
 vault-new-password-label = Nouveau mot de passe
 vault-rotate-recovery-action = Remplacer la clé de récupération
 vault-recovery-save-now-title = Enregistrez cette clé de récupération maintenant
-vault-recovery-bundle-label = Paquet de récupération
+vault-recovery-bundle-label = Key bundle
 vault-restore-action = Restaurer le coffre de clés
 vault-os-credential-title = Identifiant du système
 upload-file-picker-prompt = Choisir des fichiers
@@ -589,13 +589,13 @@ app-lock-unlock = Se connecter
 app-lock-state = Verrouillé
 sync-column-event = Activité
 managed-key-title = Clés de chiffrement
-managed-key-preparing = Préparation des clés de chiffrement…
-managed-key-ready = Prêt · Gestion automatique
-managed-key-unavailable = La clé de chiffrement nécessite votre attention
-managed-key-retry = Réessayer l’accès à la clé
+managed-key-preparing = Checking channel keys…
+managed-key-ready = Current key can open this channel
+managed-key-unavailable = No usable channel key
+managed-key-retry = Retry key check
 managed-key-recovery-options = Options de récupération
 managed-key-show-recovery = Afficher le paquet de récupération
-managed-key-import = Importer un paquet de récupération
+managed-key-import = Import a key
 managed-key-phase-loading = Lecture du trousseau système
 managed-key-phase-securing = Enregistrement et vérification de l’entrée du trousseau
 action-cancel = { common-cancel }
@@ -804,3 +804,11 @@ settings-keychain-unknown = État du trousseau indisponible
 settings-keychain-cancelled = Modification du stockage des identifiants annulée
 
 settings-keychain-cancelling = Arrêt après la fin de l’opération sur les identifiants en cours…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

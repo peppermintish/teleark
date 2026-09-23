@@ -339,7 +339,7 @@ vault-recovery-title = पुनर्प्राप्ति कुंजी
 vault-recovery-backed-up = बैकअप बना है
 vault-show-recovery = पुनर्प्राप्ति कुंजी दिखाएँ
 vault-hide-recovery = पुनर्प्राप्ति कुंजी छिपाएँ
-vault-export-recovery = पुनर्प्राप्ति कुंजी निर्यात करें
+vault-export-recovery = Export the key
 vault-profile-title = डिफ़ॉल्ट एन्क्रिप्शन प्रोफ़ाइल
 vault-option-hidden-filenames = छिपे फ़ाइलनाम
 vault-option-encrypted-metadata = एन्क्रिप्ट किया गया मेटाडेटा
@@ -509,7 +509,7 @@ vault-unlock-recovery-action = पुनर्प्राप्ति कुं
 vault-new-password-label = नया पासवर्ड
 vault-rotate-recovery-action = पुनर्प्राप्ति कुंजी बदलें
 vault-recovery-save-now-title = यह पुनर्प्राप्ति कुंजी अभी सहेजें
-vault-recovery-bundle-label = पुनर्प्राप्ति बंडल
+vault-recovery-bundle-label = Key bundle
 vault-restore-action = कुंजी भंडार बहाल करें
 vault-os-credential-title = सिस्टम क्रेडेंशियल
 upload-file-picker-prompt = फ़ाइलें चुनें
@@ -589,13 +589,13 @@ app-lock-unlock = साइन इन करें
 app-lock-state = लॉक है
 sync-column-event = गतिविधि
 managed-key-title = एन्क्रिप्शन कुंजियाँ
-managed-key-preparing = एन्क्रिप्शन कुंजियाँ तैयार हो रही हैं…
-managed-key-ready = तैयार · अपने आप प्रबंधित
-managed-key-unavailable = एन्क्रिप्शन कुंजी पर ध्यान देना ज़रूरी है
-managed-key-retry = कुंजी तक पहुँच फिर आज़माएँ
+managed-key-preparing = Checking channel keys…
+managed-key-ready = Current key can open this channel
+managed-key-unavailable = No usable channel key
+managed-key-retry = Retry key check
 managed-key-recovery-options = पुनर्प्राप्ति विकल्प
 managed-key-show-recovery = पुनर्प्राप्ति बंडल देखें
-managed-key-import = पुनर्प्राप्ति बंडल आयात करें
+managed-key-import = Import a key
 managed-key-phase-loading = सिस्टम कीचेन पढ़ा जा रहा है
 managed-key-phase-securing = कीचेन प्रविष्टि सहेजी और जाँची जा रही है
 action-cancel = { common-cancel }
@@ -804,3 +804,11 @@ settings-keychain-unknown = कीचेन की स्थिति उपल�
 settings-keychain-cancelled = क्रेडेंशियल स्टोरेज बदलाव रद्द हुआ
 
 settings-keychain-cancelling = मौजूदा क्रेडेंशियल कार्रवाई पूरी होने के बाद रुक रहा है…
+
+managed-key-no-keys = No keys found in the selected key storage. Import a key in Settings → Encryption keys to open TeleArk files.
+
+managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted with stored keys. Import the key for this channel in Settings → Encryption keys.
+
+managed-key-checking = Checking stored keys against the TeleArk channel…
+
+managed-key-phase-checking-channel = Authenticating managed-channel files

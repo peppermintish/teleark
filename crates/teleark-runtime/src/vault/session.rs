@@ -108,6 +108,16 @@ impl VaultSession {
         self.generation
     }
 
+    pub(super) fn begin_key_selection(&mut self) {
+        self.keys.revision = self.keys.revision.wrapping_add(1);
+        self.keys.active = None;
+        self.keys.historical = None;
+        self.status.key_selection = None;
+        self.status.active_key_locked = true;
+        self.status.historical_key_unlocked = false;
+        self.status.locked = true;
+    }
+
     pub fn admit(&self, command: VaultCommand) -> Result<VaultEnvelope, ApplicationError> {
         if self.closing && (command.is_transfer() || command.is_scan()) {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
@@ -345,6 +355,23 @@ mod tests {
         drop(second);
         assert!(weak.upgrade().is_none());
         assert_eq!(session.pending_transfers.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn key_reselection_blocks_new_work_without_revoking_prior_leases() {
+        let mut session = VaultSession::new(None);
+        session.publish(
+            0,
+            None,
+            Some(Arc::new(VaultMasterKey::from_bytes([7; 32]))),
+            None,
+        );
+        let admitted = session.admit(download()).expect("prior work");
+        session.begin_key_selection();
+        assert!(session.status.key_selection.is_none());
+        assert!(session.status.active_key_locked);
+        assert!(session.admit(download()).is_err());
+        assert!(admitted.keys.active.is_some());
     }
 
     #[test]

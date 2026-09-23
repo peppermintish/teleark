@@ -8,10 +8,7 @@ impl TeleArkApp {
             && self.storage_view == StorageView::RawFiles
             && self.channel_sync.is_some()
             && self.channel_history_armed;
-        let legacy = self.telegram_file_auto_load
-            && self.page == Page::LegacyRecovery
-            && self.storage_view == StorageView::RawFiles;
-        if self.library.is_none() || self.telegram.is_none() || (!automatic && !legacy) {
+        if self.library.is_none() || self.telegram.is_none() || !automatic {
             return None;
         }
         Some((
@@ -69,17 +66,9 @@ impl TeleArkApp {
         if self.storage_view == StorageView::RawFiles {
             self.remember_channel_view();
         }
-        let legacy = self.page == Page::LegacyRecovery;
         self.storage_view = view;
         self.nav_selection = "nav-storage";
-        self.set_page(
-            if legacy {
-                Page::LegacyRecovery
-            } else {
-                Page::Storage
-            },
-            cx,
-        );
+        self.set_page(Page::Storage, cx);
         let Some(chat_id) = self.active_storage_chat_id() else {
             cx.notify();
             return;
@@ -97,9 +86,6 @@ impl TeleArkApp {
                 self.show_channel_detail = false;
             }
             self.selected_chat_id = Some(chat_id);
-            if legacy {
-                self.scan_legacy_vault_files(cx);
-            }
         } else if self.selected_chat_id != Some(chat_id) || self.telegram_files.is_empty() {
             self.select_telegram_chat(chat_id, cx);
         } else {
@@ -115,24 +101,11 @@ impl TeleArkApp {
     }
 
     pub(crate) fn active_storage_chat_id(&self) -> Option<i64> {
-        if self.page == Page::LegacyRecovery {
-            self.telegram_account.as_ref().map(|account| account.id)
-        } else {
-            self.storage_channel_id()
-        }
+        self.storage_channel_id()
     }
 
     pub(crate) fn viewing_storage(&self) -> bool {
-        matches!(self.page, Page::Storage | Page::LegacyRecovery)
-    }
-
-    pub(crate) fn open_legacy_recovery(&mut self, cx: &mut Context<Self>) {
-        if self.page != Page::LegacyRecovery {
-            self.save_managed_view_for_legacy();
-        }
-        self.page = Page::LegacyRecovery;
-        self.select_storage(StorageView::Files, cx);
-        self.open_vault_action(VaultAction::Browse, cx);
+        self.page == Page::Storage
     }
 
     pub(crate) fn load_selected_telegram_files(&mut self, append: bool, cx: &mut Context<Self>) {
@@ -504,125 +477,5 @@ impl TeleArkApp {
                 cx.notify();
             });
         }));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui_kit as gpui;
-    use gpui_kit::TestAppContext;
-    use gpui_kit::component::table::TableDelegate as _;
-
-    #[gpui::test]
-    fn pagination_can_refresh_its_table_after_the_delegate_update(cx: &mut TestAppContext) {
-        use crate::app::{AppStartup, LocaleStartup, Page, RuntimeStartup};
-        use teleark_core::{ApplicationError, ApplicationErrorKind};
-        use teleark_i18n::{Localizer, SupportedLocale};
-        use teleark_runtime::{DesktopLibrary, DesktopTelegram, TelegramAccount};
-
-        cx.update(gpui_kit::init);
-        let (app, cx) = cx.add_window_view(|window, cx| {
-            let unavailable = || ApplicationError::new(ApplicationErrorKind::Authorization);
-            TeleArkApp::new(
-                window,
-                cx,
-                Localizer::new(SupportedLocale::EnUs).expect("valid catalog"),
-                RuntimeStartup {
-                    configuration: None,
-                    library: Err(unavailable()),
-                    telegram: Err(unavailable()),
-                    transfers: Err(unavailable()),
-                    vault: Err(unavailable()),
-                },
-                AppStartup {
-                    page: Page::Account,
-                    visual_preview: false,
-                    show_upload: false,
-                    locale: LocaleStartup {
-                        system_locale: SupportedLocale::EnUs,
-                        follows_system_locale: false,
-                    },
-                },
-            )
-        });
-        let directory = std::env::temp_dir().join(format!(
-            "teleark-pagination-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&directory).expect("create isolated fixture");
-        let table = app.update(cx, |app, cx| {
-            // Assign isolated, unconfigured owners after startup: no session is restored.
-            app.library = Some(
-                DesktopLibrary::open_synthetic(directory.join("library.sqlite3"))
-                    .expect("open isolated database"),
-            );
-            app.telegram = Some(
-                DesktopTelegram::open_direct(directory.join("session"))
-                    .expect("open unconfigured adapter"),
-            );
-            app.telegram_account = Some(TelegramAccount {
-                id: 1,
-                display_name: "Pagination".into(),
-                username: None,
-            });
-            app.page = Page::LegacyRecovery;
-            app.storage_view = StorageView::RawFiles;
-            app.selected_chat_id = Some(10);
-            app.telegram_files_exhausted = false;
-            app.telegram_file_auto_load = true;
-            app.telegram_activity = TelegramActivity::Idle;
-            app.refresh_channel_file_table(cx);
-            app.channel_file_table.clone()
-        });
-        cx.update(|window, cx| {
-            table.update(cx, |table, cx| {
-                assert!(table.delegate().has_more(cx));
-                table.delegate_mut().load_more(window, cx);
-                table.delegate_mut().load_more(window, cx);
-            });
-        });
-        app.update(cx, |app, cx| {
-            // The deferred request reached the real loader and refreshed TableState.
-            assert!(app.telegram_files_loading);
-            app.cancel_telegram_file_load(cx);
-        });
-        // Reject requests queued before navigation, cancellation or source changes.
-        for change in 0..4 {
-            app.update(cx, |app, cx| {
-                app.page = Page::LegacyRecovery;
-                app.telegram_file_auto_load = true;
-                app.refresh_channel_file_table(cx);
-            });
-            cx.update(|window, cx| {
-                table.update(cx, |table, cx| {
-                    table.delegate_mut().load_more(window, cx);
-                    table.delegate_mut().load_more(window, cx);
-                });
-                app.update(cx, |app, cx| match change {
-                    0 => app.page = Page::Transfers,
-                    1 => app.cancel_telegram_file_load(cx),
-                    2 => app.telegram_account.as_mut().expect("fixture account").id = 2,
-                    _ => app.selected_chat_id = Some(20),
-                });
-            });
-            app.update(cx, |app, _| assert!(!app.telegram_files_loading));
-        }
-        app.update(cx, |app, _| {
-            app.library = None;
-            app.telegram = None;
-        });
-        cx.run_until_parked();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while let Err(err) = std::fs::remove_dir_all(&directory) {
-            if std::time::Instant::now() >= deadline {
-                panic!("remove isolated fixture: {err}");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 }

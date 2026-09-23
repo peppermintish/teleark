@@ -5,6 +5,7 @@ use tokio::sync::watch;
 pub enum VaultKeyPhase {
     Queued,
     Loading,
+    CheckingChannel,
     Generating,
     WrappingPassword,
     WrappingRecovery,

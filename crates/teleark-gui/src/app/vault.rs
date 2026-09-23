@@ -3,20 +3,6 @@
 use super::*;
 use crate::screens::transfers::{TransferAction, vault_transfer_selection_key};
 
-/// Preserve the account projection while explicit legacy recovery uses its own view.
-pub(super) struct ManagedViewCache {
-    account: i64,
-    chat: i64,
-    files: std::sync::Arc<Vec<ManagedVaultFile>>,
-    rejected: usize,
-    pending: bool,
-    limited: bool,
-    health_checked: Option<usize>,
-    revision: i64,
-    scope: Option<(i64, i64)>,
-    receipts: std::collections::VecDeque<(i64, i64, ManagedVaultFile)>,
-}
-
 impl TeleArkApp {
     pub(crate) fn apply_vault_transfer_action(
         &mut self,
@@ -115,49 +101,6 @@ impl TeleArkApp {
         cx.notify();
     }
 
-    pub(super) fn save_managed_view_for_legacy(&mut self) {
-        self.cancel_managed_scan();
-        if let (Some(account), Some(chat)) = (&self.telegram_account, self.storage_channel_id()) {
-            self.managed_view_before_legacy = Some(ManagedViewCache {
-                account: account.id,
-                chat,
-                files: std::mem::take(&mut self.managed_vault_files),
-                rejected: self.managed_vault_rejected,
-                pending: self.managed_catalog_pending,
-                limited: self.managed_catalog_limited,
-                health_checked: self.managed_health_checked,
-                revision: self.managed_display_revision,
-                scope: self.managed_projection_scope,
-                receipts: std::mem::take(&mut self.managed_upload_receipts),
-            });
-        }
-        self.managed_vault_files = Default::default();
-        self.managed_projection_scope = None;
-        self.managed_health_checked = None;
-    }
-
-    pub(super) fn restore_managed_view_after_legacy(&mut self, cx: &mut Context<Self>) {
-        self.managed_vault_files = Default::default();
-        self.managed_projection_scope = None;
-        self.managed_health_checked = None;
-        if let Some(view) = self.managed_view_before_legacy.take()
-            && !self.vault_locked
-            && self.telegram_account.as_ref().map(|account| account.id) == Some(view.account)
-            && self.storage_channel_id() == Some(view.chat)
-        {
-            self.managed_vault_files = view.files;
-            self.managed_vault_rejected = view.rejected;
-            self.managed_catalog_pending = view.pending;
-            self.managed_catalog_limited = view.limited;
-            self.managed_health_checked = view.health_checked;
-            self.managed_display_revision = view.revision;
-            self.managed_projection_scope = view.scope;
-            self.managed_upload_receipts = view.receipts;
-        }
-        // Consume only actual committed changes received during the recovery view.
-        self.apply_managed_channel_changes(cx);
-    }
-
     pub(crate) fn open_vault_action(&mut self, intent: VaultAction, cx: &mut Context<Self>) {
         // Navigation and file selection never require a second unlock.
         if intent == VaultAction::Upload {
@@ -190,6 +133,90 @@ impl TeleArkApp {
             false,
             cx,
         );
+    }
+
+    pub(crate) fn select_channel_key(
+        &mut self,
+        account: i64,
+        chat: i64,
+        revision: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let progress = teleark_runtime::VaultKeyProgress::new();
+        self.vault_key_selection_scope = Some((account, chat, revision));
+        self.cancel_managed_scan();
+        self.vault_key_progress = Some(progress.clone());
+        self.vault_activity = VaultActivity::Working;
+        self.managed_vault_files = Default::default();
+        self.selected_telegram_message_id = None;
+        self.show_channel_detail = false;
+        cx.notify();
+        // Paint the phase before Keychain, database, network or crypto work starts.
+        let job = match vault.submit_select_channel_key(account, chat, progress.clone()) {
+            Ok(job) => job,
+            Err(error) => {
+                self.vault_activity = VaultActivity::Failed(error.kind());
+                cx.notify();
+                return;
+            }
+        };
+        self.sync_vault_status();
+        let mut events = progress.subscribe();
+        self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
+            loop {
+                tokio::select! {
+                    changed = events.changed() => if changed.is_err() { return; },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => {},
+                }
+                let Some(entity) = this.upgrade() else { return };
+                if entity.update(cx, |app, cx| {
+                    cx.notify();
+                    app.vault_key_progress
+                        .as_ref()
+                        .is_some_and(|p| p.snapshot().finished)
+                }) {
+                    return;
+                }
+            }
+        }));
+        let generation = self.telegram_login_generation;
+        let work = cx.background_spawn(async move { job.wait() });
+        self.vault_key_selection_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let Some(entity) = this.upgrade() else { return };
+            entity.update(cx, |app, cx| {
+                if app.telegram_login_generation != generation
+                    || app.vault_key_selection_scope != Some((account, chat, revision))
+                {
+                    return;
+                }
+                app.vault_key_selection_task = None;
+                app.vault_key_presentation = None;
+                app.sync_vault_status();
+                app.vault_activity = match result {
+                    Ok(_) => VaultActivity::Succeeded,
+                    Err(error) => VaultActivity::Failed(error.kind()),
+                };
+                app.apply_managed_channel_changes(cx);
+                if app.vault_status.key_selection == Some(teleark_runtime::VaultKeySelection::Ready)
+                {
+                    app.resume_pending_vault_action(cx);
+                    app.resume_durable_uploads(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    pub(crate) fn retry_channel_key_selection(&mut self, cx: &mut Context<Self>) {
+        if self.vault_key_selection_task.is_some() {
+            return;
+        }
+        self.vault_key_selection_scope = None;
+        self.apply_managed_channel_changes(cx);
     }
 
     fn finish_managed_key_operation(
@@ -258,15 +285,12 @@ impl TeleArkApp {
                         this.vault_new_epoch_confirmation = false;
                         if reveal_recovery && !secret.is_empty() && !this.app_lock.locked {
                             this.vault_recovery_secret = Some(secret);
-                            this.recovery_visible = true;
-                            this.vault_advanced_expanded = true;
+                            this.export_vault_recovery_key(cx);
                         }
                         this.sync_vault_status();
                         if refresh_files {
-                            this.cancel_managed_scan();
-                            this.resume_pending_vault_action(cx);
-                            this.scan_managed_vault_files(cx);
-                            this.resume_durable_uploads(cx);
+                            this.vault_key_selection_scope = None;
+                            this.apply_managed_channel_changes(cx);
                         }
                     }
                     Err(error) => {
@@ -304,10 +328,6 @@ impl TeleArkApp {
             return;
         }
         match self.pending_vault_action.take() {
-            Some(VaultAction::Browse) if self.page == Page::LegacyRecovery => {
-                self.scan_legacy_vault_files(cx)
-            }
-            Some(VaultAction::Browse) => self.scan_managed_vault_files(cx),
             Some(VaultAction::Upload) => {
                 self.show_upload = true;
                 self.upload_queued = false;
@@ -316,21 +336,6 @@ impl TeleArkApp {
             Some(VaultAction::Download(id)) => self.download_managed_vault_file(id, cx),
             None => {}
         }
-        cx.notify();
-    }
-
-    pub(crate) fn request_new_key_epoch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
-        }
-        self.cancel_managed_scan();
-        self.clear_vault_inputs(window, cx);
-        self.vault_key_progress = None;
-        self.vault_key_details = false;
-        self.vault_new_epoch_confirmation = true;
-        self.vault_advanced_expanded = false;
-        self.pending_vault_action = None;
-        self.vault_activity = VaultActivity::Idle;
         cx.notify();
     }
 
@@ -378,23 +383,6 @@ impl TeleArkApp {
             move |_| vault.submit_recovery_import(recovery, admission_progress),
             progress,
             false,
-            cx,
-        );
-    }
-
-    pub(crate) fn rotate_vault_recovery_key(&mut self, cx: &mut Context<Self>) {
-        if self.vault_activity == VaultActivity::Working {
-            return;
-        }
-        let Some(vault) = self.vault.clone() else {
-            return;
-        };
-        let progress = teleark_runtime::VaultKeyProgress::new();
-        let admission_progress = progress.clone();
-        self.finish_managed_key_operation(
-            move |_| vault.submit_recovery_rotation(admission_progress),
-            progress,
-            true,
             cx,
         );
     }
@@ -500,6 +488,8 @@ impl TeleArkApp {
         self.vault_key_progress = None;
         self.vault_key_details = false;
         self.vault_key_presentation = None;
+        self.vault_key_selection_task = None;
+        self.vault_key_selection_scope = None;
         self.clear_vault_inputs(window, cx);
         self.pending_vault_action = None;
         self.show_upload = false;
@@ -514,7 +504,6 @@ impl TeleArkApp {
         self.vault_status.historical_key_unlocked = false;
         self.managed_vault_files = Default::default();
         self.managed_projection_scope = None;
-        self.managed_view_before_legacy = None;
         self.managed_health_checked = None;
         self.managed_upload_receipts.clear();
         self.managed_vault_rejected = 0;
@@ -599,26 +588,18 @@ impl TeleArkApp {
         {
             self.vault_activity = VaultActivity::Failed(error.kind());
         }
-        self.scan_vault_files(true, self.page != Page::LegacyRecovery, cx);
+        self.scan_vault_files(true, cx);
     }
 
     pub(crate) fn scan_managed_vault_files(&mut self, cx: &mut Context<Self>) {
-        self.scan_vault_files(false, true, cx);
+        self.scan_vault_files(false, cx);
     }
 
-    pub(crate) fn scan_legacy_vault_files(&mut self, cx: &mut Context<Self>) {
-        self.scan_vault_files(false, false, cx);
-    }
-
-    fn scan_vault_files(&mut self, verify_health: bool, cached: bool, cx: &mut Context<Self>) {
+    fn scan_vault_files(&mut self, verify_health: bool, cx: &mut Context<Self>) {
         if self.vault_locked || self.managed_scan_loading {
             return;
         }
-        let chat = if cached {
-            self.storage_channel_id()
-        } else {
-            self.telegram_account.as_ref().map(|account| account.id)
-        };
+        let chat = self.storage_channel_id();
         let (Some(vault), Some(chat_id)) = (self.vault.clone(), chat) else {
             return;
         };
@@ -630,35 +611,28 @@ impl TeleArkApp {
         let generation = self.managed_scan_generation;
         let cancellation = TelegramScanCancellation::new();
         self.managed_scan_cancellation = Some(cancellation.clone());
-        if cached {
-            self.managed_projection_scope = Some((account_id, chat_id));
-            self.managed_display_revision = self
-                .channel_sync
-                .as_ref()
-                .and_then(|sync| sync.changes_since(chat_id, 0).ok())
-                .map_or(0, |changes| changes.revision);
-            self.managed_catalog_pending = self
-                .channel_sync_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.managed_watch.as_ref())
-                .is_none_or(|watch| !watch.catalog_ready);
-        }
-        let observer = cached
-            .then(|| {
-                self.channel_sync
-                    .as_ref()
-                    .map(|sync| sync.observe_managed_scan(chat_id))
-            })
-            .flatten();
+        self.managed_projection_scope = Some((account_id, chat_id));
+        self.managed_display_revision = self
+            .channel_sync
+            .as_ref()
+            .and_then(|sync| sync.changes_since(chat_id, 0).ok())
+            .map_or(0, |changes| changes.revision);
+        self.managed_catalog_pending = self
+            .channel_sync_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.managed_watch.as_ref())
+            .is_none_or(|watch| !watch.catalog_ready);
+        let observer = self
+            .channel_sync
+            .as_ref()
+            .map(|sync| sync.observe_managed_scan(chat_id));
         cx.notify();
-        let mode = if verify_health && cached {
+        let mode = if verify_health {
             teleark_runtime::ManagedScanMode::CheckHealth
-        } else if cached {
-            teleark_runtime::ManagedScanMode::Cached
         } else {
-            teleark_runtime::ManagedScanMode::Remote
+            teleark_runtime::ManagedScanMode::Cached
         };
-        let work = if cached && !verify_health {
+        let work = if !verify_health {
             cx.background_spawn(async move {
                 vault.synchronize_managed_files(account_id, chat_id, cancellation, observer)
             })
@@ -691,11 +665,7 @@ impl TeleArkApp {
                 this.managed_scan_loading = false;
                 this.managed_scan_cancellation = None;
                 if this.telegram_account.as_ref().map(|a| a.id) != Some(account_id)
-                    || if cached {
-                        this.storage_channel_id() != Some(chat_id)
-                    } else {
-                        this.page != Page::LegacyRecovery
-                    }
+                    || this.storage_channel_id() != Some(chat_id)
                 {
                     return;
                 }
@@ -722,12 +692,12 @@ impl TeleArkApp {
                         this.managed_catalog_limited = scan.catalog_limited;
                         this.managed_health_checked =
                             scan.health_checked_files.or(this.managed_health_checked);
-                        if !cached || verify_health {
+                        if verify_health {
                             this.vault_activity = VaultActivity::Succeeded;
                         }
                     }
                     Err(error) => {
-                        if !cached || verify_health {
+                        if verify_health {
                             this.vault_activity = VaultActivity::Failed(error.kind());
                         }
                     }
@@ -1240,7 +1210,7 @@ mod tests {
                         app.settings_section = SettingsSection::KeyVault;
                         app.vault_advanced_expanded = true;
                         app.show_upload = false;
-                        app.pending_vault_action = Some(VaultAction::Browse);
+                        app.pending_vault_action = Some(VaultAction::QueueUpload);
                         cx.notify();
                     });
                     cx.run_until_parked();
@@ -1554,11 +1524,10 @@ mod tests {
     #[gpui::test]
     fn upload_picker_opens_without_a_key_or_pin_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
-        app.update(cx, |app, cx| {
+        app.update(cx, |app, _| {
             app.vault_locked = false;
             app.vault_status.active_key_locked = false;
             app.show_upload = false;
-            app.open_vault_action(VaultAction::Browse, cx);
             assert_eq!(app.page, Page::Settings);
             assert!(!app.show_upload);
             assert!(app.pending_vault_action.is_none());

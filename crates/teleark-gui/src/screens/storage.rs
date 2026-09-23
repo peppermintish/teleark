@@ -94,74 +94,68 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let legacy = self.page == Page::LegacyRecovery;
-        let ready = legacy || self.storage_status.usable_channel().is_some();
-        let header =
-            div()
-                .h(px(76.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(components::app_mark(38.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(23.0))
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child(self.tr(if legacy {
-                                    "storage-legacy-title"
-                                } else {
-                                    "storage-nav-title"
-                                })),
-                        )
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_xs()
-                                .text_color(theme::text_secondary())
-                                .child(self.tr(if legacy {
-                                    "storage-legacy-description"
-                                } else {
-                                    "storage-private-label"
-                                })),
-                        ),
-                )
-                .when(!legacy && self.storage_is_quiet(), |bar| {
-                    bar.child(
-                        components::button(
-                            "storage-expand-details",
-                            self.tr("storage-connected-title"),
-                            None,
-                            false,
-                        )
-                        .ghost()
-                        .text_xs()
-                        .text_color(theme::green())
-                        .debug_selector(|| "storage-expand-details".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.modal_focus.focus(window, cx);
-                            this.storage_details_expanded = true;
-                            cx.notify();
-                        })),
+        let ready = self.storage_status.usable_channel().is_some();
+        let header = div()
+            .h(px(76.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(components::app_mark(38.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(23.0))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.tr("storage-nav-title")),
                     )
-                })
-                .child(
-                    components::icon_button(
-                        "storage-help",
-                        Symbol::Help,
-                        self.tr("storage-guide-title"),
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr("storage-private-label")),
+                    ),
+            )
+            .when(self.storage_is_quiet(), |bar| {
+                bar.child(
+                    components::button(
+                        "storage-expand-details",
+                        self.tr("storage-connected-title"),
+                        None,
+                        false,
                     )
                     .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_storage_guide = !this.show_storage_guide;
+                    .text_xs()
+                    .text_color(theme::green())
+                    .debug_selector(|| "storage-expand-details".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.modal_focus.focus(window, cx);
+                        this.storage_details_expanded = true;
                         cx.notify();
                     })),
                 )
-                .when(ready && !legacy, |bar| {
+            })
+            .child(
+                components::icon_button(
+                    "storage-help",
+                    Symbol::Help,
+                    self.tr("storage-guide-title"),
+                )
+                .ghost()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_storage_guide = !this.show_storage_guide;
+                    cx.notify();
+                })),
+            )
+            .when(
+                ready
+                    && self.vault_status.key_selection
+                        == Some(teleark_runtime::VaultKeySelection::Ready),
+                |bar| {
                     bar.child(
                         components::button(
                             "storage-upload",
@@ -173,7 +167,8 @@ impl TeleArkApp {
                             this.open_vault_action(VaultAction::Upload, cx)
                         })),
                     )
-                });
+                },
+            );
         let body = if ready {
             let overview = div()
                 .flex_none()
@@ -222,7 +217,7 @@ impl TeleArkApp {
                     body.child(self.storage_guide(true, cx))
                 })
                 .when(
-                    !legacy && !self.storage_is_quiet() && !self.storage_details_expanded,
+                    !self.storage_is_quiet() && !self.storage_details_expanded,
                     |body| body.child(self.render_storage_controls(cx)),
                 );
             let content = {
@@ -234,9 +229,7 @@ impl TeleArkApp {
                     .gap_3()
                     .when(
                         self.show_storage_guide
-                            || (!legacy
-                                && !self.storage_is_quiet()
-                                && !self.storage_details_expanded),
+                            || (!self.storage_is_quiet() && !self.storage_details_expanded),
                         |body| {
                             body.child(
                                 div()
@@ -1021,6 +1014,31 @@ impl TeleArkApp {
         layout: LayoutPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.vault_status.key_selection != Some(teleark_runtime::VaultKeySelection::Ready) {
+            let message = match self.vault_status.key_selection {
+                Some(teleark_runtime::VaultKeySelection::NoKeys) => "managed-key-no-keys",
+                Some(teleark_runtime::VaultKeySelection::Undecryptable) => {
+                    "managed-key-channel-undecryptable"
+                }
+                _ => "managed-key-checking",
+            };
+            return components::card()
+                .debug_selector(|| "storage-managed-key-warning".into())
+                .h_full()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(480.0))
+                        .p_5()
+                        .text_sm()
+                        .text_color(theme::amber())
+                        .child(self.tr(message)),
+                )
+                .into_any_element();
+        }
         let query = self.search_input.read(cx).value().to_lowercase();
         let rows = self
             .managed_projection
@@ -1372,6 +1390,42 @@ mod tests {
     use super::*;
     use teleark_i18n::{Localizer, SupportedLocale};
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn files_show_only_key_helper_while_raw_files_remain_visible(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for selection in [
+                teleark_runtime::VaultKeySelection::NoKeys,
+                teleark_runtime::VaultKeySelection::Undecryptable,
+            ] {
+                app.update(cx, |app, cx| {
+                    app.localizer = Localizer::new(SupportedLocale::EnUs).expect("catalog");
+                    app.vault_status.key_selection = Some(selection);
+                    app.storage_view = StorageView::Files;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("storage-managed-key-warning").is_some());
+                assert!(cx.debug_bounds("managed-file-row-1").is_none());
+                app.update(cx, |app, cx| {
+                    app.storage_view = StorageView::RawFiles;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("storage-managed-key-warning").is_none());
+                assert!(cx.debug_bounds("channel-file-table-viewport").is_some());
+            }
+        }
+    }
 
     #[gpui_kit::test]
     fn replacement_setup_timeline_remains_visible_at_compact_and_fullscreen_sizes(
