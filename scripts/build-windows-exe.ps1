@@ -7,6 +7,7 @@ param(
     [string]$ExpectedInnoSetupVersion = '6.7.3'
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'verify-innosetup-compiler.ps1')
 $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $iscc = if ($command = Get-Command ISCC.exe -ErrorAction SilentlyContinue) { $command.Source }
@@ -18,17 +19,7 @@ else {
     ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 }
 if (-not $iscc) { throw "Inno Setup $ExpectedInnoSetupVersion (ISCC.exe) is required to build the EXE installer." }
-$compilerVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($iscc).ProductVersion
-if ([string]::IsNullOrWhiteSpace($compilerVersion)) {
-    throw "ISCC.exe at '$iscc' does not report a product version."
-}
-$expectedVersion = [version]::Parse($ExpectedInnoSetupVersion)
-$actualVersion = [version]::Parse($compilerVersion)
-if ($actualVersion.Major -ne $expectedVersion.Major -or
-    $actualVersion.Minor -ne $expectedVersion.Minor -or
-    $actualVersion.Build -ne $expectedVersion.Build) {
-    throw "Expected Inno Setup $ExpectedInnoSetupVersion, but ISCC.exe at '$iscc' reports $compilerVersion."
-}
+$compilerVersion = Assert-InnoSetupCompilerVersion -Path $iscc -ExpectedVersion $ExpectedInnoSetupVersion
 Write-Output "Using Inno Setup $compilerVersion at $iscc"
 
 $installer = New-Object -ComObject WindowsInstaller.Installer

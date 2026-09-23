@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'verify-innosetup-compiler.ps1')
 
 if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
     throw 'scripts/install-innosetup.ps1 must run on Windows.'
@@ -30,23 +31,6 @@ $downloadPath = Join-Path $downloadDirectory $release.Asset
 $downloadUrl = "https://github.com/jrsoftware/issrc/releases/download/$($release.Tag)/$($release.Asset)"
 $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6'
 $isccPath = Join-Path $installDirectory 'ISCC.exe'
-
-function Test-Version([string]$Path) {
-    $expected = [version]::Parse($Version)
-    $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
-    if ([string]::IsNullOrWhiteSpace($fileVersion)) {
-        throw "ISCC.exe at '$Path' does not report a product version."
-    }
-
-    $actual = [version]::Parse($fileVersion)
-    if ($actual.Major -ne $expected.Major -or
-        $actual.Minor -ne $expected.Minor -or
-        $actual.Build -ne $expected.Build) {
-        throw "Expected Inno Setup $Version, but ISCC.exe at '$Path' reports $fileVersion."
-    }
-
-    return $fileVersion
-}
 
 try {
     New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
@@ -88,7 +72,7 @@ try {
     if (-not (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
         throw "Inno Setup $Version installed without the expected compiler: $isccPath"
     }
-    $fileVersion = Test-Version $isccPath
+    $fileVersion = Assert-InnoSetupCompilerVersion -Path $isccPath -ExpectedVersion $Version
     $isccDirectory = Split-Path -Parent $isccPath
     $env:PATH = "$isccDirectory;$env:PATH"
     if ($env:GITHUB_PATH) {

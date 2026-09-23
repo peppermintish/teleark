@@ -46,7 +46,7 @@ if "$dry_run"; then
 fi
 
 test -f "$binary"
-for tool in codesign security openssl pkgbuild productbuild plutil lipo ditto /usr/libexec/PlistBuddy; do
+for tool in codesign security certtool openssl pkgbuild productbuild plutil lipo ditto /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Required macOS packaging tool is missing: $tool" >&2; exit 1; }
 done
 for required_architecture in arm64 x86_64; do

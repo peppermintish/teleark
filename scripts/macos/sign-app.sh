@@ -8,11 +8,29 @@ standalone="${2:?Standalone output required}"
 repository_root="$(cd "$(dirname "$0")/../.." && pwd)"
 stage="$(mktemp -d -t teleark-sign)"
 keychain="$stage/signing.keychain-db"
+saved_keychains=()
+restore_keychain_list=0
 cleanup() {
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  if [[ "$restore_keychain_list" == 1 ]]; then
+    security list-keychains -d user -s "${saved_keychains[@]}" >/dev/null 2>&1 || \
+      echo 'macOS signing: could not restore the prior Keychain search list.' >&2
+  fi
   rm -rf "$stage"
 }
 trap cleanup EXIT
+keychain_list="$(security list-keychains -d user)"
+while IFS= read -r listed_keychain; do
+  listed_keychain="${listed_keychain#"${listed_keychain%%[![:space:]]*}"}"
+  [[ -n "$listed_keychain" ]] || continue
+  if [[ "$listed_keychain" != \"*\" ]]; then
+    echo 'Cannot parse the current macOS Keychain search list.' >&2
+    exit 1
+  fi
+  listed_keychain="${listed_keychain#\"}"
+  listed_keychain="${listed_keychain%\"}"
+  saved_keychains+=("$listed_keychain")
+done <<< "$keychain_list"
 phase() {
   printf 'macOS signing: %s\n' "$1"
 }
@@ -63,8 +81,9 @@ import_pem_identity() {
   openssl pkcs12 -legacy -in "$stage/identity.p12" -clcerts -nokeys -passin pass: -out "$stage/public-with-attributes.pem"
   openssl rsa -in "$stage/private.pem" -traditional -out "$stage/import-key.pem" 2>/dev/null
   openssl x509 -in "$stage/public-with-attributes.pem" -out "$stage/public.pem"
-  security import "$stage/import-key.pem" -t priv -f openssl -k "$keychain" -T /usr/bin/codesign >/dev/null
-  security import "$stage/public.pem" -t cert -f pemseq -k "$keychain" >/dev/null
+  # Apple's certtool imports the certificate and its private key as one identity.
+  # Separate security imports can be listed by find-identity but fail in codesign.
+  certtool i "$stage/public.pem" "k=$keychain" "r=$stage/import-key.pem" >/dev/null
 }
 
 phase 'creating the isolated temporary keychain'
@@ -82,6 +101,9 @@ fi
 
 phase 'granting codesign partition access to the private key'
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '' "$keychain" >/dev/null
+phase 'registering the temporary keychain for codesign'
+restore_keychain_list=1
+security list-keychains -d user -s "$keychain" "${saved_keychains[@]}" >/dev/null
 
 requirement="designated => identifier \"app.teleark.desktop\" and certificate leaf = H\"$fingerprint\""
 phase 'signing the app bundle'

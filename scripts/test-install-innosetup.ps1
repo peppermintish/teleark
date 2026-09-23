@@ -2,6 +2,17 @@
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This regression requires Windows.' }
 $bootstrap = Join-Path $PSScriptRoot 'install-innosetup.ps1'
+$installedCompiler = (Get-Command ISCC.exe -ErrorAction Stop).Source
+$compilerDirectory = Split-Path -Parent $installedCompiler
+. (Join-Path $PSScriptRoot 'verify-innosetup-compiler.ps1')
+[void](Assert-InnoSetupCompilerVersion -Path $installedCompiler -ExpectedVersion '6.7.3')
+$wrongVersionRejected = $false
+try {
+    [void](Assert-InnoSetupCompilerVersion -Path $installedCompiler -ExpectedVersion '6.7.2')
+} catch {
+    $wrongVersionRejected = $true
+}
+if (-not $wrongVersionRejected) { throw 'The real compiler accepted the wrong pinned version.' }
 $stage = Join-Path ([IO.Path]::GetTempPath()) "teleark-inno-test-$([guid]::NewGuid().ToString('N'))"
 $savedEnvironment = @{}
 foreach ($name in @('RUNNER_TEMP', 'LOCALAPPDATA', 'GITHUB_PATH', 'PATH')) {
@@ -13,13 +24,6 @@ try {
     $env:LOCALAPPDATA = Join-Path $stage 'Local App Data'
     $env:GITHUB_PATH = Join-Path $stage 'github-path'
     $expectedDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6'
-    $compilerFixture = Join-Path $stage 'compiler.dll'
-    Add-Type -OutputAssembly $compilerFixture -TypeDefinition @'
-using System.Reflection;
-[assembly: AssemblyInformationalVersion("6.7.3")]
-public class CompilerFixture {}
-'@
-
     function Invoke-WebRequest {
         param($Uri, $OutFile)
         if ($Uri -ne 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe') {
@@ -47,7 +51,7 @@ public class CompilerFixture {}
         if ($case -eq 'exit') { return @{ ExitCode = 2 } }
         if ($case -ne 'missing') {
             New-Item -ItemType Directory -Force -Path $expectedDirectory | Out-Null
-            Copy-Item -LiteralPath $compilerFixture -Destination (Join-Path $expectedDirectory 'ISCC.exe')
+            Copy-Item -Path (Join-Path $compilerDirectory '*') -Destination $expectedDirectory -Recurse
         }
         @{ ExitCode = 0 }
     }
@@ -82,4 +86,4 @@ public class CompilerFixture {}
     }
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
-Write-Output 'PASS: exact install path with spaces, PATH export, verification failures and installer failures.'
+Write-Output 'PASS: real compiler version, install path with spaces, PATH export and failure handling.'

@@ -253,6 +253,18 @@ jobs:
           brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
           echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
 
+      - name: Test macOS signing with an untrusted synthetic identity
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: bash scripts/test-macos-signing-import.sh
+
+      - name: Install and test pinned Inno Setup compiler
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          ./scripts/install-innosetup.ps1
+          ./scripts/test-install-innosetup.ps1
+
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
         shell: bash
@@ -306,13 +318,6 @@ jobs:
         if: matrix.platform == 'windows'
         run: dotnet tool restore
 
-      - name: Install pinned Inno Setup wizard compiler
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          ./scripts/test-install-innosetup.ps1
-          ./scripts/install-innosetup.ps1
-
       - name: Package Windows executable, ZIP and EXE setup wizard
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -345,7 +350,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/test-macos-signing-import.sh
           bash scripts/test-macos-signing.sh
           bash scripts/macos/verify-keychain-signing.sh
           label='${{ needs.version.outputs.label }}'

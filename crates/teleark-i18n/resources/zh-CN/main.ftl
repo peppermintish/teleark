@@ -1123,6 +1123,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.4 · 发行环境兼容性
+
+    - 通过让 Inno Setup 6.7.3 的预处理器编译临时且不生成输出的版本检查脚本来验证版本。官方 ISCC.exe 没有可用的版本资源或 --version 选项。Windows 回归检查使用真实编译器并拒绝错误版本。
+    - 签名期间将临时 macOS 钥匙串加入用户搜索列表，完成后恢复原列表。保留 PKCS#12 导入失败时的 PEM 回退路径，并以固定身份验证两种发行文件的签名。
+    - 应用元数据为 0.5.4。SQLite 读写架构 23、从 0–22 自动升级的能力，以及受支持的凭据、加密文件、传输和恢复编码均保持不变。
+
     ## 0.5.3 · Windows 和 macOS 发行修复
 
     - 将 Inno Setup 安装到明确的用户目录，并导出经过验证的准确路径，修复 Windows 编译器查找失败的问题。

@@ -4,6 +4,7 @@ set +x
 set -euo pipefail
 umask 077
 root="$(cd "$(dirname "$0")/.." && pwd)"
+original_keychain_list="$(security list-keychains -d user)"
 stage="$(mktemp -d -t teleark-sign-import-test)"
 trap 'rm -rf "$stage"' EXIT
 fixture="$stage/repository"
@@ -48,6 +49,10 @@ fi
 grep -Fq 'does not contain the pinned macOS signing identity' "$stage/mismatch.log"
 if grep -Fq 'signing the app bundle' "$stage/mismatch.log"; then
   echo 'Signing started before rejecting the mismatched identity.' >&2
+  exit 1
+fi
+if [[ "$(security list-keychains -d user)" != "$original_keychain_list" ]]; then
+  echo 'Signing did not restore the original Keychain search list.' >&2
   exit 1
 fi
 echo 'PASS: untrusted pinned identity, PEM fallback, Keychain continuity and identity mismatch.'
