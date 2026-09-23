@@ -1,7 +1,7 @@
 //! Credential settings and retained migration feedback; all I/O runs in Runtime owners.
 use super::*;
 use gpui_kit::component::{Disableable as _, Sizable as _, button::ButtonVariants as _};
-use gpui_kit::{FontWeight, StatefulInteractiveElement as _};
+use gpui_kit::{FontWeight, Role, StatefulInteractiveElement as _, Toggled};
 use teleark_runtime::{KeychainStatus, VaultKeyProgress};
 
 pub(crate) struct KeychainUi {
@@ -195,6 +195,9 @@ impl TeleArkApp {
                 div()
                     .id("settings-keychain-toggle")
                     .debug_selector(|| "settings-keychain-toggle".into())
+                    .role(Role::Switch)
+                    .aria_label(self.tr("settings-keychain-title"))
+                    .aria_toggled(Toggled::from(enabled))
                     .flex()
                     .items_center()
                     .gap_4()
@@ -203,6 +206,13 @@ impl TeleArkApp {
                             .focusable()
                             .tab_index(0)
                             .on_click(cx.listener(|app, _, _, cx| app.request_keychain_toggle(cx)))
+                            .on_key_down(cx.listener(
+                                |app, event: &gpui_kit::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        app.request_keychain_toggle(cx);
+                                    }
+                                },
+                            ))
                     })
                     .child(
                         div()
@@ -539,6 +549,19 @@ mod tests {
             cx.simulate_click(switch.center(), gpui::Modifiers::default());
             app.read_with(cx, |app, _| {
                 assert!(app.keychain.status.expect("preview status").enabled);
+            });
+            app.update(cx, |app, cx| {
+                app.keychain
+                    .status
+                    .as_mut()
+                    .expect("preview status")
+                    .enabled = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("space");
+            app.read_with(cx, |app, _| {
+                assert!(app.keychain.status.expect("keyboard switch").enabled);
             });
         }
     }
