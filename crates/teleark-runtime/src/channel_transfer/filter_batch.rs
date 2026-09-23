@@ -46,31 +46,46 @@ pub struct ChannelBatchPreparationSnapshot {
 }
 
 #[derive(Clone)]
-pub struct ChannelBatchPreparation(Arc<Mutex<ChannelBatchPreparationSnapshot>>);
+pub struct ChannelBatchPreparation {
+    state: Arc<Mutex<ChannelBatchPreparationSnapshot>>,
+    changed: tokio::sync::watch::Sender<u64>,
+}
 
 impl Default for ChannelBatchPreparation {
     fn default() -> Self {
         let now = Instant::now();
-        Self(Arc::new(Mutex::new(ChannelBatchPreparationSnapshot {
-            phase: ChannelBatchPreparationPhase::Discovering,
-            examined: 0,
-            matched: 0,
-            started_at: now,
-            phase_started_at: now,
-            last_activity_at: now,
-            events: vec![(ChannelBatchPreparationPhase::Discovering, now)],
-        })))
+        Self {
+            state: Arc::new(Mutex::new(ChannelBatchPreparationSnapshot {
+                phase: ChannelBatchPreparationPhase::Discovering,
+                examined: 0,
+                matched: 0,
+                started_at: now,
+                phase_started_at: now,
+                last_activity_at: now,
+                events: vec![(ChannelBatchPreparationPhase::Discovering, now)],
+            })),
+            changed: tokio::sync::watch::channel(0).0,
+        }
     }
 }
 
 impl ChannelBatchPreparation {
     pub fn snapshot(&self) -> Option<ChannelBatchPreparationSnapshot> {
-        self.0.lock().ok().map(|state| state.clone())
+        self.state.lock().ok().map(|state| state.clone())
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    fn publish(&self) {
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     /// Once durable admission starts, task Stop owns cancellation instead.
     pub fn cancel(&self) {
-        if let Ok(mut state) = self.0.lock()
+        if let Ok(mut state) = self.state.lock()
             && matches!(
                 state.phase,
                 ChannelBatchPreparationPhase::Discovering
@@ -78,6 +93,8 @@ impl ChannelBatchPreparation {
             )
         {
             transition(&mut state, ChannelBatchPreparationPhase::Cancelled);
+            drop(state);
+            self.publish();
         }
     }
 
@@ -88,7 +105,7 @@ impl ChannelBatchPreparation {
         matched: usize,
     ) -> Result<(), ApplicationError> {
         let mut state = self
-            .0
+            .state
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
         if state.phase == ChannelBatchPreparationPhase::Cancelled {
@@ -100,12 +117,14 @@ impl ChannelBatchPreparation {
         state.examined = examined;
         state.matched = matched;
         state.last_activity_at = Instant::now();
+        drop(state);
+        self.publish();
         Ok(())
     }
 
     fn check(&self) -> Result<(), ApplicationError> {
         if self
-            .0
+            .state
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
             .phase
@@ -146,7 +165,7 @@ impl DesktopTransfers {
         progress: &ChannelBatchPreparation,
     ) -> Result<Option<FilteredChannelBatch>, ApplicationError> {
         let result = self.prepare_filtered_channel_batch(filter, progress);
-        if let Ok(mut state) = progress.0.lock() {
+        if let Ok(mut state) = progress.state.lock() {
             let phase = match &result {
                 Ok(_) => ChannelBatchPreparationPhase::Completed,
                 Err(error) if error.kind() == ApplicationErrorKind::Cancelled => {
@@ -157,6 +176,8 @@ impl DesktopTransfers {
             if state.phase != phase {
                 transition(&mut state, phase);
             }
+            drop(state);
+            progress.publish();
         }
         result
     }
@@ -470,6 +491,29 @@ fn create_batch_directory(root: &Path) -> Result<PathBuf, ApplicationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_count_and_cancel_transitions_wake_the_presentation() {
+        let progress = ChannelBatchPreparation::default();
+        let mut changes = progress.subscribe();
+        assert!(!changes.has_changed().expect("subscription"));
+        progress
+            .update(ChannelBatchPreparationPhase::Discovering, 256, 12)
+            .expect("count progress");
+        assert!(changes.has_changed().expect("count wake"));
+        changes.borrow_and_update();
+        progress
+            .update(ChannelBatchPreparationPhase::PreparingFolder, 256, 12)
+            .expect("phase progress");
+        assert!(changes.has_changed().expect("phase wake"));
+        changes.borrow_and_update();
+        progress.cancel();
+        assert!(changes.has_changed().expect("terminal wake"));
+        assert_eq!(
+            progress.snapshot().expect("snapshot").phase,
+            ChannelBatchPreparationPhase::Cancelled
+        );
+    }
 
     #[test]
     fn blocked_discovery_has_feedback_and_cancels_before_any_admission() {

@@ -67,6 +67,7 @@ impl TeleArkApp {
             kinds: self.channel_batch_kinds.iter().copied().collect(),
         };
         let progress = ChannelBatchPreparation::default();
+        let mut changes = progress.subscribe();
         self.filtered_channel_batch = progress.snapshot().map(|snapshot| FilteredBatchUi {
             account_id,
             chat_id,
@@ -81,25 +82,19 @@ impl TeleArkApp {
             async move { transfers.enqueue_filtered_channel_batch(filter, &progress) }
         });
         self.filtered_channel_batch_task = Some(cx.spawn(async move |this, cx| {
-            use std::{
-                future::{Future as _, poll_fn},
-                pin::Pin,
-                task::Poll,
-            };
             let mut work = work;
             let mut presented_second = 0;
             loop {
-                // Presentation-only: update phase durations even while Storage is
-                // blocked. This timer never drives discovery or the transfer queue.
-                let mut timer = cx.background_executor().timer(Duration::from_millis(100));
-                let result = poll_fn(|cx| {
-                    if let Poll::Ready(result) = Pin::new(&mut work).poll(cx) {
-                        Poll::Ready(Some(result))
-                    } else {
-                        Pin::new(&mut timer).poll(cx).map(|()| None)
-                    }
-                })
-                .await;
+                // Phase and count revisions repaint immediately. Only the
+                // displayed elapsed label needs a one-second clock.
+                let result = tokio::select! {
+                    result = &mut work => Some(result),
+                    changed = changes.changed() => {
+                        if changed.is_err() { return; }
+                        None
+                    },
+                    () = cx.background_executor().timer(Duration::from_secs(1)) => None,
+                };
                 let Some(this) = this.upgrade() else {
                     progress.cancel();
                     return;

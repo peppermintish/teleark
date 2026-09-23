@@ -25,6 +25,7 @@ const PROBE_WORKERS: usize = 4;
 const PROBE_QUEUE: usize = 32;
 const MAX_PROBE_DURATION: Duration = Duration::from_secs(15);
 const WATCHED_QUIET_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const WATCH_STARTUP_RECHECK: Duration = Duration::from_secs(2);
 const UNWATCHED_VISIBLE_INTERVAL: Duration = Duration::from_secs(30);
 const UNWATCHED_BACKGROUND_INTERVAL: Duration = Duration::from_secs(2 * 60);
 const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -321,6 +322,7 @@ struct Entry {
     observation: LocalDownloadObservation,
     due: Option<Instant>,
     expires: Option<Instant>,
+    warmup_due: Option<Instant>,
     token: Option<u64>,
     dirty_after_probe: bool,
 }
@@ -375,6 +377,7 @@ impl Observations {
                 observation,
                 due: Some(now),
                 expires: None,
+                warmup_due: None,
                 token: None,
                 dirty_after_probe: false,
             },
@@ -406,6 +409,12 @@ impl Observations {
     fn prioritize(&mut self, chat: Option<i64>, now: Instant) {
         for (path, entry) in &mut self.entries {
             if Some(entry.observation.file.chat_id) == chat && entry.token.is_none() {
+                if path
+                    .parent()
+                    .is_some_and(|parent| self.watched_parents.contains(parent))
+                {
+                    entry.warmup_due = Some(now + WATCH_STARTUP_RECHECK);
+                }
                 if let Some(due) = entry.due {
                     self.due.remove(&(due, path.clone()));
                 }
@@ -450,18 +459,32 @@ impl Observations {
         })
     }
 
-    fn set_watch_roots(&mut self, roots: &BTreeMap<PathBuf, PathBuf>, now: Instant) {
+    fn set_watch_roots(
+        &mut self,
+        roots: &BTreeMap<PathBuf, PathBuf>,
+        selected_chat: Option<i64>,
+        now: Instant,
+    ) {
         let covered: BTreeSet<_> = roots.keys().cloned().collect();
         if self.watched_parents != covered {
             let lost: BTreeSet<_> = self.watched_parents.difference(&covered).cloned().collect();
             let gained: BTreeSet<_> = covered.difference(&self.watched_parents).cloned().collect();
             self.watched_parents = covered;
             for (path, entry) in &mut self.entries {
-                if !path
-                    .parent()
-                    .is_some_and(|parent| lost.contains(parent) || gained.contains(parent))
-                {
+                let Some(parent) = path.parent() else {
                     continue;
+                };
+                let gained_here = gained.contains(parent);
+                let lost_here = lost.contains(parent);
+                if !gained_here && !lost_here {
+                    continue;
+                }
+                if lost_here {
+                    entry.warmup_due = None;
+                } else if selected_chat == Some(entry.observation.file.chat_id) {
+                    // A second one-time check covers the interval while the
+                    // platform watch stream is becoming active after registration.
+                    entry.warmup_due = Some(now + WATCH_STARTUP_RECHECK);
                 }
                 if entry.observation.presence != LocalFilePresence::Checking {
                     entry.observation.presence = LocalFilePresence::Checking;
@@ -590,7 +613,7 @@ impl Observations {
         } else {
             presence
         };
-        let due = now
+        let periodic_due = now
             + if path
                 .parent()
                 .is_some_and(|parent| self.watched_parents.contains(parent))
@@ -601,6 +624,10 @@ impl Observations {
             } else {
                 UNWATCHED_BACKGROUND_INTERVAL
             };
+        let due = entry
+            .warmup_due
+            .take()
+            .map_or(periodic_due, |warmup| warmup.min(periodic_due));
         entry.due = Some(due);
         self.due.insert((due, path.clone()));
         if let Some(expires) = entry.expires {
@@ -690,7 +717,7 @@ fn controller(
         context = requested;
         if shared.watch_failed.swap(false, Ordering::AcqRel) {
             watch_roots.clear();
-            observations.set_watch_roots(&watch_roots, now);
+            observations.set_watch_roots(&watch_roots, context.chat, now);
             watch_retry = Some(now + WATCH_RETRY_INTERVAL);
             watch_broken = true;
         }
@@ -772,7 +799,7 @@ fn controller(
                 roots,
             }) => {
                 if watch_epoch == epoch && !watch_broken {
-                    observations.set_watch_roots(&roots, Instant::now());
+                    observations.set_watch_roots(&roots, context.chat, Instant::now());
                     watch_roots = roots;
                     let requested = shared
                         .watch_request

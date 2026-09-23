@@ -153,7 +153,8 @@ impl TeleArkApp {
             };
             let mut work = work;
             loop {
-                let mut timer = cx.background_executor().timer(Duration::from_millis(150));
+                // Only the active elapsed-time label needs a presentation clock.
+                let mut timer = cx.background_executor().timer(Duration::from_secs(1));
                 let result = poll_fn(|cx| {
                     if let Poll::Ready(result) = Pin::new(&mut work).poll(cx) {
                         Poll::Ready(Some(result))

@@ -126,6 +126,7 @@ fn watcher_handoff_closes_the_gap_after_an_initial_probe() {
     let registered = now + Duration::from_millis(1);
     model.set_watch_roots(
         &BTreeMap::from([(dir.path().to_path_buf(), dir.path().to_path_buf())]),
+        Some(20),
         registered,
     );
     assert_eq!(
@@ -142,7 +143,15 @@ fn watcher_handoff_closes_the_gap_after_an_initial_probe() {
     );
     assert_eq!(
         model.entries[&file.destination].due,
-        Some(registered + WATCHED_QUIET_INTERVAL)
+        Some(registered + WATCH_STARTUP_RECHECK),
+        "the selected channel gets one post-registration safety check"
+    );
+    let warmup = registered + WATCH_STARTUP_RECHECK;
+    let check = next(&mut model, warmup);
+    model.complete(check, warmup, LocalFilePresence::Missing, Some(20), warmup);
+    assert_eq!(
+        model.entries[&file.destination].due,
+        Some(warmup + WATCHED_QUIET_INTERVAL)
     );
     model.expire(registered + UNWATCHED_VISIBLE_INTERVAL);
     assert_eq!(
@@ -161,6 +170,7 @@ fn filesystem_event_rejects_inflight_result_and_watcher_loss_rechecks() {
     model.insert(file.clone(), now);
     model.set_watch_roots(
         &BTreeMap::from([(dir.path().to_path_buf(), dir.path().to_path_buf())]),
+        Some(20),
         now,
     );
     let first = next(&mut model, now);
@@ -198,7 +208,11 @@ fn filesystem_event_rejects_inflight_result_and_watcher_loss_rechecks() {
         model.entries[&file.destination].observation.presence,
         LocalFilePresence::Missing
     );
-    model.set_watch_roots(&BTreeMap::new(), fresh_at + Duration::from_secs(1));
+    model.set_watch_roots(
+        &BTreeMap::new(),
+        Some(20),
+        fresh_at + Duration::from_secs(1),
+    );
     assert_eq!(
         model.entries[&file.destination].due,
         Some(fresh_at + Duration::from_secs(1)),
@@ -485,9 +499,9 @@ fn deleting_native_history_and_then_the_file_updates_the_existing_observation() 
         "history deletion retains the download"
     );
     std::fs::remove_file(&file.destination).expect("external deletion");
-    // FSEvents can be delayed under the full serial suite. This stays far
-    // below the five-minute quiet reconciliation, so it still proves the
-    // native event path rather than the fallback.
+    // FSEvents can be delayed under the full serial suite. The native event
+    // or one-time post-registration check must resolve this well before quiet
+    // reconciliation, even after transfer history has been removed.
     wait_within(Duration::from_secs(15), || {
         monitor
             .take_updates()
