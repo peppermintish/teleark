@@ -95,6 +95,26 @@ impl CleanupSignal {
         }
         Ok(())
     }
+
+    pub(super) fn wait_for_all_writers(
+        &self,
+        scheduled: &Mutex<BTreeSet<u64>>,
+    ) -> Result<(), ApplicationError> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut gate = self.gate.lock().map_err(persistence)?;
+        while !scheduled.lock().map_err(persistence)?.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(conflict());
+            }
+            gate = self
+                .changed
+                .wait_timeout(gate, remaining)
+                .map_err(persistence)?
+                .0;
+        }
+        Ok(())
+    }
 }
 struct Work {
     id: u64,
@@ -339,6 +359,7 @@ impl Owner {
             for (_, control) in &rows {
                 control.store(CONTROL_CANCELLED, Ordering::Release);
             }
+            self.context.library.download_slots.wake();
             let mut records = Vec::with_capacity(rows.len());
             for (mut row, _) in rows {
                 row.state = ChannelDownloadState::Cancelled;
@@ -432,6 +453,7 @@ impl Owner {
                 );
                 self.control(saved.task_id)?
                     .store(CONTROL_CANCELLED, Ordering::Release);
+                self.context.library.download_slots.wake();
             }
         }
         Ok(())
@@ -544,6 +566,7 @@ impl Owner {
         // This owner serializes cleanup commands. No additional fallible read
         // may delay signalling a cancellation whose commit already succeeded.
         control.store(CONTROL_CANCELLED, Ordering::Release);
+        self.context.library.download_slots.wake();
         let saved = NativeDownloadCleanup {
             task_id: id,
             codec_version: 1,

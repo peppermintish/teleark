@@ -486,6 +486,10 @@ impl DownloadObserver for RuntimeDownloadObserver {
         }
     }
 
+    fn control_updates(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.library.download_slots.subscribe())
+    }
+
     fn receipt_observer(&self) -> Option<Arc<dyn teleark_telegram::DownloadReceiptObserver>> {
         Some(self.receipts.clone())
     }
@@ -1397,22 +1401,10 @@ impl DesktopTransfers {
                 return Err(error);
             }
         }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if self
-                .inner
-                .scheduled
-                .lock()
-                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
-                .is_empty()
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        self.inner
+            .pump
+            .cleanup_wake
+            .wait_for_all_writers(&self.inner.scheduled)
     }
 
     fn require_active_account(&self, account_id: Option<i64>) -> Result<(), ApplicationError> {
@@ -1480,6 +1472,7 @@ impl DesktopTransfers {
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::NotFound))?;
         persist_snapshot(&self.inner.library, &snapshot)?;
         control.store(control_value, Ordering::Release);
+        self.inner.library.download_slots.wake();
         Ok(snapshot)
     }
 
@@ -1617,6 +1610,7 @@ impl QueuePump {
 impl Drop for TransferWorkerInner {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.library.download_slots.wake();
         self.pump.cleanup_wake.notify();
         // Do not wait for Telegram or SQLite from a frontend destructor. Submit
         // the latest sample without copying replay histories; a saturated queue

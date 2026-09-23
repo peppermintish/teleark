@@ -1,6 +1,52 @@
 //! Session admission is independent from retained operation key leases.
 use super::*;
+use std::sync::Condvar;
 use std::sync::atomic::AtomicUsize;
+use std::time::Instant;
+
+#[derive(Default)]
+pub(super) struct PendingTransfers {
+    count: AtomicUsize,
+    gate: Mutex<()>,
+    changed: Condvar,
+}
+
+impl PendingTransfers {
+    pub(super) fn load(&self, order: Ordering) -> usize {
+        self.count.load(order)
+    }
+
+    fn enter(&self) {
+        self.count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn leave(&self) {
+        let gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.changed.notify_all();
+        }
+        drop(gate);
+    }
+
+    pub(super) fn wait_until_empty(&self, deadline: Instant) -> Result<(), ApplicationError> {
+        let mut gate = self
+            .gate
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        while self.count.load(Ordering::Acquire) != 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+            }
+            gate = self
+                .changed
+                .wait_timeout(gate, remaining)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
+                .0;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Default)]
 pub(super) struct KeyLease {
@@ -15,7 +61,7 @@ pub(super) struct VaultSession {
     keys: KeyLease,
     pub status: VaultStatus,
     pub closing: bool,
-    pub pending_transfers: Arc<AtomicUsize>,
+    pub pending_transfers: Arc<PendingTransfers>,
 }
 
 pub(super) struct VaultEnvelope {
@@ -34,7 +80,7 @@ impl VaultSession {
         Self {
             generation: 0,
             closing: false,
-            pending_transfers: Arc::new(AtomicUsize::new(0)),
+            pending_transfers: Arc::new(PendingTransfers::default()),
             status: status_for(record.as_ref(), true),
             keys: KeyLease {
                 record,
@@ -95,7 +141,7 @@ impl VaultSession {
             ));
         }
         let admission = command.is_transfer().then(|| {
-            self.pending_transfers.fetch_add(1, Ordering::AcqRel);
+            self.pending_transfers.enter();
             WorkPermit(self.pending_transfers.clone())
         });
         Ok(VaultEnvelope {
@@ -180,10 +226,10 @@ impl VaultCommand {
     }
 }
 
-struct WorkPermit(Arc<AtomicUsize>);
+struct WorkPermit(Arc<PendingTransfers>);
 impl Drop for WorkPermit {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.leave();
     }
 }
 
@@ -191,6 +237,25 @@ impl Drop for WorkPermit {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn last_transfer_owner_wakes_shutdown_waiter() {
+        let session = VaultSession::new(None);
+        let permit = session.admit(delete()).expect("admit transfer");
+        let pending = session.pending_transfers.clone();
+        let (done, result) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            done.send(pending.wait_until_empty(Instant::now() + Duration::from_secs(2)))
+                .expect("observer");
+        });
+        assert!(result.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(permit);
+        result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement wake")
+            .expect("all owners retired");
+        waiter.join().expect("waiter");
+    }
 
     fn download() -> VaultCommand {
         VaultCommand::Download {

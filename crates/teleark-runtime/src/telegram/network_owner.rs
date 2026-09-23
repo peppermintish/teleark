@@ -21,11 +21,13 @@ impl Endpoint {
         bandwidth: teleark_telegram::TransferBandwidth,
         lifecycle: lifecycle::Lifecycle,
         authorization: teleark_telegram::AuthorizationMonitor,
+        qr_login_signal: teleark_telegram::QrLoginSignal,
     ) -> Result<Self, ApplicationError> {
         Self::spawn_with(route, monitor, generation, move |receiver, mut state| {
             state.bandwidth = bandwidth;
             state.lifecycle = lifecycle;
             state.authorization = authorization;
+            state.qr_login_signal = qr_login_signal;
             telegram_loop(receiver, state)
         })
     }
@@ -155,6 +157,7 @@ impl DesktopTelegram {
         let monitor = NetworkMonitor::new(&route);
         let lifecycle = lifecycle::Lifecycle::default();
         let authorization = teleark_telegram::AuthorizationMonitor::default();
+        let qr_login_signal = teleark_telegram::QrLoginSignal::default();
         let endpoint = Endpoint::spawn(
             route.clone(),
             monitor.clone(),
@@ -162,6 +165,7 @@ impl DesktopTelegram {
             bandwidth.clone(),
             lifecycle.clone(),
             authorization.clone(),
+            qr_login_signal.clone(),
         )?;
         Ok(Self {
             #[cfg(test)]
@@ -169,6 +173,7 @@ impl DesktopTelegram {
             inner: Arc::new(TelegramWorkerInner {
                 lifecycle,
                 authorization,
+                qr_login_signal,
                 bandwidth,
                 endpoint: Mutex::new(Some(endpoint)),
                 changing: AtomicBool::new(false),
@@ -291,6 +296,7 @@ impl DesktopTelegram {
             self.inner.bandwidth.clone(),
             self.inner.lifecycle.clone(),
             self.inner.authorization.clone(),
+            self.inner.qr_login_signal.clone(),
         ) {
             Ok(endpoint) => endpoint,
             Err(error) => {

@@ -47,11 +47,13 @@ pub use bandwidth::{
 };
 mod authorization;
 mod connection;
+mod qr_login_signal;
 pub use authorization::{
     AuthorizationMonitor, AuthorizationPhase, AuthorizationSnapshot, AuthorizationUpdates,
 };
 use byte_progress::UploadReader;
 pub use byte_progress::{ByteTransferEvent, ByteTransferObserver};
+pub use qr_login_signal::QrLoginSignal;
 
 mod channel_sync;
 pub mod network;
@@ -136,6 +138,14 @@ pub trait DownloadReceiptObserver: Send + Sync {
 
 pub trait DownloadObserver: Send + Sync {
     fn control(&self) -> DownloadControl;
+    /// Optional wake for pause/cancel/stop. Without one, active work uses a
+    /// slower compatibility check while waiting for an RPC or retry deadline.
+    fn control_updates(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+    fn control_poll_fallback(&self) -> bool {
+        true
+    }
     fn progressed(&self, transferred_bytes: u64);
     fn receipt_observer(&self) -> Option<Arc<dyn DownloadReceiptObserver>> {
         None
@@ -214,6 +224,7 @@ pub struct TelegramConfig {
     pub network_monitor: network::NetworkMonitor,
     pub network_generation: u64,
     pub authorization_monitor: AuthorizationMonitor,
+    pub qr_login_signal: QrLoginSignal,
 }
 
 /// Stable error categories used by Core and frontends.
@@ -534,7 +545,7 @@ pub struct TelegramConnection {
     gateway_url: String,
     session: Arc<FileSession>,
     api_id: i32,
-    qr_login_update: Arc<AtomicBool>,
+    qr_login_signal: QrLoginSignal,
     download_flood_gate: Arc<DownloadFloodGate>,
     upload_flood_gate: Arc<DownloadFloodGate>,
     bandwidth: TransferBandwidth,
@@ -637,8 +648,8 @@ impl TelegramConnection {
         // hints. Durable differences, not these hints, advance the catalog.
         let channel_updates = ChannelUpdateSignals::default();
         let channel_signal = channel_updates.clone();
-        let qr_login_update = Arc::new(AtomicBool::new(false));
-        let drain_signal = Arc::clone(&qr_login_update);
+        let qr_login_signal = config.qr_login_signal.clone();
+        let drain_signal = qr_login_signal.clone();
         let authorization_monitor = config.authorization_monitor.clone();
         let shared_flood_gate = Arc::new(DownloadFloodGate::default());
         let update_drain = tokio::spawn(async move {
@@ -655,7 +666,7 @@ impl TelegramConnection {
                 }
                 channel_signal.observe(&update);
                 if contains_qr_login_update(&update) {
-                    drain_signal.store(true, Ordering::Release);
+                    drain_signal.announce();
                 }
             }
         });
@@ -667,7 +678,7 @@ impl TelegramConnection {
             gateway_url: gateway.proxy_url,
             session,
             api_id: config.api_id,
-            qr_login_update,
+            qr_login_signal,
             download_flood_gate: Arc::clone(&shared_flood_gate),
             upload_flood_gate: shared_flood_gate,
             bandwidth: TransferBandwidth::default(),
@@ -730,7 +741,7 @@ impl TelegramConnection {
         if api_hash.trim().is_empty() {
             return Err(TelegramError::new(TelegramErrorKind::InvalidConfiguration));
         }
-        self.qr_login_update.store(false, Ordering::Release);
+        self.qr_login_signal.clear();
         let request = tl::functions::auth::ExportLoginToken {
             api_id: self.api_id,
             api_hash: api_hash.to_owned(),
@@ -743,7 +754,7 @@ impl TelegramConnection {
     /// Returns whether Telegram announced that the active QR token changed or
     /// was accepted. Reading consumes the signal.
     pub fn take_qr_login_update(&self) -> bool {
-        self.qr_login_update.swap(false, Ordering::AcqRel)
+        self.qr_login_signal.take()
     }
 
     async fn resolve_qr_response(
@@ -1044,6 +1055,7 @@ impl TelegramConnection {
             let mut timed_out_slots = vec![false; clients.len()];
             let mut inflight_downloads = JoinSet::new();
             let flood_gate = Arc::clone(&self.download_flood_gate);
+            let mut control_updates = observer.control_updates();
             loop {
                 check_download_control(observer)?;
                 let desired_inflight = observer
@@ -1101,11 +1113,21 @@ impl TelegramConnection {
                     });
                 }
                 if inflight_downloads.is_empty() && missing_parts.is_empty() { break; }
-                // Keep cancellation responsive and drain healthy completions while a
-                // failed part backs off. The queue and JoinSet remain bounded.
+                // Join completions, control changes and actual retry/FloodWait
+                // deadlines wake the owner. No short transfer polling is needed.
+                let retry_at = if inflight_downloads.len() < desired_inflight {
+                    let flood_ready = Instant::now() + flood_gate.remaining();
+                    missing_parts
+                        .iter()
+                        .map(|part| part.ready_at.max(flood_ready))
+                        .min()
+                } else {
+                    None
+                };
                 let completion = tokio::select! {
                     joined = inflight_downloads.join_next(), if !inflight_downloads.is_empty() => joined,
-                    () = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                    () = wait_download_retry(retry_at) => continue,
+                    () = wait_download_control(&mut control_updates, observer.control_poll_fallback()) => continue,
                 };
                 let (
                     part_index,
@@ -1486,6 +1508,10 @@ impl DownloadObserver for UncontrolledDownload {
     }
 
     fn progressed(&self, _transferred_bytes: u64) {}
+
+    fn control_poll_fallback(&self) -> bool {
+        false
+    }
 }
 
 fn check_download_control(observer: &dyn DownloadObserver) -> Result<(), TelegramError> {
@@ -1495,6 +1521,29 @@ fn check_download_control(observer: &dyn DownloadObserver) -> Result<(), Telegra
             Err(TelegramError::new(TelegramErrorKind::Interrupted))
         }
         DownloadControl::Cancel => Err(TelegramError::new(TelegramErrorKind::Cancelled)),
+    }
+}
+
+async fn wait_download_retry(ready_at: Option<Instant>) {
+    match ready_at {
+        Some(ready_at) => tokio::time::sleep_until(ready_at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_download_control(
+    updates: &mut Option<tokio::sync::watch::Receiver<u64>>,
+    fallback: bool,
+) {
+    match updates {
+        Some(receiver) => {
+            if receiver.changed().await.is_err() {
+                // Compatibility fallback if the observer owner disappeared.
+                *updates = None;
+            }
+        }
+        None if fallback => tokio::time::sleep(Duration::from_secs(5)).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -2451,6 +2500,7 @@ mod tests {
             network_monitor: network::NetworkMonitor::new(&network::NetworkRoute::Direct),
             network_generation: 0,
             authorization_monitor: Default::default(),
+            qr_login_signal: Default::default(),
         })
         .expect_err("zero API ID must fail validation");
         assert_eq!(error.kind(), TelegramErrorKind::InvalidConfiguration);

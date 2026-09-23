@@ -396,7 +396,7 @@ impl TeleArkApp {
                 }
                 self.telegram_auth = state;
                 if matches!(self.telegram_auth, TelegramAuthState::QrCode { .. }) {
-                    self.schedule_qr_login_poll(cx);
+                    self.watch_qr_login(cx);
                 } else if matches!(self.telegram_auth, TelegramAuthState::Authorized(_)) {
                     self.qr_poll_task = None;
                     self.load_account_avatar(cx);
@@ -425,15 +425,37 @@ impl TeleArkApp {
         cx.notify();
     }
 
-    pub(super) fn schedule_qr_login_poll(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn watch_qr_login(&mut self, cx: &mut Context<Self>) {
         let Some(telegram) = self.telegram.clone() else {
             return;
         };
+        let TelegramAuthState::QrCode {
+            expires_at_unix_seconds,
+            ..
+        } = &self.telegram_auth
+        else {
+            return;
+        };
+        let expires_at_unix_seconds = *expires_at_unix_seconds;
+        let mut updates = telegram.qr_login_updates();
         let generation = self.telegram_login_generation;
         self.qr_poll_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(750))
-                .await;
+            // Telegram's native update is the normal wake. Expiry covers a
+            // missed update, sleep or an already expired token.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .min(i64::MAX as u64) as i64;
+            let remaining =
+                Duration::from_secs(expires_at_unix_seconds.saturating_sub(now).max(0) as u64);
+            let pending = *updates.borrow();
+            if !pending {
+                tokio::select! {
+                    changed = updates.changed() => if changed.is_err() { return; },
+                    () = cx.background_executor().timer(remaining) => {},
+                }
+            }
             let poll = cx.background_spawn(async move { telegram.poll_qr_login() });
             let result = poll.await;
             let Some(this) = this.upgrade() else { return };

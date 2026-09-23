@@ -126,6 +126,7 @@ pub struct DesktopTelegram {
 struct TelegramWorkerInner {
     lifecycle: lifecycle::Lifecycle,
     authorization: teleark_telegram::AuthorizationMonitor,
+    qr_login_signal: teleark_telegram::QrLoginSignal,
     endpoint: Mutex<Option<network_owner::Endpoint>>,
     bandwidth: teleark_telegram::TransferBandwidth,
     changing: std::sync::atomic::AtomicBool,
@@ -311,6 +312,7 @@ enum LoginState {
 struct WorkerState {
     lifecycle: lifecycle::Lifecycle,
     authorization: teleark_telegram::AuthorizationMonitor,
+    qr_login_signal: teleark_telegram::QrLoginSignal,
     bandwidth: teleark_telegram::TransferBandwidth,
     network_route: NetworkRoute,
     network_monitor: NetworkMonitor,
@@ -329,6 +331,7 @@ impl Default for WorkerState {
         Self {
             lifecycle: lifecycle::Lifecycle::default(),
             authorization: Default::default(),
+            qr_login_signal: Default::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             network_route: NetworkRoute::Direct,
             network_monitor: NetworkMonitor::new(&NetworkRoute::Direct),
@@ -722,6 +725,11 @@ impl DesktopTelegram {
         self.request("poll_qr_login", |reply| TelegramRequest::PollQrLogin {
             reply,
         })
+    }
+
+    /// A coalesced native update signal; token expiry remains the safety deadline.
+    pub fn qr_login_updates(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.qr_login_signal.subscribe()
     }
 
     pub fn submit_code(
@@ -1172,6 +1180,7 @@ impl WorkerState {
         Self {
             lifecycle: self.lifecycle.clone(),
             authorization: self.authorization.clone(),
+            qr_login_signal: self.qr_login_signal.clone(),
             network_route: self.network_route.clone(),
             network_monitor: self.network_monitor.clone(),
             network_generation: self.network_generation,
@@ -1720,6 +1729,7 @@ async fn connect(
         network_monitor: state.network_monitor.clone(),
         network_generation: state.network_generation,
         authorization_monitor: state.authorization.clone(),
+        qr_login_signal: state.qr_login_signal.clone(),
     })
     .await
     .map_err(map_telegram_error)?
@@ -2336,6 +2346,7 @@ async fn native_download_lookup<T>(
     observer: Option<&dyn DownloadObserver>,
 ) -> Result<T, ApplicationError> {
     tokio::pin!(lookup);
+    let mut changes = observer.and_then(DownloadObserver::control_updates);
     loop {
         if observer.is_some_and(|observer| {
             observer.control() != teleark_telegram::DownloadControl::Continue
@@ -2344,8 +2355,23 @@ async fn native_download_lookup<T>(
         }
         tokio::select! {
             result = &mut lookup => return result,
-            () = tokio::time::sleep(Duration::from_millis(20)) => {},
+            () = wait_native_download_control(&mut changes, observer.is_some()) => {},
         }
+    }
+}
+
+async fn wait_native_download_control(
+    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+    fallback: bool,
+) {
+    match changes {
+        Some(receiver) => {
+            if receiver.changed().await.is_err() {
+                *changes = None;
+            }
+        }
+        None if fallback => tokio::time::sleep(Duration::from_secs(5)).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -2516,14 +2542,20 @@ mod tests {
     #[test]
     fn native_metadata_lookup_stops_without_waiting_for_a_network_reply() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        struct Observer(AtomicBool);
+        struct Observer {
+            cancelled: AtomicBool,
+            wake: tokio::sync::watch::Sender<u64>,
+        }
         impl DownloadObserver for Observer {
             fn control(&self) -> teleark_telegram::DownloadControl {
-                if self.0.load(Ordering::Acquire) {
+                if self.cancelled.load(Ordering::Acquire) {
                     teleark_telegram::DownloadControl::Cancel
                 } else {
                     teleark_telegram::DownloadControl::Continue
                 }
+            }
+            fn control_updates(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+                Some(self.wake.subscribe())
             }
             fn progressed(&self, _: u64) {}
         }
@@ -2532,9 +2564,13 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let observer = Observer(AtomicBool::new(false));
+            let observer = Observer {
+                cancelled: AtomicBool::new(false),
+                wake: tokio::sync::watch::channel(0).0,
+            };
             let lookup = std::future::poll_fn(|_| {
-                observer.0.store(true, Ordering::Release);
+                observer.cancelled.store(true, Ordering::Release);
+                observer.wake.send_modify(|revision| *revision += 1);
                 std::task::Poll::<Result<(), ApplicationError>>::Pending
             });
             let result = tokio::time::timeout(
@@ -2612,6 +2648,7 @@ mod tests {
         let inner = TelegramWorkerInner {
             lifecycle: lifecycle::Lifecycle::default(),
             authorization: Default::default(),
+            qr_login_signal: Default::default(),
             bandwidth: teleark_telegram::TransferBandwidth::default(),
             endpoint: Mutex::new(Some(network_owner::Endpoint {
                 sender,

@@ -45,24 +45,17 @@ impl DesktopVault {
         self.inner.upload_controls.exit_pause.begin();
         let account = self.inner.lifecycle.snapshot().1;
         let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(account) = account {
-                self.submit(|reply| VaultCommand::PauseForShutdown { account, reply })?
-                    .wait()?;
-            }
-            if pending.load(Ordering::Acquire) == 0 {
-                // The last owner may have admitted a saved selection during our first pass.
-                if let Some(account) = account {
-                    self.submit(|reply| VaultCommand::PauseForShutdown { account, reply })?
-                        .wait()?;
-                }
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
-            }
-            thread::sleep(Duration::from_millis(100));
+        if let Some(account) = account {
+            self.submit(|reply| VaultCommand::PauseForShutdown { account, reply })?
+                .wait()?;
         }
+        pending.wait_until_empty(deadline)?;
+        // The last owner may have admitted a saved selection during the first pass.
+        if let Some(account) = account {
+            self.submit(|reply| VaultCommand::PauseForShutdown { account, reply })?
+                .wait()?;
+        }
+        Ok(())
     }
 
     /// Keep already-paused work paused when an exit is abandoned after an error.
