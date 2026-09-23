@@ -378,6 +378,8 @@ pub fn classify_file(path: &Path) -> FileKind {
 }
 
 /// Ready-to-use local library facade for desktop frontends.
+type DownloadedFilesListener = dyn Fn() + Send + Sync;
+
 #[derive(Clone)]
 pub struct DesktopLibrary {
     credential_store: credential_store::CredentialStore,
@@ -387,6 +389,8 @@ pub struct DesktopLibrary {
     database_path: Arc<PathBuf>,
     pub(crate) bandwidth: teleark_telegram::TransferBandwidth,
     downloaded_files_revision: Arc<std::sync::atomic::AtomicU64>,
+    downloaded_files_listeners:
+        Arc<std::sync::Mutex<Vec<std::sync::Weak<DownloadedFilesListener>>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -416,6 +420,7 @@ impl DesktopLibrary {
             worker,
             database_path: Arc::new(path.to_owned()),
             downloaded_files_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            downloaded_files_listeners: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -446,6 +451,7 @@ impl DesktopLibrary {
             worker,
             database_path: Arc::new(path),
             downloaded_files_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            downloaded_files_listeners: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -691,6 +697,32 @@ impl DesktopLibrary {
     fn downloaded_files_changed(&self) {
         self.downloaded_files_revision
             .fetch_add(1, std::sync::atomic::Ordering::Release);
+        let listeners = {
+            let mut listeners = self
+                .downloaded_files_listeners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut live = Vec::with_capacity(listeners.len());
+            listeners.retain(|listener| {
+                if let Some(listener) = listener.upgrade() {
+                    live.push(listener);
+                    true
+                } else {
+                    false
+                }
+            });
+            live
+        };
+        for listener in listeners {
+            listener();
+        }
+    }
+
+    fn subscribe_downloaded_files(&self, listener: &Arc<DownloadedFilesListener>) {
+        self.downloaded_files_listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::downgrade(listener));
     }
 
     pub(crate) fn delete_vault_transfer(

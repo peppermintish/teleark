@@ -50,7 +50,7 @@ fn removed_history_does_not_stop_rechecking_a_previously_present_path() {
     // Subsequent inventory reads contain no record: transfer history was deleted.
     // The retained path must still be rechecked without another inventory insert.
     std::fs::remove_file(&file.destination).expect("external deletion");
-    let later = now + VISIBLE_INTERVAL;
+    let later = now + UNWATCHED_VISIBLE_INTERVAL;
     let job = next(&mut model, later);
     model.complete(
         job,
@@ -64,7 +64,7 @@ fn removed_history_does_not_stop_rechecking_a_previously_present_path() {
         LocalFilePresence::Missing
     );
     std::fs::write(&file.destination, b"different").expect("changed output");
-    let later = later + VISIBLE_INTERVAL;
+    let later = later + UNWATCHED_VISIBLE_INTERVAL;
     let job = next(&mut model, later);
     model.complete(
         job,
@@ -88,8 +88,8 @@ fn stale_presence_expires_even_when_a_probe_never_finishes() {
     model.insert(file.clone(), now);
     let job = next(&mut model, now);
     model.complete(job, now, LocalFilePresence::Present, Some(20), now);
-    let blocked = next(&mut model, now + VISIBLE_INTERVAL);
-    model.expire(now + MAX_AGE);
+    let blocked = next(&mut model, now + UNWATCHED_VISIBLE_INTERVAL);
+    model.expire(now + UNWATCHED_VISIBLE_INTERVAL);
     assert_eq!(
         model.entries[&file.destination].observation.presence,
         LocalFilePresence::Checking
@@ -97,15 +97,150 @@ fn stale_presence_expires_even_when_a_probe_never_finishes() {
     // An excessively late response cannot restore an old positive observation.
     model.complete(
         blocked,
-        now + VISIBLE_INTERVAL,
+        now + UNWATCHED_VISIBLE_INTERVAL,
         LocalFilePresence::Present,
         Some(20),
-        now + MAX_AGE * 2,
+        now + UNWATCHED_VISIBLE_INTERVAL + MAX_PROBE_DURATION * 2,
     );
     assert_eq!(
         model.entries[&file.destination].observation.presence,
         LocalFilePresence::Unavailable
     );
+}
+
+#[test]
+fn watcher_handoff_closes_the_gap_after_an_initial_probe() {
+    let dir = tempfile::tempdir().expect("fixture");
+    let file = record(dir.path(), 1);
+    let now = Instant::now();
+    let mut model = Observations::default();
+    model.insert(file.clone(), now);
+    let initial = next(&mut model, now);
+    model.complete(initial, now, LocalFilePresence::Present, Some(20), now);
+    assert_eq!(
+        model.entries[&file.destination].due,
+        Some(now + UNWATCHED_VISIBLE_INTERVAL)
+    );
+
+    // A file may disappear between the first probe and watcher registration.
+    let registered = now + Duration::from_millis(1);
+    model.set_watch_roots(
+        &BTreeMap::from([(dir.path().to_path_buf(), dir.path().to_path_buf())]),
+        registered,
+    );
+    assert_eq!(
+        model.entries[&file.destination].observation.presence,
+        LocalFilePresence::Checking
+    );
+    let check = next(&mut model, registered);
+    model.complete(
+        check,
+        registered,
+        LocalFilePresence::Missing,
+        Some(20),
+        registered,
+    );
+    assert_eq!(
+        model.entries[&file.destination].due,
+        Some(registered + WATCHED_QUIET_INTERVAL)
+    );
+    model.expire(registered + UNWATCHED_VISIBLE_INTERVAL);
+    assert_eq!(
+        model.entries[&file.destination].observation.presence,
+        LocalFilePresence::Missing,
+        "a healthy watcher does not cause short-interval disk checks"
+    );
+}
+
+#[test]
+fn filesystem_event_rejects_inflight_result_and_watcher_loss_rechecks() {
+    let dir = tempfile::tempdir().expect("fixture");
+    let file = record(dir.path(), 1);
+    let now = Instant::now();
+    let mut model = Observations::default();
+    model.insert(file.clone(), now);
+    model.set_watch_roots(
+        &BTreeMap::from([(dir.path().to_path_buf(), dir.path().to_path_buf())]),
+        now,
+    );
+    let first = next(&mut model, now);
+    model.complete(first, now, LocalFilePresence::Present, Some(20), now);
+    let event = now + Duration::from_secs(1);
+    model.invalidate_paths(std::slice::from_ref(&file.destination), event);
+    assert_eq!(
+        model.entries[&file.destination].observation.presence,
+        LocalFilePresence::Checking
+    );
+    let checking = next(&mut model, event + EVENT_COALESCE);
+    model.invalidate_paths(&[dir.path().to_path_buf()], event + EVENT_COALESCE);
+    model.complete(
+        checking,
+        event + EVENT_COALESCE,
+        LocalFilePresence::Present,
+        Some(20),
+        event + EVENT_COALESCE,
+    );
+    assert_eq!(
+        model.entries[&file.destination].observation.presence,
+        LocalFilePresence::Checking,
+        "an observation started before the latest event is stale"
+    );
+    let fresh_at = event + EVENT_COALESCE * 2;
+    let fresh = next(&mut model, fresh_at);
+    model.complete(
+        fresh,
+        fresh_at,
+        LocalFilePresence::Missing,
+        Some(20),
+        fresh_at,
+    );
+    assert_eq!(
+        model.entries[&file.destination].observation.presence,
+        LocalFilePresence::Missing
+    );
+    model.set_watch_roots(&BTreeMap::new(), fresh_at + Duration::from_secs(1));
+    assert_eq!(
+        model.entries[&file.destination].due,
+        Some(fresh_at + Duration::from_secs(1)),
+        "watcher failure triggers an immediate safe recheck"
+    );
+}
+
+#[test]
+fn sleep_gap_requests_revalidation_without_a_short_disk_poll() {
+    let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mono = Instant::now();
+    assert!(!resumed_from_sleep(
+        wall,
+        mono,
+        wall + Duration::from_secs(30),
+        mono + Duration::from_secs(30),
+    ));
+    assert!(resumed_from_sleep(
+        wall,
+        mono,
+        wall + Duration::from_secs(120),
+        mono + Duration::from_secs(30),
+    ));
+}
+
+#[test]
+fn directory_event_rechecks_descendants_with_interleaved_sibling_names() {
+    let root = std::path::Path::new("/synthetic");
+    let mut model = Observations::default();
+    let now = Instant::now();
+    let mut descendant = record(root, 1);
+    descendant.destination = root.join("a/file.bin");
+    let mut sibling = record(root, 2);
+    sibling.destination = root.join("a-elsewhere.bin");
+    model.insert(descendant.clone(), now);
+    model.insert(sibling.clone(), now);
+    model.invalidate_paths(&[root.join("a")], now);
+    assert_eq!(
+        model.entries[&descendant.destination].due,
+        Some(now + EVENT_COALESCE)
+    );
+    assert_eq!(model.entries[&sibling.destination].due, Some(now));
 }
 
 #[test]
@@ -372,6 +507,8 @@ fn deleting_native_history_and_then_the_file_updates_the_existing_observation() 
 #[test]
 fn retention_and_unconsumed_changes_are_bounded_and_report_omission() {
     let (revision, _) = watch::channel(0);
+    let (wake, _) = mpsc::sync_channel(1);
+    let (watch_wake, _) = mpsc::sync_channel(1);
     let shared = Shared {
         context: Mutex::new(Context::default()),
         shutdown: AtomicBool::new(false),
@@ -379,6 +516,13 @@ fn retention_and_unconsumed_changes_are_bounded_and_report_omission() {
         inventory_reads: AtomicU64::new(0),
         updates: Mutex::new(LocalDownloadUpdates::default()),
         revision,
+        wake,
+        _inventory_listener: Arc::new(|| {}),
+        watch_request: Mutex::new(WatchRequest::default()),
+        watch_wake,
+        watch_overflow: AtomicBool::new(false),
+        watch_restart: AtomicBool::new(false),
+        watch_failed: AtomicBool::new(false),
     };
     let mut model = Observations::default();
     let now = Instant::now();

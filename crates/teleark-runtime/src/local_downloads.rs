@@ -13,18 +13,25 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use teleark_core::{ApplicationError, ApplicationErrorKind};
 use tokio::sync::watch;
 
+mod watcher;
+
 const CAPACITY: usize = 10_000;
 const PROBE_WORKERS: usize = 4;
 const PROBE_QUEUE: usize = 32;
-const MAX_AGE: Duration = Duration::from_secs(15);
-const VISIBLE_INTERVAL: Duration = Duration::from_secs(3);
-const BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
-const TICK: Duration = Duration::from_millis(100);
+const MAX_PROBE_DURATION: Duration = Duration::from_secs(15);
+const WATCHED_QUIET_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const UNWATCHED_VISIBLE_INTERVAL: Duration = Duration::from_secs(30);
+const UNWATCHED_BACKGROUND_INTERVAL: Duration = Duration::from_secs(2 * 60);
+const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const INVENTORY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+const EVENT_COALESCE: Duration = Duration::from_millis(200);
+const SLEEP_CHECK: Duration = Duration::from_secs(30);
+const SLEEP_GAP: Duration = Duration::from_secs(5);
 
 type Scope = Option<(i64, u64)>;
 
@@ -58,6 +65,19 @@ struct Shared {
     inventory_reads: AtomicU64,
     updates: Mutex<LocalDownloadUpdates>,
     revision: watch::Sender<u64>,
+    wake: mpsc::SyncSender<ResultEvent>,
+    _inventory_listener: Arc<dyn Fn() + Send + Sync>,
+    watch_request: Mutex<WatchRequest>,
+    watch_wake: mpsc::SyncSender<()>,
+    watch_overflow: AtomicBool,
+    watch_restart: AtomicBool,
+    watch_failed: AtomicBool,
+}
+
+#[derive(Clone, Default)]
+struct WatchRequest {
+    epoch: u64,
+    parents: BTreeSet<PathBuf>,
 }
 
 /// Construction is background-only. Context changes and subscriptions never do I/O.
@@ -80,6 +100,13 @@ impl LocalDownloadMonitor {
         probe: Arc<dyn Fn(&DownloadedFileRecord) -> LocalFilePresence + Send + Sync>,
     ) -> Result<Self, ApplicationError> {
         let (revision, _) = watch::channel(0);
+        let (results_tx, results_rx) = mpsc::sync_channel(PROBE_QUEUE + 1);
+        let (watch_wake, watch_requests) = mpsc::sync_channel(1);
+        let inventory_wake = results_tx.clone();
+        let inventory_listener: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = inventory_wake.try_send(ResultEvent::Wake);
+        });
+        library.subscribe_downloaded_files(&inventory_listener);
         let shared = Arc::new(Shared {
             context: Mutex::new(Context::default()),
             shutdown: AtomicBool::new(false),
@@ -88,14 +115,28 @@ impl LocalDownloadMonitor {
             inventory_reads: AtomicU64::new(0),
             updates: Mutex::new(LocalDownloadUpdates::default()),
             revision,
+            wake: results_tx.clone(),
+            _inventory_listener: inventory_listener,
+            watch_request: Mutex::new(WatchRequest::default()),
+            watch_wake,
+            watch_overflow: AtomicBool::new(false),
+            watch_restart: AtomicBool::new(false),
+            watch_failed: AtomicBool::new(false),
         });
-        let (results_tx, results_rx) = mpsc::sync_channel(PROBE_QUEUE + 1);
         let (probes_tx, probes_rx) = mpsc::sync_channel::<Probe>(PROBE_QUEUE);
         let probes_rx = Arc::new(Mutex::new(probes_rx));
         let mut monitor = Self {
             shared: shared.clone(),
             _workers: Vec::new(),
         };
+        let watch_shared = shared.clone();
+        let watch_results = results_tx.clone();
+        monitor._workers.push(
+            thread::Builder::new()
+                .name("teleark-local-watcher".into())
+                .spawn(move || watcher::run(watch_shared, watch_requests, watch_results))
+                .map_err(worker_error)?,
+        );
         for index in 0..PROBE_WORKERS {
             let jobs = probes_rx.clone();
             let results = results_tx.clone();
@@ -163,14 +204,19 @@ impl LocalDownloadMonitor {
     }
 
     pub fn set_context(&self, scope: Scope, chat: Option<i64>) {
-        *self
+        let mut context = self
             .shared
             .context
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Context {
+            .unwrap_or_else(|e| e.into_inner());
+        let requested = Context {
             scope: scope.filter(|(account, _)| *account > 0),
             chat,
         };
+        if *context != requested {
+            *context = requested;
+            let _ = self.shared.wake.try_send(ResultEvent::Wake);
+        }
     }
 
     pub fn subscribe(&self) -> LocalDownloadSubscription {
@@ -214,6 +260,8 @@ impl LocalDownloadSubscription {
 impl Drop for LocalDownloadMonitor {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
+        let _ = self.shared.wake.try_send(ResultEvent::Wake);
+        let _ = self.shared.watch_wake.try_send(());
         self.shared
             .revision
             .send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -234,6 +282,16 @@ fn worker_error(_: std::io::Error) -> ApplicationError {
     ApplicationError::new(ApplicationErrorKind::Persistence)
 }
 
+fn resumed_from_sleep(
+    before_wall: SystemTime,
+    before_mono: Instant,
+    after_wall: SystemTime,
+    after_mono: Instant,
+) -> bool {
+    after_wall.duration_since(before_wall).unwrap_or_default()
+        > after_mono.saturating_duration_since(before_mono) + SLEEP_GAP
+}
+
 struct Probe {
     epoch: u64,
     token: u64,
@@ -245,6 +303,13 @@ struct Inventory {
     cursor: Option<DownloadedFilesCursor>,
 }
 enum ResultEvent {
+    Wake,
+    WatchPaths(Vec<PathBuf>),
+    WatchStatus {
+        epoch: u64,
+        roots: BTreeMap<PathBuf, PathBuf>,
+    },
+    WatchFailure,
     Probe(Probe, Instant, LocalFilePresence),
     Inventory(
         Inventory,
@@ -257,6 +322,7 @@ struct Entry {
     due: Option<Instant>,
     expires: Option<Instant>,
     token: Option<u64>,
+    dirty_after_probe: bool,
 }
 
 #[derive(Default)]
@@ -269,6 +335,8 @@ struct Observations {
     changes: BTreeMap<PathBuf, Option<LocalDownloadObservation>>,
     limited: bool,
     limit_changed: bool,
+    watch_dirty: bool,
+    watched_parents: BTreeSet<PathBuf>,
 }
 
 impl Observations {
@@ -292,6 +360,7 @@ impl Observations {
             return;
         }
         self.remove(&path);
+        self.watch_dirty = true;
         let observation = LocalDownloadObservation {
             file,
             presence: LocalFilePresence::Checking,
@@ -307,6 +376,7 @@ impl Observations {
                 due: Some(now),
                 expires: None,
                 token: None,
+                dirty_after_probe: false,
             },
         );
         while self.entries.len() > CAPACITY {
@@ -320,6 +390,7 @@ impl Observations {
 
     fn remove(&mut self, path: &PathBuf) {
         if let Some(entry) = self.entries.remove(path) {
+            self.watch_dirty = true;
             self.ages
                 .remove(&(entry.observation.file.completed_at_unix_ms, path.clone()));
             if let Some(due) = entry.due {
@@ -340,6 +411,110 @@ impl Observations {
                 }
                 entry.due = Some(now);
                 self.due.insert((now, path.clone()));
+                if let Some(expires) = entry.expires.replace(now) {
+                    self.expiries.remove(&(expires, path.clone()));
+                }
+                self.expiries.insert((now, path.clone()));
+            }
+        }
+    }
+
+    fn prioritize_all(&mut self, now: Instant) {
+        for (path, entry) in &mut self.entries {
+            if entry.token.is_some() {
+                continue;
+            }
+            if let Some(due) = entry.due {
+                self.due.remove(&(due, path.clone()));
+            }
+            entry.due = Some(now);
+            self.due.insert((now, path.clone()));
+            if let Some(expires) = entry.expires.replace(now) {
+                self.expiries.remove(&(expires, path.clone()));
+            }
+            self.expiries.insert((now, path.clone()));
+        }
+    }
+
+    fn watch_request(&mut self, epoch: u64) -> Option<WatchRequest> {
+        if !std::mem::take(&mut self.watch_dirty) {
+            return None;
+        }
+        Some(WatchRequest {
+            epoch,
+            parents: self
+                .entries
+                .keys()
+                .filter_map(|path| path.parent().map(std::path::Path::to_path_buf))
+                .collect(),
+        })
+    }
+
+    fn set_watch_roots(&mut self, roots: &BTreeMap<PathBuf, PathBuf>, now: Instant) {
+        let covered: BTreeSet<_> = roots.keys().cloned().collect();
+        if self.watched_parents != covered {
+            let lost: BTreeSet<_> = self.watched_parents.difference(&covered).cloned().collect();
+            let gained: BTreeSet<_> = covered.difference(&self.watched_parents).cloned().collect();
+            self.watched_parents = covered;
+            for (path, entry) in &mut self.entries {
+                if !path
+                    .parent()
+                    .is_some_and(|parent| lost.contains(parent) || gained.contains(parent))
+                {
+                    continue;
+                }
+                if entry.observation.presence != LocalFilePresence::Checking {
+                    entry.observation.presence = LocalFilePresence::Checking;
+                    self.changes
+                        .insert(path.clone(), Some(entry.observation.clone()));
+                }
+                if entry.token.is_some() {
+                    entry.dirty_after_probe = true;
+                } else {
+                    if let Some(due) = entry.due {
+                        self.due.remove(&(due, path.clone()));
+                    }
+                    entry.due = Some(now);
+                    self.due.insert((now, path.clone()));
+                    if let Some(expires) = entry.expires.replace(now) {
+                        self.expiries.remove(&(expires, path.clone()));
+                    }
+                    self.expiries.insert((now, path.clone()));
+                }
+            }
+        }
+    }
+
+    fn invalidate_paths(&mut self, paths: &[PathBuf], now: Instant) {
+        let mut affected = BTreeSet::new();
+        for changed in paths {
+            for (path, _) in self.entries.range(changed.clone()..) {
+                if path.starts_with(changed) {
+                    affected.insert(path.clone());
+                }
+            }
+        }
+        for path in affected {
+            let Some(entry) = self.entries.get_mut(&path) else {
+                continue;
+            };
+            if entry.observation.presence != LocalFilePresence::Checking {
+                entry.observation.presence = LocalFilePresence::Checking;
+                self.changes
+                    .insert(path.clone(), Some(entry.observation.clone()));
+            }
+            if entry.token.is_some() {
+                entry.dirty_after_probe = true;
+                continue;
+            }
+            if let Some(due) = entry.due {
+                self.due.remove(&(due, path.clone()));
+            }
+            let due = now + EVENT_COALESCE;
+            entry.due = Some(due);
+            self.due.insert((due, path.clone()));
+            if let Some(expires) = entry.expires.take() {
+                self.expiries.remove(&(expires, path));
             }
         }
     }
@@ -357,7 +532,7 @@ impl Observations {
         }
     }
 
-    fn dispatch(&mut self, epoch: u64, now: Instant, sender: &mpsc::SyncSender<Probe>) {
+    fn dispatch(&mut self, epoch: u64, now: Instant, sender: &mpsc::SyncSender<Probe>) -> bool {
         // Bound work per turn even if all 10,000 retained paths become due together.
         for _ in 0..PROBE_QUEUE {
             if !self.due.first().is_some_and(|(at, _)| *at <= now) {
@@ -380,10 +555,11 @@ impl Observations {
                 }
                 Err(_) => {
                     self.due.insert((at, path));
-                    break;
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn complete(
@@ -402,23 +578,35 @@ impl Observations {
             return;
         }
         entry.token = None;
-        let presence = if now.saturating_duration_since(started) >= MAX_AGE {
+        if entry.dirty_after_probe {
+            entry.dirty_after_probe = false;
+            let due = now + EVENT_COALESCE;
+            entry.due = Some(due);
+            self.due.insert((due, path));
+            return;
+        }
+        let presence = if now.saturating_duration_since(started) >= MAX_PROBE_DURATION {
             LocalFilePresence::Unavailable
         } else {
             presence
         };
         let due = now
-            + if Some(entry.observation.file.chat_id) == chat {
-                VISIBLE_INTERVAL
+            + if path
+                .parent()
+                .is_some_and(|parent| self.watched_parents.contains(parent))
+            {
+                WATCHED_QUIET_INTERVAL
+            } else if Some(entry.observation.file.chat_id) == chat {
+                UNWATCHED_VISIBLE_INTERVAL
             } else {
-                BACKGROUND_INTERVAL
+                UNWATCHED_BACKGROUND_INTERVAL
             };
         entry.due = Some(due);
         self.due.insert((due, path.clone()));
         if let Some(expires) = entry.expires {
             self.expiries.remove(&(expires, path.clone()));
         }
-        let expires = now + MAX_AGE;
+        let expires = due;
         entry.expires = Some(expires);
         self.expiries.insert((expires, path.clone()));
         if entry.observation.presence != presence {
@@ -471,6 +659,11 @@ fn controller(
     let mut discovering = false;
     let mut seen_revision = None;
     let mut inventory_retry = Instant::now();
+    let mut watch_roots = BTreeMap::new();
+    let mut watch_retry = None;
+    let mut watch_broken = false;
+    let mut last_wall = SystemTime::now();
+    let mut last_mono = Instant::now();
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
@@ -481,6 +674,10 @@ fn controller(
             epoch = epoch.wrapping_add(1);
             shared.epoch.store(epoch, Ordering::Release);
             observations = Observations::default();
+            observations.watch_dirty = true;
+            watch_roots.clear();
+            watch_retry = None;
+            watch_broken = false;
             cursor = None;
             discovering = false;
             seen_revision = None;
@@ -491,6 +688,23 @@ fn controller(
             observations.prioritize(requested.chat, now);
         }
         context = requested;
+        if shared.watch_failed.swap(false, Ordering::AcqRel) {
+            watch_roots.clear();
+            observations.set_watch_roots(&watch_roots, now);
+            watch_retry = Some(now + WATCH_RETRY_INTERVAL);
+            watch_broken = true;
+        }
+        if shared.watch_overflow.swap(false, Ordering::AcqRel) {
+            observations.prioritize_all(now);
+        }
+        if watch_retry.is_some_and(|at| at <= now) {
+            if watch_broken {
+                shared.watch_restart.store(true, Ordering::Release);
+                watch_broken = false;
+            }
+            observations.watch_dirty = true;
+            watch_retry = None;
+        }
         let revision = library.downloaded_files_revision.load(Ordering::Acquire);
         if !discovering && seen_revision != Some(revision) && now >= inventory_retry {
             cursor = None;
@@ -510,11 +724,67 @@ fn controller(
         {
             inventory_busy = true;
         }
+        if !watch_broken && let Some(request) = observations.watch_request(epoch) {
+            *shared
+                .watch_request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = request;
+            let _ = shared.watch_wake.try_send(());
+        }
         observations.expire(now);
         // Publish Checking before admitting filesystem work.
         observations.publish(&shared, context.scope, false);
-        observations.dispatch(epoch, now, &probes);
-        match results.recv_timeout(TICK) {
+        let queue_full = observations.dispatch(epoch, now, &probes);
+        if !queue_full && observations.due.first().is_some_and(|(at, _)| *at <= now) {
+            continue;
+        }
+        let next = [
+            observations.due.first().map(|(at, _)| *at),
+            observations.expiries.first().map(|(at, _)| *at),
+            (seen_revision.is_none() && !discovering).then_some(inventory_retry),
+            watch_retry,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(now + SLEEP_CHECK);
+        let wait = if queue_full {
+            SLEEP_CHECK
+        } else {
+            next.saturating_duration_since(now).min(SLEEP_CHECK)
+        };
+        match results.recv_timeout(wait) {
+            Ok(ResultEvent::Wake) => {}
+            Ok(ResultEvent::WatchPaths(paths)) => {
+                let now = Instant::now();
+                observations.invalidate_paths(&paths, now);
+                if watch_roots.iter().any(|(parent, root)| {
+                    parent != root
+                        && paths
+                            .iter()
+                            .any(|path| parent.starts_with(path) && path.starts_with(root))
+                }) {
+                    observations.watch_dirty = true;
+                }
+            }
+            Ok(ResultEvent::WatchStatus {
+                epoch: watch_epoch,
+                roots,
+            }) => {
+                if watch_epoch == epoch && !watch_broken {
+                    observations.set_watch_roots(&roots, Instant::now());
+                    watch_roots = roots;
+                    let requested = shared
+                        .watch_request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .parents
+                        .len();
+                    watch_retry = (watch_roots.len() < requested)
+                        .then(|| Instant::now() + WATCH_RETRY_INTERVAL);
+                }
+            }
+            Ok(ResultEvent::WatchFailure) => {}
             Ok(ResultEvent::Probe(job, started, presence)) => {
                 if job.epoch == epoch {
                     observations.complete(job, started, presence, context.chat, Instant::now());
@@ -536,13 +806,20 @@ fn controller(
                     Err(_) => {
                         discovering = false;
                         seen_revision = None;
-                        inventory_retry = Instant::now() + VISIBLE_INTERVAL;
+                        inventory_retry = Instant::now() + INVENTORY_RETRY_INTERVAL;
                     }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
+        let wall = SystemTime::now();
+        let mono = Instant::now();
+        if resumed_from_sleep(last_wall, last_mono, wall, mono) {
+            observations.prioritize_all(mono);
+        }
+        last_wall = wall;
+        last_mono = mono;
     }
 }
 

@@ -7748,6 +7748,7 @@ name = "teleark-runtime"
 version = "0.5.4"
 dependencies = [
  "blake3",
+ "notify",
  "security-framework",
  "serde_json",
  "sysinfo",
