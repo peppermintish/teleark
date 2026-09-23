@@ -169,6 +169,8 @@ fn contiguous_push_commits_without_rpc_and_duplicate_pushes_do_nothing() {
     );
     let journal = shared.deltas.lock().expect("journal");
     assert_eq!(journal.changes(2, 1).deltas[0].upserted.len(), 1);
+    assert!(journal.changes(2, 1).managed_catalog_changed);
+    assert!(!journal.changes(2, 2).managed_catalog_changed);
     assert!(journal.changes(3, 1).deltas.is_empty());
     assert!(!journal.changes(3, 1).reset_required);
     drop(journal);
