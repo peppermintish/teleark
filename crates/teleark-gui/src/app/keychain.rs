@@ -50,6 +50,7 @@ impl Drop for KeychainUi {
 struct KeychainOutcome {
     status: Result<KeychainStatus, ApplicationError>,
     change_error: Option<teleark_core::ApplicationErrorKind>,
+    backend_changed: bool,
 }
 
 impl TeleArkApp {
@@ -91,13 +92,13 @@ impl TeleArkApp {
         self.keychain.error = None;
         cx.notify();
         let work = cx.background_spawn(async move {
-            let change_error = library
-                .set_keychain_enabled(enabled, progress)
-                .err()
-                .map(|error| error.kind());
+            let change = library.set_keychain_enabled(enabled, progress);
+            let backend_changed = change.is_ok();
+            let change_error = change.err().map(|error| error.kind());
             KeychainOutcome {
                 status: library.keychain_status(),
                 change_error,
+                backend_changed,
             }
         });
         self.observe_keychain_work(work, cx);
@@ -126,6 +127,7 @@ impl TeleArkApp {
             KeychainOutcome {
                 status: library.keychain_status(),
                 change_error: None,
+                backend_changed: false,
             }
         });
         self.observe_keychain_work(work, cx);
@@ -141,6 +143,10 @@ impl TeleArkApp {
         self.keychain.error = outcome
             .change_error
             .or_else(|| outcome.status.err().map(|error| error.kind()));
+        if outcome.backend_changed {
+            self.vault_key_selection_scope = None;
+            self.apply_managed_channel_changes(cx);
+        }
         cx.notify();
     }
 
@@ -580,6 +586,7 @@ mod tests {
                         teleark_core::ApplicationErrorKind::Persistence,
                     )),
                     change_error: None,
+                    backend_changed: false,
                 },
                 cx,
             );
@@ -593,11 +600,22 @@ mod tests {
                 KeychainOutcome {
                     status: Ok(observed),
                     change_error: Some(teleark_core::ApplicationErrorKind::Cancelled),
+                    backend_changed: false,
                 },
                 cx,
             );
             assert_eq!(app.keychain.status, Some(observed));
             assert_eq!(app.keychain_error_id(), "settings-keychain-cancelled");
+            app.vault_key_selection_scope = Some((1, 2, 3));
+            app.finish_keychain_work(
+                KeychainOutcome {
+                    status: Ok(observed),
+                    change_error: None,
+                    backend_changed: true,
+                },
+                cx,
+            );
+            assert!(app.vault_key_selection_scope.is_none());
         });
     }
 
