@@ -122,12 +122,13 @@ pub use transfer::{
     encrypted_part_plaintext_limit, encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultJob, VaultKeyPhase,
-    VaultKeyProgress, VaultKeySelection, VaultKeySnapshot, VaultRecoverySecret, VaultStatus,
-    VaultTransferControl, VaultTransferDirection, VaultTransferSnapshot, VaultTransferState,
-    VaultUploadControl, VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport,
-    VaultUploadSelectionPhase, VaultUploadSelectionProgress, VaultUploadSelectionSnapshot,
-    VaultUploadSource, inspect_upload_sources, inspect_upload_sources_observed,
+    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultChannelSetupScope,
+    VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySelection, VaultKeySnapshot,
+    VaultRecoverySecret, VaultStatus, VaultTransferControl, VaultTransferDirection,
+    VaultTransferSnapshot, VaultTransferState, VaultUploadControl, VaultUploadFailure,
+    VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
+    VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
+    inspect_upload_sources, inspect_upload_sources_observed,
 };
 
 pub use teleark_telegram::{
@@ -1136,6 +1137,21 @@ enum StorageRequest {
         account_id: i64,
         reply: SyncSender<Result<Option<i64>, ApplicationError>>,
     },
+    PendingChannelKey {
+        account_id: i64,
+        reply: SyncSender<Result<Option<storage_channel::PendingChannelKey>, ApplicationError>>,
+    },
+    SavePendingChannelKey {
+        account_id: i64,
+        chat_id: i64,
+        previous_vault_id: Option<[u8; 16]>,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
+    ClearPendingChannelKey {
+        account_id: i64,
+        chat_id: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     SaveStorageChannel {
         account_id: i64,
         chat_id: i64,
@@ -1889,6 +1905,33 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             }
             StorageRequest::StorageChannel { account_id, reply } => {
                 let _ = reply.send(storage_channel::load_binding(&database, account_id));
+            }
+            StorageRequest::PendingChannelKey { account_id, reply } => {
+                let _ = reply.send(storage_channel::load_pending_key(&database, account_id));
+            }
+            StorageRequest::SavePendingChannelKey {
+                account_id,
+                chat_id,
+                previous_vault_id,
+                reply,
+            } => {
+                let _ = reply.send(storage_channel::save_pending_key(
+                    &mut database,
+                    account_id,
+                    chat_id,
+                    previous_vault_id,
+                ));
+            }
+            StorageRequest::ClearPendingChannelKey {
+                account_id,
+                chat_id,
+                reply,
+            } => {
+                let _ = reply.send(storage_channel::clear_pending_key(
+                    &mut database,
+                    account_id,
+                    chat_id,
+                ));
             }
             StorageRequest::SaveStorageChannel {
                 account_id,

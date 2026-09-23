@@ -427,18 +427,18 @@ impl DesktopTelegram {
         &self,
         library: &DesktopLibrary,
         vault: &crate::DesktopVault,
-        account_id: i64,
+        scope: crate::VaultChannelSetupScope,
         title: String,
         description: String,
         progress: crate::StorageSetupProgress,
     ) -> Result<ManagedStorageChannel, ApplicationError> {
         self.ensure_storage_channel_observed_inner(
             library,
-            account_id,
+            scope.account_id,
             title,
             description,
             progress,
-            Some(vault),
+            Some((vault, scope)),
         )
     }
 
@@ -449,7 +449,7 @@ impl DesktopTelegram {
         title: String,
         description: String,
         progress: crate::StorageSetupProgress,
-        vault: Option<&crate::DesktopVault>,
+        vault: Option<(&crate::DesktopVault, crate::VaultChannelSetupScope)>,
     ) -> Result<ManagedStorageChannel, ApplicationError> {
         let result = (|| {
             let preferred = library.storage_channel_id(account_id)?;
@@ -491,6 +491,13 @@ impl DesktopTelegram {
             // A recovered original peer found during the second read needs no
             // replacement notification or binding change.
             let replaced_channel = replaced_channel.filter(|previous| *previous != channel.id);
+            if created && let Some((_, scope)) = vault {
+                library.save_pending_channel_key(
+                    account_id,
+                    channel.id,
+                    scope.previous_vault_id,
+                )?;
+            }
             progress.phase(crate::StorageSetupPhase::SavingBinding);
             if let Some(previous) = replaced_channel {
                 library.replace_storage_channel_id(account_id, previous, channel.id)?;
@@ -505,14 +512,19 @@ impl DesktopTelegram {
             };
             if managed.created
                 && managed.health == crate::StorageChannelHealth::Healthy
-                && let Some(vault) = vault
+                && let Some((vault, scope)) = vault
             {
                 progress.phase(crate::StorageSetupPhase::CreatingKey);
                 // The recovery bundle is stored by Runtime in the selected
                 // credential backend; it must not be exposed through setup.
                 let _secret = vault
-                    .submit_new_managed_key(crate::VaultKeyProgress::new())?
+                    .submit_new_channel_key(
+                        scope,
+                        managed.channel.id,
+                        crate::VaultKeyProgress::new(),
+                    )?
                     .wait()?;
+                library.clear_pending_channel_key(account_id, managed.channel.id)?;
             }
             Ok(managed)
         })();
@@ -2459,7 +2471,8 @@ async fn search_files(
             chat,
             caption,
             limit,
-            caption == crate::transfer::MANIFEST_CAPTION,
+            caption == crate::transfer::MANIFEST_CAPTION
+                || caption == crate::vault::remote_upload::CAPTION,
         )
         .await
         .map_err(map_telegram_error)

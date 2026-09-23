@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GateKind {
+    StorageDiscovery,
     Validation,
     PendingMetadataUpload,
     UploadPart,
@@ -230,6 +231,7 @@ impl TestVaultRemote {
                     if let Some(progress) = &progress {
                         progress.phase(crate::StorageSetupPhase::ReadingDialogs);
                     }
+                    self.cross_gate(GateKind::StorageDiscovery)?;
                     let mut state = self.state.lock().expect("state");
                     let created = !state.storage_created && create.is_some();
                     if created {

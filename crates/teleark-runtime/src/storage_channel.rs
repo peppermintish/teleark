@@ -7,6 +7,13 @@ use crate::{DesktopLibrary, StorageRequest, TelegramChatSummary, map_storage_err
 
 const FIXED_BINDING_PREFIX: &str = "storage-channel.v2.account.";
 const BINDING_PREFIX: &str = "storage-channel.v1.account.";
+const PENDING_KEY_PREFIX: &str = "storage-channel-key-pending.v1.account.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PendingChannelKey {
+    pub(crate) channel_id: i64,
+    pub(crate) previous_vault_id: Option<[u8; 16]>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageChannelStatus {
@@ -112,6 +119,50 @@ pub(crate) fn resolve_storage_channel(
 }
 
 impl DesktopLibrary {
+    pub(crate) fn pending_channel_key(
+        &self,
+        account_id: i64,
+    ) -> Result<Option<PendingChannelKey>, ApplicationError> {
+        validate_id(account_id)?;
+        self.worker.request("pending_channel_key", |reply| {
+            StorageRequest::PendingChannelKey { account_id, reply }
+        })
+    }
+
+    pub(crate) fn save_pending_channel_key(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        previous_vault_id: Option<[u8; 16]>,
+    ) -> Result<(), ApplicationError> {
+        validate_id(account_id)?;
+        validate_id(chat_id)?;
+        self.worker.request("save_pending_channel_key", |reply| {
+            StorageRequest::SavePendingChannelKey {
+                account_id,
+                chat_id,
+                previous_vault_id,
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn clear_pending_channel_key(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+    ) -> Result<(), ApplicationError> {
+        validate_id(account_id)?;
+        validate_id(chat_id)?;
+        self.worker.request("clear_pending_channel_key", |reply| {
+            StorageRequest::ClearPendingChannelKey {
+                account_id,
+                chat_id,
+                reply,
+            }
+        })
+    }
+
     pub(crate) fn storage_channel_id(
         &self,
         account_id: i64,
@@ -188,6 +239,110 @@ pub(crate) fn load_binding(
         .map_err(map_storage_error)?
         .map(|record| parse_binding(&record.value))
         .transpose()
+}
+
+pub(crate) fn load_pending_key(
+    database: &Database,
+    account_id: i64,
+) -> Result<Option<PendingChannelKey>, ApplicationError> {
+    validate_id(account_id)?;
+    let setting = database
+        .setting(&format!("{PENDING_KEY_PREFIX}{account_id}"))
+        .map_err(map_storage_error)?;
+    setting
+        .map(|setting| {
+            let value: serde_json::Value = serde_json::from_str(&setting.value)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+            let invalid = || ApplicationError::new(ApplicationErrorKind::Persistence);
+            let version = value.get("version").and_then(serde_json::Value::as_u64);
+            if version.is_some_and(|version| version > 1) {
+                return Err(ApplicationError::new(
+                    ApplicationErrorKind::StorageIdentityUnsupported,
+                ));
+            }
+            if value.as_object().is_none_or(|fields| fields.len() != 3) || version != Some(1) {
+                return Err(invalid());
+            }
+            let channel_id = value
+                .get("channel_id")
+                .and_then(serde_json::Value::as_i64)
+                .filter(|id| *id > 0)
+                .ok_or_else(invalid)?;
+            let previous = value.get("previous_vault_id").ok_or_else(invalid)?;
+            let previous_vault_id = if previous.is_null() {
+                None
+            } else {
+                let bytes = previous
+                    .as_array()
+                    .filter(|bytes| bytes.len() == 16)
+                    .ok_or_else(invalid)?;
+                let mut id = [0_u8; 16];
+                for (destination, value) in id.iter_mut().zip(bytes) {
+                    *destination = value
+                        .as_u64()
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or_else(invalid)?;
+                }
+                Some(id)
+            };
+            let marker = PendingChannelKey {
+                channel_id,
+                previous_vault_id,
+            };
+            Ok(marker)
+        })
+        .transpose()
+}
+
+pub(crate) fn save_pending_key(
+    database: &mut Database,
+    account_id: i64,
+    chat_id: i64,
+    previous_vault_id: Option<[u8; 16]>,
+) -> Result<(), ApplicationError> {
+    validate_id(account_id)?;
+    validate_id(chat_id)?;
+    // Never overwrite an unsupported or damaged marker during a new setup.
+    let _ = load_pending_key(database, account_id)?;
+    let marker = PendingChannelKey {
+        channel_id: chat_id,
+        previous_vault_id,
+    };
+    database
+        .set_setting(&SettingRecord {
+            key: format!("{PENDING_KEY_PREFIX}{account_id}"),
+            value: format!(
+                "{{\"version\":1,\"channel_id\":{chat_id},\"previous_vault_id\":{}}}",
+                marker.previous_vault_id.map_or_else(
+                    || "null".to_owned(),
+                    |id| format!(
+                        "[{}]",
+                        id.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+                    )
+                )
+            ),
+            updated_at_unix_ms: crate::system_time_unix_ms(std::time::SystemTime::now())
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
+        })
+        .map_err(map_storage_error)
+}
+
+pub(crate) fn clear_pending_key(
+    database: &mut Database,
+    account_id: i64,
+    chat_id: i64,
+) -> Result<(), ApplicationError> {
+    validate_id(account_id)?;
+    validate_id(chat_id)?;
+    if let Some(marker) = load_pending_key(database, account_id)? {
+        if marker.channel_id != chat_id {
+            return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+        }
+        database
+            .delete_setting(&format!("{PENDING_KEY_PREFIX}{account_id}"))
+            .map_err(map_storage_error)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn save_binding(
@@ -271,6 +426,52 @@ fn parse_binding(value: &str) -> Result<i64, ApplicationError> {
 mod tests {
     use super::*;
     use crate::TelegramChatKind;
+
+    #[test]
+    fn pending_key_marker_preserves_newer_and_malformed_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut database = Database::open(temp.path().join("fixture.sqlite"))?;
+        save_pending_key(&mut database, 7, 11, Some([3; 16]))?;
+        assert_eq!(
+            load_pending_key(&database, 7)?,
+            Some(PendingChannelKey {
+                channel_id: 11,
+                previous_vault_id: Some([3; 16]),
+            })
+        );
+        let key = format!("{PENDING_KEY_PREFIX}7");
+        for (value, kind) in [
+            (
+                "{\"version\":2,\"channel_id\":11,\"previous_vault_id\":null}",
+                ApplicationErrorKind::StorageIdentityUnsupported,
+            ),
+            (
+                "{\"version\":1,\"channel_id\":0,\"previous_vault_id\":[]}",
+                ApplicationErrorKind::Persistence,
+            ),
+        ] {
+            database.set_setting(&SettingRecord {
+                key: key.clone(),
+                value: value.into(),
+                updated_at_unix_ms: 1,
+            })?;
+            assert_eq!(
+                load_pending_key(&database, 7)
+                    .expect_err("invalid marker")
+                    .kind(),
+                kind
+            );
+            assert_eq!(
+                save_pending_key(&mut database, 7, 12, None)
+                    .expect_err("must not overwrite unknown marker")
+                    .kind(),
+                kind
+            );
+            assert_eq!(database.setting(&key)?.expect("preserved").value, value);
+        }
+        Ok(())
+    }
 
     fn channel(id: i64, name: &str) -> TelegramChatSummary {
         TelegramChatSummary {

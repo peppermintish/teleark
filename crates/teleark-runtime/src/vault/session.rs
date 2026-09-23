@@ -170,13 +170,15 @@ impl VaultSession {
         active: Option<Arc<VaultMasterKey>>,
         historical: Option<([u8; 16], Arc<VaultMasterKey>)>,
     ) {
-        self.keys.record = record;
-        // A late password/KDF completion cannot undo an explicit lock.
-        if generation == self.generation {
-            self.keys.revision = self.keys.revision.wrapping_add(1);
-            self.keys.active = active;
-            self.keys.historical = historical;
+        // A late key operation cannot publish either a key or its metadata
+        // into a different account session after logout.
+        if generation != self.generation {
+            return;
         }
+        self.keys.record = record;
+        self.keys.revision = self.keys.revision.wrapping_add(1);
+        self.keys.active = active;
+        self.keys.historical = historical;
         self.status = status_for(self.keys.record.as_ref(), self.keys.active.is_none());
         self.status.historical_key_unlocked = self.keys.historical.is_some();
         self.status.locked = self.keys.active.is_none() && self.keys.historical.is_none();
@@ -248,6 +250,26 @@ impl Drop for WorkPermit {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn stale_key_completion_cannot_replace_new_session_record() {
+        let mut session = VaultSession::new(None);
+        let old_generation = session.scan_revision().0;
+        session.lock();
+        let stale = VaultMetadataRecord {
+            vault_id: [7; 16],
+            password_wrap: vec![],
+            recovery_wrap: vec![],
+            password_generation: 1,
+            recovery_generation: 1,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        };
+        session.publish(old_generation, Some(stale), None, None);
+        assert!(session.keys.record.is_none());
+        assert!(session.status.active_vault_id.is_none());
+        assert!(session.status.locked);
+    }
 
     #[test]
     fn last_transfer_owner_wakes_shutdown_waiter() {

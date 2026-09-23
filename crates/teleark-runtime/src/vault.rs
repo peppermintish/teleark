@@ -140,6 +140,16 @@ pub enum VaultKeySelection {
     Undecryptable,
 }
 
+/// Captured before channel discovery so late setup cannot create a key for a
+/// different Telegram account or Vault session.
+#[derive(Clone, Copy, Debug)]
+pub struct VaultChannelSetupScope {
+    pub(crate) account_id: i64,
+    pub(crate) previous_vault_id: Option<[u8; 16]>,
+    telegram_revision: u64,
+    session_revision: (u64, u64),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultTransferDirection {
     Upload,
@@ -486,6 +496,10 @@ struct VaultInner {
 enum ManagedKeyAction {
     Prepare,
     NewEpoch,
+    NewChannel {
+        scope: VaultChannelSetupScope,
+        chat_id: i64,
+    },
     Import(Zeroizing<String>),
     Export,
     RotateRecovery,
@@ -495,7 +509,7 @@ enum VaultCommand {
     SelectChannelKey {
         account: i64,
         chat: i64,
-        initialize_empty: bool,
+        initialize_empty: Option<VaultChannelSetupScope>,
         progress: VaultKeyProgress,
         reply: mpsc::SyncSender<Result<VaultKeySelection, ApplicationError>>,
     },
@@ -651,6 +665,65 @@ struct VaultOwner {
 }
 
 impl DesktopVault {
+    /// Capture on the calling UI turn before asynchronous channel discovery.
+    pub fn channel_setup_scope(
+        &self,
+        account_id: i64,
+    ) -> Result<VaultChannelSetupScope, ApplicationError> {
+        if account_id <= 0 {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        let (telegram_revision, account, _) = self.inner.lifecycle.snapshot();
+        if account != Some(account_id) {
+            return Err(ApplicationError::new(ApplicationErrorKind::Authorization));
+        }
+        let session = self
+            .inner
+            .session
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        let session_revision = session.scan_revision();
+        let keys = session.current_keys(session_revision.0)?;
+        Ok(VaultChannelSetupScope {
+            account_id,
+            previous_vault_id: keys.record.as_ref().map(|record| record.vault_id),
+            telegram_revision,
+            session_revision,
+        })
+    }
+
+    /// Only the account/session that began setup may create its new-channel key.
+    pub fn submit_new_channel_key(
+        &self,
+        scope: VaultChannelSetupScope,
+        chat_id: i64,
+        progress: VaultKeyProgress,
+    ) -> Result<VaultJob<VaultRecoverySecret>, ApplicationError> {
+        let observer = progress.clone();
+        if chat_id <= 0 {
+            let error = ApplicationError::new(ApplicationErrorKind::InvalidRequest);
+            observer.finish(Some(error.kind()));
+            return Err(error);
+        }
+        let (revision, account, _) = self.inner.lifecycle.snapshot();
+        if revision != scope.telegram_revision || account != Some(scope.account_id) {
+            let error = ApplicationError::new(ApplicationErrorKind::Cancelled);
+            observer.finish(Some(error.kind()));
+            return Err(error);
+        }
+        let result = self.submit_in_session(Some(scope.session_revision), |reply| {
+            VaultCommand::ManageKey {
+                action: ManagedKeyAction::NewChannel { scope, chat_id },
+                progress,
+                reply,
+            }
+        });
+        if let Err(error) = &result {
+            observer.finish(Some(error.kind()));
+        }
+        result
+    }
+
     /// Selects the one stored key that authenticates the managed channel's files.
     /// Call after the channel cache has received its initial catalog.
     pub fn submit_select_channel_key(
@@ -663,7 +736,7 @@ impl DesktopVault {
         let result = self.submit(|reply| VaultCommand::SelectChannelKey {
             account,
             chat,
-            initialize_empty: false,
+            initialize_empty: None,
             progress,
             reply,
         });
@@ -673,9 +746,8 @@ impl DesktopVault {
         result
     }
 
-    /// Selects a stored key, or initializes an empty managed channel when no
-    /// usable stored key or managed catalog object exists. Call after catalog
-    /// synchronization has finished for this account and channel.
+    /// Selects a stored key, or finishes key setup for a channel this local
+    /// profile created and marked pending. Call after catalog synchronization.
     pub fn submit_select_or_initialize_channel_key(
         &self,
         account: i64,
@@ -683,10 +755,17 @@ impl DesktopVault {
         progress: VaultKeyProgress,
     ) -> Result<VaultJob<VaultKeySelection>, ApplicationError> {
         let observer = progress.clone();
+        let scope = match self.channel_setup_scope(account) {
+            Ok(scope) => scope,
+            Err(error) => {
+                observer.finish(Some(error.kind()));
+                return Err(error);
+            }
+        };
         let result = self.submit(|reply| VaultCommand::SelectChannelKey {
             account,
             chat,
-            initialize_empty: true,
+            initialize_empty: Some(scope),
             progress,
             reply,
         });
@@ -1863,12 +1942,32 @@ impl VaultOwner {
         self.create_key_epoch_observed(password, &VaultKeyProgress::new())
     }
 
+    fn check_channel_setup_scope(
+        &self,
+        scope: VaultChannelSetupScope,
+        chat_id: i64,
+    ) -> Result<(), ApplicationError> {
+        let (revision, account, _) = self.telegram.lifecycle().snapshot();
+        if revision != scope.telegram_revision
+            || account != Some(scope.account_id)
+            || self.library.storage_channel_id(scope.account_id)? != Some(chat_id)
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+        session.current_keys(scope.session_revision.0)?;
+        Ok(())
+    }
+
     fn create_key_epoch_observed(
         &mut self,
         password: &str,
         progress: &VaultKeyProgress,
     ) -> Result<String, ApplicationError> {
-        self.create_key_epoch_persisted(password, progress, false)
+        self.create_key_epoch_persisted(password, progress, false, None)
     }
 
     fn create_key_epoch_persisted(
@@ -1876,7 +1975,11 @@ impl VaultOwner {
         password: &str,
         progress: &VaultKeyProgress,
         managed: bool,
+        channel_scope: Option<(VaultChannelSetupScope, i64)>,
     ) -> Result<String, ApplicationError> {
+        if let Some((scope, chat_id)) = channel_scope {
+            self.check_channel_setup_scope(scope, chat_id)?;
+        }
         progress.phase(VaultKeyPhase::Generating)?;
         if let Some(worker) = &self.health_worker {
             worker.cancel();
@@ -1918,10 +2021,16 @@ impl VaultOwner {
         let recovery_text = Zeroizing::new(encode_recovery_bundle(&recovery_key, &recovery_wrap));
         if managed {
             progress.phase(VaultKeyPhase::Securing)?;
+            if let Some((scope, chat_id)) = channel_scope {
+                self.check_channel_setup_scope(scope, chat_id)?;
+            }
             self.save_device_key(&record, &recovery_text)?;
             self.check_key_generation()?;
         }
         progress.phase(VaultKeyPhase::Saving)?;
+        if let Some((scope, chat_id)) = channel_scope {
+            self.check_channel_setup_scope(scope, chat_id)?;
+        }
         self.library.worker.save_vault_metadata(
             record.clone(),
             self.record.as_ref().map(|old| {

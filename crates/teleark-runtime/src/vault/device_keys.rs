@@ -80,7 +80,7 @@ impl VaultOwner {
         &mut self,
         account: i64,
         chat: i64,
-        initialize_empty: bool,
+        initialize_empty: Option<VaultChannelSetupScope>,
         progress: &VaultKeyProgress,
     ) -> Result<VaultKeySelection, ApplicationError> {
         progress.phase(VaultKeyPhase::Loading)?;
@@ -107,7 +107,16 @@ impl VaultOwner {
             }
             progress.activity()?;
         }
-        if initialize_empty && available.is_empty() {
+        let pending_key = if initialize_empty.is_some() {
+            self.library.pending_channel_key(account)?
+        } else {
+            None
+        };
+        let pending_for_channel = pending_key.is_some_and(|marker| {
+            marker.channel_id == chat
+                && preferred.as_ref().map(|record| record.vault_id) == marker.previous_vault_id
+        }) && self.library.storage_channel_id(account)? == Some(chat);
+        if pending_for_channel {
             progress.phase(VaultKeyPhase::CheckingChannel)?;
             let manifests = self.library.cached_manifest_candidates(account, chat)?;
             let pending = self
@@ -138,9 +147,16 @@ impl VaultOwner {
                 // The initial managed catalog has been read. A lost key must
                 // never cause a replacement while recoverable remote objects
                 // are present; an actually empty channel can be initialized.
+                let scope = initialize_empty.expect("pending setup has a captured scope");
+                self.check_channel_setup_scope(scope, chat)?;
                 let password = random_wrapping_password()?;
-                let _secret =
-                    Zeroizing::new(self.create_key_epoch_persisted(&password, progress, true)?);
+                let _secret = Zeroizing::new(self.create_key_epoch_persisted(
+                    &password,
+                    progress,
+                    true,
+                    Some((scope, chat)),
+                )?);
+                self.library.clear_pending_channel_key(account, chat)?;
                 self.check_key_generation()?;
                 let mut session = self
                     .session
@@ -247,6 +263,15 @@ impl VaultOwner {
             None,
         );
         session.status.key_selection = Some(outcome);
+        if outcome == VaultKeySelection::Ready
+            && pending_key.is_some_and(|marker| marker.channel_id == chat)
+        {
+            // If key persistence succeeded before marker cleanup (for example,
+            // after a process crash), selecting that advanced epoch retires
+            // the stale marker without generating another key.
+            drop(session);
+            self.library.clear_pending_channel_key(account, chat)?;
+        }
         Ok(outcome)
     }
 
@@ -316,7 +341,7 @@ impl VaultOwner {
             // password. Neither file keys nor recovery keys depend on this value.
             let password = random_wrapping_password()?;
             let _bundle =
-                Zeroizing::new(self.create_key_epoch_persisted(&password, progress, true)?);
+                Zeroizing::new(self.create_key_epoch_persisted(&password, progress, true, None)?);
             Ok(())
         }
     }
@@ -414,7 +439,12 @@ impl VaultOwner {
             }
             ManagedKeyAction::NewEpoch => {
                 let password = random_wrapping_password()?;
-                self.create_key_epoch_persisted(&password, progress, true)
+                self.create_key_epoch_persisted(&password, progress, true, None)
+            }
+            ManagedKeyAction::NewChannel { scope, chat_id } => {
+                self.check_channel_setup_scope(scope, chat_id)?;
+                let password = random_wrapping_password()?;
+                self.create_key_epoch_persisted(&password, progress, true, Some((scope, chat_id)))
             }
             ManagedKeyAction::Import(bundle) => {
                 if self.record.is_none() {
@@ -558,11 +588,12 @@ mod tests {
         let telegram = remote.connect(&temp.path().join("synthetic.session"));
         let vault =
             DesktopVault::with_device_keys(telegram.clone(), library.clone(), store.clone())?;
+        let scope = vault.channel_setup_scope(7)?;
         let first_progress = crate::StorageSetupProgress::new();
         let first = telegram.ensure_storage_channel_with_key_observed(
             &library,
             &vault,
-            7,
+            scope,
             "Synthetic private storage".into(),
             "Synthetic description".into(),
             first_progress.clone(),
@@ -577,15 +608,17 @@ mod tests {
         );
         assert_eq!(library.storage_channel_id(7)?, Some(11));
         assert!(library.worker.vault_metadata()?.is_none());
+        assert!(library.pending_channel_key(7)?.is_some());
         drop(vault);
 
         store.reject.store(false, Ordering::Release);
         let telegram = remote.connect(&temp.path().join("synthetic.session"));
         let restarted = DesktopVault::with_device_keys(telegram.clone(), library.clone(), store)?;
+        let scope = restarted.channel_setup_scope(7)?;
         let rediscovered = telegram.ensure_storage_channel_with_key_observed(
             &library,
             &restarted,
-            7,
+            scope,
             "Synthetic private storage".into(),
             "Synthetic description".into(),
             crate::StorageSetupProgress::new(),
@@ -606,6 +639,7 @@ mod tests {
             VaultKeySelection::Ready
         );
         assert_eq!(library.worker.vault_metadata()?, Some(record));
+        assert!(library.pending_channel_key(7)?.is_none());
         Ok(())
     }
 
@@ -625,11 +659,12 @@ mod tests {
             .submit_new_managed_key(VaultKeyProgress::new())?
             .wait()?;
         let previous = library.worker.vault_metadata()?.expect("older key");
+        let scope = vault.channel_setup_scope(7)?;
         let progress = crate::StorageSetupProgress::new();
         let managed = telegram.ensure_storage_channel_with_key_observed(
             &library,
             &vault,
-            7,
+            scope,
             "Synthetic private storage".into(),
             "Synthetic description".into(),
             progress.clone(),
@@ -645,6 +680,66 @@ mod tests {
         assert!(phases.contains(&crate::StorageSetupPhase::CreatingKey));
         assert_eq!(phases.last(), Some(&crate::StorageSetupPhase::Completed));
         assert_eq!(library.storage_channel_id(7)?, Some(11));
+        assert!(library.pending_channel_key(7)?.is_none());
+        // Simulate a crash after metadata persistence but before marker cleanup.
+        library.save_pending_channel_key(7, 11, Some(previous.vault_id))?;
+        assert_eq!(
+            vault
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        assert_eq!(library.worker.vault_metadata()?, Some(current));
+        assert!(library.pending_channel_key(7)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn account_switch_during_channel_discovery_cannot_admit_old_key_setup() -> TestResult {
+        use crate::telegram::test_vault_remote::{GateKind, TestVaultRemote};
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let (entered, release) = remote.gate(GateKind::StorageDiscovery, 0);
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        let vault = DesktopVault::with_device_keys(
+            telegram.clone(),
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        let scope = vault.channel_setup_scope(7)?;
+        let progress = crate::StorageSetupProgress::new();
+        let worker = {
+            let library = library.clone();
+            let vault = vault.clone();
+            let telegram = telegram.clone();
+            let progress = progress.clone();
+            std::thread::spawn(move || {
+                telegram.ensure_storage_channel_with_key_observed(
+                    &library,
+                    &vault,
+                    scope,
+                    "Synthetic private storage".into(),
+                    "Synthetic description".into(),
+                    progress,
+                )
+            })
+        };
+        entered.recv_timeout(Duration::from_secs(30))?;
+        vault.lock()?;
+        telegram.lifecycle().publish(2, Some(8), None);
+        release.send(())?;
+        let error = worker
+            .join()
+            .expect("setup worker")
+            .expect_err("stale setup");
+        assert_eq!(error.kind(), ApplicationErrorKind::Cancelled);
+        assert_eq!(
+            progress.snapshot().error,
+            Some(ApplicationErrorKind::Cancelled)
+        );
+        assert!(library.worker.vault_metadata()?.is_none());
+        assert!(vault.status().active_vault_id.is_none());
         Ok(())
     }
 
@@ -654,6 +749,8 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
         let remote = TestVaultRemote::new();
+        library.save_storage_channel_id(7, 11)?;
+        library.save_pending_channel_key(7, 11, None)?;
         library.save_telegram_sources(
             &crate::TelegramAccount {
                 id: 7,
@@ -703,8 +800,33 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
         let remote = TestVaultRemote::new();
+        library.save_storage_channel_id(7, 11)?;
+        library.save_pending_channel_key(7, 11, None)?;
         let telegram = remote.connect(&temp.path().join("synthetic.session"));
         telegram.upload_bytes(7, 11, "pending.tarku", remote_upload::CAPTION, vec![1])?;
+        let vault = DesktopVault::with_device_keys(
+            telegram,
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        assert_eq!(
+            vault
+                .submit_select_or_initialize_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::NoKeys
+        );
+        assert!(library.worker.vault_metadata()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn discovered_empty_channel_without_local_pending_marker_is_not_rekeyed() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        library.save_storage_channel_id(7, 11)?;
+        let remote = TestVaultRemote::new();
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
         let vault = DesktopVault::with_device_keys(
             telegram,
             library.clone(),

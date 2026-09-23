@@ -122,6 +122,14 @@ impl TeleArkApp {
             return;
         };
         let account_id = account.id;
+        let setup_scope = match vault.channel_setup_scope(account_id) {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.storage_error = Some(error.kind());
+                cx.notify();
+                return;
+            }
+        };
         let generation = self.telegram_login_generation;
         let title = self.tr("storage-remote-title").to_string();
         let description = self.tr("storage-remote-description").to_string();
@@ -157,7 +165,7 @@ impl TeleArkApp {
             let managed = telegram.ensure_storage_channel_with_key_observed(
                 &library,
                 &vault,
-                account_id,
+                setup_scope,
                 title,
                 description,
                 progress,
