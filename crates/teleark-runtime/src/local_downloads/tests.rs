@@ -286,12 +286,16 @@ fn complete_history(library: &DesktopLibrary, file: &DownloadedFileRecord) {
         .expect("completed history");
 }
 
-fn wait(mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn wait_within(timeout: Duration, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
     while !ready() {
         assert!(Instant::now() < deadline, "observation timed out");
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+fn wait(ready: impl FnMut() -> bool) {
+    wait_within(Duration::from_secs(5), ready);
 }
 
 #[test]
@@ -481,7 +485,10 @@ fn deleting_native_history_and_then_the_file_updates_the_existing_observation() 
         "history deletion retains the download"
     );
     std::fs::remove_file(&file.destination).expect("external deletion");
-    wait(|| {
+    // FSEvents can be delayed under the full serial suite. This stays far
+    // below the five-minute quiet reconciliation, so it still proves the
+    // native event path rather than the fallback.
+    wait_within(Duration::from_secs(15), || {
         monitor
             .take_updates()
             .changes
