@@ -32,6 +32,8 @@ impl ChannelDelta {
 pub struct ChannelChanges {
     pub revision: i64,
     pub reset_required: bool,
+    /// A managed manifest changed after `since`, even if its delta was evicted.
+    pub managed_catalog_changed: bool,
     pub deltas: Vec<Arc<ChannelDelta>>,
 }
 
@@ -49,6 +51,7 @@ impl ChannelSyncSubscription {
 #[derive(Default)]
 pub(super) struct DeltaJournal {
     latest: BTreeMap<i64, i64>,
+    managed_latest: BTreeMap<i64, i64>,
     exhausted: BTreeMap<i64, bool>,
     lost_through: BTreeMap<i64, i64>,
     deltas: VecDeque<Arc<ChannelDelta>>,
@@ -58,6 +61,9 @@ pub(super) struct DeltaJournal {
 impl DeltaJournal {
     pub(super) fn append(&mut self, delta: ChannelDelta) {
         self.latest.insert(delta.chat_id, delta.revision);
+        if delta.managed_files_changed {
+            self.managed_latest.insert(delta.chat_id, delta.revision);
+        }
         let previous = self
             .exhausted
             .insert(delta.chat_id, delta.history_exhausted);
@@ -85,6 +91,10 @@ impl DeltaJournal {
                 .lost_through
                 .get(&chat)
                 .is_some_and(|lost| *lost > since),
+            managed_catalog_changed: self
+                .managed_latest
+                .get(&chat)
+                .is_some_and(|revision| *revision > since),
             deltas: self
                 .deltas
                 .iter()
@@ -96,6 +106,8 @@ impl DeltaJournal {
 
     pub(super) fn retain_sources(&mut self, sources: &BTreeMap<i64, Job>) {
         self.latest.retain(|chat, _| sources.contains_key(chat));
+        self.managed_latest
+            .retain(|chat, _| sources.contains_key(chat));
         self.exhausted.retain(|chat, _| sources.contains_key(chat));
         self.lost_through
             .retain(|chat, _| sources.contains_key(chat));
@@ -153,5 +165,22 @@ mod tests {
         assert!(journal.deltas.is_empty());
         assert!(journal.changes(2, 0).reset_required);
         assert!(!journal.changes(3, 0).reset_required);
+    }
+
+    #[test]
+    fn managed_change_survives_delta_eviction_until_consumer_catches_up() {
+        let mut journal = DeltaJournal::default();
+        let mut manifest = delta(2, 1);
+        manifest.managed_files_changed = true;
+        journal.append(manifest);
+        for revision in 1..=DELTA_CAPACITY as i64 {
+            journal.append(delta(3, revision));
+        }
+        let missed = journal.changes(2, 0);
+        assert!(missed.reset_required);
+        assert!(missed.managed_catalog_changed);
+        assert!(missed.deltas.is_empty());
+        assert!(!journal.changes(3, 0).managed_catalog_changed);
+        assert!(!journal.changes(2, 1).managed_catalog_changed);
     }
 }
