@@ -1,5 +1,11 @@
 # Third-Party Notices
 
+TeleArk directly uses `notify 7.0.0` for native filesystem change events. It
+declares CC0-1.0 and was already present in the dependency graph; this release
+adds no copied implementation or additional license exception. `deny.toml`
+continues to allow CC0-1.0, and Cargo's locked dependency graph remains the
+source of the complete package inventory.
+
 ## Windows installer tooling
 
 Windows installers are compiled with [WiX 5.0.2](https://www.nuget.org/packages/wix/5.0.2),

@@ -1151,6 +1151,12 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.5 · Event-driven local availability
+
+    - Downloaded-file badges react to native filesystem notifications and successful transfer events. Startup, watch registration, wake, watcher errors and a five-minute quiet fallback trigger bounded rechecks; paths without a working watch use slower fallback checks.
+    - Remove idle transfer-cleanup, bandwidth-display and QR-login polling. Queued downloads, active transfer cancellation and shutdown waits react to control events; retries wait for their deadlines. Startup, storage, Vault key and filtered-batch phases repaint from progress events; active elapsed labels, including Keychain feedback, use a one-second presentation clock.
+    - Application metadata is 0.5.5. SQLite read/write schema 23, automatic upgrades from 0–22, and supported credential, encrypted-file, transfer and recovery codecs are unchanged.
+
     ## 0.5.4 · Release runner compatibility
 
     - Verify the installed Inno Setup 6.7.3 compiler by compiling a temporary, output-free version probe against its preprocessor. The official `ISCC.exe` has no usable version resource or `--version` switch. The Windows regression exercises the real compiler and rejects a wrong version.
