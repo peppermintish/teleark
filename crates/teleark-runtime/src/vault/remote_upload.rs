@@ -295,40 +295,6 @@ pub(super) fn load(
     }))
 }
 impl VaultOwner {
-    pub(super) fn pending_remote_files(
-        &self,
-        account: i64,
-        chat: i64,
-        candidates: Vec<crate::RemoteByteObject>,
-        completed: &[ManagedVaultFile],
-        cancellation: crate::TelegramScanCancellation,
-    ) -> Result<Vec<ManagedVaultFile>, ApplicationError> {
-        let mut store = TelegramObjectStore::new(self.telegram.clone(), account, chat)
-            .with_cancellation(cancellation);
-        let mut seen: std::collections::BTreeSet<_> = completed
-            .iter()
-            .map(|file| name(&package_bytes(file.package_numeric_id)))
-            .collect();
-        let mut files = Vec::new();
-        for object in candidates.into_iter().take(MAX_MANIFEST_SCAN) {
-            if !object.name.ends_with(".tarku") || !seen.insert(object.name.clone()) {
-                continue;
-            }
-            if let Some(file) = load(
-                &mut store,
-                object,
-                self.master_key.as_deref(),
-                account,
-                chat,
-            )? {
-                files.push(file);
-            }
-        }
-        Ok(files)
-    }
-}
-
-impl VaultOwner {
     pub(super) fn resume_remote_upload(
         &mut self,
         account: i64,
