@@ -1119,6 +1119,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.8 · Authenticated channel key proof
+
+    - New managed channels publish a proof tied to the account, channel and key. Sign-in verifies it even when there are no files. Verified older empty channels receive a new key and proof after remote checks.
+    - Channel setup and credential-storage changes trigger a fresh key check, including when an earlier check is still running. Files clears the key warning once a fitting key is confirmed.
+    - SQLite schema 23 and encrypted-file codecs are unchanged. Channel-key proof codec 1 and pending channel-key marker codec 2 are added; older markers remain readable.
+
     ## 0.5.7 · Automatic channel key setup
 
     - The Keychain preference now uses a labeled switch on the right.

@@ -1,6 +1,6 @@
 # TeleArk Crypto Format
 
-Format: **part/manifest readers 1.0 and 2.0; new desktop writes 2.0; key wraps and recovery bundles remain 1.0**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
+Format: **part/manifest readers 1.0 and 2.0; new desktop writes 2.0; key wraps and recovery bundles remain 1.0; channel-key proof 1**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
 ## Goals and boundaries
 
@@ -70,6 +70,21 @@ random File Key
 ```
 
 Password, recovery, and file-key wrap records use AES-256-GCM. Their derivations bind the relevant vault/package identity and generation in HKDF `salt`/`info` and AAD. A wrap record is immutable: changing password/recovery creates a fresh record with fresh salt/key-generation identity. Implementations must reject duplicate identities that could cause key/nonce reuse.
+
+### Managed-channel key proof
+
+A managed channel contains a small document with the exact caption
+`teleark:channel-key-proof:v1`. Its public, fixed-length 72-byte payload is:
+
+| Offset | Length | Field |
+| --- | ---: | --- |
+| 0 | 8 | ASCII magic `TARKKP01` |
+| 8 | 8 | Positive account ID, signed i64 big-endian |
+| 16 | 8 | Positive channel ID, signed i64 big-endian |
+| 24 | 16 | Vault ID |
+| 40 | 32 | BLAKE3 keyed MAC over bytes 0–39 |
+
+The MAC key is `BLAKE3 derive_key("teleark/channel-key-proof/v1", Vault Master Key)`. Readers require the exact length, magic, account, channel, Vault ID and MAC. The record binds a key to one Telegram account and channel; it reveals no key material and does not grant file access. The remote identity message identifies the managed channel but is never accepted as key proof. A current proof is required before an empty channel can select a stored key. For a channel with manifests, the selected key must authenticate the files and any proof that is present; older file-bearing channels without a proof remain readable through their authenticated manifests. Unsupported or damaged proofs fail closed. This codec is independent of the part and manifest formats.
 
 ### Password wrapping
 

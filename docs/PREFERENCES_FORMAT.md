@@ -147,6 +147,11 @@ channel:<actual positive canonical decimal i64 channel ID>
 <nonempty localized warning>
 ```
 
+This identity message binds the managed channel to the Telegram account but does
+not authenticate an encryption key. The separate version-1 channel-key proof is
+published as a document with exact caption `teleark:channel-key-proof:v1`; its
+binary format and key verification rules are in [Crypto format](CRYPTO_FORMAT.md#managed-channel-key-proof).
+
 Writers use LF separators without a trailing LF. Readers require the exact
 record prefix and account/channel values, and bound the whole message to 2,048
 UTF-8 bytes. Description parsing uses lines and rejects noncanonical, zero,

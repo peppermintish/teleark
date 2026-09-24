@@ -1,4 +1,10 @@
-# Implementation status — v0.5.7
+# Implementation status — v0.5.8
+
+## Version 0.5.8 · Authenticated managed-channel key proof (2026-09-24)
+
+New managed channels publish and verify a versioned authenticated key proof after persisting their key. The proof binds the Vault Master Key, Vault ID, account and channel. An empty channel now selects its current key from that remote proof rather than guessing among local credentials. A verified older channel with only the plaintext identity message receives a fresh key and proof after synchronized catalog and fresh remote manifest and pending-upload checks establish that it contains no managed files. A channel with files is never automatically rekeyed. Key setup retains its pending marker until the proof is verified, and restart recovery targets the exact key begun by setup. Missing or mismatched local credentials continue to show the appropriate Files helper; Raw Files remains available.
+
+The Files view rechecks its key after channel setup succeeds even when the catalog revision is unchanged. Switching credential storage while a prior key check is running also queues a fresh check. The channel-key proof uses codec 1; the local pending channel-key marker writes codec 2 and reads older codec 1. SQLite read/write schema 23, encrypted-file/manifest codecs and recovery bundles are unchanged. [Crypto format](CRYPTO_FORMAT.md#managed-channel-key-proof), [data model](DATA_MODEL.md) and [ADR 0057](adr/0057-single-current-channel-key.md) record the contracts. Local release gates passed: Git-index LF policy and regressions, 13 synthetic distribution-credential cases, macOS library and Linux payload checks, formatting, locked workspace/all-target checking, strict Clippy, the full serial workspace test suite, explicit Core and localization tests, warning-denied rustdoc, cargo-deny and the matching v0.5.8 release-version resolver. Synthetic remote tests cover fresh and rediscovered channels, restart/import, interrupted proof upload/acknowledgment, wrong newest proof and missing credentials. No live Telegram account or personal key material was used. Hosted package qualification and publication run from the pushed release tag.
 
 ## Version 0.5.7 · Automatic managed channel key (2026-09-24)
 
