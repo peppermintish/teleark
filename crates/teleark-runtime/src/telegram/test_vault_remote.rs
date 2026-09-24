@@ -12,7 +12,10 @@ pub(crate) enum GateKind {
     UploadPart,
     DownloadPart,
     ManifestDownload,
+    ProofDownload,
     ManifestUpload,
+    ProofUpload,
+    ProofAcknowledgment,
     PartAcknowledgment,
     ManifestAcknowledgment,
 }
@@ -176,7 +179,10 @@ impl TestVaultRemote {
             .expect("state")
             .objects
             .values()
-            .filter(|object| object.summary.caption != crate::vault::remote_upload::CAPTION)
+            .filter(|object| {
+                object.summary.caption != crate::vault::remote_upload::CAPTION
+                    && object.summary.caption != crate::vault::CHANNEL_KEY_PROOF_CAPTION
+            })
             .count()
     }
     pub(crate) fn downloads(&self) -> Vec<i64> {
@@ -193,6 +199,41 @@ impl TestVaultRemote {
     }
     pub(crate) fn uploads(&self) -> Vec<(i64, [u8; 32])> {
         self.state.lock().expect("state").uploads.clone()
+    }
+
+    pub(crate) fn proof_bytes(&self) -> Vec<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("state")
+            .objects
+            .values()
+            .filter(|object| object.summary.caption == crate::vault::CHANNEL_KEY_PROOF_CAPTION)
+            .map(|object| object.bytes.clone())
+            .collect()
+    }
+
+    pub(crate) fn mark_storage_created(&self) {
+        self.state.lock().expect("state").storage_created = true;
+    }
+
+    pub(crate) fn insert_proof(&self, bytes: Vec<u8>) {
+        let mut state = self.state.lock().expect("state");
+        let id = state.objects.keys().next_back().copied().unwrap_or(0) + 1;
+        state.objects.insert(
+            id,
+            Object {
+                summary: TelegramFileSummary {
+                    message_id: id,
+                    sent_at_unix_ms: 100,
+                    modified_at_unix_ms: 100,
+                    file_name: "channel-key-proof.v1.takp".into(),
+                    caption: crate::vault::CHANNEL_KEY_PROOF_CAPTION.into(),
+                    mime_type: None,
+                    size_bytes: bytes.len() as u64,
+                },
+                bytes,
+            },
+        );
     }
 
     pub(crate) fn fail_once(&self, kind: GateKind) {
@@ -381,17 +422,16 @@ impl TestVaultRemote {
                         // mutex while coordinating concurrent publications.
                         self.cross_gate(GateKind::PendingMetadataUpload)?;
                     } else {
-                        self.cross_gate(if caption == crate::transfer::MANIFEST_CAPTION {
+                        let kind = if caption == crate::vault::CHANNEL_KEY_PROOF_CAPTION {
+                            GateKind::ProofUpload
+                        } else if caption == crate::transfer::MANIFEST_CAPTION {
                             GateKind::ManifestUpload
                         } else {
                             GateKind::UploadPart
-                        })?;
+                        };
+                        self.cross_gate(kind)?;
                         Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                        self.fail_if_armed(if caption == crate::transfer::MANIFEST_CAPTION {
-                            GateKind::ManifestUpload
-                        } else {
-                            GateKind::UploadPart
-                        })?;
+                        self.fail_if_armed(kind)?;
                     }
                     let mut state = self.state.lock().expect("state");
                     if let Some(random) = publication_random_id
@@ -413,7 +453,9 @@ impl TestVaultRemote {
                             + bytes.len()
                             <= 128 * 1024 * 1024
                     );
-                    let acknowledgment = if caption == crate::transfer::MANIFEST_CAPTION {
+                    let acknowledgment = if caption == crate::vault::CHANNEL_KEY_PROOF_CAPTION {
+                        GateKind::ProofAcknowledgment
+                    } else if caption == crate::transfer::MANIFEST_CAPTION {
                         GateKind::ManifestAcknowledgment
                     } else {
                         GateKind::PartAcknowledgment
@@ -528,13 +570,16 @@ impl TestVaultRemote {
                             total: object.bytes.len() as u64,
                         });
                     }
-                    if object.summary.caption != crate::transfer::MANIFEST_CAPTION {
-                        self.cross_gate(GateKind::DownloadPart)?;
-                        self.fail_if_armed(GateKind::DownloadPart)?;
+                    let kind = if object.summary.caption == crate::vault::CHANNEL_KEY_PROOF_CAPTION
+                    {
+                        GateKind::ProofDownload
+                    } else if object.summary.caption == crate::transfer::MANIFEST_CAPTION {
+                        GateKind::ManifestDownload
                     } else {
-                        self.cross_gate(GateKind::ManifestDownload)?;
-                        self.fail_if_armed(GateKind::ManifestDownload)?;
-                    }
+                        GateKind::DownloadPart
+                    };
+                    self.cross_gate(kind)?;
+                    self.fail_if_armed(kind)?;
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
                     if let Some(observer) = &observer {
                         observer.observe(teleark_telegram::ByteTransferEvent::Downloading {

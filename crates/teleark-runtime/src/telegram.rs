@@ -510,21 +510,66 @@ impl DesktopTelegram {
                 replaced: replaced_channel.is_some(),
                 health,
             };
-            if managed.created
-                && managed.health == crate::StorageChannelHealth::Healthy
+            if managed.health == crate::StorageChannelHealth::Healthy
                 && let Some((vault, scope)) = vault
             {
-                progress.phase(crate::StorageSetupPhase::CreatingKey);
-                // The recovery bundle is stored by Runtime in the selected
-                // credential backend; it must not be exposed through setup.
-                let _secret = vault
-                    .submit_new_channel_key(
-                        scope,
-                        managed.channel.id,
-                        crate::VaultKeyProgress::new(),
-                    )?
-                    .wait()?;
-                library.clear_pending_channel_key(account_id, managed.channel.id)?;
+                let pending = library.pending_channel_key(account_id)?;
+                if !managed.created
+                    && pending.is_some_and(|marker| marker.channel_id == managed.channel.id)
+                {
+                    progress.phase(crate::StorageSetupPhase::CreatingKey);
+                    let outcome = vault
+                        .submit_select_or_initialize_channel_key(
+                            account_id,
+                            managed.channel.id,
+                            crate::VaultKeyProgress::new(),
+                        )?
+                        .wait()?;
+                    if outcome != crate::VaultKeySelection::Ready {
+                        return Err(ApplicationError::new(
+                            ApplicationErrorKind::VaultKeyUnavailable,
+                        ));
+                    }
+                } else if managed.created
+                    || (!managed.replaced
+                        && pending.is_none()
+                        && [
+                            crate::vault::CHANNEL_KEY_PROOF_CAPTION,
+                            crate::transfer::MANIFEST_CAPTION,
+                            crate::vault::remote_upload::CAPTION,
+                        ]
+                        .into_iter()
+                        .map(|caption| {
+                            self.search_files_exact_caption(
+                                account_id,
+                                managed.channel.id,
+                                caption,
+                                1,
+                                None,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .iter()
+                        .all(Vec::is_empty))
+                {
+                    if !managed.created {
+                        library.save_pending_channel_key(
+                            account_id,
+                            managed.channel.id,
+                            scope.previous_vault_id,
+                        )?;
+                    }
+                    progress.phase(crate::StorageSetupPhase::CreatingKey);
+                    // The recovery bundle stays in the selected credential backend.
+                    let _secret = vault
+                        .submit_new_channel_key(
+                            scope,
+                            managed.channel.id,
+                            crate::VaultKeyProgress::new(),
+                        )?
+                        .wait()?;
+                    library.clear_pending_channel_key(account_id, managed.channel.id)?;
+                }
             }
             Ok(managed)
         })();
@@ -2472,7 +2517,8 @@ async fn search_files(
             caption,
             limit,
             caption == crate::transfer::MANIFEST_CAPTION
-                || caption == crate::vault::remote_upload::CAPTION,
+                || caption == crate::vault::remote_upload::CAPTION
+                || caption == crate::vault::CHANNEL_KEY_PROOF_CAPTION,
         )
         .await
         .map_err(map_telegram_error)

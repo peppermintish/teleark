@@ -1145,6 +1145,7 @@ enum StorageRequest {
         account_id: i64,
         chat_id: i64,
         previous_vault_id: Option<[u8; 16]>,
+        target_vault_id: Option<[u8; 16]>,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     ClearPendingChannelKey {
@@ -1913,6 +1914,7 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 account_id,
                 chat_id,
                 previous_vault_id,
+                target_vault_id,
                 reply,
             } => {
                 let _ = reply.send(storage_channel::save_pending_key(
@@ -1920,6 +1922,7 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                     account_id,
                     chat_id,
                     previous_vault_id,
+                    target_vault_id,
                 ));
             }
             StorageRequest::ClearPendingChannelKey {

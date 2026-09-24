@@ -8,6 +8,7 @@
 
 mod aead;
 mod cbor;
+mod channel_key_proof;
 mod error;
 mod kdf;
 mod manifest;
@@ -17,6 +18,7 @@ mod secret;
 mod usage;
 mod wrap;
 
+pub use channel_key_proof::{open_channel_key_proof, seal_channel_key_proof};
 pub use error::{CryptoError, FormatKind, LayoutViolation};
 pub use manifest::{
     ExtensionField, LogicalTimestamps, ManifestLimits, ManifestMetadata, ManifestPart,

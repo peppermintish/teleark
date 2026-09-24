@@ -13,6 +13,7 @@ const PENDING_KEY_PREFIX: &str = "storage-channel-key-pending.v1.account.";
 pub(crate) struct PendingChannelKey {
     pub(crate) channel_id: i64,
     pub(crate) previous_vault_id: Option<[u8; 16]>,
+    pub(crate) target_vault_id: Option<[u8; 16]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,6 +143,27 @@ impl DesktopLibrary {
                 account_id,
                 chat_id,
                 previous_vault_id,
+                target_vault_id: None,
+                reply,
+            }
+        })
+    }
+
+    pub(crate) fn target_pending_channel_key(
+        &self,
+        account_id: i64,
+        chat_id: i64,
+        previous_vault_id: Option<[u8; 16]>,
+        target_vault_id: [u8; 16],
+    ) -> Result<(), ApplicationError> {
+        validate_id(account_id)?;
+        validate_id(chat_id)?;
+        self.worker.request("target_pending_channel_key", |reply| {
+            StorageRequest::SavePendingChannelKey {
+                account_id,
+                chat_id,
+                previous_vault_id,
+                target_vault_id: Some(target_vault_id),
                 reply,
             }
         })
@@ -255,12 +277,16 @@ pub(crate) fn load_pending_key(
                 .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
             let invalid = || ApplicationError::new(ApplicationErrorKind::Persistence);
             let version = value.get("version").and_then(serde_json::Value::as_u64);
-            if version.is_some_and(|version| version > 1) {
+            if version.is_some_and(|version| version > 2) {
                 return Err(ApplicationError::new(
                     ApplicationErrorKind::StorageIdentityUnsupported,
                 ));
             }
-            if value.as_object().is_none_or(|fields| fields.len() != 3) || version != Some(1) {
+            if value
+                .as_object()
+                .is_none_or(|fields| fields.len() != if version == Some(2) { 4 } else { 3 })
+                || !matches!(version, Some(1 | 2))
+            {
                 return Err(invalid());
             }
             let channel_id = value
@@ -269,25 +295,16 @@ pub(crate) fn load_pending_key(
                 .filter(|id| *id > 0)
                 .ok_or_else(invalid)?;
             let previous = value.get("previous_vault_id").ok_or_else(invalid)?;
-            let previous_vault_id = if previous.is_null() {
-                None
+            let previous_vault_id = parse_optional_vault_id(previous)?;
+            let target_vault_id = if version == Some(2) {
+                parse_optional_vault_id(value.get("target_vault_id").ok_or_else(invalid)?)?
             } else {
-                let bytes = previous
-                    .as_array()
-                    .filter(|bytes| bytes.len() == 16)
-                    .ok_or_else(invalid)?;
-                let mut id = [0_u8; 16];
-                for (destination, value) in id.iter_mut().zip(bytes) {
-                    *destination = value
-                        .as_u64()
-                        .and_then(|value| u8::try_from(value).ok())
-                        .ok_or_else(invalid)?;
-                }
-                Some(id)
+                None
             };
             let marker = PendingChannelKey {
                 channel_id,
                 previous_vault_id,
+                target_vault_id,
             };
             Ok(marker)
         })
@@ -299,32 +316,66 @@ pub(crate) fn save_pending_key(
     account_id: i64,
     chat_id: i64,
     previous_vault_id: Option<[u8; 16]>,
+    target_vault_id: Option<[u8; 16]>,
 ) -> Result<(), ApplicationError> {
     validate_id(account_id)?;
     validate_id(chat_id)?;
     // Never overwrite an unsupported or damaged marker during a new setup.
-    let _ = load_pending_key(database, account_id)?;
+    if let Some(current) = load_pending_key(database, account_id)?
+        && target_vault_id.is_some()
+        && (current.channel_id != chat_id || current.previous_vault_id != previous_vault_id)
+    {
+        return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
+    }
     let marker = PendingChannelKey {
         channel_id: chat_id,
         previous_vault_id,
+        target_vault_id,
     };
     database
         .set_setting(&SettingRecord {
             key: format!("{PENDING_KEY_PREFIX}{account_id}"),
             value: format!(
-                "{{\"version\":1,\"channel_id\":{chat_id},\"previous_vault_id\":{}}}",
-                marker.previous_vault_id.map_or_else(
-                    || "null".to_owned(),
-                    |id| format!(
-                        "[{}]",
-                        id.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
-                    )
-                )
+                "{{\"version\":2,\"channel_id\":{chat_id},\"previous_vault_id\":{},\"target_vault_id\":{}}}",
+                format_vault_id(marker.previous_vault_id),
+                format_vault_id(marker.target_vault_id),
             ),
             updated_at_unix_ms: crate::system_time_unix_ms(std::time::SystemTime::now())
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?,
         })
         .map_err(map_storage_error)
+}
+
+fn parse_optional_vault_id(
+    value: &serde_json::Value,
+) -> Result<Option<[u8; 16]>, ApplicationError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let bytes = value
+        .as_array()
+        .filter(|bytes| bytes.len() == 16)
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    let mut id = [0_u8; 16];
+    for (destination, value) in id.iter_mut().zip(bytes) {
+        *destination = value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
+    }
+    Ok(Some(id))
+}
+
+fn format_vault_id(id: Option<[u8; 16]>) -> String {
+    id.map_or_else(
+        || "null".to_owned(),
+        |id| {
+            format!(
+                "[{}]",
+                id.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+            )
+        },
+    )
 }
 
 pub(crate) fn clear_pending_key(
@@ -432,18 +483,30 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let mut database = Database::open(temp.path().join("fixture.sqlite"))?;
-        save_pending_key(&mut database, 7, 11, Some([3; 16]))?;
+        save_pending_key(&mut database, 7, 11, Some([3; 16]), None)?;
         assert_eq!(
             load_pending_key(&database, 7)?,
             Some(PendingChannelKey {
                 channel_id: 11,
                 previous_vault_id: Some([3; 16]),
+                target_vault_id: None,
             })
+        );
+        save_pending_key(&mut database, 7, 11, Some([3; 16]), Some([4; 16]))?;
+        assert_eq!(
+            load_pending_key(&database, 7)?.and_then(|marker| marker.target_vault_id),
+            Some([4; 16])
+        );
+        assert_eq!(
+            save_pending_key(&mut database, 7, 12, Some([3; 16]), Some([5; 16]))
+                .expect_err("target cannot move to another channel")
+                .kind(),
+            ApplicationErrorKind::Conflict
         );
         let key = format!("{PENDING_KEY_PREFIX}7");
         for (value, kind) in [
             (
-                "{\"version\":2,\"channel_id\":11,\"previous_vault_id\":null}",
+                "{\"version\":3,\"channel_id\":11,\"previous_vault_id\":null}",
                 ApplicationErrorKind::StorageIdentityUnsupported,
             ),
             (
@@ -463,7 +526,7 @@ mod tests {
                 kind
             );
             assert_eq!(
-                save_pending_key(&mut database, 7, 12, None)
+                save_pending_key(&mut database, 7, 12, None, None)
                     .expect_err("must not overwrite unknown marker")
                     .kind(),
                 kind

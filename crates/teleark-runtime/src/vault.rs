@@ -81,6 +81,7 @@ const VAULT_QUEUE_CAPACITY: usize = 16;
 // Internal scheduling window, never a user selection limit.
 const VAULT_UPLOAD_WINDOW: usize = 128;
 const MAX_MANIFEST_SCAN: usize = 1_000;
+pub(crate) const CHANNEL_KEY_PROOF_CAPTION: &str = "teleark:channel-key-proof:v1";
 const RECOVERY_BUNDLE_PREFIX: &str = "TARK-RB1-";
 const TRANSFER_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 // Producers and network queues are bounded in 512 KiB blocks, independently
@@ -1988,6 +1989,14 @@ impl VaultOwner {
         let mut random = OsRandom;
         let mut vault_id = [0_u8; 16];
         random.fill_bytes(&mut vault_id).map_err(map_crypto_error)?;
+        if let Some((scope, chat_id)) = channel_scope {
+            self.library.target_pending_channel_key(
+                scope.account_id,
+                chat_id,
+                scope.previous_vault_id,
+                vault_id,
+            )?;
+        }
         if self.library.worker.vault_key_epoch(vault_id)?.is_some() {
             return Err(ApplicationError::new(ApplicationErrorKind::Conflict));
         }
