@@ -237,9 +237,11 @@ pub fn default_database_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|root| root.join("TeleArk/library.sqlite3"))
+        windows_data_root(
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("USERPROFILE"),
+        )
+        .map(|root| root.join("library.sqlite3"))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -253,6 +255,22 @@ pub fn default_database_path() -> Option<PathBuf> {
             })
             .map(|root| root.join("teleark/library.sqlite3"))
     }
+}
+
+#[cfg(all(feature = "msix", any(target_os = "windows", test)))]
+fn windows_data_root(
+    _local_app_data: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    user_profile.map(|profile| PathBuf::from(profile).join("TeleArk"))
+}
+
+#[cfg(all(not(feature = "msix"), any(target_os = "windows", test)))]
+fn windows_data_root(
+    local_app_data: Option<std::ffi::OsString>,
+    _user_profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    local_app_data.map(|local_app_data| PathBuf::from(local_app_data).join("TeleArk"))
 }
 
 /// Resolves the default desktop managed-file layout without touching disk.
@@ -2941,6 +2959,24 @@ fn map_storage_error(error: StorageError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_data_root_uses_distribution_specific_location() {
+        let local_app_data = Some(std::ffi::OsString::from("local-app-data"));
+        let user_profile = Some(std::ffi::OsString::from("user-profile"));
+        let root = windows_data_root(local_app_data, user_profile).expect("data root");
+
+        #[cfg(feature = "msix")]
+        assert_eq!(root, PathBuf::from("user-profile").join("TeleArk"));
+        #[cfg(not(feature = "msix"))]
+        assert_eq!(root, PathBuf::from("local-app-data").join("TeleArk"));
+    }
+
+    #[cfg(feature = "msix")]
+    #[test]
+    fn msix_data_root_requires_a_user_profile() {
+        assert!(windows_data_root(Some("local-app-data".into()), None).is_none());
+    }
 
     #[test]
     fn dropping_storage_owner_does_not_wait_for_a_full_queue_or_blocked_worker() {

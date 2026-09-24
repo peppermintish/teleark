@@ -178,6 +178,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       label: ${{ steps.resolve.outputs.label }}
+      msix_enabled: ${{ steps.msix.outputs.enabled }}
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Configure Rust
@@ -186,6 +187,23 @@ jobs:
         id: resolve
         shell: pwsh
         run: ./scripts/release-version.ps1
+      - name: Validate optional Microsoft Store identity
+        id: msix
+        shell: pwsh
+        env:
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $identityName = $env:TELEARK_MSIX_IDENTITY_NAME
+          $publisher = $env:TELEARK_MSIX_PUBLISHER
+          $publisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
+          $configuredValues = @($identityName, $publisher, $publisherDisplayName) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          if ($configuredValues.Count -ne 0 -and $configuredValues.Count -ne 3) {
+            throw 'Configure TELEARK_MSIX_IDENTITY_NAME, TELEARK_MSIX_PUBLISHER, and TELEARK_MSIX_PUBLISHER_DISPLAY_NAME together, or leave all three unset.'
+          }
+          $enabled = if ($configuredValues.Count -eq 3) { 'true' } else { 'false' }
+          "enabled=$enabled" >> $env:GITHUB_OUTPUT
       - name: Validate Telegram distribution configuration
         shell: pwsh
         env:
@@ -332,6 +350,39 @@ jobs:
           ./scripts/verify-release-windows.ps1 '${{ needs.version.outputs.version }}' `
             '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
 
+      - name: Build Microsoft Store data-layout binary
+        if: ${{ matrix.platform == 'windows' && needs.version.outputs.msix_enabled == 'true' }}
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
+        run: |
+          cargo test -p teleark-runtime --locked --features msix data_root
+          cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }} --features msix
+
+      - name: Package Microsoft Store upload bundle
+        if: ${{ matrix.platform == 'windows' && needs.version.outputs.msix_enabled == 'true' }}
+        shell: pwsh
+        env:
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $packageParams = @{
+            BinaryPath = "target/${{ matrix.target }}/release/teleark.exe"
+            OutputDirectory = 'dist'
+            CargoVersion = '${{ needs.version.outputs.version }}'
+            IdentityName = $env:TELEARK_MSIX_IDENTITY_NAME
+            Publisher = $env:TELEARK_MSIX_PUBLISHER
+            PublisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
+          }
+          $symbolsPath = "target/${{ matrix.target }}/release/teleark.pdb"
+          if (Test-Path -LiteralPath $symbolsPath -PathType Leaf) {
+            $packageParams.PublicSymbolsPath = $symbolsPath
+          }
+          ./scripts/package-windows-msix.ps1 @packageParams
+
       - name: Retain failed Windows installer logs
         if: ${{ failure() && matrix.platform == 'windows' }}
         uses: actions/upload-artifact@v7.0.1
@@ -397,6 +448,7 @@ jobs:
             dist/*.deb
             dist/*.pkg
             dist/*.bin
+            dist/*.msixupload
           if-no-files-found: error
           retention-days: 14
 
@@ -434,11 +486,29 @@ jobs:
           copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.AppImage"
           copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.tar.gz"
           copy_asset linux-x86_64 "teleark_${label}_amd64.deb"
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 9
+          shopt -s nullglob
+          msix_uploads=(artifacts/release-windows-x86_64/*.msixupload)
+          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then
+            if [[ "${#msix_uploads[@]}" -ne 1 ]]; then
+              echo "Expected exactly one Windows .msixupload artifact, found ${#msix_uploads[@]}." >&2
+              exit 1
+            fi
+            cp "${msix_uploads[0]}" "dist/$(basename "${msix_uploads[0]}")"
+          elif [[ "${#msix_uploads[@]}" -ne 0 ]]; then
+            echo 'Unexpected Windows .msixupload artifact while Store packaging is disabled.' >&2
+            exit 1
+          fi
+          expected_assets=9
+          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then expected_assets=10; fi
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq "$expected_assets"
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md dist/
           (cd dist && sha256sum * > SHA256SUMS)
           echo '### Release assets' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Validated nine installers and portable assets across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then
+            echo 'Validated ten installers and portable assets, including the Microsoft Store upload bundle, across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Validated nine installers and portable assets across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo '| SHA256 | File |' >> "$GITHUB_STEP_SUMMARY"
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           while read -r hash file; do echo "| \`$hash\` | \`$file\` |" >> "$GITHUB_STEP_SUMMARY"; done < dist/SHA256SUMS
