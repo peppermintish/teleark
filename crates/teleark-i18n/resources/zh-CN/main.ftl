@@ -968,7 +968,7 @@ account-restoring = 正在恢复 Telegram 会话…
 
 account-change-method = 使用其他登录方式
 
-account-private-note = Telegram 会话仅保存在这台 Mac 上。
+account-private-note = Telegram 会话保存在此设备上。
 
 account-switch-description = 切换会退出当前 Telegram 账户并暂停下载。文件与下载进度会保留。
 

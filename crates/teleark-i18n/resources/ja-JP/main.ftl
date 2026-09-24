@@ -968,7 +968,7 @@ account-restoring = Telegram セッションを復元中…
 
 account-change-method = 別の方法でログイン
 
-account-private-note = Telegram セッションはこの Mac に保存されます。
+account-private-note = Telegram セッションはこのデバイスに保存されます。
 
 account-switch-description = 切り替えると Telegram からログアウトし、ダウンロードを一時停止します。ファイルと進行状況は保持されます。
 

@@ -996,7 +996,7 @@ account-restoring = Restoring your Telegram session…
 
 account-change-method = Use another login method
 
-account-private-note = Your Telegram session stays on this Mac.
+account-private-note = Your Telegram session stays on this device.
 
 account-switch-description = Switching signs out of Telegram and pauses downloads. Files and progress are kept.
 
