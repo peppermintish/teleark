@@ -201,6 +201,11 @@ impl TeleArkApp {
                     Ok(_) => VaultActivity::Succeeded,
                     Err(error) => VaultActivity::Failed(error.kind()),
                 };
+                if app.finish_pending_channel_key_reselection() {
+                    app.apply_managed_channel_changes(cx);
+                    cx.notify();
+                    return;
+                }
                 app.apply_managed_channel_changes(cx);
                 if app.vault_status.key_selection == Some(teleark_runtime::VaultKeySelection::Ready)
                 {
@@ -218,6 +223,27 @@ impl TeleArkApp {
         }
         self.vault_key_selection_scope = None;
         self.apply_managed_channel_changes(cx);
+    }
+
+    pub(crate) fn request_channel_key_reselection(&mut self, account: i64, chat: i64) {
+        self.vault_key_reselection_pending = Some((account, chat));
+        self.finish_pending_channel_key_reselection();
+    }
+
+    fn finish_pending_channel_key_reselection(&mut self) -> bool {
+        if self.vault_key_selection_task.is_some() {
+            return false;
+        }
+        let Some((account, chat)) = self.vault_key_reselection_pending.take() else {
+            return false;
+        };
+        if self.telegram_account.as_ref().map(|current| current.id) != Some(account)
+            || self.storage_channel_id() != Some(chat)
+        {
+            return false;
+        }
+        self.vault_key_selection_scope = None;
+        true
     }
 
     fn finish_managed_key_operation(
@@ -491,6 +517,7 @@ impl TeleArkApp {
         self.vault_key_presentation = None;
         self.vault_key_selection_task = None;
         self.vault_key_selection_scope = None;
+        self.vault_key_reselection_pending = None;
         self.clear_vault_inputs(window, cx);
         self.pending_vault_action = None;
         self.show_upload = false;
@@ -1188,6 +1215,38 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn completed_channel_setup_rechecks_key_at_the_same_catalog_revision(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("preview account").id;
+            let chat = app.storage_channel_id().expect("preview channel");
+            let old_scope = Some((account, chat, 7));
+            app.vault_key_selection_scope = old_scope;
+            app.request_channel_key_reselection(account, chat);
+            assert_eq!(app.vault_key_selection_scope, None);
+            assert_eq!(app.vault_key_reselection_pending, None);
+
+            app.vault_key_selection_scope = old_scope;
+            app.vault_key_selection_task = Some(cx.spawn(async move |_, _| {
+                std::future::pending::<()>().await;
+            }));
+            app.request_channel_key_reselection(account, chat);
+            assert_eq!(app.vault_key_selection_scope, old_scope);
+            assert_eq!(app.vault_key_reselection_pending, Some((account, chat)));
+            app.vault_key_selection_task = None;
+            assert!(app.finish_pending_channel_key_reselection());
+            assert_eq!(app.vault_key_selection_scope, None);
+
+            app.vault_key_selection_scope = old_scope;
+            app.request_channel_key_reselection(account + 1, chat);
+            assert_eq!(app.vault_key_selection_scope, old_scope);
+            assert_eq!(app.vault_key_reselection_pending, None);
+        });
+    }
 
     #[gpui::test]
     fn key_readiness_never_gates_pages_or_the_upload_picker(cx: &mut gpui::TestAppContext) {

@@ -234,6 +234,9 @@ impl TeleArkApp {
                             {
                                 this.storage_error = Some(error.kind());
                             }
+                            // The channel sync may have checked an empty channel
+                            // before setup finished persisting its new key.
+                            this.request_channel_key_reselection(account_id, chat_id);
                             this.apply_managed_channel_changes(cx);
                             if this.page == Page::Storage {
                                 this.select_storage(this.storage_view, cx);
