@@ -230,7 +230,7 @@ impl TeleArkApp {
         self.finish_pending_channel_key_reselection();
     }
 
-    fn finish_pending_channel_key_reselection(&mut self) -> bool {
+    pub(crate) fn finish_pending_channel_key_reselection(&mut self) -> bool {
         if self.vault_key_selection_task.is_some() {
             return false;
         }

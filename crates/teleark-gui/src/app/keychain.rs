@@ -145,7 +145,15 @@ impl TeleArkApp {
             .change_error
             .or_else(|| outcome.status.err().map(|error| error.kind()));
         if outcome.backend_changed {
-            self.vault_key_selection_scope = None;
+            if let (Some(account), Some(chat)) = (
+                self.telegram_account.as_ref().map(|account| account.id),
+                self.storage_channel_id(),
+            ) {
+                self.request_channel_key_reselection(account, chat);
+            } else {
+                self.vault_key_reselection_pending = None;
+                self.vault_key_selection_scope = None;
+            }
             self.apply_managed_channel_changes(cx);
         }
         cx.notify();
@@ -713,6 +721,39 @@ mod tests {
                 cx,
             );
             assert!(app.vault_key_selection_scope.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn backend_switch_waits_for_in_flight_channel_key_selection(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("preview account").id;
+            let chat = app.storage_channel_id().expect("preview channel");
+            let old_scope = Some((account, chat, 8));
+            app.vault_key_selection_scope = old_scope;
+            app.vault_key_selection_task = Some(cx.spawn(async move |_, _| {
+                std::future::pending::<()>().await;
+            }));
+            app.finish_keychain_work(
+                KeychainOutcome {
+                    status: Ok(KeychainStatus {
+                        enabled: true,
+                        supported: true,
+                        cleanup_pending: 0,
+                        unavailable_credentials: 0,
+                    }),
+                    change_error: None,
+                    backend_changed: true,
+                },
+                cx,
+            );
+            assert_eq!(app.vault_key_selection_scope, old_scope);
+            assert_eq!(app.vault_key_reselection_pending, Some((account, chat)));
+            app.vault_key_selection_task = None;
+            assert!(app.finish_pending_channel_key_reselection());
+            assert_eq!(app.vault_key_selection_scope, None);
+            assert_eq!(app.vault_key_reselection_pending, None);
         });
     }
 
