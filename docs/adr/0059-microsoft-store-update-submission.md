@@ -1,6 +1,6 @@
 # ADR 0059: Microsoft Store update submission from GitHub Actions
 
-Status: Accepted — 2026-09-25. This supersedes ADR 0058's manual-only submission path for updates. The first Store submission remains manual.
+Status: Superseded by ADR 0060 — 2026-09-25. This records the interim optional submission setup; the first Store submission remains manual.
 
 ## Decision
 
