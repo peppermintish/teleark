@@ -92,7 +92,7 @@ The finished files are:
 | `dist/TeleArk-<version>-macos-universal.pkg` | Installer to share; installs the app at `/Applications/TeleArk.app`. |
 | `dist/teleark-<version>-macos-universal.bin` | Signed standalone executable. |
 
-For version 0.5.8, the installer is `dist/TeleArk-0.5.8-macos-universal.pkg`. CI additionally creates the portable `.tar.gz` archive and release checksums. To preview the local output paths without building or accessing credentials, run `scripts/package-macos.sh --dry-run target/universal-apple-darwin/release/teleark dist/TeleArk.app`.
+For version 0.5.9, the installer is `dist/TeleArk-0.5.9-macos-universal.pkg`. CI additionally creates the portable `.tar.gz` archive and release checksums. To preview the local output paths without building or accessing credentials, run `scripts/package-macos.sh --dry-run target/universal-apple-darwin/release/teleark dist/TeleArk.app`.
 
 ### Persistent self-signed release identity
 
