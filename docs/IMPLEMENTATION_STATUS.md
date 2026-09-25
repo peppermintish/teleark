@@ -1,4 +1,8 @@
-# Implementation status — v0.5.8
+# Implementation status — v0.5.9
+
+## Version 0.5.9 · Remove Hindi interface language (2026-09-25)
+
+Removed `hi-IN` from the supported-locale registry, translation resources, settings and locale negotiation. Windows systems configured for Hindi now use the English fallback unless another supported language is selected. The Windows MSIX declares the remaining nine UI languages. Persistent schemas and encrypted formats are unchanged.
 
 ## Windows MSIX-only Store release workflow (2026-09-25)
 

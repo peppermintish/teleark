@@ -16,7 +16,7 @@ The Windows Store package is unsigned before submission; Microsoft signs it afte
 
 ## Windows
 
-Windows release builds produce one artifact: an x64 MSIX for Microsoft Store distribution. The build uses the `msix` feature and statically links the Microsoft C runtime. Its manifest declares the ten UI languages bundled under `crates/teleark-i18n/resources` (`en-US`, `de-DE`, `es-ES`, `fr-FR`, `hi-IN`, `ja-JP`, `ko-KR`, `pt-BR`, `ru-RU`, and `zh-CN`); keep the manifest list in sync with those catalogs. The manifest identity comes from the three repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME`; keep them identical to the values assigned in Partner Center.
+Windows release builds produce one artifact: an x64 MSIX for Microsoft Store distribution. The build uses the `msix` feature and statically links the Microsoft C runtime. Its manifest declares the nine UI languages bundled under `crates/teleark-i18n/resources` (`en-US`, `de-DE`, `es-ES`, `fr-FR`, `ja-JP`, `ko-KR`, `pt-BR`, `ru-RU`, and `zh-CN`); keep the manifest list in sync with those catalogs. The manifest identity comes from the three repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME`; keep them identical to the values assigned in Partner Center.
 
 On every matching `vX.Y.Z` tag, CI builds and checks all platform packages, submits the raw `.msix` to Partner Center, then publishes the GitHub Release. Pull requests and manual package previews do not submit to the Store. A release tag must point to a commit on `main` and match the `teleark-gui` Cargo version. The workflow requires the four Store authentication secrets and the repository variable `TELEARK_MSSTORE_PRODUCT_ID`; incomplete configuration fails before packaging.
 
@@ -34,7 +34,7 @@ The Entra application must be associated with the Partner Center account and hav
 
 The manifest targets Windows 10 version 1809 or later. General Windows 10 support ended on October 14, 2025, with later support limited to specific LTSC or Extended Security Update editions; confirm that the declared floor fits the intended audience before submission. See [MSIX platform support](https://learn.microsoft.com/en-us/windows/msix/supported-platforms) and the [Windows 10 lifecycle notice](https://learn.microsoft.com/en-us/lifecycle/announcements/windows-10-end-of-support).
 
-The package version maps Cargo `major.minor.patch` to `(major + 1).minor.patch.0`; for example, Cargo `0.5.8` becomes Store package version `1.5.8.0`. Partner Center identity values must remain stable across updates. The package stores the database, session and default managed files under `%USERPROFILE%\TeleArk`; this location persists after uninstall and follows the user's Windows profile permissions.
+The package version maps Cargo `major.minor.patch` to `(major + 1).minor.patch.0`; for example, Cargo `0.5.9` becomes Store package version `1.5.9.0`. Partner Center identity values must remain stable across updates. The package stores the database, session and default managed files under `%USERPROFILE%\TeleArk`; this location persists after uninstall and follows the user's Windows profile permissions.
 
 ### Build the first package locally
 

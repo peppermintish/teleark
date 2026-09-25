@@ -80,7 +80,6 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
         return match locale {
             SupportedLocale::RuRu => format!("{value} мс"),
             SupportedLocale::KoKr => format!("{value}밀리초"),
-            SupportedLocale::HiIn => format!("{value} मिलीसेकंड"),
             SupportedLocale::ZhCn => format!("{value} 毫秒"),
             SupportedLocale::JaJp => format!("{value} ミリ秒"),
             _ => format!("{value} ms"),
@@ -91,7 +90,6 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
         return match locale {
             SupportedLocale::RuRu => format!("{value} с"),
             SupportedLocale::KoKr => format!("{value}초"),
-            SupportedLocale::HiIn => format!("{value} सेकंड"),
             SupportedLocale::ZhCn => format!("{value} 秒"),
             SupportedLocale::JaJp => format!("{value}秒"),
             _ => format!("{value} s"),
@@ -105,7 +103,6 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
     match locale {
         SupportedLocale::RuRu => format!("{minutes} мин {seconds} с"),
         SupportedLocale::KoKr => format!("{minutes}분 {seconds}초"),
-        SupportedLocale::HiIn => format!("{minutes} मिनट {seconds} सेकंड"),
         SupportedLocale::ZhCn => format!("{minutes} 分钟 {seconds} 秒"),
         SupportedLocale::JaJp => format!("{minutes}分{seconds}秒"),
         _ => format!("{minutes} min {seconds} s"),
@@ -128,8 +125,7 @@ pub fn format_unix_millis(locale: SupportedLocale, unix_millis: i64) -> String {
         SupportedLocale::DeDe | SupportedLocale::RuRu => local.format("%d.%m.%Y %H:%M").to_string(),
         SupportedLocale::EsEs
         | SupportedLocale::FrFr
-        | SupportedLocale::PtBr
-        | SupportedLocale::HiIn => local.format("%d/%m/%Y %H:%M").to_string(),
+        | SupportedLocale::PtBr => local.format("%d/%m/%Y %H:%M").to_string(),
     }
 }
 
@@ -168,11 +164,7 @@ fn group_integer(locale: SupportedLocale, canonical: &str) -> String {
     let separator = grouping_separator(locale);
     let mut reversed = String::with_capacity(canonical.len() + canonical.len() / 3);
     for (position, digit) in digits.chars().rev().enumerate() {
-        let boundary = if locale == SupportedLocale::HiIn {
-            position >= 3 && (position - 3) % 2 == 0
-        } else {
-            position != 0 && position % 3 == 0
-        };
+        let boundary = position != 0 && position % 3 == 0;
         if boundary {
             reversed.push(separator);
         }
@@ -262,14 +254,6 @@ mod tests {
         assert_eq!(
             format_decimal(SupportedLocale::RuRu, 12_345.6, 1),
             "12\u{00a0}345,6"
-        );
-        assert_eq!(
-            format_integer(SupportedLocale::HiIn, 12_345_678),
-            "1,23,45,678"
-        );
-        assert_eq!(
-            format_signed_integer(SupportedLocale::HiIn, -123_456),
-            "-1,23,456"
         );
         assert_eq!(
             format_decimal(SupportedLocale::KoKr, 12_345.6, 1),

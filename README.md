@@ -13,7 +13,7 @@ Browse channel files, store encrypted files in your own private Telegram channel
 - **Transfer management** — Follow progress, queues, retries and live or historical diagnostics. Ordinary Telegram downloads support pause, resume, cancel, retry and restart recovery. Upload history survives restarts; separate upload and download speed limits apply to active transfers.
 - **Local and remote library** — Browse downloaded/imported files separately from indexed Telegram files, with search, filters and file actions. Background checks identify missing or changed local downloads.
 - **Key management and recovery** — TeleArk selects one stored key that opens the managed channel's files. Import a key when none of the stored keys fit, and export the current key for safekeeping.
-- **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and ten interface languages with English fallback for untranslated messages.
+- **Desktop controls** — Light and dark themes, a collapsible sidebar, keyboard shortcuts, configurable storage paths, SOCKS5/HTTP CONNECT proxy settings, and nine interface languages with English fallback for untranslated messages.
 
 ## How it works
 

@@ -1147,6 +1147,11 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.9 · Remove Hindi interface language
+
+    - Hindi is no longer an available interface language. The Windows Store package declares the nine remaining supported interface languages.
+    - Application metadata is 0.5.9. Persistent schemas and encrypted formats are unchanged.
+
     ## 0.5.8 · Authenticated channel key proof
 
     - New managed channels publish a versioned proof tied to their account, channel and encryption key. Sign-in checks that proof to select the current key even before any file exists. A verified older empty channel with only its identity message receives a new key and proof after remote emptiness checks; channels with files are never automatically rekeyed.

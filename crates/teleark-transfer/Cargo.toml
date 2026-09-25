@@ -1,6 +1,6 @@
 [package]
 name = "teleark-transfer"
-version = "0.5.8"
+version = "0.5.9"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ default = []
 test-support = []
 
 [dependencies]
-teleark-core = { version = "=0.5.8", path = "../teleark-core" }
+teleark-core = { version = "=0.5.9", path = "../teleark-core" }
 blake3 = "=1.8.7"
 
 [dev-dependencies]

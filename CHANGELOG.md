@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.9 · Remove Hindi locale support
+
+- Remove Hindi from the supported interface languages and Windows MSIX language resources. Windows systems configured for Hindi now use the English fallback unless another supported language is selected.
+- Store package version is 1.5.9.0; persistent schemas and encrypted formats are unchanged.
+
 ## 0.5.8 · Authenticated channel key proof
 
 - Windows Store MSIX declares all ten bundled interface languages so the package's language metadata matches TeleArk's localized UI.
