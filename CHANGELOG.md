@@ -2,6 +2,7 @@
 
 ## 0.5.8 · Authenticated channel key proof
 
+- Windows Store MSIX declares all ten bundled interface languages so the package's language metadata matches TeleArk's localized UI.
 - New managed channels publish a versioned proof tied to their account, channel and encryption key. Sign-in checks that proof to select the current key even before any file exists. A verified older empty channel with only its identity message receives a new key and proof after remote emptiness checks; channels with files are never automatically rekeyed.
 - Completing channel setup rechecks the key even when the file catalog has not changed. Switching credential storage while a key check is running also schedules a fresh check. Files shows its key warning only until a fitting key is confirmed; Raw Files continues to show the actual Telegram objects.
 - Application metadata is 0.5.8. SQLite schema 23 and encrypted file, manifest and recovery-bundle codecs are unchanged. Channel-key proof codec 1 and pending channel-key marker codec 2 are added; older marker records remain readable.

@@ -16,7 +16,7 @@ The Windows Store package is unsigned before submission; Microsoft signs it afte
 
 ## Windows
 
-Windows release builds produce one artifact: an x64 MSIX for Microsoft Store distribution. The build uses the `msix` feature and statically links the Microsoft C runtime. The manifest identity comes from the three repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME`; keep them identical to the values assigned in Partner Center.
+Windows release builds produce one artifact: an x64 MSIX for Microsoft Store distribution. The build uses the `msix` feature and statically links the Microsoft C runtime. Its manifest declares the ten UI languages bundled under `crates/teleark-i18n/resources` (`en-US`, `de-DE`, `es-ES`, `fr-FR`, `hi-IN`, `ja-JP`, `ko-KR`, `pt-BR`, `ru-RU`, and `zh-CN`); keep the manifest list in sync with those catalogs. The manifest identity comes from the three repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME`; keep them identical to the values assigned in Partner Center.
 
 On every matching `vX.Y.Z` tag, CI builds and checks all platform packages, submits the raw `.msix` to Partner Center, then publishes the GitHub Release. Pull requests and manual package previews do not submit to the Store. A release tag must point to a commit on `main` and match the `teleark-gui` Cargo version. The workflow requires the four Store authentication secrets and the repository variable `TELEARK_MSSTORE_PRODUCT_ID`; incomplete configuration fails before packaging.
 
