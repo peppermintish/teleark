@@ -182,18 +182,25 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       label: ${{ steps.resolve.outputs.label }}
-      msix_enabled: ${{ steps.msix.outputs.enabled }}
-      store_submission_enabled: ${{ steps.store.outputs.enabled }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - name: Configure Rust
         run: rustup default stable
+      - name: Verify release commit is on main
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo 'Release tags must point to a commit on origin/main.' >&2
+            exit 1
+          }
       - name: Match tag to Cargo version
         id: resolve
         shell: pwsh
         run: ./scripts/release-version.ps1
-      - name: Validate optional Microsoft Store identity
-        id: msix
+      - name: Validate Microsoft Store package identity
         shell: pwsh
         env:
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
@@ -203,23 +210,28 @@ jobs:
           $identityName = $env:TELEARK_MSIX_IDENTITY_NAME
           $publisher = $env:TELEARK_MSIX_PUBLISHER
           $publisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
-          $configuredValues = @($identityName, $publisher, $publisherDisplayName) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-          if ($configuredValues.Count -ne 0 -and $configuredValues.Count -ne 3) {
-            throw 'Configure TELEARK_MSIX_IDENTITY_NAME, TELEARK_MSIX_PUBLISHER, and TELEARK_MSIX_PUBLISHER_DISPLAY_NAME together, or leave all three unset.'
+          if ([string]::IsNullOrWhiteSpace($identityName) -or [string]::IsNullOrWhiteSpace($publisher) -or [string]::IsNullOrWhiteSpace($publisherDisplayName)) {
+            throw 'Configure TELEARK_MSIX_IDENTITY_NAME, TELEARK_MSIX_PUBLISHER, and TELEARK_MSIX_PUBLISHER_DISPLAY_NAME with the exact Partner Center identity.'
           }
-          $enabled = if ($configuredValues.Count -eq 3) { 'true' } else { 'false' }
-          "enabled=$enabled" >> $env:GITHUB_OUTPUT
-      - name: Validate optional Microsoft Store submission configuration
-        id: store
+          if ($identityName -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]{1,48}[A-Za-z0-9]$') {
+            throw 'TELEARK_MSIX_IDENTITY_NAME is not a valid package identity name.'
+          }
+          if ($publisherDisplayName.Length -gt 256) {
+            throw 'TELEARK_MSIX_PUBLISHER_DISPLAY_NAME exceeds the 256-character manifest limit.'
+          }
+      - name: Validate required Microsoft Store submission configuration
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         env:
-          TELEARK_MSIX_ENABLED: ${{ steps.msix.outputs.enabled }}
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
           AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
           AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           SELLER_ID: ${{ secrets.SELLER_ID }}
           TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
-        run: ./scripts/check-msstore-submit-config.ps1
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
       - name: Validate Telegram distribution configuration
         shell: pwsh
         env:
@@ -292,13 +304,6 @@ jobs:
         shell: bash
         run: bash scripts/test-macos-signing-import.sh
 
-      - name: Install and test pinned Inno Setup compiler
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          ./scripts/install-innosetup.ps1
-          ./scripts/test-install-innosetup.ps1
-
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
         shell: bash
@@ -312,13 +317,15 @@ jobs:
           chmod +x "$tool"
           echo "LINUXDEPLOY=$tool" >> "$GITHUB_ENV"
 
-      - name: Build Windows release with static CRT
+      - name: Build and test Microsoft Store Windows binary
         if: matrix.platform == 'windows'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
           TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
           TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
-        run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }}
+        run: |
+          cargo test -p teleark-runtime --locked --target ${{ matrix.target }} --features msix data_root
+          cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }} --features msix
 
       - name: Build universal macOS release
         if: matrix.platform == 'macos'
@@ -342,43 +349,8 @@ jobs:
           TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }}
 
-      - name: Configure Windows packaging SDK
+      - name: Package Windows MSIX
         if: matrix.platform == 'windows'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Restore pinned MSI compiler
-        if: matrix.platform == 'windows'
-        run: dotnet tool restore
-
-      - name: Package Windows executable, ZIP and EXE setup wizard
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          ./scripts/package-windows.ps1 "target/${{ matrix.target }}/release/teleark.exe" dist `
-            '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
-
-      - name: Verify Windows artifacts, setup wizard and upgrade transactions
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          ./scripts/verify-release-windows.ps1 '${{ needs.version.outputs.version }}' `
-            '${{ needs.version.outputs.label }}' '${{ matrix.arch }}'
-
-      - name: Build Microsoft Store data-layout binary
-        if: ${{ matrix.platform == 'windows' && needs.version.outputs.msix_enabled == 'true' }}
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
-          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
-        run: |
-          cargo test -p teleark-runtime --locked --features msix data_root
-          cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }} --features msix
-
-      - name: Package Microsoft Store upload bundle
-        if: ${{ matrix.platform == 'windows' && needs.version.outputs.msix_enabled == 'true' }}
         shell: pwsh
         env:
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
@@ -393,22 +365,7 @@ jobs:
             Publisher = $env:TELEARK_MSIX_PUBLISHER
             PublisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
           }
-          $symbolsPath = "target/${{ matrix.target }}/release/teleark.pdb"
-          if (Test-Path -LiteralPath $symbolsPath -PathType Leaf) {
-            $packageParams.PublicSymbolsPath = $symbolsPath
-          }
           ./scripts/package-windows-msix.ps1 @packageParams
-
-      - name: Retain failed Windows installer logs
-        if: ${{ failure() && matrix.platform == 'windows' }}
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: windows-installer-test-logs
-          path: |
-            ${{ runner.temp }}/teleark-msi-*/*.log
-            ${{ runner.temp }}/teleark-exe-*/*.log
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: Package and verify macOS release
         if: matrix.platform == 'macos'
@@ -459,19 +416,16 @@ jobs:
           path: |
             dist/*.AppImage
             dist/*.tar.gz
-            dist/*.zip
-            dist/*.exe
             dist/*.deb
             dist/*.pkg
             dist/*.bin
             dist/*.msix
-            dist/*.msixupload
           if-no-files-found: error
           retention-days: 14
 
   store_submission:
     name: 4 · Submit package to Microsoft Store
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.version.outputs.store_submission_enabled == 'true' }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: [version, package]
     runs-on: windows-2022
     timeout-minutes: 45
@@ -517,7 +471,7 @@ jobs:
   publish:
     name: 5 · Publish GitHub Release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [version, package]
+    needs: [version, package, store_submission]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -539,38 +493,19 @@ jobs:
             test -s "artifacts/release-$group/$name"
             cp "artifacts/release-$group/$name" "dist/$name"
           }
-          copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.exe"
-          copy_asset windows-x86_64 "teleark-${label}-windows-x86_64.zip"
-          copy_asset windows-x86_64 "TeleArk-Setup-${label}-windows-x86_64.exe"
+          copy_asset windows-x86_64 "TeleArk-${label}-windows-x86_64.msix"
           copy_asset macos-universal "teleark-${label}-macos-universal.bin"
           copy_asset macos-universal "teleark-${label}-macos-universal.tar.gz"
           copy_asset macos-universal "TeleArk-${label}-macos-universal.pkg"
           copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.AppImage"
           copy_asset linux-x86_64 "teleark-${label}-linux-x86_64.tar.gz"
           copy_asset linux-x86_64 "teleark_${label}_amd64.deb"
-          shopt -s nullglob
-          msix_uploads=(artifacts/release-windows-x86_64/*.msixupload)
-          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then
-            if [[ "${#msix_uploads[@]}" -ne 1 ]]; then
-              echo "Expected exactly one Windows .msixupload artifact, found ${#msix_uploads[@]}." >&2
-              exit 1
-            fi
-            cp "${msix_uploads[0]}" "dist/$(basename "${msix_uploads[0]}")"
-          elif [[ "${#msix_uploads[@]}" -ne 0 ]]; then
-            echo 'Unexpected Windows .msixupload artifact while Store packaging is disabled.' >&2
-            exit 1
-          fi
-          expected_assets=9
-          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then expected_assets=10; fi
+          expected_assets=7
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq "$expected_assets"
           cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md dist/
           (cd dist && sha256sum * > SHA256SUMS)
           echo '### Release assets' >> "$GITHUB_STEP_SUMMARY"
-          if [[ '${{ needs.version.outputs.msix_enabled }}' == 'true' ]]; then
-            echo 'Validated ten installers and portable assets, including the Microsoft Store upload bundle, across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Validated nine installers and portable assets across Windows x64, macOS universal, and Linux x64.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo 'Validated seven platform assets: one Windows MSIX, three macOS assets and three Linux assets.' >> "$GITHUB_STEP_SUMMARY"
           echo '| SHA256 | File |' >> "$GITHUB_STEP_SUMMARY"
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           while read -r hash file; do echo "| \`$hash\` | \`$file\` |" >> "$GITHUB_STEP_SUMMARY"; done < dist/SHA256SUMS
@@ -605,11 +540,7 @@ jobs:
             echo '| Version and distribution configuration | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
             echo '| Native packages | ${{ needs.package.result }} |' >> "$GITHUB_STEP_SUMMARY"
             if [[ '${{ github.ref }}' == refs/tags/v* ]]; then
-              if [[ '${{ needs.version.outputs.store_submission_enabled }}' == 'true' ]]; then
-                echo '| Microsoft Store submission | ${{ needs.store_submission.result }} |' >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo '| Microsoft Store submission | Not configured |' >> "$GITHUB_STEP_SUMMARY"
-              fi
+              echo '| Microsoft Store submission | ${{ needs.store_submission.result }} |' >> "$GITHUB_STEP_SUMMARY"
             else
               echo '| Microsoft Store submission | Not run for package preview |' >> "$GITHUB_STEP_SUMMARY"
             fi

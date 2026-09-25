@@ -1,32 +1,56 @@
-# Keep Store submission disabled until its full Partner Center configuration exists.
+param([switch]$RequireSubmission)
+
 $ErrorActionPreference = 'Stop'
 
-$settings = @(
+$identitySettings = @(
+    $env:TELEARK_MSIX_IDENTITY_NAME,
+    $env:TELEARK_MSIX_PUBLISHER,
+    $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
+)
+$configuredIdentity = @($identitySettings | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($configuredIdentity.Count -ne $identitySettings.Count) {
+    throw 'Configure TELEARK_MSIX_IDENTITY_NAME, TELEARK_MSIX_PUBLISHER, and TELEARK_MSIX_PUBLISHER_DISPLAY_NAME with the exact Partner Center identity.'
+}
+
+if ($env:TELEARK_MSIX_IDENTITY_NAME -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]{1,48}[A-Za-z0-9]$') {
+    throw 'TELEARK_MSIX_IDENTITY_NAME is not a valid package identity name.'
+}
+if ($env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME.Length -gt 256) {
+    throw 'TELEARK_MSIX_PUBLISHER_DISPLAY_NAME exceeds the 256-character manifest limit.'
+}
+
+$submissionSettings = @(
     $env:AZURE_AD_TENANT_ID,
     $env:AZURE_AD_APPLICATION_CLIENT_ID,
     $env:AZURE_AD_APPLICATION_SECRET,
     $env:SELLER_ID,
     $env:TELEARK_MSSTORE_PRODUCT_ID
 )
-$configured = @($settings | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-
-if ($configured.Count -ne 0 -and $configured.Count -ne $settings.Count) {
-    throw 'Configure all four Microsoft Store submission secrets and TELEARK_MSSTORE_PRODUCT_ID, or leave all five unset.'
+$configuredSubmission = @($submissionSettings | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($configuredSubmission.Count -ne 0 -and $configuredSubmission.Count -ne $submissionSettings.Count) {
+    throw 'Configure all four Microsoft Store submission secrets and TELEARK_MSSTORE_PRODUCT_ID together.'
+}
+if ($RequireSubmission -and $configuredSubmission.Count -ne $submissionSettings.Count) {
+    throw 'Version-tag releases require all four Microsoft Store submission secrets and TELEARK_MSSTORE_PRODUCT_ID.'
 }
 
-$enabled = $configured.Count -eq $settings.Count
-if ($enabled -and $env:TELEARK_MSIX_ENABLED -cne 'true') {
-    throw 'Microsoft Store submission settings are configured, but MSIX packaging is disabled. Configure all three TELEARK_MSIX_* repository variables.'
-}
-
-$outputValue = if ($enabled) { 'true' } else { 'false' }
+$submissionReady = $configuredSubmission.Count -eq $submissionSettings.Count
+$outputValue = if ($submissionReady) { 'true' } else { 'false' }
 if ($env:GITHUB_OUTPUT) {
-    [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "enabled=$outputValue`n")
+    [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "submission_ready=$outputValue`n")
 }
 
-$status = if ($enabled) { 'Enabled' } else { 'Not configured; upload remains a manual Partner Center step.' }
-if ($env:GITHUB_STEP_SUMMARY) {
-    [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY,
-        "### Microsoft Store submission configuration`n`n$status. Authentication values are never included in this report.`n")
+$status = if ($submissionReady) {
+    'Store submission configuration is complete.'
+} elseif ($RequireSubmission) {
+    'Store submission configuration is incomplete.'
+} else {
+    'Package identity is configured; submission credentials are not required for a manual package preview.'
 }
-Write-Output "Microsoft Store submission configuration: $status"
+if ($env:GITHUB_STEP_SUMMARY) {
+    [System.IO.File]::AppendAllText(
+        $env:GITHUB_STEP_SUMMARY,
+        "### Microsoft Store configuration`n`n$status Values are never included in this report.`n"
+    )
+}
+Write-Output $status

@@ -19,7 +19,7 @@ if ($packages.Count -ne 1) {
 }
 $version = [string]$packages[0].version
 if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "Release installers require a three-component numeric version; Cargo has '$version'."
+    throw "Release packages require a three-component numeric version; Cargo has '$version'."
 }
 
 if ($RefType -eq 'tag' -and $RefName -cne "v$version") {

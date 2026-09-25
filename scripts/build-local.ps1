@@ -3,13 +3,15 @@ $ErrorActionPreference = 'Stop'
 
 $dry_run = $false
 $run = $false
+$msix = $false
 
 foreach ($argument in $args) {
     switch ($argument) {
         { $_ -in '--dry-run', '-DryRun', '-dry-run' } { $dry_run = $true }
         { $_ -in '--run', '-Run', '-run' } { $run = $true }
+        { $_ -in '--msix', '-Msix', '-msix' } { $msix = $true }
         default {
-            [Console]::Error.WriteLine("Usage: scripts/build-local.ps1 [--run] [--dry-run]")
+            [Console]::Error.WriteLine("Usage: scripts/build-local.ps1 [--msix] [--run] [--dry-run]")
             exit 2
         }
     }
@@ -19,9 +21,11 @@ $command = @('cargo', 'build', '--release', '-p', 'teleark-gui', '--bin', 'telea
 if ($run) {
     $command = @('cargo', 'run', '--release', '-p', 'teleark-gui', '--bin', 'teleark', '--locked')
 }
+if ($msix) { $command += @('--features', 'msix') }
 
 if ($dry_run) {
     Write-Output "Would load and validate repository .env.local (without displaying values)."
+    if ($msix) { Write-Output 'Would enable the Windows Store MSIX data layout and statically link the Microsoft C runtime.' }
     Write-Output ("Would execute: " + ($command -join ' '))
     exit 0
 }
@@ -69,6 +73,16 @@ if ($api_hash -and ($api_hash -match '^[0-9a-fA-F]{32}$')) {
 if (-not $valid_id -or -not $valid_hash) {
     [Console]::Error.WriteLine(".env.local must define a valid Telegram API ID and Hash; values were not logged.")
     exit 1
+}
+
+if ($msix) {
+    if ($env:OS -cne 'Windows_NT') { throw 'The local MSIX build requires Windows.' }
+    $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
+    if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+        $env:RUSTFLAGS = '-C target-feature=+crt-static'
+    } elseif ($env:RUSTFLAGS -notmatch '(?i)(^|\s)\+crt-static(?:,|\s|$)') {
+        $env:RUSTFLAGS = "$($env:RUSTFLAGS) -C target-feature=+crt-static"
+    }
 }
 
 if ($api_id -eq '17349') {
