@@ -42,6 +42,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-distribution-credentials.ps1
 
+      - name: Test Microsoft Store submission configuration
+        shell: pwsh
+        run: ./scripts/test-msstore-submit-config.ps1
+
       - name: Test universal macOS dependency check
         shell: bash
         run: bash scripts/test-macos-libraries.sh
@@ -179,6 +183,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       label: ${{ steps.resolve.outputs.label }}
       msix_enabled: ${{ steps.msix.outputs.enabled }}
+      store_submission_enabled: ${{ steps.store.outputs.enabled }}
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Configure Rust
@@ -204,6 +209,17 @@ jobs:
           }
           $enabled = if ($configuredValues.Count -eq 3) { 'true' } else { 'false' }
           "enabled=$enabled" >> $env:GITHUB_OUTPUT
+      - name: Validate optional Microsoft Store submission configuration
+        id: store
+        shell: pwsh
+        env:
+          TELEARK_MSIX_ENABLED: ${{ steps.msix.outputs.enabled }}
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
+        run: ./scripts/check-msstore-submit-config.ps1
       - name: Validate Telegram distribution configuration
         shell: pwsh
         env:
@@ -448,12 +464,58 @@ jobs:
             dist/*.deb
             dist/*.pkg
             dist/*.bin
+            dist/*.msix
             dist/*.msixupload
           if-no-files-found: error
           retention-days: 14
 
+  store_submission:
+    name: 4 · Submit package to Microsoft Store
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.version.outputs.store_submission_enabled == 'true' }}
+    needs: [version, package]
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Download verified Windows package
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: release-windows-x86_64
+          path: store-package
+
+      - name: Configure Microsoft Store CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.1
+
+      - name: Authenticate with Partner Center
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          msstore reconfigure `
+            --tenantId "$env:AZURE_AD_TENANT_ID" `
+            --sellerId "$env:SELLER_ID" `
+            --clientId "$env:AZURE_AD_APPLICATION_CLIENT_ID" `
+            --clientSecret "$env:AZURE_AD_APPLICATION_SECRET"
+
+      - name: Submit MSIX package for Store certification
+        shell: pwsh
+        env:
+          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath 'store-package' -Filter '*.msix' -File)
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one verified .msix package, found $($packages.Count)."
+          }
+          msstore publish $packages[0].FullName -id "$env:TELEARK_MSSTORE_PRODUCT_ID"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Store submission failed with exit code $LASTEXITCODE."
+          }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'The MSIX package was submitted to Partner Center for Store certification. Certification and publication are still pending.'
+
   publish:
-    name: 4 · Publish GitHub Release
+    name: 5 · Publish GitHub Release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: [version, package]
     runs-on: ubuntu-22.04
@@ -529,7 +591,7 @@ jobs:
   summary:
     name: Stage summary
     if: ${{ always() }}
-    needs: [quality, test, version, package, publish]
+    needs: [quality, test, version, package, store_submission, publish]
     runs-on: ubuntu-22.04
     steps:
       - name: Report stages
@@ -540,8 +602,17 @@ jobs:
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
           echo '| LF, legal, Linux quality | ${{ needs.quality.result }} |' >> "$GITHUB_STEP_SUMMARY"
           if [[ '${{ github.ref }}' == refs/tags/v* ]] || [ '${{ inputs.package_preview }}' = 'true' ]; then
-            echo '| Version and Telegram configuration | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            echo '| Version and distribution configuration | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
             echo '| Native packages | ${{ needs.package.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            if [[ '${{ github.ref }}' == refs/tags/v* ]]; then
+              if [[ '${{ needs.version.outputs.store_submission_enabled }}' == 'true' ]]; then
+                echo '| Microsoft Store submission | ${{ needs.store_submission.result }} |' >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo '| Microsoft Store submission | Not configured |' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo '| Microsoft Store submission | Not run for package preview |' >> "$GITHUB_STEP_SUMMARY"
+            fi
             echo '| GitHub Release | ${{ needs.publish.result }} |' >> "$GITHUB_STEP_SUMMARY"
           else
             echo '| Windows and macOS tests | ${{ needs.test.result }} |' >> "$GITHUB_STEP_SUMMARY"

@@ -4,7 +4,7 @@ Packaging turns a compiled TeleArk executable into a portable app and a native i
 
 The [single CI/CD workflow](../.github/workflows/ci.yml) runs source checks for pull requests, version tags and manual dispatches. Branch pushes alone do not start a run, so a combined branch and version-tag push starts only the release run. Installer jobs run only for a matching `vX.Y.Z` tag or an explicitly selected manual package preview. A preview uploads artifacts but cannot publish a GitHub Release. A tag must match the `teleark-gui` Cargo version; the numeric Cargo version is stamped into native installers, while the Store package uses the explicit four-part mapping below.
 
-The tagged workflow checks and publishes these nine standard files, plus both project licenses, third-party notices and a unified `SHA256SUMS`. When all three Microsoft Store identity repository variables are configured, it also publishes one `.msixupload` file for manual Partner Center submission:
+The tagged workflow checks and publishes these nine standard files, plus both project licenses, third-party notices and a unified `SHA256SUMS`. When all three Microsoft Store identity repository variables are configured, it also publishes one `.msixupload` file for the initial/manual Partner Center submission:
 
 | Target | Standalone executable | Portable archive | Native installer | Store submission |
 | --- | --- | --- | --- |
@@ -32,11 +32,23 @@ The release verifier checks EXE metadata, archive contents and all three checksu
 
 ### Microsoft Store MSIX
 
-The Windows package job can also build a Store upload bundle. Set the GitHub repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME` to the exact Name, Publisher, and Publisher display name values assigned to the app in Partner Center. Leave all three unset to disable MSIX packaging; a partial configuration fails the version/configuration job. A version tag or manual package preview then builds the separate `msix` feature variant and attaches a `.msixupload` to the Windows artifact. The tagged GitHub Release includes that bundle in its checksums. Nothing in CI submits or publishes the app to Partner Center.
+The Windows package job can also build a Store upload bundle. Set the GitHub repository variables `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER`, and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME` to the exact Name, Publisher, and Publisher display name values assigned to the app in Partner Center. Leave all three unset to disable MSIX packaging; a partial configuration fails the version/configuration job. A version tag or manual package preview then builds the separate `msix` feature variant and attaches a `.msixupload` to the Windows artifact. The tagged GitHub Release includes that bundle in its checksums.
+
+To submit Store updates automatically on matching version tags, also configure the Microsoft Store submission credentials below and repository variable `TELEARK_MSSTORE_PRODUCT_ID`. The submission job runs only after every platform package succeeds and submits the raw `.msix` for Store certification. It does not run on pull requests or manual package previews.
+
+| GitHub setting | Partner Center / Entra value |
+| --- | --- |
+| Secret `AZURE_AD_TENANT_ID` | Microsoft Entra tenant ID |
+| Secret `AZURE_AD_APPLICATION_CLIENT_ID` | Client ID of the Entra app associated with Partner Center |
+| Secret `AZURE_AD_APPLICATION_SECRET` | Client secret value for that Entra app |
+| Secret `SELLER_ID` | Partner Center Seller ID / Publisher ID |
+| Variable `TELEARK_MSSTORE_PRODUCT_ID` | Store Product ID (also shown as Store ID) for TeleArk |
+
+The Entra application must be associated with the Partner Center account and assigned the Manager role. Microsoft currently documents this GitHub Actions submission path for free products that are already published and live in the Store. The initial submission remains manual. Automated submission sends an update for certification; it does not bypass certification or make the update immediately live. See Microsoft's [GitHub Actions setup and MSIX workflow](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/github-actions) and [Partner Center Entra app setup](https://learn.microsoft.com/en-us/windows/apps/publish/partner-center/manage-azure-ad-applications-in-partner-center).
 
 The Store manifest uses a full-trust desktop entry point and targets Windows 10 version 1809 or later. This is the technical MSIX floor supported by Store installation. General Windows 10 support ended on October 14, 2025, with later support only for specific LTSC or Extended Security Update editions; confirm that this floor matches TeleArk's intended audience before submission. See Microsoft's [MSIX platform support](https://learn.microsoft.com/en-us/windows/msix/supported-platforms) and [Windows 10 lifecycle notice](https://learn.microsoft.com/en-us/lifecycle/announcements/windows-10-end-of-support).
 
-The manifest's `runFullTrust` declaration is needed to launch the native desktop executable; Partner Center may ask for a justification during submission. Explain that TeleArk is a native Rust desktop app and uses the full-trust process for its user interface, local database, encryption, Telegram networking and user-selected files. See Microsoft's [desktop packaging guidance](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-manual-conversion) and [restricted capability review process](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations).
+The manifest's `runFullTrust` declaration is needed to launch the native desktop executable; Partner Center may ask for a justification during the initial submission. Explain that TeleArk is a native Rust desktop app and uses the full-trust process for its user interface, local database, encryption, Telegram networking and user-selected files. See Microsoft's [desktop packaging guidance](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-manual-conversion) and [restricted capability review process](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations).
 
 The Store-only binary keeps its database, Telegram session, recovery data and default managed files under `%USERPROFILE%\TeleArk`, outside AppData. This avoids AppData virtualization and keeps the files through package updates and uninstall. It deliberately starts with a separate, empty Store data set; it does not import data from the existing unpackaged Windows build. Users can remove the `TeleArk` folder after uninstall if they also want to delete that Store data. The folder inherits the normal Windows user-profile permissions and is not isolated from other processes running as that user.
 
