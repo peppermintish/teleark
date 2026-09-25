@@ -123,9 +123,9 @@ pub fn format_unix_millis(locale: SupportedLocale, unix_millis: i64) -> String {
         SupportedLocale::ZhCn | SupportedLocale::JaJp => local.format("%Y/%m/%d %H:%M").to_string(),
         SupportedLocale::KoKr => local.format("%Y.%m.%d %H:%M").to_string(),
         SupportedLocale::DeDe | SupportedLocale::RuRu => local.format("%d.%m.%Y %H:%M").to_string(),
-        SupportedLocale::EsEs
-        | SupportedLocale::FrFr
-        | SupportedLocale::PtBr => local.format("%d/%m/%Y %H:%M").to_string(),
+        SupportedLocale::EsEs | SupportedLocale::FrFr | SupportedLocale::PtBr => {
+            local.format("%d/%m/%Y %H:%M").to_string()
+        }
     }
 }
 

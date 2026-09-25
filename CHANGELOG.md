@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.5.9 · Remove Hindi locale support
+## 0.5.9 · Remove Hindi interface language
 
-- Remove Hindi from the supported interface languages and Windows MSIX language resources. Windows systems configured for Hindi now use the English fallback unless another supported language is selected.
-- Store package version is 1.5.9.0; persistent schemas and encrypted formats are unchanged.
+- Hindi is no longer an available interface language. Windows systems configured for Hindi use the English fallback unless another supported language is selected, and the Windows Store package declares the nine remaining supported interface languages.
+- Application metadata is 0.5.9. Persistent schemas and encrypted formats are unchanged.
 
 ## 0.5.8 · Authenticated channel key proof
 
