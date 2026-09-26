@@ -1,4 +1,4 @@
-# Implementation status — v0.5.8
+# Implementation status — v0.5.9
 
 This is the current capability and qualification snapshot. Release changes belong
 in [CHANGELOG.md](../CHANGELOG.md), format details in their specifications, and
@@ -56,11 +56,13 @@ general-purpose migration service.
 
 ## Verification record
 
-The v0.5.8 release notes record local formatting, locked workspace checking,
-strict Clippy, serial workspace tests, Core/i18n tests, warning-denied rustdoc,
-cargo-deny, script regressions and release-version validation. Those are historical
-results, not reruns on every later commit. The earlier record is available at the
-version tag; current commands are in [Development](DEVELOPMENT.md#quality-gates).
+The v0.5.9 local source run passed formatting, locked workspace checking,
+strict Clippy, 914 serial workspace tests (10 manual benchmarks ignored), explicit
+Core/i18n tests, warning-denied rustdoc, dependency policy, script regressions and
+release-version validation. The [GUI interaction audit](validation/2026-09-26-gui-interaction-audit.md)
+records the exact checks and macOS native review. These results do not establish
+published installers or live Telegram qualification. Current commands are in
+[Development](DEVELOPMENT.md#quality-gates).
 
 Recovery tests compose Runtime owners, real temporary SQLite/files, crypto and
 synthetic wire transports. They cover supported codec fixtures, stale accounts and

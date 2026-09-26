@@ -1148,14 +1148,15 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
-    ## Unreleased · Desktop interaction fixes
+    ## 0.5.9 · Desktop interaction fixes
 
     - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
     - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
     - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
     - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
     - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
-    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata remains 0.5.8; persistent schemas and codecs are unchanged.
+    - Rewrite public development and status guides, remove superseded notes, and harden local build, credential, checksum and packaging validation. Native Windows/macOS tests now gate release packaging.
+    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata is 0.5.9. SQLite read/write schema 23, automatic upgrades from 0–22, and all supported encrypted-file, manifest, credential, transfer and recovery codecs are unchanged.
 
     ## 0.5.8 · Authenticated channel key proof
 

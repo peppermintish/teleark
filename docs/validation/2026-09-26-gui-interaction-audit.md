@@ -76,9 +76,28 @@ help links now point to the configured repository.
 ## Evidence and boundaries
 
 The final GUI run passed **214 tests**, with three existing manual comparative
-benchmarks ignored. This is 25 more passing tests than the audit baseline. The
-focused i18n run passed all 26 tests. Scoped strict Clippy, formatting and script
-regressions passed; full release qualification is recorded separately when run.
+benchmarks ignored. This is 25 more passing tests than the audit baseline. After
+the fixes were committed, application metadata was synchronized to **0.5.9** and
+the full source gates ran on macOS:
+
+| Gate | Result |
+| --- | --- |
+| Formatting; locked workspace check; strict Clippy, all targets | Passed |
+| Serial workspace tests, all targets | 914 passed; 0 failed; 10 existing manual benchmarks ignored |
+| Explicit Core and i18n tests | 25 Core and 26 i18n tests passed; doc tests passed |
+| Native macOS debug executable | Version 0.5.9 built successfully |
+| Rustdoc with warnings denied | Passed for all nine workspace packages |
+| Dependency policy | Advisories, bans, licenses and sources passed; existing duplicate-version warnings remain |
+| Line-ending policy and its regressions | Passed; tracked text uses LF |
+| Distribution credentials; release checksums; release-version regressions | 16, 13 and 12 synthetic cases passed respectively |
+| Local-build helper regression | 14 passed; one Debian-specific notice fixture skipped on macOS |
+| macOS linked-library and Linux payload regressions | Passed with synthetic tools/files; these are not native installer execution claims |
+| Actual release-version resolution; main/fuzz locked metadata | Passed for `v0.5.9`; the stale fuzz Crypto package version is synchronized |
+
+The existing upstream `block 0.1.6` future-compatibility warning remains. Test
+logs are retained locally under `/tmp/teleark-v059-*.log`; they are not release
+assets. No package was published or installed, and no commit or tag was pushed.
+
 The deterministic cases cover actual GPUI events/focus, compact geometry,
 fullscreen state, blocked operations, independent completion, cancellation,
 capacity limits, account generations, and shutdown barriers. Native previews
