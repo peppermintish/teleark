@@ -422,7 +422,6 @@ log-connection-timeout = 连接超时，正在重试
 log-saved = 下载完成，文件已保存
 
 upload-source-unchanged = 源文件未发生变化
-upload-source-checked = 刚刚检查
 upload-automatic-multipart-description = 将此文件拆分为兼容 Telegram 的应用分片。
 upload-conservative-mode = 1024 MiB 保守模式
 upload-estimate-title = 预计信息
@@ -432,8 +431,6 @@ upload-estimate-total-size = 总大小
 upload-estimate-messages = Telegram 消息数
 upload-estimate-time = 预计时间
 upload-client-encryption-description = 上传前在本机加密文件内容。
-upload-hide-filename-description = 使用受保护的名称代替原始文件名。
-upload-encrypt-metadata-description = 保护文件名、大小和类型元数据。
 
 file-detail-hash = 文件哈希
 file-detail-part-size = 分片大小
@@ -626,7 +623,6 @@ settings-upload-description = 加密上传使用你的 TeleArk 私有频道。
 settings-upload-vault-managed-title = 由密钥保管库管理的加密上传
 settings-upload-vault-managed-description = TeleArk 自动加密内容、名称和元数据。每个容器最多包含 { $size } 明文；加密和上传以 512 KiB 块同步推进。
 upload-current-part-size = 当前安全分片上限
-upload-current-part-size-description = TeleArk 当前生成的加密明文分片最大为 { $size }。
 settings-vault-title = 密钥库保护
 settings-vault-description = 管理文件加密密钥和恢复。在通用设置中配置应用 PIN。
 settings-index-title = Telegram 索引
@@ -878,9 +874,9 @@ transfer-controller-connections-value = C={$connections} · W={$rpcs}
 transfer-controller-queue-waits-value = 网络等待加密 {$network} · 加密等待网络 {$encryption} · {$parts} 分片/秒
 transfer-controller-buffers-value = 明文 {$plaintext} · 密文 {$encrypted} · 网络 {$network} · 写入 {$writer}
 transfer-controller-decisions = 控制器决策
-transfer-controller-no-decisions = 正在等待第一条测量决策。
+transfer-controller-no-decisions = 尚未记录到控制器活动测量数据。
 transfer-controller-lanes = DC 与连接 lane
-transfer-controller-lanes-unavailable = 当前 grammers 传输层尚未暴露可信的逐 DC lane 指标。
+transfer-controller-lanes-unavailable = 此传输的逐连接测量数据不可用。
 transfer-lane-value = DC {$dc} · lane {$lane} · inflight {$inflight} · {$speed} · RTT p95 {$rtt} · {$status}
 transfer-lane-active = 活跃
 transfer-lane-paused = 已暂停
@@ -1124,6 +1120,15 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## Unreleased · Desktop interaction fixes
+
+    - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
+    - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
+    - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
+    - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
+    - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
+    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata remains 0.5.8; persistent schemas and codecs are unchanged.
+
     ## 0.5.8 · Authenticated channel key proof
 
     - New managed channels publish a proof tied to the account, channel and key. Sign-in verifies it even when there are no files. Verified older empty channels receive a new key and proof after remote checks.
@@ -1955,7 +1960,6 @@ settings-keychain-cleanup-pending = 凭据存储已更新。部分旧钥匙串�
 
 settings-keychain-unavailable-credentials = 部分凭据属于另一台设备的钥匙串。请重新输入 API 或代理凭据，并导入加密恢复包以恢复访问。
 
-upload-options-title = 上传选项
 
 channel-filter-batch-no-matches = 没有符合这些筛选条件的已索引文件。
 
@@ -1982,3 +1986,7 @@ managed-key-phase-checking-channel = Authenticating managed-channel files
 storage-download-requests = { $count } 个下载请求正在进行 · 最早的请求已持续 { $seconds } 秒。前往“传输”查看进度、暂停或停止。
 storage-download-capacity = 下载请求队列已满。请等待一个请求完成后再添加文件。
 storage-download-request-active = 已请求下载；请前往“传输”查看进度。
+
+transfer-controller-native-throughput = { $parts } 分片/秒 · 有效吞吐量 { $speed }
+transfer-controller-native-buffers = 预计网络缓冲容量 { $network }
+transfer-controller-native-writer = 最近采样的写入大小 { $size }

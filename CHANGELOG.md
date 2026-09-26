@@ -6,7 +6,8 @@
 - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
 - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
 - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
-- Application metadata remains 0.5.8. Native English/light interaction review at 900×600 and actual fullscreen is still required before preparing the next release. Persistent schemas and codecs are unchanged.
+- Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
+- Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata remains 0.5.8; persistent schemas and codecs are unchanged.
 
 ## 0.5.8 · Authenticated channel key proof
 

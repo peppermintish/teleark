@@ -757,7 +757,6 @@ settings-keychain-cleanup-pending = 자격 증명 저장소가 업데이트되�
 
 settings-keychain-unavailable-credentials = 일부 자격 증명은 다른 기기의 키체인에 속합니다. API 또는 프록시 자격 증명을 다시 입력하고 암호화 복구 번들을 가져와 접근을 복원하세요.
 
-upload-options-title = 업로드 옵션
 
 channel-filter-batch-no-matches = 이 필터와 일치하는 색인된 파일이 없습니다.
 

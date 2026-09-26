@@ -422,7 +422,6 @@ log-connection-timeout = 接続がタイムアウトしたため再試行しま�
 log-saved = ダウンロードが完了し、ファイルを保存しました
 
 upload-source-unchanged = 転送元は変更されていません
-upload-source-checked = たった今確認
 upload-automatic-multipart-description = このファイルを Telegram 互換のアプリケーションパートに分割します。
 upload-conservative-mode = 1024 MiB 保守モード
 upload-estimate-title = 見積もり情報
@@ -432,8 +431,6 @@ upload-estimate-total-size = 合計サイズ
 upload-estimate-messages = Telegram メッセージ数
 upload-estimate-time = 推定時間
 upload-client-encryption-description = アップロード前にローカルで内容を暗号化します。
-upload-hide-filename-description = 元のファイル名の代わりに保護された名前を保存します。
-upload-encrypt-metadata-description = ファイル名、サイズ、種類のメタデータを保護します。
 
 file-detail-hash = ファイルハッシュ
 file-detail-part-size = パートサイズ
@@ -626,7 +623,6 @@ settings-upload-description = 暗号化アップロードには専用の TeleArk
 settings-upload-vault-managed-title = キー保管庫で管理する暗号化アップロード
 settings-upload-vault-managed-description = TeleArk は内容、名前、メタデータを自動暗号化します。各コンテナの平文上限は { $size } で、512 KiB ブロック単位で暗号化とアップロードが進みます。
 upload-current-part-size = 現在の安全なパート上限
-upload-current-part-size-description = TeleArk は現在、最大 { $size } の暗号化平文パートを作成します。
 settings-vault-title = Key Vault の保護
 settings-vault-description = ファイルの暗号化キーと復元を管理します。アプリのPINは一般設定で設定できます。
 settings-index-title = Telegram の索引作成
@@ -878,9 +874,9 @@ transfer-controller-connections-value = C={$connections} · W={$rpcs}
 transfer-controller-queue-waits-value = ネットワークの暗号化待ち {$network} · 暗号化のネットワーク待ち {$encryption} · {$parts} パート/秒
 transfer-controller-buffers-value = 平文 {$plaintext} · 暗号文 {$encrypted} · ネットワーク {$network} · 書き込み {$writer}
 transfer-controller-decisions = コントローラーの決定
-transfer-controller-no-decisions = 最初の測定結果を待っています。
+transfer-controller-no-decisions = コントローラーの活動は記録されていません。
 transfer-controller-lanes = DC と接続 lane
-transfer-controller-lanes-unavailable = 現在の grammers 転送層は、信頼できる DC 別 lane 指標をまだ公開していません。
+transfer-controller-lanes-unavailable = この転送の接続別の測定値は利用できません。
 transfer-lane-value = DC {$dc} · lane {$lane} · inflight {$inflight} · {$speed} · RTT p95 {$rtt} · {$status}
 transfer-lane-active = 稼働中
 transfer-lane-paused = 一時停止中
@@ -1124,6 +1120,15 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## Unreleased · Desktop interaction fixes
+
+    - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
+    - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
+    - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
+    - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
+    - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
+    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata remains 0.5.8; persistent schemas and codecs are unchanged.
+
     ## 0.5.8 · Authenticated channel key proof
 
     - New managed channels publish a proof tied to the account, channel and key. Sign-in verifies it even when there are no files. Verified older empty channels receive a new key and proof after remote checks.
@@ -1955,7 +1960,6 @@ settings-keychain-cleanup-pending = 認証情報の保存先を更新しまし�
 
 settings-keychain-unavailable-credentials = 一部の認証情報は別のデバイスのキーチェーンに属しています。API またはプロキシの認証情報を再入力し、暗号化の復旧バンドルを読み込んでアクセスを復元してください。
 
-upload-options-title = アップロードのオプション
 
 channel-filter-batch-no-matches = この条件に一致する索引済みファイルはありません。
 
@@ -1982,3 +1986,7 @@ managed-key-phase-checking-channel = Authenticating managed-channel files
 storage-download-requests = { $count } 件のダウンロードリクエストが実行中 · 最も古いリクエストは { $seconds } 秒経過。「転送」で進行状況を確認し、一時停止または停止できます。
 storage-download-capacity = ダウンロードリクエストのキューがいっぱいです。リクエストが完了してから別のファイルを追加してください。
 storage-download-request-active = ダウンロードをリクエストしました。「転送」で進行状況を確認できます。
+
+transfer-controller-native-throughput = { $parts } パート/秒 · 有効転送速度 { $speed }
+transfer-controller-native-buffers = 推定ネットワークバッファ容量 { $network }
+transfer-controller-native-writer = 最後に測定した書き込みサイズ { $size }

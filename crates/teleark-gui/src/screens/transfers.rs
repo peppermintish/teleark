@@ -386,6 +386,7 @@ impl TeleArkApp {
         self.preview_native_cleanup(false);
         let mut snapshot = (*self.native_transfer_view.items[0]).clone();
         snapshot.cleanup = None;
+        snapshot.telemetry.parameters = TransferControlParameters::conservative_download();
         snapshot.state = ChannelDownloadState::Failed(ApplicationErrorKind::Network);
         snapshot.size_bytes = 80 * 1024 * 1024;
         snapshot.transferred_bytes = 18 * 1024 * 1024;
@@ -2575,6 +2576,7 @@ impl TeleArkApp {
         &self,
         telemetry: TransferTelemetrySnapshot,
         transfer_is_active: bool,
+        native_download: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let replay_mode = self.transfer_inspector_replay || !transfer_is_active;
@@ -2719,70 +2721,143 @@ impl TeleArkApp {
                     )
                     .child(div().flex().gap_2().child(live_button).child(replay_button)),
             )
-            .child(
-                div().text_xs().text_color(theme::text_secondary()).child(
-                    self.tr_with(
-                        "transfer-controller-queue-waits-value",
-                        MessageArgs::new()
-                            .with(
-                                "network",
-                                format_duration_millis(
-                                    self.locale(),
-                                    telemetry.network_waiting_for_encryption_millis,
-                                ),
-                            )
-                            .with(
-                                "encryption",
-                                format_duration_millis(
-                                    self.locale(),
-                                    telemetry.encryption_waiting_for_network_millis,
-                                ),
-                            )
-                            .with(
-                                "parts",
-                                format_decimal(
-                                    self.locale(),
-                                    telemetry.parts.completed_parts_per_second_milli as f64
-                                        / 1_000.0,
-                                    2,
-                                ),
+            .when(!native_download, |card| {
+                card.child(
+                    div()
+                        .debug_selector(|| "transfer-encryption-sample".into())
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(
+                            self.tr_with(
+                                "transfer-controller-queue-waits-value",
+                                MessageArgs::new()
+                                    .with(
+                                        "network",
+                                        format_duration_millis(
+                                            self.locale(),
+                                            telemetry.network_waiting_for_encryption_millis,
+                                        ),
+                                    )
+                                    .with(
+                                        "encryption",
+                                        format_duration_millis(
+                                            self.locale(),
+                                            telemetry.encryption_waiting_for_network_millis,
+                                        ),
+                                    )
+                                    .with(
+                                        "parts",
+                                        format_decimal(
+                                            self.locale(),
+                                            telemetry.parts.completed_parts_per_second_milli as f64
+                                                / 1_000.0,
+                                            2,
+                                        ),
+                                    ),
                             ),
+                        ),
+                )
+                .child(
+                    div().text_xs().text_color(theme::text_secondary()).child(
+                        self.tr_with(
+                            "transfer-controller-buffers-value",
+                            MessageArgs::new()
+                                .with(
+                                    "plaintext",
+                                    format_bytes(
+                                        self.locale(),
+                                        telemetry.memory.plaintext_buffer_bytes,
+                                    ),
+                                )
+                                .with(
+                                    "encrypted",
+                                    format_bytes(
+                                        self.locale(),
+                                        telemetry.memory.encrypted_buffer_bytes,
+                                    ),
+                                )
+                                .with(
+                                    "network",
+                                    format_bytes(
+                                        self.locale(),
+                                        telemetry.memory.network_inflight_bytes,
+                                    ),
+                                )
+                                .with(
+                                    "writer",
+                                    format_bytes(
+                                        self.locale(),
+                                        telemetry.memory.writer_queue_bytes,
+                                    ),
+                                ),
+                        ),
                     ),
-                ),
-            )
-            .child(
-                div().text_xs().text_color(theme::text_secondary()).child(
-                    self.tr_with(
-                        "transfer-controller-buffers-value",
-                        MessageArgs::new()
-                            .with(
-                                "plaintext",
-                                format_bytes(
-                                    self.locale(),
-                                    telemetry.memory.plaintext_buffer_bytes,
-                                ),
-                            )
-                            .with(
-                                "encrypted",
-                                format_bytes(
-                                    self.locale(),
-                                    telemetry.memory.encrypted_buffer_bytes,
-                                ),
-                            )
-                            .with(
+                )
+            })
+            .when(native_download && !telemetry.decisions.is_empty(), |card| {
+                card.child(
+                    div()
+                        .debug_selector(|| "transfer-native-sample".into())
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(
+                            self.tr_with(
+                                "transfer-controller-native-throughput",
+                                MessageArgs::new()
+                                    .with(
+                                        "parts",
+                                        format_decimal(
+                                            self.locale(),
+                                            telemetry.parts.completed_parts_per_second_milli as f64
+                                                / 1_000.0,
+                                            2,
+                                        ),
+                                    )
+                                    .with(
+                                        "speed",
+                                        format_speed(
+                                            self.locale(),
+                                            telemetry.goodput_bytes_per_second,
+                                        ),
+                                    ),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "transfer-native-buffer".into())
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr_with(
+                            "transfer-controller-native-buffers",
+                            MessageArgs::new().with(
                                 "network",
                                 format_bytes(
                                     self.locale(),
                                     telemetry.memory.network_inflight_bytes,
                                 ),
-                            )
-                            .with(
-                                "writer",
-                                format_bytes(self.locale(), telemetry.memory.writer_queue_bytes),
                             ),
-                    ),
-                ),
-            )
+                        )),
+                )
+                .when(telemetry.memory.writer_queue_bytes > 0, |card| {
+                    card.child(
+                        div()
+                            .debug_selector(|| "transfer-native-writer".into())
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(self.tr_with(
+                                "transfer-controller-native-writer",
+                                MessageArgs::new().with(
+                                    "size",
+                                    format_bytes(
+                                        self.locale(),
+                                        telemetry.memory.writer_queue_bytes,
+                                    ),
+                                ),
+                            )),
+                    )
+                })
+            })
             .child(
                 div()
                     .pt_2()
@@ -3454,7 +3529,7 @@ impl TeleArkApp {
                 }),
             ));
         }
-        if let Some(telemetry) = telemetry.as_ref().filter(|_| !upload) {
+        if let Some(telemetry) = telemetry.as_ref().filter(|_| !upload && vault_backed) {
             let parameters = telemetry.parameters;
             details.extend([
                 (
@@ -3529,34 +3604,39 @@ impl TeleArkApp {
                             ),
                     ),
                 ),
-                (
-                    self.tr("transfer-controller-part-map"),
-                    self.tr_with(
-                        "transfer-controller-part-map-value",
-                        MessageArgs::new()
-                            .with(
-                                "completed",
-                                format_integer(self.locale(), telemetry.parts.completed_parts),
-                            )
-                            .with(
-                                "inflight",
-                                format_integer(self.locale(), telemetry.parts.inflight_parts),
-                            )
-                            .with(
-                                "retry",
-                                format_integer(self.locale(), telemetry.parts.retry_parts),
-                            )
-                            .with(
-                                "failed",
-                                format_integer(self.locale(), telemetry.parts.failed_parts),
-                            )
-                            .with(
-                                "missing",
-                                format_integer(self.locale(), telemetry.parts.missing_parts),
-                            ),
-                    ),
-                ),
             ]);
+        }
+        if let Some(telemetry) = telemetry
+            .as_ref()
+            .filter(|telemetry| !upload && (vault_backed || !telemetry.decisions.is_empty()))
+        {
+            details.push((
+                self.tr("transfer-controller-part-map"),
+                self.tr_with(
+                    "transfer-controller-part-map-value",
+                    MessageArgs::new()
+                        .with(
+                            "completed",
+                            format_integer(self.locale(), telemetry.parts.completed_parts),
+                        )
+                        .with(
+                            "inflight",
+                            format_integer(self.locale(), telemetry.parts.inflight_parts),
+                        )
+                        .with(
+                            "retry",
+                            format_integer(self.locale(), telemetry.parts.retry_parts),
+                        )
+                        .with(
+                            "failed",
+                            format_integer(self.locale(), telemetry.parts.failed_parts),
+                        )
+                        .with(
+                            "missing",
+                            format_integer(self.locale(), telemetry.parts.missing_parts),
+                        ),
+                ),
+            ));
         }
         if let Some(path) = vault_snapshot
             .as_ref()
@@ -3971,7 +4051,12 @@ impl TeleArkApp {
                             })
                         }),
                         |details, telemetry| {
-                            details.child(self.render_transfer_telemetry(telemetry, active, cx))
+                            details.child(self.render_transfer_telemetry(
+                                telemetry,
+                                active,
+                                runtime_backed,
+                                cx,
+                            ))
                         },
                     )
                     .when_some(server_status, |details, status| {
@@ -4959,6 +5044,72 @@ mod tests {
                     .debug_bounds("transfer-recovery-guidance")
                     .expect("guidance");
                 assert!(guidance.top() >= panel.top() && guidance.bottom() <= panel.bottom());
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn native_inspector_shows_only_recorded_and_applicable_telemetry(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for sample in 0..3 {
+                app.update(cx, |app, cx| {
+                    app.preview_native_failure();
+                    let mut snapshot = (*app.native_transfer_view.items[0]).clone();
+                    if sample > 0 {
+                        let telemetry = &mut snapshot.telemetry;
+                        telemetry.goodput_bytes_per_second = 1024 * 1024;
+                        telemetry.parts.completed_parts = 36;
+                        telemetry.parts.completed_parts_per_second_milli = 1500;
+                        telemetry.memory.network_inflight_bytes = 4 * 1024 * 1024;
+                        telemetry.memory.writer_queue_bytes =
+                            if sample == 1 { 512 * 1024 } else { 0 };
+                        telemetry.decisions.push(ControllerDecision {
+                            sequence: 1,
+                            observed_at_millis: 24_000,
+                            phase: ControllerPhase::Stable,
+                            parameter: None,
+                            before: telemetry.parameters,
+                            after: telemetry.parameters,
+                            baseline_goodput_bytes_per_second: telemetry.goodput_bytes_per_second,
+                            observed_goodput_bytes_per_second: telemetry.goodput_bytes_per_second,
+                            goodput_change_basis_points: 0,
+                            outcome: ControllerDecisionOutcome::Confirm,
+                            reason: ControllerDecisionReason::UserSettings,
+                            affected_lane: None,
+                            flood_wait_seconds: None,
+                        });
+                    }
+                    app.native_transfer_view.items = vec![std::sync::Arc::new(snapshot)].into();
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("transfer-inspector").is_some());
+                assert!(
+                    cx.debug_bounds("transfer-encryption-sample").is_none(),
+                    "native downloads have no encryption queue or encryption buffers"
+                );
+                assert_eq!(
+                    cx.debug_bounds("transfer-native-sample").is_some(),
+                    sample > 0
+                );
+                assert_eq!(
+                    cx.debug_bounds("transfer-native-buffer").is_some(),
+                    sample > 0
+                );
+                assert_eq!(
+                    cx.debug_bounds("transfer-native-writer").is_some(),
+                    sample == 1
+                );
+                cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
             }
         }
     }

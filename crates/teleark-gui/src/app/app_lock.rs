@@ -411,10 +411,12 @@ impl TeleArkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let modal_open = self.transition.is_some();
+        let modal_open = self.transition.is_some() || self.confirm_account_switch;
         if modal_open != self.modal_was_open || window.focused(cx).is_none() {
             if modal_open {
                 self.modal_focus.focus(window, cx);
+            } else if self.app_lock.show_proxy {
+                self.main_focus.focus(window, cx);
             } else {
                 self.app_lock
                     .pin
@@ -436,8 +438,8 @@ impl TeleArkApp {
             .font_family(".SystemUIFont")
             .track_focus(&self.main_focus)
             .on_action(cx.listener(|app, _: &DismissOverlay, window, cx| {
-                if app.transition.is_some() {
-                    app.cancel_transition(cx);
+                if app.transition.is_some() || app.confirm_account_switch {
+                    app.dismiss_workspace_overlay(&DismissOverlay, window, cx);
                 } else if app.app_lock.show_proxy {
                     app.app_lock.show_proxy = false;
                     cx.notify();
@@ -914,6 +916,44 @@ mod failure_tests {
 mod layout_tests {
     use super::*;
     use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn locked_account_confirmation_cancels_before_proxy_or_fullscreen(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, cx| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+                app.update(cx, |app, cx| {
+                    app.app_lock.locked = true;
+                    app.app_lock.show_proxy = true;
+                    app.confirm_account_switch = true;
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                app.read_with(cx, |app, _| assert!(app.modal_focus.is_focused(window)));
+            });
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert!(!app.confirm_account_switch);
+                assert!(app.app_lock.locked);
+                assert!(app.app_lock.show_proxy);
+                assert!(app.telegram_account.is_some());
+            });
+            cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| assert!(!app.app_lock.show_proxy));
+            cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
+        }
+    }
 
     #[gpui::test]
     fn pin_settings_and_network_log_entry_remain_reachable_in_window_and_fullscreen(

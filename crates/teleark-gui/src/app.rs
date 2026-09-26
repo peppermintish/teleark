@@ -171,6 +171,7 @@ enum EscapeBehavior {
     DismissUpload,
     DismissTelegramApiIdPrompt,
     DismissStorageDetails,
+    DismissInspector,
     Ignore,
 }
 
@@ -180,6 +181,7 @@ fn escape_behavior(
     upload_visible: bool,
     telegram_api_id_prompt_visible: bool,
     storage_details_visible: bool,
+    inspector_visible: bool,
 ) -> EscapeBehavior {
     if unlock_visible {
         EscapeBehavior::DismissUnlock
@@ -189,6 +191,8 @@ fn escape_behavior(
         EscapeBehavior::DismissTelegramApiIdPrompt
     } else if storage_details_visible {
         EscapeBehavior::DismissStorageDetails
+    } else if inspector_visible {
+        EscapeBehavior::DismissInspector
     } else if fullscreen {
         EscapeBehavior::ExitFullscreen
     } else {
@@ -327,7 +331,6 @@ pub struct TeleArkApp {
     pub(crate) storage_error: Option<teleark_core::ApplicationErrorKind>,
     pub(crate) show_storage_guide: bool,
     pub(crate) about_show_licenses: bool,
-    pub(crate) upload_advanced_expanded: bool,
     pub(crate) vault_advanced_expanded: bool,
     pub(crate) vault_new_epoch_confirmation: bool,
     pub(crate) vault_key_progress: Option<teleark_runtime::VaultKeyProgress>,
@@ -751,7 +754,6 @@ impl TeleArkApp {
             storage_error: None,
             show_storage_guide: false,
             about_show_licenses: false,
-            upload_advanced_expanded: false,
             vault_advanced_expanded: false,
             vault_new_epoch_confirmation: false,
             vault_key_progress: None,
@@ -1188,6 +1190,77 @@ impl TeleArkApp {
             || (self.page == Page::Storage && self.storage_details_expanded)
     }
 
+    fn workspace_inspector_open(&self) -> bool {
+        self.dialogs.details
+            || self.channel_sync_details
+            || (self.vault_key_details && self.vault_key_progress.is_some())
+            || (self.page == Page::Transfers && self.show_transfer_detail)
+            || (matches!(self.page, Page::Storage | Page::Channel) && self.show_channel_detail)
+    }
+
+    fn dismiss_workspace_overlay(
+        &mut self,
+        _: &DismissOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition.is_some() {
+            self.cancel_transition(cx);
+            return;
+        }
+        if self.confirm_account_switch || self.keychain.confirmation || self.speed_limits.open {
+            self.confirm_account_switch = false;
+            self.show_account_switch = false;
+            self.keychain.confirmation = false;
+            self.speed_limits.open = false;
+            cx.notify();
+            return;
+        }
+        if self.pending_transfer_delete.is_some() || !self.pending_transfer_bulk_delete.is_empty() {
+            self.pending_transfer_delete = None;
+            self.pending_transfer_bulk_delete.clear();
+            cx.notify();
+            return;
+        }
+        match escape_behavior(
+            window.is_fullscreen(),
+            self.vault_new_epoch_confirmation,
+            self.show_upload,
+            self.show_telegram_api_id_prompt,
+            self.page == Page::Storage && self.storage_details_expanded,
+            self.workspace_inspector_open(),
+        ) {
+            EscapeBehavior::ExitFullscreen => window.toggle_fullscreen(),
+            EscapeBehavior::DismissUnlock => {
+                if self.vault_activity != VaultActivity::Working {
+                    self.dismiss_unlock(window, cx);
+                }
+            }
+            EscapeBehavior::DismissUpload => {
+                self.show_upload = false;
+                cx.notify();
+            }
+            EscapeBehavior::DismissTelegramApiIdPrompt => {
+                self.skip_telegram_api_id_prompt(cx);
+            }
+            EscapeBehavior::DismissStorageDetails => {
+                self.storage_details_expanded = false;
+                self.main_focus.focus(window, cx);
+                cx.notify();
+            }
+            EscapeBehavior::DismissInspector => {
+                self.dialogs.details = false;
+                self.channel_sync_details = false;
+                self.vault_key_details = false;
+                self.show_transfer_detail = false;
+                self.show_channel_detail = false;
+                self.main_focus.focus(window, cx);
+                cx.notify();
+            }
+            EscapeBehavior::Ignore => {}
+        }
+    }
+
     fn render_workspace_frame(
         &mut self,
         window: &mut Window,
@@ -1260,66 +1333,6 @@ impl TeleArkApp {
             .bg(theme::canvas())
             .font_family(".SystemUIFont")
             .text_color(theme::text_primary())
-            .on_action(cx.listener(|this, _: &DismissOverlay, window, cx| {
-                if this.transition.is_some() {
-                    this.cancel_transition(cx);
-                    return;
-                }
-                if this.confirm_account_switch
-                    || this.keychain.confirmation
-                    || this.speed_limits.open
-                {
-                    this.confirm_account_switch = false;
-                    this.show_account_switch = false;
-                    this.keychain.confirmation = false;
-                    this.speed_limits.open = false;
-                    cx.notify();
-                    return;
-                }
-                if this.pending_transfer_delete.is_some()
-                    || !this.pending_transfer_bulk_delete.is_empty()
-                {
-                    this.pending_transfer_delete = None;
-                    this.pending_transfer_bulk_delete.clear();
-                    cx.notify();
-                    return;
-                }
-                match escape_behavior(
-                    window.is_fullscreen(),
-                    this.vault_new_epoch_confirmation,
-                    this.show_upload,
-                    this.show_telegram_api_id_prompt,
-                    this.page == Page::Storage && this.storage_details_expanded,
-                ) {
-                    EscapeBehavior::ExitFullscreen => window.toggle_fullscreen(),
-                    EscapeBehavior::DismissUnlock => {
-                        if this.vault_activity != VaultActivity::Working {
-                            this.dismiss_unlock(window, cx);
-                        }
-                    }
-                    EscapeBehavior::DismissUpload => {
-                        this.show_upload = false;
-                        cx.notify();
-                    }
-                    EscapeBehavior::DismissTelegramApiIdPrompt => {
-                        this.skip_telegram_api_id_prompt(cx);
-                    }
-                    EscapeBehavior::DismissStorageDetails => {
-                        this.storage_details_expanded = false;
-                        this.main_focus.focus(window, cx);
-                        cx.notify();
-                    }
-                    EscapeBehavior::Ignore => {
-                        this.dialogs.details = false;
-                        this.channel_sync_details = false;
-                        this.vault_key_details = false;
-                        this.show_transfer_detail = false;
-                        this.pending_transfer_delete = None;
-                        this.pending_transfer_bulk_delete.clear();
-                        cx.notify();
-                    }
-                }
-            }))
             .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
                 if this.workspace_modal_open() {
                     return;
@@ -1550,32 +1563,40 @@ mod tests {
     #[test]
     fn escape_dismisses_the_topmost_modal_before_leaving_fullscreen() {
         assert_eq!(
-            escape_behavior(true, false, false, false, true),
+            escape_behavior(true, false, false, false, true, false),
             EscapeBehavior::DismissStorageDetails
         );
         assert_eq!(
-            escape_behavior(true, true, true, true, false),
+            escape_behavior(true, true, true, true, false, false),
             EscapeBehavior::DismissUnlock
         );
         assert_eq!(
-            escape_behavior(true, false, true, true, false),
+            escape_behavior(true, false, true, true, false, false),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, false, true, true, false),
+            escape_behavior(false, false, true, true, false, false),
             EscapeBehavior::DismissUpload
         );
         assert_eq!(
-            escape_behavior(false, false, false, true, false),
+            escape_behavior(false, false, false, true, false, false),
             EscapeBehavior::DismissTelegramApiIdPrompt
         );
         assert_eq!(
-            escape_behavior(false, false, false, false, false),
+            escape_behavior(false, false, false, false, false, false),
             EscapeBehavior::Ignore
         );
         assert_eq!(
-            escape_behavior(true, false, false, false, false),
+            escape_behavior(true, false, false, false, false, false),
             EscapeBehavior::ExitFullscreen
+        );
+        assert_eq!(
+            escape_behavior(true, false, false, false, false, true),
+            EscapeBehavior::DismissInspector
+        );
+        assert_eq!(
+            escape_behavior(true, false, true, false, false, true),
+            EscapeBehavior::DismissUpload
         );
     }
 
@@ -1704,6 +1725,7 @@ impl Render for TeleArkApp {
         div()
             .size_full()
             .relative()
+            .on_action(cx.listener(Self::dismiss_workspace_overlay))
             .child(workspace)
             .when(self.channel_sync_details, |root| {
                 let inspector = self
@@ -1758,6 +1780,89 @@ mod modal_interaction_tests {
                     page == Page::Transfers
                 );
             });
+        }
+    }
+
+    #[gpui::test]
+    fn escape_closes_inspectors_before_leaving_compact_or_fullscreen_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = test_support::preview_app(cx, Page::Transfers);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for (inspector, page) in [
+                ("transfer", Page::Transfers),
+                ("channel sync", Page::Storage),
+                ("dialogs", Page::Storage),
+                ("key activity", Page::Storage),
+                ("managed file", Page::Storage),
+                ("channel file", Page::Channel),
+            ] {
+                app.update(cx, |app, cx| {
+                    app.page = page;
+                    app.nav_selection = "nav-downloads";
+                    app.preview_transfer_rows = crate::mock::transfers(false);
+                    app.focused_transfer_key = Some(0x8000_0000_0000_0000);
+                    app.show_transfer_detail = inspector == "transfer";
+                    app.channel_sync_details = inspector == "channel sync";
+                    app.dialogs.details = inspector == "dialogs";
+                    app.vault_key_progress = Some(teleark_runtime::VaultKeyProgress::new());
+                    app.vault_key_details = inspector == "key activity";
+                    app.show_channel_detail = matches!(inspector, "managed file" | "channel file");
+                    app.selected_telegram_message_id =
+                        Some(if page == Page::Channel { 5000 } else { 100 });
+                    app.refresh_channel_file_table(cx);
+                    assert!(app.workspace_inspector_open());
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                if let Some(selector) = match inspector {
+                    "transfer" => Some("transfer-inspector"),
+                    "channel sync" => Some("channel-sync-inspector"),
+                    "dialogs" => Some("dialogs-inspector"),
+                    "key activity" => Some("vault-key-inspector"),
+                    _ => None,
+                } {
+                    assert!(
+                        cx.debug_bounds(selector).is_some(),
+                        "{inspector} is visible"
+                    );
+                }
+                // A modal still dismisses first, preserving the inspector beneath it.
+                app.update(cx, |app, cx| {
+                    app.show_upload = true;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    assert!(!app.show_upload);
+                    assert!(app.workspace_inspector_open());
+                });
+                cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
+
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    assert!(!app.workspace_inspector_open(), "Escape closes {inspector}");
+                    assert!(
+                        app.focused_transfer_key.is_some(),
+                        "closing preserves selection"
+                    );
+                    assert!(app.selected_telegram_message_id.is_some());
+                });
+                cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
+            }
+            // Only a subsequent Escape without overlays may leave fullscreen.
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            cx.update(|window, _| assert!(!window.is_fullscreen()));
         }
     }
 

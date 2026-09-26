@@ -789,7 +789,6 @@ settings-keychain-cleanup-pending = क्रेडेंशियल स्ट�
 
 settings-keychain-unavailable-credentials = कुछ क्रेडेंशियल दूसरे डिवाइस की कीचेन में हैं। पहुँच बहाल करने के लिए API या प्रॉक्सी क्रेडेंशियल फिर डालें और एन्क्रिप्शन पुनर्प्राप्ति बंडल आयात करें।
 
-upload-options-title = अपलोड विकल्प
 
 channel-filter-batch-no-matches = इन फ़िल्टरों से मेल खाने वाली कोई इंडेक्स की गई फ़ाइल नहीं है।
 

@@ -42,6 +42,7 @@ impl TeleArkApp {
         self.upload_in_flight
             || self.vault_download_in_flight
             || !self.vault_download_jobs.is_empty()
+            || !self.vault_transfer_jobs.is_empty()
             || self.vault_bulk_action_queue.is_some()
             || self.upload_preparing
             || self.has_active_transfer()

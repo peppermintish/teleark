@@ -83,34 +83,47 @@ impl TeleArkApp {
                 return;
             };
             this.update(cx, |this, cx| {
-                this.vault_transfer_jobs.remove(&key);
-                if this.telegram_login_generation != generation
-                    || this.telegram_account.as_ref().map(|account| account.id) != Some(account)
-                {
-                    this.advance_vault_bulk_actions(cx);
-                    return;
-                }
-                match result {
-                    Ok(Some(file)) => {
-                        this.apply_completed_vault_uploads(account, chat_id, vec![file])
-                    }
-                    Ok(None) if action == TransferAction::Delete => {
-                        this.show_transfer_detail = false;
-                        this.selected_transfer_keys
-                            .remove(&vault_transfer_selection_key(id));
-                    }
-                    Ok(None) => {}
-                    Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
-                    }
-                    Err(error) => this.transfer_action_error = Some(error.kind()),
-                }
-                this.finish_vault_bulk_action((account, generation), id, action, cx);
-                cx.notify();
+                this.finish_vault_transfer_action(key, generation, chat_id, action, result, cx);
             });
         });
         self.vault_transfer_jobs.insert(key, task);
         cx.notify();
         true
+    }
+
+    fn finish_vault_transfer_action(
+        &mut self,
+        key: (i64, u64, bool),
+        generation: u64,
+        chat_id: i64,
+        action: TransferAction,
+        result: Result<Option<ManagedVaultFile>, ApplicationError>,
+        cx: &mut Context<Self>,
+    ) {
+        let (account, id, _) = key;
+        self.vault_transfer_jobs.remove(&key);
+        if self.telegram_login_generation == generation
+            && self.telegram_account.as_ref().map(|account| account.id) == Some(account)
+        {
+            match result {
+                Ok(Some(file)) => self.apply_completed_vault_uploads(account, chat_id, vec![file]),
+                Ok(None) if action == TransferAction::Delete => {
+                    self.show_transfer_detail = false;
+                    self.selected_transfer_keys
+                        .remove(&vault_transfer_selection_key(id));
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {}
+                Err(error) => self.transfer_action_error = Some(error.kind()),
+            }
+            self.finish_vault_bulk_action((account, generation), id, action, cx);
+        } else {
+            self.advance_vault_bulk_actions(cx);
+        }
+        // Cancelling a bulk queue preserves its admitted owners. Their final
+        // completion must release a drain even when the queue no longer exists.
+        self.advance_transition(cx);
+        cx.notify();
     }
 
     pub(crate) fn open_vault_action(&mut self, intent: VaultAction, cx: &mut Context<Self>) {
@@ -1313,6 +1326,85 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn cancelled_bulk_queue_keeps_transition_waiting_until_retained_command_finishes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::app::lifecycle::{TransitionAction, TransitionPhase};
+
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for action in [
+            TransitionAction::SwitchAccount,
+            TransitionAction::ApplyProxy,
+        ] {
+            for outcome in 0..3 {
+                app.update(cx, |app, cx| {
+                    app.native_transfer_view.items = Default::default();
+                    app.vault_transfer_view.items = Default::default();
+                    let account = app.telegram_account.as_ref().expect("account").id;
+                    let chat = app.active_storage_chat_id().expect("channel");
+                    let generation = app.telegram_login_generation;
+                    let key = (account, 41, false);
+                    // The background executor has not yet admitted this resume
+                    // to the runtime, so no active transfer snapshot exists.
+                    app.vault_transfer_jobs.insert(
+                        key,
+                        cx.spawn(async |_, _| std::future::pending::<()>().await),
+                    );
+                    app.vault_bulk_action_queue =
+                        Some(crate::screens::transfers::VaultBulkActionQueue::new(
+                            (account, generation),
+                            TransferAction::Resume,
+                            &[42],
+                        ));
+                    // Cancel queued actions keeps the already-dispatched owner.
+                    app.vault_bulk_action_queue = None;
+                    assert!(app.transition_has_work());
+                    app.request_transition(action, cx);
+                    assert!(app.transition.as_ref().is_some_and(|transition| {
+                        transition.phase == TransitionPhase::Confirm
+                    }));
+                    app.transition.as_mut().expect("transition").phase = TransitionPhase::Waiting;
+                    app.advance_transition(cx);
+                    assert!(app.transition.as_ref().is_some_and(|transition| {
+                        transition.phase == TransitionPhase::Waiting
+                    }));
+
+                    let completion_generation = if outcome == 2 {
+                        generation.wrapping_sub(1)
+                    } else {
+                        generation
+                    };
+                    let result = if outcome == 0 {
+                        Ok(None)
+                    } else {
+                        Err(ApplicationError::new(
+                            teleark_core::ApplicationErrorKind::Persistence,
+                        ))
+                    };
+                    app.finish_vault_transfer_action(
+                        key,
+                        completion_generation,
+                        chat,
+                        TransferAction::Resume,
+                        result,
+                        cx,
+                    );
+                    assert!(app.vault_transfer_jobs.is_empty());
+                    assert!(!app.transition_has_work());
+                    assert!(app.transition.as_ref().is_some_and(|transition| {
+                        transition.phase == TransitionPhase::Executing
+                    }));
+                    // Keep each case synthetic; the deferred transition checks
+                    // this cancellation before changing the account or route.
+                    app.cancel_transition(cx);
+                });
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| assert!(app.transition.is_none()));
+            }
+        }
+    }
 
     #[gpui::test]
     fn managed_download_requests_allow_independent_completion_and_reject_stale_callbacks(

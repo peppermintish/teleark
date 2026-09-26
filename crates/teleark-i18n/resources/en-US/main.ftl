@@ -397,7 +397,7 @@ file-state-locked = Locked
 
 transfer-state-waiting = Waiting
 transfer-summary-downloading = Downloading
-transfer-summary-task-count = { $count } tasks
+transfer-summary-task-count = Tasks: { $count }
 transfer-summary-completed-note = Finished downloads
 transfer-summary-live-runtime = Live Telegram runtime
 transfer-summary-completed-data = Completed data
@@ -416,7 +416,7 @@ transfer-footer-total = 166 tasks
 transfer-footer-downloading = Downloading 8 (78.27 GiB)
 transfer-footer-waiting = Waiting 156 (210.43 GiB)
 transfer-footer-unlimited = Limit: Unlimited
-transfer-footer-total-live = { $count } tasks
+transfer-footer-total-live = Tasks: { $count }
 transfer-footer-downloading-live = { $count } downloading
 transfer-footer-waiting-live = { $count } waiting
 transfer-empty = No transfers yet. Choose a Telegram source and download a file to get started.
@@ -450,7 +450,6 @@ log-connection-timeout = Connection timed out; retrying
 log-saved = Download complete; file saved
 
 upload-source-unchanged = Source unchanged
-upload-source-checked = Checked just now
 upload-automatic-multipart-description = Split this file into Telegram-compatible application parts.
 upload-conservative-mode = 1024 MiB conservative mode
 upload-estimate-title = Estimated Information
@@ -460,8 +459,6 @@ upload-estimate-total-size = Total Size
 upload-estimate-messages = Telegram Messages
 upload-estimate-time = Estimated Time
 upload-client-encryption-description = Encrypt content locally before upload.
-upload-hide-filename-description = Store a protected name instead of the original filename.
-upload-encrypt-metadata-description = Protect filename, size, and type metadata.
 
 file-detail-hash = File Hash
 file-detail-part-size = Part Size
@@ -654,7 +651,6 @@ settings-upload-description = Encrypted uploads use your private TeleArk channel
 settings-upload-vault-managed-title = Vault-managed encrypted uploads
 settings-upload-vault-managed-description = TeleArk automatically encrypts content, names and metadata. Containers hold up to { $size } of plaintext; encryption and upload advance together in 512 KiB blocks.
 upload-current-part-size = Current safe part limit
-upload-current-part-size-description = TeleArk currently creates encrypted plaintext parts of at most { $size }.
 settings-vault-title = Key Vault protection
 settings-vault-description = Manage file encryption keys and recovery. Configure the application PIN in General settings.
 settings-index-title = Telegram indexing
@@ -906,9 +902,9 @@ transfer-controller-connections-value = C={$connections} · W={$rpcs}
 transfer-controller-queue-waits-value = Network waited {$network} for encryption · encryption waited {$encryption} for network · {$parts} parts/s
 transfer-controller-buffers-value = Plaintext {$plaintext} · encrypted {$encrypted} · network {$network} · writer {$writer}
 transfer-controller-decisions = Controller decisions
-transfer-controller-no-decisions = Waiting for the first measured decision.
+transfer-controller-no-decisions = No measured controller activity was recorded.
 transfer-controller-lanes = DC and connection lanes
-transfer-controller-lanes-unavailable = The active grammers transport does not expose trustworthy per-DC lane metrics yet.
+transfer-controller-lanes-unavailable = Per-connection measurements are unavailable for this transfer.
 transfer-lane-value = DC {$dc} · lane {$lane} · {$inflight} inflight · {$speed} · RTT p95 {$rtt} · {$status}
 transfer-lane-active = active
 transfer-lane-paused = paused
@@ -1146,12 +1142,21 @@ local-file-observation-limit = Local checks cover the 10,000 most recent downloa
 local-file-status = Local file
 transfer-download-again = Download again
 
-upload-selection-summary = { $count } files · { $size }
+upload-selection-summary = Files: { $count } · { $size }
 upload-remove-file = Remove file from selection
 upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## Unreleased · Desktop interaction fixes
+
+    - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
+    - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
+    - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
+    - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
+    - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
+    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata remains 0.5.8; persistent schemas and codecs are unchanged.
+
     ## 0.5.8 · Authenticated channel key proof
 
     - New managed channels publish a versioned proof tied to their account, channel and encryption key. Sign-in checks that proof to select the current key even before any file exists. A verified older empty channel with only its identity message receives a new key and proof after remote emptiness checks; channels with files are never automatically rekeyed.
@@ -1340,7 +1345,7 @@ library-tab-local = Local files
 library-tab-remote = Remote files
 library-types-all = All types
 library-type-filter = Filter by file type
-library-visible-files = { $count } files shown
+library-visible-files = Files shown: { $count }
 library-visible-size = { $size } shown
 library-local-explanation = Downloads from this account and imported files that are currently accessible on disk. Refresh to check again.
 library-remote-explanation = Telegram files indexed for this account. Browse or index a channel to add files here; these records do not mean the files are downloaded.
@@ -1702,7 +1707,7 @@ sync-older-events = Some older activity is no longer shown.
 sync-event-times-local = Event times · local time
 
 sync-silence-policy = Recovery check after { $minutes } minutes without channel updates.
-channel-file-count = { $count } files
+channel-file-count = Files: { $count }
 channel-select-all-compact = Select all
 channel-download-compact = Download
 shell-sync-complete = Synced
@@ -1982,7 +1987,6 @@ settings-keychain-cleanup-pending = Credential storage is updated. Some older Ke
 
 settings-keychain-unavailable-credentials = Some credentials belong to another device’s Keychain. Reenter API or proxy credentials and import your encryption recovery bundle to restore access.
 
-upload-options-title = Upload options
 
 channel-filter-batch-no-matches = No indexed files match these filters.
 
@@ -2009,3 +2013,7 @@ managed-key-phase-checking-channel = Authenticating managed-channel files
 storage-download-requests = { $count } download requests active · oldest request { $seconds } s. View Transfers for progress and pause or stop controls.
 storage-download-capacity = The download request queue is full. Wait for a request to finish before adding another file.
 storage-download-request-active = Download requested; view Transfers for progress.
+
+transfer-controller-native-throughput = { $parts } parts/s · Goodput { $speed }
+transfer-controller-native-buffers = Estimated network buffer capacity { $network }
+transfer-controller-native-writer = Last sampled write size { $size }

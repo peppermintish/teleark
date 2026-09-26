@@ -16,7 +16,7 @@
     <Property Id="ARPNOMODIFY" Value="1" />
     <!-- Rebuilt packages with the same numeric version must replace their payload too. -->
     <Property Id="REINSTALLMODE" Value="amus" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Kangarooss/teleark" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/peppermintish/teleark" />
     <Property Id="ARPPRODUCTICON" Value="TeleArkIcon" />
     <Icon Id="TeleArkIcon" SourceFile="$(var.IconPath)" />
 

@@ -789,7 +789,6 @@ settings-keychain-cleanup-pending = O armazenamento foi atualizado. Algumas cóp
 
 settings-keychain-unavailable-credentials = Algumas credenciais pertencem às Chaves de outro dispositivo. Digite novamente as credenciais de API ou proxy e importe seu pacote de recuperação para restaurar o acesso.
 
-upload-options-title = Opções de envio
 
 channel-filter-batch-no-matches = Nenhum arquivo indexado corresponde a estes filtros.
 

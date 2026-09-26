@@ -805,7 +805,6 @@ settings-keychain-cleanup-pending = Хранилище обновлено. Не�
 
 settings-keychain-unavailable-credentials = Некоторые данные принадлежат связке ключей другого устройства. Введите данные API или прокси заново и импортируйте пакет восстановления шифрования для возврата доступа.
 
-upload-options-title = Параметры загрузки
 
 channel-filter-batch-no-matches = Нет проиндексированных файлов по этим фильтрам.
 
