@@ -61,6 +61,11 @@ impl TeleArkApp {
                         })),
                     ),
             );
+        let cancel = cx.listener(|this, _, _, cx| {
+            this.confirm_account_switch = false;
+            this.show_account_switch = false;
+            cx.notify();
+        });
         gpui_kit::base::Dialog::new(cx)
             .focus_handle(self.modal_focus.clone())
             .flex()
@@ -69,7 +74,10 @@ impl TeleArkApp {
             .backdrop(div().absolute().inset_0().bg(theme::modal_backdrop()))
             .popup(popup)
             .close_on_backdrop_press(false)
-            .on_cancel(|_, _, _| false)
+            .on_cancel(move |event, window, cx| {
+                cancel(event, window, cx);
+                false
+            })
             .on_ok(|_, _, _| false)
             .into_any_element()
     }

@@ -36,11 +36,13 @@ use crate::{
 
 mod batch_style;
 mod batch_window;
+mod bulk_vault;
 mod projection;
 mod upload_activity;
 #[cfg(test)]
 use crate::mock::transfers;
 use batch_style::BatchRowPosition;
+pub(crate) use bulk_vault::VaultBulkActionQueue;
 pub(crate) use projection::TransferProjectionCache;
 use projection::{TransferItem, vault_action_supported, vault_transfer_state};
 
@@ -1351,11 +1353,7 @@ impl TeleArkApp {
                 .map(|action| {
                     let native_ids = presentation.actions[&(action as usize)].clone();
                     let vault_ids = presentation.vault_actions[&(action as usize)].clone();
-                    let disabled_ids_empty = if action == TransferAction::Delete {
-                        native_ids.is_empty() && vault_ids.is_empty()
-                    } else {
-                        native_ids.is_empty()
-                    };
+                    let disabled_ids_empty = native_ids.is_empty() && vault_ids.is_empty();
                     components::button(
                         ("transfer-bulk", action as usize),
                         self.tr(action.label()),
@@ -1373,7 +1371,12 @@ impl TeleArkApp {
                             }
                         )
                     })
-                    .disabled(disabled_ids_empty || self.transfer_action_job.is_some())
+                    .disabled(
+                        disabled_ids_empty
+                            || self.transfer_action_job.is_some()
+                            || self.vault_bulk_action_blocks(action)
+                            || self.visual_preview,
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if action == TransferAction::Delete {
                             let mut targets = native_ids
@@ -1387,6 +1390,7 @@ impl TeleArkApp {
                             this.pending_transfer_bulk_delete = targets;
                         } else {
                             this.apply_transfer_action(action, &native_ids, cx);
+                            this.apply_vault_bulk_action(action, &vault_ids, cx);
                         }
                         cx.notify();
                     }))
@@ -1410,10 +1414,14 @@ impl TeleArkApp {
             .when(self.transfer_action_job.is_some(), |bar| {
                 bar.child(
                     div()
+                        .debug_selector(|| "transfer-actions-applying".into())
                         .text_xs()
                         .text_color(theme::blue())
                         .child(self.tr("transfer-actions-applying")),
                 )
+            })
+            .when(self.vault_bulk_action_queue.is_some(), |bar| {
+                bar.child(self.render_vault_bulk_progress(cx))
             })
             .when_some(self.transfer_action_error, |bar, error| {
                 bar.child(
@@ -1632,6 +1640,8 @@ impl TeleArkApp {
             .when(
                 self.transfer_controls_expanded
                     || selection_count > 0
+                    || self.transfer_action_job.is_some()
+                    || self.vault_bulk_action_queue.is_some()
                     || self.transfer_action_error.is_some()
                     || self.pending_transfer_delete.is_some()
                     || !self.pending_transfer_bulk_delete.is_empty(),
@@ -1677,27 +1687,55 @@ impl TeleArkApp {
             return;
         };
         self.transfer_action_error = None;
+        let scope = (
+            self.telegram_account.as_ref().map(|account| account.id),
+            self.telegram_login_generation,
+        );
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let work = cx.background_spawn(async move { transfers.redownload_completed(id) });
         let task = cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
-                this.transfer_action_job = None;
-                match result {
-                    Ok(id) => {
-                        this.focused_transfer_key = Some(id);
-                        this.monitor_channel_download(id, cx);
-                    }
-                    Err(error) => this.transfer_action_error = Some(error.kind()),
-                }
-                cx.notify();
+                this.finish_redownload_completed(scope, result, cx);
             });
         });
         self.transfer_action_job = Some(TransferActionJob {
             _task: task,
             cancelled,
         });
+        cx.notify();
+    }
+
+    fn finish_redownload_completed(
+        &mut self,
+        scope: (Option<i64>, u64),
+        result: Result<u64, teleark_core::ApplicationError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.transfer_action_job = None;
+        if scope
+            != (
+                self.telegram_account.as_ref().map(|account| account.id),
+                self.telegram_login_generation,
+            )
+        {
+            cx.notify();
+            return;
+        }
+        match result {
+            Ok(id) => {
+                // A replacement task is queued, so it is absent from the Completed
+                // facet that commonly launched this action. Keep the new task visible.
+                self.nav_selection = "nav-downloads";
+                self.selected_transfer_keys.clear();
+                self.selected_transfer_keys.insert(id);
+                self.focused_transfer_key = Some(id);
+                self.monitor_channel_download(id, cx);
+            }
+            Err(error) => self.transfer_action_error = Some(error.kind()),
+        }
+        cx.notify();
     }
 
     fn native_action_supported(
@@ -1819,7 +1857,7 @@ impl TeleArkApp {
                         this.focused_transfer_key = Some(key);
                     }
                 }
-                this.transfer_action_error = failure;
+                this.transfer_action_error = failure.or(this.transfer_action_error);
                 cx.notify();
             });
         });
@@ -4736,6 +4774,78 @@ mod tests {
     #[path = "completed_batch_retry.rs"]
     mod completed_batch_retry;
     use super::*;
+
+    #[gpui_kit::test]
+    fn row_action_wait_is_visible_when_manage_is_collapsed(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        app.update(cx, |app, cx| {
+            app.show_transfer_detail = false;
+            app.transfer_controls_expanded = false;
+            app.selected_transfer_keys.clear();
+            app.transfer_action_job = Some(TransferActionJob {
+                _task: cx.spawn(async |_, _| std::future::pending::<()>().await),
+                cancelled: Default::default(),
+            });
+            cx.notify();
+        });
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), fullscreen);
+            });
+            cx.run_until_parked();
+            let feedback = cx
+                .debug_bounds("transfer-actions-applying")
+                .expect("a row command must acknowledge its wait without opening Manage");
+            cx.update(|window, _| {
+                assert!(feedback.bottom() < window.viewport_size().height);
+                assert!(feedback.right() <= window.viewport_size().width);
+            });
+        }
+        app.update(cx, |app, cx| {
+            app.transfer_action_job = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transfer-actions-applying").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn download_again_reveals_replacement_and_ignores_old_account_callbacks(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        app.update(cx, |app, cx| {
+            let scope = (
+                app.telegram_account.as_ref().map(|account| account.id),
+                app.telegram_login_generation,
+            );
+            app.nav_selection = "nav-completed";
+            app.selected_transfer_keys = [41].into();
+            app.finish_redownload_completed(scope, Ok(42), cx);
+            assert_eq!(app.nav_selection, "nav-downloads");
+            assert_eq!(app.focused_transfer_key, Some(42));
+            assert_eq!(app.selected_transfer_keys, [42].into());
+
+            app.nav_selection = "nav-completed";
+            app.telegram_login_generation = app.telegram_login_generation.wrapping_add(1);
+            app.finish_redownload_completed(scope, Ok(99), cx);
+            assert_eq!(app.nav_selection, "nav-completed");
+            assert_eq!(app.focused_transfer_key, Some(42));
+            assert_eq!(app.selected_transfer_keys, [42].into());
+            app.finish_redownload_completed(
+                scope,
+                Err(teleark_core::ApplicationError::new(
+                    ApplicationErrorKind::Network,
+                )),
+                cx,
+            );
+            assert!(app.transfer_action_error.is_none());
+        });
+    }
 
     #[gpui_kit::test]
     fn eta_and_progress_columns_use_the_supported_window_widths(cx: &mut gpui_kit::TestAppContext) {

@@ -2,7 +2,7 @@
 use crate::app::storage::StorageAction;
 use crate::assets::Symbol;
 use crate::{
-    app::{Page, StorageView, TeleArkApp, VaultAction},
+    app::{MANAGED_DOWNLOAD_REQUEST_LIMIT, Page, StorageView, TeleArkApp, VaultAction},
     components::{self, Tone},
     layout::LayoutPolicy,
     theme,
@@ -95,67 +95,64 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ready = self.storage_status.usable_channel().is_some();
-        let header = div()
-            .h(px(76.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(components::app_mark(38.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(23.0))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(self.tr("storage-nav-title")),
+        let header =
+            div()
+                .h(px(76.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(components::app_mark(38.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(23.0))
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(self.tr("storage-nav-title")),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme::text_secondary())
+                                .child(self.tr("storage-private-label")),
+                        ),
+                )
+                .when(self.storage_is_quiet(), |bar| {
+                    bar.child(
+                        components::button(
+                            "storage-expand-details",
+                            self.tr("storage-connected-title"),
+                            None,
+                            false,
+                        )
+                        .ghost()
+                        .text_xs()
+                        .text_color(theme::green())
+                        .debug_selector(|| "storage-expand-details".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.modal_focus.focus(window, cx);
+                            this.storage_details_expanded = true;
+                            cx.notify();
+                        })),
                     )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(self.tr("storage-private-label")),
-                    ),
-            )
-            .when(self.storage_is_quiet(), |bar| {
-                bar.child(
-                    components::button(
-                        "storage-expand-details",
-                        self.tr("storage-connected-title"),
-                        None,
-                        false,
+                })
+                .child(
+                    components::icon_button(
+                        "storage-help",
+                        Symbol::Help,
+                        self.tr("storage-guide-title"),
                     )
                     .ghost()
-                    .text_xs()
-                    .text_color(theme::green())
-                    .debug_selector(|| "storage-expand-details".into())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.modal_focus.focus(window, cx);
-                        this.storage_details_expanded = true;
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_storage_guide = !this.show_storage_guide;
                         cx.notify();
                     })),
                 )
-            })
-            .child(
-                components::icon_button(
-                    "storage-help",
-                    Symbol::Help,
-                    self.tr("storage-guide-title"),
-                )
-                .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_storage_guide = !this.show_storage_guide;
-                    cx.notify();
-                })),
-            )
-            .when(
-                ready
-                    && self.vault_status.key_selection
-                        == Some(teleark_runtime::VaultKeySelection::Ready),
-                |bar| {
+                .when(ready, |bar| {
                     bar.child(
                         components::button(
                             "storage-upload",
@@ -163,12 +160,12 @@ impl TeleArkApp {
                             Some(IconName::Plus),
                             true,
                         )
+                        .debug_selector(|| "storage-upload".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_vault_action(VaultAction::Upload, cx)
                         })),
                     )
-                },
-            );
+                });
         let body = if ready {
             let overview = div()
                 .flex_none()
@@ -1009,6 +1006,74 @@ impl TeleArkApp {
 }
 
 impl TeleArkApp {
+    pub(crate) fn render_managed_download_requests(&self, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.vault_download_jobs.len();
+        let oldest = self
+            .vault_download_jobs
+            .values()
+            .map(|job| job.started)
+            .min();
+        div()
+            .flex_none()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::blue_soft())
+            .flex()
+            .items_center()
+            .gap_3()
+            .debug_selector(|| "managed-download-requests".into())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .child(
+                        self.tr_with(
+                            "storage-download-requests",
+                            teleark_i18n::MessageArgs::new()
+                                .with(
+                                    "count",
+                                    teleark_i18n::format::format_integer(
+                                        self.locale(),
+                                        count as u64,
+                                    ),
+                                )
+                                .with(
+                                    "seconds",
+                                    teleark_i18n::format::format_integer(
+                                        self.locale(),
+                                        oldest.map_or(0, |started| started.elapsed().as_secs()),
+                                    ),
+                                ),
+                        ),
+                    )
+                    .when(count >= MANAGED_DOWNLOAD_REQUEST_LIMIT, |body| {
+                        body.child(
+                            div()
+                                .text_color(theme::amber())
+                                .child(self.tr("storage-download-capacity")),
+                        )
+                    }),
+            )
+            .child(
+                components::button(
+                    "managed-download-show-transfers",
+                    self.tr("transfer-title"),
+                    None,
+                    false,
+                )
+                .ghost()
+                .debug_selector(|| "managed-download-show-transfers".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.nav_selection = "nav-downloads";
+                    this.set_page(Page::Transfers, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_storage_managed(
         &self,
         layout: LayoutPolicy,
@@ -1040,6 +1105,7 @@ impl TeleArkApp {
                 .into_any_element();
         }
         let query = self.search_input.read(cx).value().to_lowercase();
+        let has_search = !query.trim().is_empty();
         let rows = self
             .managed_projection
             .borrow_mut()
@@ -1156,25 +1222,32 @@ impl TeleArkApp {
                                     } else {
                                         IconName::ArrowDown
                                     },
-                                    this.tr(
-                                        if file.health
-                                            == teleark_runtime::VaultFileHealth::PendingUpload
-                                        {
-                                            "vault-pending-resume"
-                                        } else {
-                                            "storage-channel-download-restored-action"
-                                        },
-                                    ),
+                                    this.tr(if this.managed_download_active(package_id) {
+                                        "storage-download-request-active"
+                                    } else if this.vault_download_jobs.len()
+                                        >= MANAGED_DOWNLOAD_REQUEST_LIMIT
+                                    {
+                                        "storage-download-capacity"
+                                    } else if file.health
+                                        == teleark_runtime::VaultFileHealth::PendingUpload
+                                    {
+                                        "vault-pending-resume"
+                                    } else {
+                                        "storage-channel-download-restored-action"
+                                    }),
                                 )
                                 .ghost()
                                 .debug_selector(move || format!("managed-file-action-{package_id}"))
-                                .disabled(matches!(
-                                    file.health,
-                                    teleark_runtime::VaultFileHealth::KeyUnavailable
-                                        | teleark_runtime::VaultFileHealth::MissingParts
-                                        | teleark_runtime::VaultFileHealth::MissingManifest
-                                        | teleark_runtime::VaultFileHealth::InvalidManifest
-                                ))
+                                .disabled(
+                                    this.managed_download_blocked(package_id)
+                                        || matches!(
+                                            file.health,
+                                            teleark_runtime::VaultFileHealth::KeyUnavailable
+                                                | teleark_runtime::VaultFileHealth::MissingParts
+                                                | teleark_runtime::VaultFileHealth::MissingManifest
+                                                | teleark_runtime::VaultFileHealth::InvalidManifest
+                                        ),
+                                )
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         cx.stop_propagation();
@@ -1266,9 +1339,18 @@ impl TeleArkApp {
                                     "managed-catalog-syncing"
                                 } else if self.managed_scan_loading {
                                     "storage-loading"
+                                } else if has_search {
+                                    "channel-filter-batch-no-matches"
                                 } else {
                                     "storage-channel-managed-empty"
-                                })),
+                                }))
+                                .debug_selector(move || {
+                                    if has_search {
+                                        "storage-managed-search-empty".into()
+                                    } else {
+                                        "storage-managed-empty".into()
+                                    }
+                                }),
                         ),
                 )
             })
@@ -1391,6 +1473,84 @@ mod tests {
     use super::*;
     use teleark_i18n::{Localizer, SupportedLocale};
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn upload_remains_reachable_before_channel_key_is_ready(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for selection in [
+                None,
+                Some(teleark_runtime::VaultKeySelection::NoKeys),
+                Some(teleark_runtime::VaultKeySelection::Undecryptable),
+            ] {
+                app.update(cx, |app, cx| {
+                    app.show_upload = false;
+                    app.vault_status.key_selection = selection;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let upload = cx
+                    .debug_bounds("storage-upload")
+                    .expect("upload entry point");
+                assert!(upload.left() >= px(0.0) && upload.right() <= px(900.0));
+                cx.simulate_click(upload.center(), gpui_kit::Modifiers::default());
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    assert!(
+                        app.show_upload,
+                        "file selection must not wait for key readiness"
+                    );
+                    assert!(!app.upload_in_flight);
+                });
+                assert!(cx.debug_bounds("upload-choose").is_some());
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn managed_search_no_match_preserves_files_and_clearing_search_restores_them(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        let count = app.read_with(cx, |app, _| app.managed_vault_files.len());
+        assert!(count > 0, "preview has existing files");
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, cx| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+                app.update(cx, |app, cx| {
+                    app.search_input.update(cx, |input, cx| {
+                        input.set_value("no-such-teleark-file-938174", window, cx);
+                    });
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("storage-managed-search-empty").is_some());
+            assert!(cx.debug_bounds("storage-managed-empty").is_none());
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.managed_vault_files.len(), count)
+            });
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.search_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("storage-managed-search-empty").is_none());
+            assert!(cx.debug_bounds("managed-file-row-1").is_some());
+        }
+    }
 
     #[gpui_kit::test]
     fn files_show_only_key_helper_while_raw_files_remain_visible(

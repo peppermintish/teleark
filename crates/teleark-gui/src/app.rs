@@ -25,6 +25,7 @@ pub(crate) use preview::completed_storage_maintenance_preview;
 pub(crate) mod proxy;
 pub(crate) mod storage;
 mod vault;
+pub(crate) use vault::MANAGED_DOWNLOAD_REQUEST_LIMIT;
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -362,6 +363,7 @@ pub struct TeleArkApp {
     pub(crate) transfer_projection_cache:
         std::cell::RefCell<screens::transfers::TransferProjectionCache>,
     pub(crate) transfer_action_job: Option<screens::transfers::TransferActionJob>,
+    pub(crate) vault_bulk_action_queue: Option<screens::transfers::VaultBulkActionQueue>,
     pub(crate) show_transfer_detail: bool,
     pub(crate) transfer_controls_expanded: bool,
     pub(crate) focused_transfer_key: Option<u64>,
@@ -541,6 +543,9 @@ pub struct TeleArkApp {
     managed_scan_cancellation: Option<TelegramScanCancellation>,
     vault_scan_task: Option<Task<()>>,
     vault_download_task: Option<Task<()>>,
+    pub(crate) vault_download_jobs:
+        std::collections::BTreeMap<(i64, i64, u64), vault::ManagedDownloadRequest>,
+    vault_download_presentation: Option<Task<()>>,
     upload_picker_task: Option<Task<()>>,
     qr_poll_task: Option<Task<()>>,
     pub(crate) telegram_login_generation: u64,
@@ -781,6 +786,7 @@ impl TeleArkApp {
             transfer_action_error: None,
             transfer_projection_cache: Default::default(),
             transfer_action_job: None,
+            vault_bulk_action_queue: None,
             show_transfer_detail: false,
             transfer_controls_expanded: false,
             focused_transfer_key: None,
@@ -965,6 +971,8 @@ impl TeleArkApp {
             managed_scan_cancellation: None,
             vault_scan_task: None,
             vault_download_task: None,
+            vault_download_jobs: std::collections::BTreeMap::new(),
+            vault_download_presentation: None,
             upload_picker_task: None,
             qr_poll_task: None,
             telegram_login_generation: 0,
@@ -978,6 +986,7 @@ impl TeleArkApp {
             ],
         };
         app._subscriptions.extend(form_subscriptions);
+        app.install_auth_input_subscriptions(window, cx);
         let pin_input = app.app_lock.pin.clone();
         app._subscriptions.push(cx.subscribe_in(
             &pin_input,
@@ -1168,6 +1177,17 @@ impl Drop for TeleArkApp {
 }
 
 impl TeleArkApp {
+    fn workspace_modal_open(&self) -> bool {
+        self.transition.is_some()
+            || self.show_upload
+            || self.show_telegram_api_id_prompt
+            || self.vault_new_epoch_confirmation
+            || self.confirm_account_switch
+            || self.keychain.confirmation
+            || self.speed_limits.open
+            || (self.page == Page::Storage && self.storage_details_expanded)
+    }
+
     fn render_workspace_frame(
         &mut self,
         window: &mut Window,
@@ -1215,12 +1235,7 @@ impl TeleArkApp {
         };
         #[cfg(not(target_os = "windows"))]
         let workspace_height = window.viewport_size().height;
-        let modal_open = self.transition.is_some()
-            || self.show_upload
-            || self.show_telegram_api_id_prompt
-            || self.vault_new_epoch_confirmation
-            || self.confirm_account_switch
-            || self.keychain.confirmation;
+        let modal_open = self.workspace_modal_open();
         if modal_open != self.modal_was_open {
             window.focus(
                 if modal_open {
@@ -1250,7 +1265,23 @@ impl TeleArkApp {
                     this.cancel_transition(cx);
                     return;
                 }
-                if this.confirm_account_switch {
+                if this.confirm_account_switch
+                    || this.keychain.confirmation
+                    || this.speed_limits.open
+                {
+                    this.confirm_account_switch = false;
+                    this.show_account_switch = false;
+                    this.keychain.confirmation = false;
+                    this.speed_limits.open = false;
+                    cx.notify();
+                    return;
+                }
+                if this.pending_transfer_delete.is_some()
+                    || !this.pending_transfer_bulk_delete.is_empty()
+                {
+                    this.pending_transfer_delete = None;
+                    this.pending_transfer_bulk_delete.clear();
+                    cx.notify();
                     return;
                 }
                 match escape_behavior(
@@ -1290,21 +1321,35 @@ impl TeleArkApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
+                if this.workspace_modal_open() {
+                    return;
+                }
                 this.set_settings_section(SettingsSection::About, cx);
                 this.set_page(Page::Settings, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &ShowSettings, _, cx| this.set_page(Page::Settings, cx)),
-            )
+            .on_action(cx.listener(|this, _: &ShowSettings, _, cx| {
+                if !this.workspace_modal_open() {
+                    this.set_page(Page::Settings, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ShowTransfers, _, cx| {
+                if this.workspace_modal_open() {
+                    return;
+                }
                 this.nav_selection = "nav-transfers-all";
                 this.set_page(Page::Transfers, cx);
             }))
             .on_action(cx.listener(|this, _: &ShowStorage, _, cx| {
+                if this.workspace_modal_open() {
+                    return;
+                }
                 this.page = Page::Storage;
                 this.select_storage(StorageView::Files, cx);
             }))
             .on_action(cx.listener(|this, _: &UploadFile, _, cx| {
+                if this.workspace_modal_open() {
+                    return;
+                }
                 this.page = Page::Storage;
                 if this.storage_channel_id().is_some() {
                     this.open_vault_action(VaultAction::Upload, cx);
@@ -1313,6 +1358,14 @@ impl TeleArkApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                if this.workspace_modal_open()
+                    || !matches!(
+                        this.page,
+                        Page::Channel | Page::Storage | Page::Transfers | Page::Library
+                    )
+                {
+                    return;
+                }
                 this.search_input
                     .update(cx, |input, cx| input.focus(window, cx))
             }))
@@ -1348,6 +1401,22 @@ impl TeleArkApp {
                 self.upload_in_flight
                     || (self.page == Page::Transfers && self.upload_selection_progress.is_some()),
                 |root| root.child(self.render_upload_selection_progress(false, cx)),
+            )
+            .when(!self.vault_download_jobs.is_empty(), |root| {
+                root.child(self.render_managed_download_requests(cx))
+            })
+            .when(
+                self.vault_bulk_action_queue.is_some() && self.page != Page::Transfers,
+                |root| {
+                    root.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(theme::border())
+                            .child(self.render_vault_bulk_progress(cx)),
+                    )
+                },
             )
             .when(self.upload_preparing && !self.show_upload, |root| {
                 root.child(self.render_upload_selection_progress(true, cx))
@@ -1650,5 +1719,97 @@ impl Render for TeleArkApp {
                 root.child(self.render_transition_dialog(cx))
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod modal_interaction_tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn find_shortcut_only_focuses_a_visible_search_field(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (app, cx) = test_support::preview_app(cx, Page::Storage);
+        for page in [
+            Page::Account,
+            Page::Settings,
+            Page::FileDetail,
+            Page::Transfers,
+        ] {
+            app.update(cx, |app, cx| {
+                app.page = page;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let focus = app.read(cx).main_focus.clone();
+                focus.focus(window, cx);
+                window.dispatch_action(Box::new(FocusSearch), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert_eq!(
+                    app.read(cx)
+                        .search_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    page == Page::Transfers
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn dialogs_keep_navigation_and_escape_scoped_in_compact_and_fullscreen_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for dialog in 0..4 {
+                app.update(cx, |app, cx| {
+                    app.page = Page::Storage;
+                    app.show_upload = dialog == 0;
+                    app.confirm_account_switch = dialog == 1;
+                    app.keychain.confirmation = dialog == 2;
+                    app.speed_limits.open = dialog == 3;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.dispatch_action(Box::new(ShowTransfers), cx);
+                    window.dispatch_action(Box::new(ShowSettings), cx);
+                    window.dispatch_action(Box::new(ShowAbout), cx);
+                    window.dispatch_action(Box::new(FocusSearch), cx);
+                });
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    assert_eq!(app.page, Page::Storage);
+                    assert!(app.workspace_modal_open());
+                });
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    assert!(!app.workspace_modal_open(), "Escape closes dialog {dialog}");
+                    assert!(app.telegram_account.is_some());
+                    assert_eq!(
+                        app.keychain.status.expect("preview keychain").enabled,
+                        cfg!(target_os = "macos"),
+                        "cancel never changes key storage"
+                    );
+                });
+                cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
+            }
+            cx.update(|window, cx| window.dispatch_action(Box::new(ShowTransfers), cx));
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| assert_eq!(app.page, Page::Transfers));
+        }
     }
 }

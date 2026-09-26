@@ -3,24 +3,31 @@
 use super::*;
 use crate::screens::transfers::{TransferAction, vault_transfer_selection_key};
 
+pub(crate) const MANAGED_DOWNLOAD_REQUEST_LIMIT: usize = 16;
+
+pub(crate) struct ManagedDownloadRequest {
+    _task: Task<()>,
+    pub(crate) started: std::time::Instant,
+}
+
 impl TeleArkApp {
     pub(crate) fn apply_vault_transfer_action(
         &mut self,
         id: u64,
         action: TransferAction,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(account) = self.telegram_account.as_ref().map(|account| account.id) else {
-            return;
+            return false;
         };
         let Some(vault) = self.vault.clone() else {
-            return;
+            return false;
         };
         let Some(snapshot) = self.vault_transfer_snapshot(id) else {
-            return;
+            return false;
         };
         if snapshot.account_id != account {
-            return;
+            return false;
         }
         let control = matches!(
             action,
@@ -31,12 +38,14 @@ impl TeleArkApp {
             || self.vault_transfer_jobs.len() >= 64
             || self.visual_preview
         {
-            return;
+            return false;
         }
         let generation = self.telegram_login_generation;
         let chat_id = snapshot.chat_id;
         let upload = snapshot.direction == teleark_runtime::VaultTransferDirection::Upload;
-        self.transfer_action_error = None;
+        if self.vault_bulk_action_queue.is_none() {
+            self.transfer_action_error = None;
+        }
         let work = cx.background_spawn(async move {
             match action {
                 TransferAction::Pause => vault
@@ -78,6 +87,7 @@ impl TeleArkApp {
                 if this.telegram_login_generation != generation
                     || this.telegram_account.as_ref().map(|account| account.id) != Some(account)
                 {
+                    this.advance_vault_bulk_actions(cx);
                     return;
                 }
                 match result {
@@ -94,11 +104,13 @@ impl TeleArkApp {
                     }
                     Err(error) => this.transfer_action_error = Some(error.kind()),
                 }
+                this.finish_vault_bulk_action((account, generation), id, action, cx);
                 cx.notify();
             });
         });
         self.vault_transfer_jobs.insert(key, task);
         cx.notify();
+        true
     }
 
     pub(crate) fn open_vault_action(&mut self, intent: VaultAction, cx: &mut Context<Self>) {
@@ -739,16 +751,38 @@ impl TeleArkApp {
         }));
     }
 
+    pub(crate) fn managed_download_active(&self, package_id: u64) -> bool {
+        match (
+            self.telegram_account.as_ref().map(|account| account.id),
+            self.active_storage_chat_id(),
+        ) {
+            (Some(account), Some(chat)) => self
+                .vault_download_jobs
+                .contains_key(&(account, chat, package_id)),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn managed_download_blocked(&self, package_id: u64) -> bool {
+        self.vault_activity == VaultActivity::Working
+            || self.vault_download_in_flight
+            || self.managed_download_active(package_id)
+            || self.vault_download_jobs.len() >= MANAGED_DOWNLOAD_REQUEST_LIMIT
+    }
+
     pub(crate) fn download_managed_vault_file(&mut self, package_id: u64, cx: &mut Context<Self>) {
-        if self.vault_activity == VaultActivity::Working || self.vault_download_in_flight {
+        if self.managed_download_blocked(package_id) {
             return;
         }
         if self.vault_locked {
             self.open_vault_action(VaultAction::Download(package_id), cx);
             return;
         }
-        let (Some(vault), Some(chat_id)) = (self.vault.clone(), self.active_storage_chat_id())
-        else {
+        let (Some(vault), Some(chat_id), Some(account_id)) = (
+            self.vault.clone(),
+            self.active_storage_chat_id(),
+            self.telegram_account.as_ref().map(|account| account.id),
+        ) else {
             return;
         };
         if let Some(file) = self.managed_vault_files.iter().find(|file| {
@@ -758,44 +792,101 @@ impl TeleArkApp {
             self.resume_pending_remote_file(file.manifest_message_id, cx);
             return;
         }
-        self.vault_download_in_flight = true;
-        let Some(account_id) = self.telegram_account.as_ref().map(|a| a.id) else {
-            return;
-        };
+        let background = cx.background_executor().clone();
+        self.track_managed_download(
+            (account_id, chat_id, package_id),
+            async move {
+                background
+                    .spawn(async move {
+                        vault
+                            .submit_download_file(account_id, chat_id, package_id)?
+                            .wait()
+                    })
+                    .await
+            },
+            cx,
+        );
+    }
+
+    fn track_managed_download(
+        &mut self,
+        key: (i64, i64, u64),
+        work: impl std::future::Future<Output = Result<std::path::PathBuf, ApplicationError>> + 'static,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.vault_download_jobs.contains_key(&key)
+            || self.vault_download_jobs.len() >= MANAGED_DOWNLOAD_REQUEST_LIMIT
+        {
+            return false;
+        }
         let generation = self.telegram_login_generation;
-        let job = match vault.submit_download_file(account_id, chat_id, package_id) {
-            Ok(job) => job,
-            Err(error) => {
-                self.vault_download_in_flight = false;
-                self.vault_activity = VaultActivity::Failed(error.kind());
-                cx.notify();
-                return;
-            }
-        };
-        let work = cx.background_spawn(async move { job.wait() });
-        self.vault_download_task = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let result = work.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if this.telegram_login_generation != generation {
-                    return;
-                }
-                this.vault_download_in_flight = false;
-                this.advance_transition(cx);
-                let key_activity = this.vault_activity;
-                this.vault_activity = match result {
-                    Ok(_) => VaultActivity::Succeeded,
-                    Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
-                        VaultActivity::Idle
-                    }
-                    Err(error) => VaultActivity::Failed(error.kind()),
-                };
-                if key_activity == VaultActivity::Working {
-                    this.vault_activity = key_activity;
-                }
-                cx.notify();
+            let _ = this.update(cx, |this, cx| {
+                this.finish_managed_download(key, generation, result, cx);
             });
-        }));
+        });
+        self.vault_download_jobs.insert(
+            key,
+            ManagedDownloadRequest {
+                _task: task,
+                started: std::time::Instant::now(),
+            },
+        );
+        self.vault_activity = VaultActivity::Idle;
+        if self.vault_download_presentation.is_none() {
+            self.vault_download_presentation = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let Some(this) = this.upgrade() else { return };
+                    if this.update(cx, |this, cx| {
+                        cx.notify();
+                        if this.vault_download_jobs.is_empty() {
+                            this.vault_download_presentation = None;
+                            true
+                        } else {
+                            false
+                        }
+                    }) {
+                        return;
+                    }
+                }
+            }));
+        }
+        // The request, its elapsed time, and the route to transfer controls are
+        // visible before the retained task submits runtime work.
+        cx.notify();
+        true
+    }
+
+    fn finish_managed_download(
+        &mut self,
+        key: (i64, i64, u64),
+        generation: u64,
+        result: Result<std::path::PathBuf, ApplicationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.telegram_login_generation != generation
+            || self.telegram_account.as_ref().map(|account| account.id) != Some(key.0)
+        {
+            return;
+        }
+        self.vault_download_jobs.remove(&key);
+        if self.vault_download_jobs.is_empty() {
+            self.vault_download_presentation = None;
+        }
+        if self.vault_activity != VaultActivity::Working {
+            self.vault_activity = match result {
+                Ok(_) if self.vault_download_jobs.is_empty() => VaultActivity::Succeeded,
+                Ok(_) => VaultActivity::Idle,
+                Err(error) if error.kind() == teleark_core::ApplicationErrorKind::Cancelled => {
+                    VaultActivity::Idle
+                }
+                Err(error) => VaultActivity::Failed(error.kind()),
+            };
+        }
+        self.advance_transition(cx);
+        cx.notify();
     }
 
     fn resume_pending_remote_file(&mut self, message_id: i64, cx: &mut Context<Self>) {
@@ -823,8 +914,15 @@ impl TeleArkApp {
             };
             let Some(source) = source else {
                 let _ = this.update(cx, |this, cx| {
+                    if this.telegram_login_generation != generation
+                        || this.telegram_account.as_ref().map(|account| account.id)
+                            != Some(account_id)
+                    {
+                        return;
+                    }
                     this.vault_download_in_flight = false;
                     this.vault_activity = VaultActivity::Idle;
+                    this.advance_transition(cx);
                     cx.notify();
                 });
                 return;
@@ -1215,6 +1313,145 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn managed_download_requests_allow_independent_completion_and_reject_stale_callbacks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        let (first, second, first_key, generation) = app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("account").id;
+            let chat = app.active_storage_chat_id().expect("channel");
+            let first_key = (account, chat, 1);
+            let (first, first_result) = tokio::sync::oneshot::channel();
+            let (second, second_result) = tokio::sync::oneshot::channel();
+            assert!(app.track_managed_download(
+                first_key,
+                async move { first_result.await.expect("first result") },
+                cx
+            ));
+            assert!(app.track_managed_download(
+                (account, chat, 2),
+                async move { second_result.await.expect("second result") },
+                cx
+            ));
+            assert_eq!(app.vault_download_jobs.len(), 2);
+            assert!(app.managed_download_blocked(1));
+            assert!(
+                !app.managed_download_blocked(3),
+                "another file remains available"
+            );
+            assert!(app.transition_has_work());
+            (first, second, first_key, app.telegram_login_generation)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("managed-download-requests").is_some());
+        second
+            .send(Ok(std::path::PathBuf::from("synthetic-completed.txt")))
+            .expect("second receiver");
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            assert_eq!(
+                app.vault_download_jobs.len(),
+                1,
+                "blocked first request does not stop another completion"
+            );
+            assert!(app.managed_download_active(1));
+            assert!(!app.managed_download_active(2));
+            app.finish_managed_download(
+                first_key,
+                generation.wrapping_sub(1),
+                Ok(Default::default()),
+                cx,
+            );
+            assert!(
+                app.managed_download_active(1),
+                "stale completion cannot remove a current request"
+            );
+        });
+        first
+            .send(Err(ApplicationError::new(
+                teleark_core::ApplicationErrorKind::PermissionDenied,
+            )))
+            .expect("first receiver");
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.vault_download_jobs.is_empty());
+            assert!(app.vault_download_presentation.is_none());
+            assert_eq!(
+                app.vault_activity,
+                VaultActivity::Failed(teleark_core::ApplicationErrorKind::PermissionDenied)
+            );
+        });
+        assert!(cx.debug_bounds("managed-download-requests").is_none());
+    }
+
+    #[gpui::test]
+    fn managed_download_request_limit_stays_visible_and_transfers_remain_reachable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("account").id;
+            let chat = app.active_storage_chat_id().expect("channel");
+            for package in 1..=MANAGED_DOWNLOAD_REQUEST_LIMIT as u64 {
+                assert!(app.track_managed_download(
+                    (account, chat, package),
+                    std::future::pending(),
+                    cx
+                ));
+            }
+            assert!(!app.track_managed_download((account, chat, 1), std::future::pending(), cx));
+            assert!(!app.track_managed_download((account, chat, 99), std::future::pending(), cx));
+            assert_eq!(
+                app.vault_download_jobs.len(),
+                MANAGED_DOWNLOAD_REQUEST_LIMIT
+            );
+            assert!(app.managed_download_blocked(99));
+        });
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            app.update(cx, |app, cx| app.set_page(Page::Storage, cx));
+            cx.run_until_parked();
+            let banner = cx
+                .debug_bounds("managed-download-requests")
+                .expect("waiting feedback");
+            assert!(banner.top() >= px(0.0) && banner.bottom() <= px(600.0));
+            let transfers = cx
+                .debug_bounds("managed-download-show-transfers")
+                .expect("transfer controls link");
+            assert!(transfers.left() >= px(0.0) && transfers.right() <= px(900.0));
+            cx.simulate_click(transfers.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| assert_eq!(app.page, Page::Transfers));
+            assert!(
+                cx.debug_bounds("managed-download-requests").is_some(),
+                "navigation preserves waiting feedback"
+            );
+        }
+        app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("account").id;
+            let chat = app.active_storage_chat_id().expect("channel");
+            app.finish_managed_download(
+                (account, chat, 1),
+                app.telegram_login_generation,
+                Err(ApplicationError::new(
+                    teleark_core::ApplicationErrorKind::Cancelled,
+                )),
+                cx,
+            );
+            assert!(
+                !app.managed_download_blocked(99),
+                "completion releases admission capacity"
+            );
+            assert_eq!(app.vault_activity, VaultActivity::Idle);
+        });
+    }
 
     #[gpui::test]
     fn completed_channel_setup_rechecks_key_at_the_same_catalog_revision(

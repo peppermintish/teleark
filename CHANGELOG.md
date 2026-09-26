@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased · Desktop interaction fixes
+
+- Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
+- Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
+- Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
+- Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
+- Application metadata remains 0.5.8. Native English/light interaction review at 900×600 and actual fullscreen is still required before preparing the next release. Persistent schemas and codecs are unchanged.
+
 ## 0.5.8 · Authenticated channel key proof
 
 - New managed channels publish a versioned proof tied to their account, channel and encryption key. Sign-in checks that proof to select the current key even before any file exists. A verified older empty channel with only its identity message receives a new key and proof after remote emptiness checks; channels with files are never automatically rekeyed.

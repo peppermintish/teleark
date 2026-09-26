@@ -77,6 +77,11 @@ The [2026-09-26 documentation/script audit](validation/2026-09-26-open-source-au
 records corrected guides, packaging regressions, Git-history findings and current
 validation. It changes no application release version or persistent format.
 
+The [2026-09-26 GUI interaction audit](validation/2026-09-26-gui-interaction-audit.md)
+tracks keyboard submission, dialog cancellation, selection isolation, action
+feedback and bounded multi-file download controls. It records automated and
+native review evidence separately; pending native qualification is not a pass.
+
 ## Next actions and release gates
 
 1. Qualify creation/discovery/repair, account switching, upload/download/recovery,

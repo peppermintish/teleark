@@ -45,14 +45,22 @@ impl TeleArkApp {
     fn network_message_id(&self) -> &'static str {
         if self.proxy.load_failed {
             "proxy-load-failed"
+        } else if self.proxy.action == ProxyAction::Failed
+            && self
+                .proxy
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !matches!(snapshot.phase, NetworkPhase::Blocked(_)))
+        {
+            // Route persistence can fail before the network owner publishes a
+            // new phase. A retained success snapshot must not hide that failure.
+            "proxy-error-persistence"
         } else if let Some(snapshot) = &self.proxy.snapshot {
             phase_id(snapshot.phase)
         } else if self.proxy.action == ProxyAction::Applying {
             "proxy-phase-applying"
         } else if self.proxy.action == ProxyAction::Testing {
             "proxy-phase-testing"
-        } else if self.proxy.action == ProxyAction::Failed {
-            "proxy-error-persistence"
         } else {
             "proxy-phase-direct"
         }
@@ -428,5 +436,44 @@ impl TeleArkApp {
             }
         }
         card.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit as gpui;
+    use std::time::Instant;
+    use teleark_runtime::NetworkSnapshot;
+
+    #[gpui::test]
+    fn failed_proxy_apply_is_not_reported_as_the_previous_connection_success(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        app.update(cx, |app, _| {
+            app.proxy.action = ProxyAction::Failed;
+            app.proxy.snapshot = Some(NetworkSnapshot {
+                revision: 1,
+                generation: 1,
+                proxy_enabled: true,
+                phase: NetworkPhase::Connected,
+                phase_started: Instant::now(),
+                last_activity: Instant::now(),
+                events: Default::default(),
+                omitted_events: 0,
+            });
+            assert_eq!(app.network_message_id(), "proxy-error-persistence");
+            assert!(
+                app.proxy.show_banner(),
+                "failed save remains visible after leaving settings"
+            );
+            app.proxy.snapshot.as_mut().expect("snapshot").phase =
+                NetworkPhase::Blocked(ProxyFailure::Authentication);
+            assert_eq!(app.network_message_id(), "proxy-error-authentication");
+            app.proxy.action = ProxyAction::Succeeded;
+            app.proxy.snapshot.as_mut().expect("snapshot").phase = NetworkPhase::Connected;
+            assert_eq!(app.network_message_id(), "proxy-phase-connected");
+        });
     }
 }

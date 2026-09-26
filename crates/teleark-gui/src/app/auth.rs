@@ -1,8 +1,90 @@
 //! Auth presentation owner. Business operations stay in the runtime.
 
 use super::*;
+use gpui_kit::{EntityInputHandler as _, Focusable as _};
+
+#[derive(Clone, Copy, Debug)]
+enum LoginInput {
+    Phone,
+    Code,
+    Password,
+    Credentials,
+}
 
 impl TeleArkApp {
+    pub(super) fn install_auth_input_subscriptions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (input, kind) in [
+            (self.telegram_phone.clone(), LoginInput::Phone),
+            (self.telegram_code.clone(), LoginInput::Code),
+            (self.telegram_password.clone(), LoginInput::Password),
+            (self.telegram_api_id.clone(), LoginInput::Credentials),
+            (self.telegram_api_hash.clone(), LoginInput::Credentials),
+        ] {
+            self._subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                move |app, input, event: &InputEvent, window, cx| {
+                    if !matches!(
+                        event,
+                        InputEvent::PressEnter {
+                            secondary: false,
+                            shift: false
+                        }
+                    ) || !app.login_input_available(kind)
+                        || !input.read(cx).focus_handle(cx).is_focused(window)
+                        || input.update(cx, |input, cx| {
+                            input.marked_text_range(window, cx).is_some()
+                        })
+                    {
+                        return;
+                    }
+                    match kind {
+                        LoginInput::Phone => app.begin_telegram_login(cx),
+                        LoginInput::Code => app.submit_telegram_code(window, cx),
+                        LoginInput::Password => app.submit_telegram_password(window, cx),
+                        LoginInput::Credentials => app.save_telegram_credentials(window, cx),
+                    }
+                },
+            ));
+        }
+    }
+
+    fn login_input_available(&self, input: LoginInput) -> bool {
+        if matches!(input, LoginInput::Credentials) {
+            return !self.app_is_locked()
+                && self.transition.is_none()
+                && self.telegram_api_id_persistence != TelegramApiIdPersistence::Saving
+                && (self.show_telegram_api_id_prompt
+                    || (self.page == Page::Settings
+                        && self.settings_section == SettingsSection::Accounts
+                        && self.custom_telegram_credentials_enabled));
+        }
+        !self.app_is_locked()
+            && self.page == Page::Account
+            && !self.login_proxy_open
+            && !self.show_telegram_api_id_prompt
+            && self.transition.is_none()
+            && !self.account_restoring
+            && self.configured_telegram_api_id.is_some()
+            && self.telegram_activity != TelegramActivity::Working
+            && match input {
+                LoginInput::Phone => {
+                    self.phone_login
+                        && matches!(self.telegram_auth, TelegramAuthState::Unauthorized)
+                }
+                LoginInput::Code => matches!(self.telegram_auth, TelegramAuthState::CodeSent),
+                LoginInput::Password => matches!(
+                    self.telegram_auth,
+                    TelegramAuthState::PasswordRequired { .. }
+                ),
+                LoginInput::Credentials => false,
+            }
+    }
+
     pub(crate) fn telegram_is_authorized(&self) -> bool {
         !self.session_loss_pending()
             && matches!(&self.telegram_auth, TelegramAuthState::Authorized(account)
@@ -116,6 +198,7 @@ impl TeleArkApp {
             self.request_transition(super::lifecycle::TransitionAction::SwitchAccount, cx);
             return;
         }
+        self.vault_bulk_action_queue = None;
         self.confirm_account_switch = false;
         self.show_account_switch = false;
         self.phone_login = false;
@@ -182,6 +265,8 @@ impl TeleArkApp {
     }
 
     pub(super) fn finish_telegram_sign_out(&mut self, cx: &mut Context<Self>) {
+        self.vault_bulk_action_queue = None;
+        self.vault_download_jobs.clear();
         self.cancel_filtered_channel_batch(cx);
         self.telegram_auth = TelegramAuthState::Unauthorized;
         self.telegram_activity = TelegramActivity::Idle;
@@ -305,6 +390,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn submit_telegram_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.login_input_available(LoginInput::Code) {
+            return;
+        }
         let code = self.telegram_code.read(cx).value().to_string();
         self.telegram_code
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -312,6 +400,9 @@ impl TeleArkApp {
     }
 
     pub(crate) fn submit_telegram_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.login_input_available(LoginInput::Password) {
+            return;
+        }
         let password = self.telegram_password.read(cx).value().to_string();
         self.telegram_password
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -328,6 +419,9 @@ impl TeleArkApp {
             return;
         }
         let Some(telegram) = self.telegram.clone() else {
+            self.telegram_activity =
+                TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence);
+            cx.notify();
             return;
         };
         self.telegram_activity = TelegramActivity::Working;
@@ -843,7 +937,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn account_switch_requires_explicit_confirmation_and_ignores_escape_and_backdrop(
+    fn account_switch_requires_confirmation_and_escape_cancels_safely(
         cx: &mut gpui::TestAppContext,
     ) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Account);
@@ -858,18 +952,13 @@ mod tests {
             assert!(app.confirm_account_switch);
             assert!(app.telegram_account.is_some());
         });
-        cx.simulate_keystrokes("escape");
         cx.simulate_click(gpui::point(px(10.0), px(10.0)), gpui::Modifiers::default());
         cx.run_until_parked();
         app.update(cx, |app, _| {
             assert!(app.confirm_account_switch);
             assert!(app.telegram_account.is_some());
         });
-        let cancel = cx
-            .debug_bounds("account-switch-cancel")
-            .expect("cancel")
-            .center();
-        cx.simulate_click(cancel, gpui::Modifiers::default());
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         app.update(cx, |app, cx| {
             assert!(!app.confirm_account_switch);
@@ -943,5 +1032,178 @@ mod tests {
             assert_eq!(app.telegram_activity, TelegramActivity::Idle);
             app.visual_preview = true;
         });
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+    use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn credential_form_enter_validates_visible_fields_and_ignores_hidden_forms(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, cx| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                app.update(cx, |app, cx| {
+                    app.settings_section = SettingsSection::Accounts;
+                    app.custom_telegram_credentials_enabled = true;
+                    app.telegram_api_id_persistence = TelegramApiIdPersistence::Idle;
+                    app.telegram_api_id.update(cx, |input, cx| {
+                        input.set_value("invalid", window, cx);
+                        input.focus(window, cx);
+                    });
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            app.read_with(cx, |app, _| {
+                assert!(matches!(
+                    app.telegram_api_id_persistence,
+                    TelegramApiIdPersistence::Failed(_)
+                ));
+            });
+            app.update(cx, |app, cx| {
+                app.telegram_api_id_persistence = TelegramApiIdPersistence::Idle;
+                app.settings_section = SettingsSection::General;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            // A delayed input event after navigation cannot submit a hidden form.
+            let input = app.read_with(cx, |app, _| app.telegram_api_id.clone());
+            input.update(cx, |_, cx| {
+                cx.emit(InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                })
+            });
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert_eq!(
+                    app.telegram_api_id_persistence,
+                    TelegramApiIdPersistence::Idle
+                )
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn login_forms_submit_with_enter_and_preserve_busy_or_composing_drafts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Account);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+            });
+            for kind in [LoginInput::Phone, LoginInput::Code, LoginInput::Password] {
+                let input = cx.update(|window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.telegram_auth = match kind {
+                            LoginInput::Phone => TelegramAuthState::Unauthorized,
+                            LoginInput::Code => TelegramAuthState::CodeSent,
+                            LoginInput::Password => {
+                                TelegramAuthState::PasswordRequired { hint: None }
+                            }
+                            LoginInput::Credentials => unreachable!(),
+                        };
+                        app.telegram_account = None;
+                        app.phone_login = true;
+                        app.account_restoring = false;
+                        app.show_telegram_api_id_prompt = false;
+                        app.configured_telegram_api_id = Some(12345);
+                        app.telegram_activity = TelegramActivity::Idle;
+                        let input = match kind {
+                            LoginInput::Phone => app.telegram_phone.clone(),
+                            LoginInput::Code => app.telegram_code.clone(),
+                            LoginInput::Password => app.telegram_password.clone(),
+                            LoginInput::Credentials => unreachable!(),
+                        };
+                        input.update(cx, |input, cx| {
+                            input.set_value("12345", window, cx);
+                            input.focus(window, cx);
+                        });
+                        cx.notify();
+                        input
+                    })
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes("enter");
+                app.read_with(cx, |app, _| {
+                    assert_eq!(app.telegram_activity, TelegramActivity::Failed(teleark_core::ApplicationErrorKind::Persistence), "Enter reaches the same submit path as clicking, with no runtime in this fixture");
+                });
+                cx.update(|window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.telegram_activity = TelegramActivity::Working;
+                        input.update(cx, |input, cx| {
+                            input.set_value("pending draft", window, cx);
+                            input.focus(window, cx);
+                        });
+                        // Late/repeated button callbacks must not clear a pending draft.
+                        match kind {
+                            LoginInput::Phone => app.begin_telegram_login(cx),
+                            LoginInput::Code => app.submit_telegram_code(window, cx),
+                            LoginInput::Password => app.submit_telegram_password(window, cx),
+                            LoginInput::Credentials => unreachable!(),
+                        }
+                        assert_eq!(input.read(cx).value().as_ref(), "pending draft");
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes("enter");
+                app.read_with(cx, |app, cx| {
+                    assert_eq!(app.telegram_activity, TelegramActivity::Working);
+                    assert_eq!(input.read(cx).value().as_ref(), "pending draft");
+                });
+                app.update(cx, |app, cx| {
+                    app.telegram_activity = TelegramActivity::Idle;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    app.update(cx, |_, cx| {
+                        input.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                            input.replace_and_mark_text_in_range(None, "12345", None, window, cx);
+                            assert!(
+                                input.marked_text_range(window, cx).is_some(),
+                                "fixture composition starts for {kind:?}"
+                            );
+                            input.focus(window, cx);
+                        });
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                // Deliver the native key event without simulate_keystrokes' extra
+                // synthetic text insertion, which would commit marked IME text.
+                cx.simulate_event(gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("enter").expect("Enter key"),
+                    is_held: false,
+                    prefer_character_input: false,
+                });
+                cx.run_until_parked();
+                app.read_with(cx, |app, cx| {
+                    assert_eq!(
+                        app.telegram_activity,
+                        TelegramActivity::Idle,
+                        "IME confirmation cannot submit the login form: {kind:?}"
+                    );
+                    assert_eq!(input.read(cx).value().as_ref(), "12345");
+                });
+                cx.update(|window, cx| input.update(cx, |input, cx| input.unmark_text(window, cx)));
+            }
+        }
     }
 }

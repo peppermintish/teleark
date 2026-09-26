@@ -107,6 +107,7 @@ impl TeleArkApp {
         // Fence navigation, old auth/dialog callbacks, future admission and auxiliary
         // windows immediately. Existing transfer owners keep their checkpoints.
         self.telegram_login_generation = self.telegram_login_generation.wrapping_add(1);
+        self.vault_bulk_action_queue = None;
         self.vault_session_generation = self.vault_session_generation.wrapping_add(1);
         self.telegram_task = None;
         self.qr_poll_task = None;
@@ -445,7 +446,17 @@ mod tests {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
         app.update(cx, |app, cx| {
             let login = app.telegram_login_generation;
+            app.vault_bulk_action_queue =
+                Some(crate::screens::transfers::VaultBulkActionQueue::new(
+                    (1, login),
+                    crate::screens::transfers::TransferAction::Resume,
+                    &[41, 42],
+                ));
             app.observe_authorization(revoked(), cx);
+            assert!(
+                app.vault_bulk_action_queue.is_none(),
+                "revocation cancels pending resumes immediately"
+            );
             assert!(!app.telegram_is_authorized());
             assert!(app.session_loss_matches(revoked(), Phase::Pausing));
             assert!(

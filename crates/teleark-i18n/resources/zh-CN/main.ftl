@@ -536,6 +536,8 @@ action-back = 返回
 action-more = 更多操作
 telegram-library-title = Telegram 来源
 telegram-status-working = 正在处理…
+telegram-code-verifying = 正在向 Telegram 验证登录验证码…
+telegram-password-verifying = 正在向 Telegram 验证两步验证密码…
 telegram-status-failed = 需要处理
 telegram-status-connected = 已连接
 telegram-status-not-connected = 未连接
@@ -950,6 +952,9 @@ transfer-filter-count = { $label } · { $count }
 transfer-delete-confirmation = 删除 { $count } 个任务？已下载的文件会保留，任务记录、日志和未完成的下载数据将被清除。
 transfer-filter-title = 筛选
 transfer-actions-applying = 正在处理任务操作…
+transfer-vault-bulk-progress = { $action }：{ $queued } 项排队中 · { $active } 项进行中。正在等待当前操作完成 · 已用时 { $seconds } 秒 · 上次活动在 { $idle } 秒前。
+transfer-vault-bulk-cancel = 取消剩余操作
+transfer-vault-bulk-cancel-help = 取消排队中的操作。正在运行的传输将继续；可使用各自的暂停或停止按钮。
 
 settings-download-strategy-title = 下载策略
 settings-download-strategy-balanced = 均衡
@@ -1973,3 +1978,7 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+storage-download-requests = { $count } 个下载请求正在进行 · 最早的请求已持续 { $seconds } 秒。前往“传输”查看进度、暂停或停止。
+storage-download-capacity = 下载请求队列已满。请等待一个请求完成后再添加文件。
+storage-download-request-active = 已请求下载；请前往“传输”查看进度。

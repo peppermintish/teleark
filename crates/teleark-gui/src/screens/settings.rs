@@ -415,6 +415,7 @@ impl TeleArkApp {
         };
 
         let content = div()
+            .debug_selector(|| "settings-scroll-body".into())
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -454,6 +455,7 @@ impl TeleArkApp {
                     .pb(px(padding))
                     .flex()
                     .gap_4()
+                    .debug_selector(|| "settings-panels".into())
                     .child(settings_nav)
                     .child(content),
             )
@@ -1554,8 +1556,10 @@ fn theme_option(
     title: SharedString,
     description: SharedString,
     selected: bool,
-    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+    on_activate: impl Fn(&(), &mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
+    let on_activate = std::rc::Rc::new(on_activate);
+    let on_click = on_activate.clone();
     div()
         .id(id)
         .flex_1()
@@ -1577,7 +1581,18 @@ fn theme_option(
         .focusable()
         .tab_index(0)
         .hover(|option| option.bg(theme::blue_pale()))
-        .on_click(on_click)
+        .debug_selector(move || id.into())
+        .focus_visible(|style| style.bg(theme::blue_pale()))
+        .on_click(move |_, window, cx| on_click(&(), window, cx))
+        .on_key_down(move |event, window, cx| {
+            if !event.is_held
+                && event.keystroke.modifiers == gpui_kit::Modifiers::default()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                on_activate(&(), window, cx);
+                cx.stop_propagation();
+            }
+        })
         .child(
             div()
                 .h(px(70.0))
@@ -1639,8 +1654,10 @@ fn preference_row(
     title: SharedString,
     description: SharedString,
     enabled: bool,
-    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+    on_activate: impl Fn(&(), &mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
+    let on_activate = std::rc::Rc::new(on_activate);
+    let on_click = on_activate.clone();
     div()
         .id(id)
         .py_2()
@@ -1650,7 +1667,18 @@ fn preference_row(
         .cursor_pointer()
         .focusable()
         .tab_index(0)
-        .on_click(on_click)
+        .debug_selector(move || id.into())
+        .focus_visible(|style| style.bg(theme::blue_pale()))
+        .on_click(move |_, window, cx| on_click(&(), window, cx))
+        .on_key_down(move |event, window, cx| {
+            if !event.is_held
+                && event.keystroke.modifiers == gpui_kit::Modifiers::default()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                on_activate(&(), window, cx);
+                cx.stop_propagation();
+            }
+        })
         .child(
             div()
                 .flex_1()
@@ -1787,5 +1815,125 @@ mod tests {
     #[test]
     fn telegram_api_panel_button_targets_the_official_https_page() {
         assert_eq!(TELEGRAM_API_PANEL_URL, "https://my.telegram.org/apps");
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crate::app::Page;
+    use gpui_kit as gpui;
+
+    fn reveal_control(
+        cx: &mut gpui::VisualTestContext,
+        id: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        for _ in 0..12 {
+            let body = cx
+                .debug_bounds("settings-scroll-body")
+                .expect("settings body");
+            let control = cx.debug_bounds(id).expect("settings control");
+            let viewport = cx
+                .debug_bounds("settings-panels")
+                .expect("settings viewport");
+            if control.top() >= viewport.top() && control.bottom() <= viewport.bottom() {
+                return control;
+            }
+            let delta = if control.bottom() > viewport.bottom() {
+                -200.0
+            } else {
+                200.0
+            };
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: gpui::point(body.center().x, viewport.center().y),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(delta))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+        }
+        panic!("settings control must be reachable: {id}");
+    }
+
+    #[gpui::test]
+    fn settings_tiles_and_switches_accept_keyboard_and_respect_pending_saves(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Settings);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, cx| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                app.update(cx, |app, cx| {
+                    theme::apply_appearance(AppearancePreference::Light, window, cx);
+                    app.settings_section = SettingsSection::Appearance;
+                    app.preference_persistence = PreferencePersistence::Idle;
+                    app.preferences.appearance = AppearancePreference::System;
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            let light = reveal_control(cx, "settings-theme-light");
+            cx.simulate_click(light.center(), gpui::Modifiers::default());
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.preferences.appearance, AppearancePreference::Light)
+            });
+            for key in ["enter", "space"] {
+                app.update(cx, |app, cx| {
+                    app.preferences.appearance = AppearancePreference::System;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes(key);
+                app.read_with(cx, |app, _| {
+                    assert_eq!(app.preferences.appearance, AppearancePreference::Light)
+                });
+            }
+            app.update(cx, |app, cx| {
+                app.preference_persistence = PreferencePersistence::Saving;
+                app.preferences.appearance = AppearancePreference::System;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.preferences.appearance, AppearancePreference::System)
+            });
+            app.update(cx, |app, cx| {
+                app.preference_persistence = PreferencePersistence::Idle;
+                app.preferences.appearance = AppearancePreference::Light;
+                app.settings_section = SettingsSection::General;
+                app.preferences.notify_download_completed = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let notify = reveal_control(cx, "settings-notify-download-complete");
+            cx.simulate_click(notify.center(), gpui::Modifiers::default());
+            app.read_with(cx, |app, _| {
+                assert!(
+                    app.preferences.notify_download_completed,
+                    "click failed: fullscreen={full}, bounds={notify:?}, persistence={:?}",
+                    app.preference_persistence
+                )
+            });
+            cx.simulate_keystrokes("space");
+            app.read_with(cx, |app, _| {
+                assert!(!app.preferences.notify_download_completed)
+            });
+            cx.simulate_keystrokes("enter");
+            app.read_with(cx, |app, _| {
+                assert!(app.preferences.notify_download_completed)
+            });
+            app.update(cx, |app, cx| {
+                app.preference_persistence = PreferencePersistence::Saving;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("space");
+            app.read_with(cx, |app, _| {
+                assert!(app.preferences.notify_download_completed)
+            });
+        }
     }
 }

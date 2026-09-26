@@ -838,6 +838,7 @@ impl TeleArkApp {
     }
 
     pub(crate) fn render_telegram_code(&self, cx: &mut Context<Self>) -> AnyElement {
+        let working = self.telegram_activity == TelegramActivity::Working;
         components::card()
             .max_w(px(560.0))
             .mx_auto()
@@ -851,10 +852,21 @@ impl TeleArkApp {
                     .child(self.tr("telegram-code-description")),
             )
             .child(
-                div()
-                    .mt_5()
-                    .child(Input::new(&self.telegram_code).h(px(38.0))),
+                div().mt_5().child(
+                    Input::new(&self.telegram_code)
+                        .h(px(38.0))
+                        .disabled(working),
+                ),
             )
+            .when(working, |card| {
+                card.child(
+                    div()
+                        .mt_3()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("telegram-code-verifying")),
+                )
+            })
             .when_some(self.telegram_error_message(), |card, message| {
                 card.child(error_banner(message))
             })
@@ -862,7 +874,7 @@ impl TeleArkApp {
                 "telegram-submit-code",
                 self.tr("telegram-code-action"),
                 IconName::Check,
-                false,
+                working,
                 cx.listener(|this, _, window, cx| this.submit_telegram_code(window, cx)),
             ))
             .into_any_element()
@@ -882,6 +894,7 @@ impl TeleArkApp {
                 )
             },
         );
+        let working = self.telegram_activity == TelegramActivity::Working;
         components::card()
             .max_w(px(560.0))
             .mx_auto()
@@ -900,9 +913,19 @@ impl TeleArkApp {
                 div().mt_5().child(
                     Input::new(&self.telegram_password)
                         .mask_toggle()
-                        .h(px(38.0)),
+                        .h(px(38.0))
+                        .disabled(working),
                 ),
             )
+            .when(working, |card| {
+                card.child(
+                    div()
+                        .mt_3()
+                        .text_sm()
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("telegram-password-verifying")),
+                )
+            })
             .when_some(self.telegram_error_message(), |card, message| {
                 card.child(error_banner(message))
             })
@@ -910,7 +933,7 @@ impl TeleArkApp {
                 "telegram-submit-password",
                 self.tr("telegram-password-action"),
                 IconName::Asterisk,
-                false,
+                working,
                 cx.listener(|this, _, window, cx| this.submit_telegram_password(window, cx)),
             ))
             .into_any_element()

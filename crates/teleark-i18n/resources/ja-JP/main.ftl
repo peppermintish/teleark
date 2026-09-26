@@ -536,6 +536,8 @@ action-back = 戻る
 action-more = その他の操作
 telegram-library-title = Telegram ソース
 telegram-status-working = 処理中…
+telegram-code-verifying = Telegram でログインコードを確認しています…
+telegram-password-verifying = Telegram で2段階認証パスワードを確認しています…
 telegram-status-failed = 確認が必要
 telegram-status-connected = 接続済み
 telegram-status-not-connected = 未接続
@@ -950,6 +952,9 @@ transfer-filter-count = { $label } · { $count }
 transfer-delete-confirmation = { $count } 件のタスクを削除しますか？ダウンロード済みのファイルは保持されます。履歴、ログ、未完了のデータは削除されます。
 transfer-filter-title = 絞り込み
 transfer-actions-applying = タスクの操作を適用中…
+transfer-vault-bulk-progress = { $action }：待機中 { $queued } 件 · 実行中 { $active } 件。実行中の操作の完了を待っています · 経過 { $seconds } 秒 · 最終更新 { $idle } 秒前。
+transfer-vault-bulk-cancel = 残りの操作をキャンセル
+transfer-vault-bulk-cancel-help = 待機中の操作を取り消します。実行中の転送は続行されます。各転送の一時停止または停止ボタンを使用してください。
 
 settings-download-strategy-title = ダウンロード方針
 settings-download-strategy-balanced = バランス
@@ -1973,3 +1978,7 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+storage-download-requests = { $count } 件のダウンロードリクエストが実行中 · 最も古いリクエストは { $seconds } 秒経過。「転送」で進行状況を確認し、一時停止または停止できます。
+storage-download-capacity = ダウンロードリクエストのキューがいっぱいです。リクエストが完了してから別のファイルを追加してください。
+storage-download-request-active = ダウンロードをリクエストしました。「転送」で進行状況を確認できます。

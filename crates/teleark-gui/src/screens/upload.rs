@@ -8,8 +8,8 @@ use crate::{
 };
 use gpui_kit::component::{Disableable as _, Icon, IconName, button::ButtonVariants as _};
 use gpui_kit::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
 };
 
 pub fn render_upload_overlay(
@@ -193,6 +193,10 @@ pub fn render_upload_overlay(
                                                             .into_owned();
                                                         components::list_row()
                                         .id(("upload-source-row", index))
+                                        .tooltip(move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                                .build(window, cx)
+                                        })
                                                     .debug_selector(move || format!("upload-source-row-{index}"))
 
                                         .flex()
@@ -234,7 +238,6 @@ pub fn render_upload_overlay(
                                                 this.tr("upload-remove-file"),
                                             )
                                             .ghost()
-                                            .tooltip(tooltip)
                                             .debug_selector(move || format!("upload-source-action-{index}"))
                                             .disabled(this.upload_preparing)
                                             .on_click(

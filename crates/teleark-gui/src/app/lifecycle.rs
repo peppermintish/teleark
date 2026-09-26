@@ -41,6 +41,8 @@ impl TeleArkApp {
     pub(crate) fn transition_has_work(&self) -> bool {
         self.upload_in_flight
             || self.vault_download_in_flight
+            || !self.vault_download_jobs.is_empty()
+            || self.vault_bulk_action_queue.is_some()
             || self.upload_preparing
             || self.has_active_transfer()
             || self.vault_transfer_view.items.iter().any(|row| {
@@ -97,7 +99,7 @@ impl TeleArkApp {
 
     /// Called by transfer revision notifications and preparation/completion callbacks.
     /// No polling timer, no repeated database reads, no work dispatched from render.
-    pub(super) fn advance_transition(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn advance_transition(&mut self, cx: &mut Context<Self>) {
         if self
             .transition
             .as_ref()
@@ -175,6 +177,7 @@ impl TeleArkApp {
             return;
         };
         transition.phase = TransitionPhase::Pausing;
+        self.vault_bulk_action_queue = None;
         if let Some(progress) = &self.upload_preparation_progress {
             progress.cancel();
         }
@@ -396,6 +399,53 @@ impl TeleArkApp {
 mod tests {
     use super::*;
     use gpui_kit as gpui;
+
+    #[gpui::test]
+    fn pending_bulk_actions_require_confirmation_and_pause_discards_them_before_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            app.visual_preview = false;
+            app.native_transfer_view.items = Default::default();
+            app.vault_transfer_view.items = Default::default();
+            let account = app.telegram_account.as_ref().expect("account").id;
+            app.vault_bulk_action_queue =
+                Some(crate::screens::transfers::VaultBulkActionQueue::new(
+                    (account, app.telegram_login_generation),
+                    crate::screens::transfers::TransferAction::Resume,
+                    &[41, 42],
+                ));
+            app.vault_transfer_jobs.insert(
+                (account, 40, false),
+                cx.spawn(async |_, _| std::future::pending::<()>().await),
+            );
+            assert!(
+                app.transition_has_work(),
+                "pending resumes are work even before admission"
+            );
+            app.request_transition(TransitionAction::Quit, cx);
+            assert!(
+                app.transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.phase == TransitionPhase::Confirm)
+            );
+            app.begin_shutdown(cx);
+            assert!(app.vault_bulk_action_queue.is_none());
+            assert_eq!(
+                app.vault_transfer_jobs.len(),
+                1,
+                "pause retains the running owner until its barrier finishes"
+            );
+            assert!(
+                app.shutdown_task.is_none(),
+                "the acknowledgement precedes pause dispatch"
+            );
+            // Keep this synthetic test from actually quitting on its next frame.
+            app.transition.as_mut().expect("transition").phase = TransitionPhase::Failed;
+            app.visual_preview = true;
+        });
+    }
 
     #[gpui::test]
     fn native_close_allows_preview_and_prompts_for_real_work(cx: &mut gpui::TestAppContext) {

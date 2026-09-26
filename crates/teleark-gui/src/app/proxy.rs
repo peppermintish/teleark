@@ -113,6 +113,7 @@ impl ProxyUi {
 
     pub(crate) fn show_banner(&self) -> bool {
         self.load_failed
+            || self.action == ProxyAction::Failed
             || self.waiting()
             || self
                 .snapshot

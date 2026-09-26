@@ -19,17 +19,21 @@ impl TeleArkApp {
     }
 
     pub(crate) fn select_telegram_chat(&mut self, chat_id: i64, cx: &mut Context<Self>) {
+        self.select_telegram_source(Some(chat_id), cx);
+    }
+
+    pub(super) fn select_telegram_source(&mut self, chat_id: Option<i64>, cx: &mut Context<Self>) {
         self.cancel_channel_history();
         self.remember_channel_view();
         self.cancel_telegram_file_load(cx);
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
-        self.selected_chat_id = Some(chat_id);
+        self.selected_chat_id = chat_id;
         self.telegram_index = None;
         self.telegram_files.clear();
         self.telegram_files_next = None;
         self.telegram_files_exhausted = false;
         let restored = matches!(self.page, Page::Channel | Page::Storage)
-            && self.restore_channel_view(chat_id);
+            && chat_id.is_some_and(|chat_id| self.restore_channel_view(chat_id));
         self.telegram_download = None;
         self.selected_telegram_message_id = None;
         self.show_channel_detail = false;
@@ -41,9 +45,10 @@ impl TeleArkApp {
         self.refresh_channel_file_table(cx);
         if restored {
             self.apply_channel_changes(cx);
-        } else {
+        } else if chat_id.is_some() {
             self.load_selected_telegram_files(false, cx);
         }
+        cx.notify();
     }
 
     pub(crate) fn select_channel(&mut self, chat_id: i64, cx: &mut Context<Self>) {
@@ -66,6 +71,7 @@ impl TeleArkApp {
         if self.storage_view == StorageView::RawFiles {
             self.remember_channel_view();
         }
+        let view_changed = self.storage_view != view;
         self.storage_view = view;
         self.nav_selection = "nav-storage";
         self.set_page(Page::Storage, cx);
@@ -73,6 +79,14 @@ impl TeleArkApp {
             cx.notify();
             return;
         };
+        if view_changed || self.selected_chat_id != Some(chat_id) {
+            // Raw Telegram messages and authenticated packages have separate
+            // selection meanings, even when they share a channel.
+            self.selected_telegram_message_id = None;
+            self.show_channel_detail = false;
+            self.selected_channel_message_ids.clear();
+            self.channel_batch_activity = ChannelBatchActivity::Idle;
+        }
         if view == StorageView::Files {
             self.cancel_telegram_file_load(cx);
             if self.selected_chat_id != Some(chat_id) {
@@ -437,7 +451,10 @@ impl TeleArkApp {
         let Some(account_id) = self.telegram_account.as_ref().map(|account| account.id) else {
             return;
         };
+        let scope = (self.telegram_login_generation, account_id, chat_id);
+        let submitted_ids = files.iter().map(|file| file.message_id).collect();
         self.channel_batch_activity = ChannelBatchActivity::Preparing;
+        cx.notify();
         let work = cx.background_spawn(async move {
             let mut reserved = BTreeSet::new();
             let mut requests = Vec::with_capacity(files.len());
@@ -466,16 +483,119 @@ impl TeleArkApp {
             let result = work.await;
             let Some(this) = this.upgrade() else { return };
             this.update(cx, |this, cx| {
-                this.channel_batch_activity = match result {
-                    Ok((batch_id, count)) => {
-                        this.selected_channel_message_ids.clear();
-                        this.notify_channel_file_table(cx);
-                        ChannelBatchActivity::Queued { batch_id, count }
-                    }
-                    Err(error) => ChannelBatchActivity::Failed(error.kind()),
-                };
-                cx.notify();
+                this.finish_channel_batch_preparation(scope, &submitted_ids, result, cx);
             });
         }));
+    }
+
+    fn finish_channel_batch_preparation(
+        &mut self,
+        scope: (u64, i64, i64),
+        submitted_ids: &BTreeSet<i64>,
+        result: Result<(u64, usize), ApplicationError>,
+        cx: &mut Context<Self>,
+    ) {
+        let (login_generation, account_id, chat_id) = scope;
+        if self.telegram_login_generation != login_generation
+            || self.telegram_account.as_ref().map(|account| account.id) != Some(account_id)
+            || self.selected_chat_id != Some(chat_id)
+        {
+            return;
+        }
+        self.channel_batch_activity = match result {
+            Ok((batch_id, count)) => {
+                self.selected_channel_message_ids
+                    .retain(|message_id| !submitted_ids.contains(message_id));
+                self.notify_channel_file_table(cx);
+                ChannelBatchActivity::Queued { batch_id, count }
+            }
+            Err(error) => ChannelBatchActivity::Failed(error.kind()),
+        };
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui_kit::test]
+    fn switching_storage_modes_clears_the_previous_file_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, cx| {
+            for view in [StorageView::RawFiles, StorageView::Files] {
+                app.selected_telegram_message_id = Some(42);
+                app.selected_channel_message_ids.insert(42);
+                app.show_channel_detail = true;
+                app.channel_batch_activity = ChannelBatchActivity::Preparing;
+                app.select_storage(view, cx);
+                assert_eq!(app.storage_view, view);
+                assert_eq!(app.selected_telegram_message_id, None);
+                assert!(app.selected_channel_message_ids.is_empty());
+                assert!(!app.show_channel_detail);
+                assert_eq!(app.channel_batch_activity, ChannelBatchActivity::Idle);
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn batch_completion_preserves_new_selections_and_rejects_changed_source_scope(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        app.update(cx, |app, cx| {
+            let account = app.telegram_account.as_ref().expect("preview account").id;
+            let chat = app.selected_chat_id.expect("preview channel");
+            let scope = (app.telegram_login_generation, account, chat);
+            let submitted = BTreeSet::from([1, 2]);
+            app.selected_channel_message_ids = BTreeSet::from([1, 2, 3]);
+            app.channel_batch_activity = ChannelBatchActivity::Preparing;
+            app.set_page(Page::Transfers, cx);
+            app.finish_channel_batch_preparation(scope, &submitted, Ok((7, 2)), cx);
+            assert_eq!(app.selected_channel_message_ids, BTreeSet::from([3]));
+            assert_eq!(
+                app.channel_batch_activity,
+                ChannelBatchActivity::Queued {
+                    batch_id: 7,
+                    count: 2
+                }
+            );
+
+            for stale_scope in [
+                (scope.0.wrapping_sub(1), account, chat),
+                (scope.0, account + 1, chat),
+                (scope.0, account, chat + 1),
+            ] {
+                app.selected_channel_message_ids = BTreeSet::from([1, 2, 3]);
+                app.channel_batch_activity = ChannelBatchActivity::Idle;
+                app.finish_channel_batch_preparation(stale_scope, &submitted, Ok((8, 2)), cx);
+                assert_eq!(app.selected_channel_message_ids, BTreeSet::from([1, 2, 3]));
+                assert_eq!(app.channel_batch_activity, ChannelBatchActivity::Idle);
+                app.finish_channel_batch_preparation(
+                    stale_scope,
+                    &submitted,
+                    Err(ApplicationError::new(
+                        teleark_core::ApplicationErrorKind::Persistence,
+                    )),
+                    cx,
+                );
+                assert_eq!(app.channel_batch_activity, ChannelBatchActivity::Idle);
+            }
+            app.finish_channel_batch_preparation(
+                scope,
+                &submitted,
+                Err(ApplicationError::new(
+                    teleark_core::ApplicationErrorKind::Persistence,
+                )),
+                cx,
+            );
+            assert_eq!(app.selected_channel_message_ids, BTreeSet::from([1, 2, 3]));
+            assert_eq!(
+                app.channel_batch_activity,
+                ChannelBatchActivity::Failed(teleark_core::ApplicationErrorKind::Persistence)
+            );
+        });
     }
 }

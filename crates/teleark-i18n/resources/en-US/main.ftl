@@ -564,6 +564,8 @@ action-back = Back
 action-more = More actions
 telegram-library-title = Telegram Sources
 telegram-status-working = Working…
+telegram-code-verifying = Verifying your login code with Telegram…
+telegram-password-verifying = Verifying your two-step verification password with Telegram…
 telegram-status-failed = Needs attention
 telegram-status-connected = Connected
 telegram-status-not-connected = Not connected
@@ -978,6 +980,9 @@ transfer-filter-count = { $label } · { $count }
 transfer-delete-confirmation = Delete { $count } tasks? Downloaded files will be kept. Task history, logs and partial downloads will be removed.
 transfer-filter-title = Filters
 transfer-actions-applying = Applying task actions…
+transfer-vault-bulk-progress = { $action }: { $queued } queued · { $active } running. Waiting for running actions to finish · { $seconds } s elapsed · last activity { $idle } s ago.
+transfer-vault-bulk-cancel = Cancel remaining actions
+transfer-vault-bulk-cancel-help = Discard queued actions. Running transfers continue; use their individual pause or stop controls.
 
 settings-download-strategy-title = Download strategy
 settings-download-strategy-balanced = Balanced
@@ -2000,3 +2005,7 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+storage-download-requests = { $count } download requests active · oldest request { $seconds } s. View Transfers for progress and pause or stop controls.
+storage-download-capacity = The download request queue is full. Wait for a request to finish before adding another file.
+storage-download-request-active = Download requested; view Transfers for progress.

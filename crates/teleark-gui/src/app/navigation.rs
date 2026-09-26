@@ -222,6 +222,9 @@ impl TeleArkApp {
                     this.select_channel(chat_id, cx);
                 } else {
                     this.set_page(Page::Channel, cx);
+                    this.nav_selection = "nav-channel";
+                    this.storage_view = StorageView::RawFiles;
+                    this.select_telegram_source(None, cx);
                 }
             }
             "nav-settings" => {
@@ -778,6 +781,46 @@ mod tests {
                 sync_pts: None,
             })
             .collect();
+    }
+
+    #[gpui_kit::test]
+    fn channels_without_public_sources_never_shows_the_storage_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            app.update(cx, |app, cx| {
+                let storage = app.storage_channel_id().expect("storage channel");
+                app.telegram_chats.retain(|chat| chat.id == storage);
+                app.page = Page::Storage;
+                app.storage_view = StorageView::Files;
+                app.selected_chat_id = Some(storage);
+                app.selected_telegram_message_id = Some(42);
+                app.selected_channel_message_ids.insert(42);
+                app.show_channel_detail = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let channels = cx
+                .debug_bounds("primary-nav-row-nav-channels")
+                .expect("Channels");
+            cx.simulate_click(channels.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.page, Page::Channel);
+                assert_eq!(app.selected_chat_id, None);
+                assert_eq!(app.selected_telegram_message_id, None);
+                assert!(app.selected_channel_message_ids.is_empty());
+                assert!(app.telegram_files.is_empty());
+                assert!(!app.show_channel_detail);
+            });
+        }
     }
 
     #[gpui_kit::test]
