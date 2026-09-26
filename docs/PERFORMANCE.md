@@ -1,5 +1,9 @@
 # Performance audit - September 2026
 
+This is a dated audit record. Its measurements and before/after descriptions apply
+to the revisions reviewed here; subsequent ownership, streaming and UI decisions
+are documented in [Architecture](ARCHITECTURE.md) and the linked ADRs.
+
 This audit uses isolated fake remotes, temporary databases and synthetic histories. Each verified fix receives a `perf/20260908-NN-*` annotated checkpoint tag. Tags point to complete source snapshots with a per-fix parent; the user's current branch, index and unrelated uncommitted work remain intact. These are source checkpoints, not release tags.
 
 ## 01 - Native download part-event overhead

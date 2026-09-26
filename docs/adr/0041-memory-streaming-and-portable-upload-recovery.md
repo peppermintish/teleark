@@ -5,7 +5,7 @@ Date: 2026-09-15. Status: accepted.
 This supersedes ADR 0036's 60 MiB container target, new ciphertext spools and
 package retirement solely because temporary Telegram parts expired. Its bounded
 concurrency, immutable encryption identities and retained legacy readers remain.
-The earlier [performance proposal](../UPLOAD_PERFORMANCE_PROPOSAL.md) is historical.
+This decision replaces the earlier upload performance proposal, which remains in Git history.
 
 ## Payload and preparation
 

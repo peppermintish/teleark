@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cat > "$stage/otool" <<'EOF'
@@ -18,15 +19,15 @@ EOF
 chmod +x "$stage/otool"
 export PATH="$stage:$PATH"
 
-bash scripts/verify-macos-libraries.sh dist/teleark-universal.bin
+bash "$repository_root/scripts/verify-macos-libraries.sh" dist/teleark-universal.bin
 
-if TEST_LIBRARY_CASE=external bash scripts/verify-macos-libraries.sh dist/teleark-universal.bin >"$stage/external.log" 2>&1; then
+if TEST_LIBRARY_CASE=external bash "$repository_root/scripts/verify-macos-libraries.sh" dist/teleark-universal.bin >"$stage/external.log" 2>&1; then
   echo 'The macOS library check accepted a non-system dependency.' >&2
   exit 1
 fi
 grep -Fq 'Unbundled macOS library for x86_64: @rpath/libExternal.dylib' "$stage/external.log"
 
-if TEST_LIBRARY_CASE=missing bash scripts/verify-macos-libraries.sh dist/teleark-universal.bin >"$stage/missing.log" 2>&1; then
+if TEST_LIBRARY_CASE=missing bash "$repository_root/scripts/verify-macos-libraries.sh" dist/teleark-universal.bin >"$stage/missing.log" 2>&1; then
   echo 'The macOS library check accepted an uninspected architecture.' >&2
   exit 1
 fi

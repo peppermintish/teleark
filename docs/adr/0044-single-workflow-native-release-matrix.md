@@ -2,6 +2,8 @@
 
 Status: Partially superseded by [ADR 0045](0045-focused-release-targets.md) for target list and asset count, and by [ADR 0046](0046-tag-only-push-trigger.md) for push triggers. The single-workflow structure remains in force. This ADR superseded ADR 0043's workflow structure, target list and asset count; ADR 0043's numeric version and installer upgrade/downgrade contract remains in force.
 
+Amendment (2026-09-26): every supported trigger now runs native Windows/macOS source tests, and packages depend on those tests as well as version validation. This supersedes the tag-versus-branch testing split below. [ADR 0055](0055-stable-macos-signing-identity.md) supersedes the unsigned macOS description.
+
 ## Decision
 
 One `ci.yml` owns both CI and tagged publication. Linux quality runs for every trigger. Branches and pull requests then test Windows and macOS; a matching `vX.Y.Z` push instead builds packages and publishes one GitHub Release. An optional manual package preview uploads artifacts with a commit-suffixed label but cannot publish. The release jobs use ordinary `if` conditions and `needs` edges; there is no manual promotion or second release workflow. Branch and tag pushes can create two runs for one commit, but only the tag run starts installer runners. The tag reruns Linux source gates so the published ref is directly checked.

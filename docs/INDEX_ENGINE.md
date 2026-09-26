@@ -45,7 +45,7 @@ Current storage uses inclusive message-ID bounds and rejects overlapping ranges 
 
 ## Search contract
 
-FTS5 searches normalized copies of names/paths/captions while original Unicode remains available. Parameterized structured facets filter account/channel, kind, dates, size, extension and file states. The current sort is `(modified_at DESC, LogicalFileId DESC)`; query-bound opaque keyset cursors reject stale filters. Stable fixtures traverse ties without missing or duplicating IDs. Other sort modes and snapshot isolation during concurrent insertion are not implemented.
+FTS5 searches normalized copies of names/paths/captions while original Unicode remains available. Parameterized structured facets filter account/channel, kind, dates, size, extension and file states. Results sort by effective timestamp descending, then `LogicalFileId` descending. The effective timestamp is the modification time, falling back to creation time and then the defined null sentinel. Query-bound opaque keyset cursors reject stale filters and seek on that same timestamp/ID pair. Stable fixtures traverse ties and null timestamps without missing or duplicating IDs. Other sort modes and snapshot isolation during concurrent insertion are not implemented.
 
 CJK, emoji, combining characters and case behavior need measured tokenizer/product expectations; locale changes must not rewrite indexed source content. Avoid deep OFFSET and per-query remote full scans.
 

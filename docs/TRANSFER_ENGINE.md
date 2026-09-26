@@ -1,11 +1,12 @@
 # Transfers and diagnostics
 
-## Current payload and presentation contract (2026-09-15)
+## Payload and presentation contract
 
 [ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md) supersedes
 older ciphertext spool, 60 MiB target and container-completion speed descriptions.
 The new ceiling is **1.9 GiB of encrypted bytes**, including headers and tags.
-Upload streams plaintext → in-memory encryption → bounded 512 KiB blocks → RPCs;
+Upload streams plaintext → in-memory encryption → 512 KiB encoded frame blocks
+→ bounded 128 KiB Telegram requests;
 download streams RPC blocks → in-memory frame authentication/decryption →
 plaintext partial output. Container and final-file checks precede publication.
 Legacy ciphertext spools are recovery inputs only; tiny recovery metadata remains
@@ -69,16 +70,16 @@ heuristic changes user-selected values. Legacy adaptive algorithms remain only
 for compatibility/test coverage; ADR0036 supersedes their production policy.
 Defaults and bounds are in [Preferences](PREFERENCES_FORMAT.md).
 
-Uploads run three files concurrently, each with ten asynchronous 512 KiB
+Uploads default to two concurrent files, each with sixteen asynchronous 128 KiB
 `upload.saveBigFilePart` requests. Independent retained MTProto sender pools share
-the authenticated session and mandatory network gateway, with two connections
+the authenticated session and mandatory network gateway, with eight connections
 per direction by default; cloning a Client alone would not create connections.
 RPCs are assigned round-robin across the selected direction's pools. Connections
 are shared across tasks rather than multiplied by each file. No encryption worker,
 checkpoint write or thread join runs on the UI or network reactor.
 
-One producer per file reads/encrypts a frame, writes the immutable ciphertext to
-its bounded spool and hands the reusable buffer to a queue of two ready blocks.
+One producer per file reads/encrypts a frame and divides its immutable ciphertext
+into reusable protocol buffers, with a queue of two ready blocks by default.
 The consumer owns at most the configured concurrent part requests and returns
 buffers for reuse. Backpressure bounds production; no whole plaintext container
 is retained. Internal result windows also retain at most 128 recent completed
@@ -101,10 +102,11 @@ concurrency reduction or increased limit in response to a retry. A failed upload
 part cancels that stream's retained RPC tasks; independent files remain runnable.
 Byte rate caps continue to apply across tasks through the shared budgets.
 
-The upload inspector prioritizes acknowledged-byte rate intervals, a 512 KiB
+The upload inspector prioritizes acknowledged-byte rate intervals, a protocol-part
 part map, queued/active work, last activity, retry deadlines and a bounded timeline.
 Up to 128 events and 96 rate samples remain in memory, with truncation counts;
-samples coalesce to at most four per second plus container boundaries. Restored
+ordinary rate samples publish once per second, with additional container-boundary
+samples. Restored
 acknowledgements are excluded from new throughput. Logs use the existing bounded
 background writer and disclose dropped records; logging cannot block transport.
 100% still requires message/manifest publication and local persistence.
@@ -138,7 +140,23 @@ and credentialed multi-DC/throughput qualification remain separate work.
 
 ## Local availability and disk space
 
-Historical Completed means transfer finalization succeeded; current local presence is a separate observation. Every three seconds, a retained GUI owner asks Runtime for up to three 128-row account-scoped pages, revisiting older history while prioritizing recent native/Vault outputs. Filesystem calls run off the UI thread. The presentation cache holds at most 10,000 recent paths; account changes clear it and discard stale results. Missing means the parent remains accessible; inaccessible parents, permissions and I/O failures are Unavailable. Matching size is Present, not a new cryptographic verification; same-size replacement is not detected.
+Historical Completed means transfer finalization succeeded; current local
+presence is a separate observation. Runtime watches parent directories using
+native filesystem events and checks metadata on retained background workers.
+The monitor holds at most 10,000 paths, four probe workers and 32 queued requests.
+Events withdraw stale positive observations immediately and coalesce probes for
+200 ms. An initial probe, a post-registration probe and a selected-channel startup
+recheck close watcher startup gaps. Account epochs and per-path tokens reject
+stale callbacks; a probe older than 15 seconds cannot publish a positive result.
+
+Healthy, quiet watchers reconcile every five minutes. Unwatched paths fall back
+to 30 seconds in the selected channel or two minutes elsewhere; failed watcher
+registrations retry after one minute. Sleep/wake detection also triggers bounded
+rechecks. The GUI subscribes to revisions and does no recurring filesystem scan.
+Missing means the parent remains accessible; inaccessible parents, permissions
+and I/O failures are Unavailable. Matching size is Present, not a new cryptographic
+verification; same-size replacement is not detected. [ADR 0056](adr/0056-event-driven-local-availability.md)
+defines the event and fallback policy.
 
 Missing/changed outputs disable ordinary open/reveal actions. A completed native task can explicitly create a fresh account-validated download with a non-overwriting destination; its old history remains intact. No observation triggers network traffic or file deletion. Vault outputs persist through the schema-10 inventory; its finalization caveat is in [Data model](DATA_MODEL.md#local-output-inventory-version-10).
 
@@ -164,7 +182,18 @@ The manifest is published/verified last. Output stays partial until every requir
 
 ## Progress, session logs and diagnostics
 
-Upload snapshots expose ephemeral typed activity for storage discovery, per-file destination checks, reading/encryption, the Telegram request queue, streaming upload, message confirmation, readback verification and manifest publication. Phase duration uses a monotonic clock. Telegram's public `upload_stream` API reads through a bounded observer; uploaded presentation bytes include transport-buffered/in-flight ciphertext converted to logical-size equivalents. They are not acknowledgements or verified checkpoint bytes. Readback reports actual received encoded bytes. Existing `transferred_bytes`, confirmed parts and session logs remain verified evidence; file/batch progress uses the transient upload counter and is capped at 99% until finalization succeeds. Manifest upload/readback remains the Publishing phase and cannot inflate file-part progress. Inline observers retain only one numeric snapshot under a short lock, with no event backlog or buffers. The GUI coalesces activity updates at 250 ms and elapsed time at one-second granularity; terminal rows stop activity updates. No stored format or protocol sequencing changes.
+Upload snapshots expose typed activity for storage discovery, destination checks,
+source inspection, encryption, request queues, RPC acknowledgements, message
+confirmation and manifest publication. Phase duration uses a monotonic clock.
+Streaming RPC acknowledgements advance confirmed transport counters immediately;
+restored acknowledgements establish a baseline and do not create live throughput.
+Readback, when recovery or manifest verification requires it, reports actual
+received encoded bytes. Published-container receipts and durable task progress
+remain separate from transient presentation counters. File/batch progress stays
+below 100% until publication and persistence succeed. Manifest upload/readback
+stays in Publishing and cannot inflate file-part progress. Revision notifications
+wake the GUI; bounded coalescing controls redraw frequency and one-second clocks
+advance elapsed-time labels only while work is active.
 
 Workers produce raw byte/part events; the frontend consumes bounded/coalesced snapshots plus immediate important state/error changes. Details expose timing, queue wait, attempts, verification, failures, current/average rates, part state, memory/queues and Live/Replay decisions. A failed native part records its structured cause, zero-based local transfer connection slot, attempt and elapsed time; the inspector displays the one-based slot and cause above the trace. The slot is a local assignment, not a measured Telegram DC or network lane. Unknown values stay unavailable. Failures map from structured categories; behavior never parses strings.
 
@@ -194,14 +223,33 @@ Native history retention follows [ADR 0023](adr/0023-native-history-and-recovery
 
 ## Batch presentation
 
-Single-file transfers, including one-member batches, occupy one 42-point row. Batch headers occupy 63 points and show completed/total and failed counts. Collapsed headers use the ordinary row surface with a semibold title. Activating a header with 2–9 members toggles one continuous inline group: the darker header, lighter member surface, neutral outline and left marker connect the title to its files. Child checkboxes and names are indented; members have no individual boxes. Rounded group ends and outside spacing separate adjacent batches and ordinary tasks. Hover/selection tint each row's existing surface, preserving the hierarchy and marker. Row content retains its normal height; only group boundaries add spacing. Search/state filters can still reveal matching members without expanding unrelated work, and boundaries follow adjacent visible batch identities in constant time per rendered row.
+Single-file transfers, including one-member batches, use the shared 24-point row
+height and 12-point text. Batch headers occupy 34 points and show completed/total
+and failed counts. Headers with 2–9 members expand inline; child indentation,
+continuous group surfaces and a left marker connect the header to its members.
+Hover and selection preserve that hierarchy. Search/state filters can reveal
+matching members without expanding unrelated work. Boundaries follow adjacent
+visible batch identities in constant time per rendered row.
 
 Batches with more than nine members open a centered auxiliary window initially smaller than the parent. Its fixed title and scrolling members share the same group surfaces, outline and continuous left marker. It uses the same revisioned transfer projection and command owner, virtualizes member rows, and follows parent notifications without another service loop. The window supports member inspectors and action feedback/confirmation, can be reused after repeated activation, and closes on account change, parent-window close or parent-owner release. Member rendering holds a weak owner reference. Closing the auxiliary window does not cancel transfers. Opening is deferred past the parent event lease because the framework draws the child synchronously. No transfer lifecycle or persistent format changes.
 
 
 ## Durable Vault upload history
 
-[ADR 0029](adr/0029-durable-upload-history.md) supersedes the memory-only history behavior. Schema 16 persists admitted upload windows, file starts and terminal summaries. Database acknowledgment precedes completion in the UI. Startup converts unfinished local operations to explicit interrupted history without resending them; the inspector explains how to check Storage and start a new upload from its source. Account-scoped restoration runs before remote catalog loading, with visible background phases and generation checks. The current view retains 256 recent rows plus the complete boundary batch and discloses older stored rows. Restored totals and available sanitized logs are real; live telemetry is explicitly unavailable. Older versions did not save task summaries, so already-lost rows cannot be reconstructed. Encrypted part resumption and browsing older upload history remain open.
+[ADR 0029](adr/0029-durable-upload-history.md) introduced schema-16 durable upload
+summaries. Later recovery schemas add executable jobs, control intent,
+authenticated receipts and manifest outboxes. Startup restores eligible jobs
+under the current account and reconciles remote publication before continuing;
+legacy summaries without recovery context remain explicit interrupted history.
+See [Vault recovery](VAULT_TRANSFER_RECOVERY.md) for supported states and restart
+rules. Database acknowledgment precedes completion in the UI.
+
+Account-scoped history restoration has visible phases and generation checks. The
+view retains 256 recent rows plus the complete boundary batch and discloses older
+stored rows. Restored totals and sanitized logs are available where persisted;
+past live telemetry is not invented. Versions predating durable summaries cannot
+reconstruct rows that were never saved. Browsing all older upload history remains
+separate work.
 
 ## Aggregate upload and download speed limits
 
@@ -212,23 +260,25 @@ Successful saves immediately update existing connection clones and survive route
 replacement and restart. Failed saves retain the active limits.
 
 Native downloads reserve a chunk before issuing its request; encrypted downloads,
-verification reads and manifest payloads use the same download budget. Uploads pace
-bounded source reads before handing bytes to the transport. Authentication, proxy
+verification reads and manifest payloads use the same download budget. Streaming
+uploads reserve each bounded RPC payload before sending it; a retry reserves that
+payload again. Other bounded upload readers use the same budget. Authentication, proxy
 checks, catalog control requests and avatars do not consume file-transfer budgets.
-This is payload admission pacing, not an exact socket-byte ceiling: MTProto overhead,
-internal transport retransmission and previously admitted/in-flight buffers are not
-counted again. The token burst is at most 512 KiB per direction; each upload reader
-admits at most 16 KiB per read and grammers assembles 512 KiB transport parts, so low
-upload caps can have a long visible wait before each part is sent. Existing transport
-concurrency bounds its in-flight buffers. Download requests use a 4–512 KiB aligned
+This is payload admission pacing, not an exact socket-byte ceiling. MTProto
+overhead, internal retransmission and payload already admitted before a setting
+change can make observed wire traffic differ. The token burst is at most 128 KiB per direction.
+Low upload caps can therefore have a visible wait before each 128 KiB RPC payload
+is sent. Existing transport concurrency bounds its in-flight buffers. Download requests use a 4–128 KiB aligned
 chunk chosen at logical-part start; policy changes wake waits immediately without
 changing the existing persistent logical-part map.
 
 A global status strip remains visible across navigation and collapsed batches while
 caps are configured. The editor shows waiting counts/durations, last payload
 admission and an expandable timeline (latest 16 transitions per direction, with
-omission counts). A retained 250 ms presentation sampler reads bounded in-memory
-snapshots, never SQL or queues; unchanged idle frames are not invalidated. Existing
+omission counts). A retained observer waits for revision events, coalesces bursts
+for 250 ms, and reads bounded in-memory snapshots. A one-second presentation clock
+runs only while a bandwidth wait needs elapsed-time feedback. It never reads SQL
+or drives service queues; idle frames are not invalidated. Existing
 transfer cancel controls cancel pending admission through task cancellation. Limits
 can be changed to zero to release bandwidth waits; waiting itself is not completion.
 

@@ -48,5 +48,5 @@ validation or source-content hashing. Selection-wide saving progress is visible;
 only the active detailed window is materialized. This preserves bounded content
 preflight while making pending source identities durable. Executable encryption
 contexts remain immutable and are admitted by atomic promotion after hashing.
-See [transfer recovery](../VAULT_TRANSFER_RECOVERY.md#batch-admission-integration-in-progress)
+See [transfer recovery](../VAULT_TRANSFER_RECOVERY.md#batch-admission-integration)
 for current integration and remaining acceptance boundaries.

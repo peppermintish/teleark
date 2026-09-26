@@ -11,12 +11,13 @@ function Invoke-Check {
     if (Test-Path -LiteralPath $summary) {
         Remove-Item -LiteralPath $summary -Force
     }
+    $previousSummary = $env:GITHUB_STEP_SUMMARY
     $env:GITHUB_STEP_SUMMARY = $summary
     try {
         $output = & pwsh -NoProfile -File $checker -Repository $repository 2>&1
         return @{ Code = $LASTEXITCODE; Output = ($output -join "`n"); Summary = (Get-Content -LiteralPath $summary -Raw) }
     } finally {
-        Remove-Item Env:GITHUB_STEP_SUMMARY -ErrorAction SilentlyContinue
+        $env:GITHUB_STEP_SUMMARY = $previousSummary
     }
 }
 

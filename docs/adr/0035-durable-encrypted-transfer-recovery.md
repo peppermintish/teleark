@@ -1,6 +1,6 @@
 # ADR 0035: Durable encrypted transfer recovery
 
-Status: accepted; integrated into DesktopVault execution, recovery controls and guidance.
+Status: accepted; integrated into DesktopVault execution, recovery controls and guidance. [ADR 0041](0041-memory-streaming-and-portable-upload-recovery.md) supersedes the ciphertext-cache policy with bounded in-memory streaming; old spools remain read-only recovery inputs.
 
 ## Context
 

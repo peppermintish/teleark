@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current schema is version **22**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **23**, with automatic upgrades from versions 0–22. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -26,10 +26,12 @@ index_jobs, index_ranges, telegram_index_state
 channel_sync_state, channel_sync_tombstones, channel_file_versions
 managed_channel_watches, managed_channel_changes
 transfer_tasks, transfer_parts
-native_download_batches, native_download_tasks
+native_download_batches, native_download_tasks, native_download_cleanup
 collections, collection_items
 settings, id_allocators, vault_metadata, vault_downloaded_files
 vault_key_epochs, vault_inventory, vault_message_health, vault_upload_history
+vault_transfer_jobs, vault_transfer_parts, vault_manifest_outbox, vault_pending_uploads
+credential_backend, credential_items, credential_cleanup
 ```
 
 Migrations 1–6 establish the catalog, FTS triggers, checkpoints/ranges, tagged paths, monotonic IDs, remote-object identities, cursors and native history. Version 7 adds native batch identity and source sent-time/caption/MIME metadata; version 8 adds wrapped Vault metadata; version 9 adds native account scope; version 10 adds the Vault output inventory; version 11 adds Channel synchronization cursors and deletion evidence; version 12 adds per-message projection versions and durable private-channel observations without rewriting existing records. Tests cover empty-to-latest and every prior-version upgrade, preserving indexed data.
@@ -133,20 +135,20 @@ Current SQLite read/write version is **16**; automatic supported upgrades are **
 
 Upload summaries use explicit SQL columns and independent state/error codec v1. The globally unique random task ID is scoped with its account; batch/channel identity, original filename, package ID, bytes/parts, queue/start times, duration and average throughput are durable. `sequence` is local insertion order, so tied timestamps and random IDs do not reorder history. Updates preserve this sequence. States are `queued`, `running`, `completed`, `failed`, `cancelled`, `interrupted`; failure codes are the explicit snake-case ApplicationErrorKind mappings in Runtime's upload history codec, with unknown codes rejected. Completed rows require a package ID and full confirmed byte/part counts. No source paths, content or keys are added.
 
-At service startup, queued/running rows become interrupted without changing their saved totals. Account-scoped reads retain the latest 256 rows plus the complete boundary batch (up to 128 members); omitted older rows remain stored. There is no automatic resend or old-page browser. Runtime writes acknowledged admission/start/terminal summaries outside UI and network reactors; samples remain in memory. See [ADR 0029](adr/0029-durable-upload-history.md) for publication ambiguity, local privacy and legacy-history limits.
+At service startup, legacy queued/running summaries become interrupted without changing their saved totals. Valid executable/pending recovery records take precedence during current history hydration and supply supported restart controls. Account-scoped reads retain the latest 256 rows plus the complete boundary batch (up to 128 members); omitted older rows remain stored. There is no automatic resend or old-page browser. Runtime writes acknowledged admission/start/terminal summaries outside UI and network reactors; samples remain in memory. See [ADR 0029](adr/0029-durable-upload-history.md) for publication ambiguity, local privacy and legacy-history limits.
 
 
-## Durable encrypted transfer ledger (schema 17, integration in progress)
+## Durable encrypted transfer ledger (schema 17)
 
 Migration 17 is additive. Databases at versions 0–16 automatically reach read/write 17 through the existing ordered, verified transactions. Existing schema-16 upload receipts remain unchanged: they do not contain source/key/part recovery context and must not be promoted into resumable jobs. A failed migration leaves the prior version and original rows intact; restart retries the missing step. Readers supporting only schema 16 reject schema 17, and newer unknown schemas remain intact.
 
-`vault_transfer_jobs` owns account-scoped stable task and package identities, direction, immutable versioned recovery context, persisted control state and an execution generation. Context version 1 is bounded to 2 MiB; raw file/master keys and sessions are forbidden. The runtime context and part reservation codecs are specified in [recovery records](VAULT_TRANSFER_RECOVERY.md); production execution wiring is not yet complete. `vault_transfer_parts` stores immutable, bounded part identity reservations and optional immutable verification receipts. These bytes are interpreted by the runtime's independently versioned codecs, not Rust layout or SQL. Reservations precede encryption; receipts follow authenticated remote verification or fsynced local writes. This storage layer does not itself authenticate cryptographic receipts.
+`vault_transfer_jobs` owns account-scoped stable task and package identities, direction, immutable versioned recovery context, persisted control state and an execution generation. Context version 1 is bounded to 2 MiB; raw file/master keys and sessions are forbidden. The runtime context and part reservation codecs are specified in [recovery records](VAULT_TRANSFER_RECOVERY.md) and are used by the connected DesktopVault execution path. `vault_transfer_parts` stores immutable, bounded part identity reservations and optional immutable verification receipts. These bytes are interpreted by the runtime's independently versioned codecs, not Rust layout or SQL. Reservations precede encryption; receipts follow authenticated remote verification or fsynced local writes. This storage layer does not itself authenticate cryptographic receipts.
 
 State transitions compare account, task, generation and expected state. Claiming queued work increments its execution generation. Pause/cancel intent is committed before signalling the worker. A worker can receipt an in-flight success while pausing/cancelling, but cannot overwrite control intent with completion. After stop acknowledgement or a new execution generation, late receipts are rejected. Retryable failures require an explicit retry; blocked failures cannot be resumed blindly. Cold-start recovery changes running→queued, pausing→paused and cancelling→cancelled, incrementing generations; this runs before any new execution owner, never on ordinary navigation. Queued recovery still requires runtime source/key/remote validation and ambiguous-publication reconciliation.
 
 Critical ledger transactions use `synchronous=FULL` and `fullfsync=ON`, restoring the connection's prior policy afterward. In WAL mode FULL commits add the durability sync that NORMAL omits; fullfsync requests the stronger macOS sync where supported. See [SQLite synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous) and [fullfsync](https://www.sqlite.org/pragma.html#pragma_fullfsync). Actual storage hardware must honor synchronization; tests verify policy, rollback and file reopen, not physical power-loss qualification. Account/state/id keyset pages use `vault_transfer_jobs_schedule`, verified with the actual filtered deep-cursor query plan, and return at most 256 identities per page. Part pages are also bounded to 256.
 
-## Manifest publication outbox (schema 18, integration in progress)
+## Manifest publication outbox (schema 18)
 
 Migration 18 adds `vault_manifest_outbox` without rewriting schema-17 jobs or part receipts. Supported databases 0–17 automatically reach read/write 18 through ordered transactions; a failed step retains its prior version and existing rows. Readers supporting only earlier schemas reject version 18; unknown newer versions are never reset. The recovery context and part codecs remain version 1 with unchanged meanings.
 

@@ -51,7 +51,8 @@ if ($architecture -cne 'x86_64') {
 $package_name = "teleark-$artifact_label-windows-$architecture"
 $dist_dir = [System.IO.Path]::GetFullPath($dist_dir)
 $staging_dir = [System.IO.Path]::GetFullPath((Join-Path $dist_dir $package_name))
-if (-not $staging_dir.StartsWith("$dist_dir$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::OrdinalIgnoreCase)) {
+$dist_prefix = $dist_dir.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+if (-not $staging_dir.StartsWith($dist_prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'Staging directory must be within the requested destination directory.'
 }
 $zip_path = Join-Path $dist_dir "$package_name.zip"

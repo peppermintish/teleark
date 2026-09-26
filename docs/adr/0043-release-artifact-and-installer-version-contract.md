@@ -2,6 +2,8 @@
 
 Status: Partially superseded by [ADR 0044](0044-single-workflow-native-release-matrix.md). The version and installer downgrade contracts remain in force; the workflow, target matrix and asset count below describe the 0.4.5 release.
 
+Windows installer ownership is subsequently defined by [ADR 0047](0047-windows-msi-and-distribution-build-inputs.md) and [ADR 0052](0052-visible-windows-exe-installer.md). [ADR 0055](0055-stable-macos-signing-identity.md) replaces the unsigned macOS policy with persistent self-signing; Apple notarization remains unavailable.
+
 ## Decision
 
 The release workflow builds one native desktop target per supported platform: `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, and `x86_64-unknown-linux-gnu`. Every platform must produce a directly runnable executable, a portable archive and a native installer. Missing outputs fail the matrix job; publication copies an exact nine-file manifest rather than whatever happens to be present. Checksums and legal files accompany the assets. Manual dispatch uploads artifacts without publishing a GitHub release. Tagged publication refuses to replace an existing release's assets.

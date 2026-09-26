@@ -1,4 +1,4 @@
-; EXE setup wizard restored from the 2026-09-21 Inno installer.
+; Visible setup wizard around the private, transactional MSI payload.
 ; Windows Installer remains the sole owner of installed files and registration.
 ; All defines are supplied by build-windows-exe.ps1; no stale version fallback.
 [Setup]

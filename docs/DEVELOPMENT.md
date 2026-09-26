@@ -16,6 +16,7 @@ Choose local validation by the changed behavior; CI remains the full workspace g
 | Change | Local validation |
 | --- | --- |
 | Documentation only | Review the diff, local links/anchors and stale references; `git diff --check`. No Rust rebuild unless executable examples or build instructions changed. |
+| Build/package scripts or workflows | Syntax checks and the affected synthetic script regressions; `actionlint` for workflow edits. Native installer/signing tests require the matching host and a disposable environment. See [script guide](../scripts/README.md). |
 | One module | `cargo fmt --all --check`; affected crate tests and strict Clippy with `--all-targets --locked`. Include callers when the API changes. |
 | UI / messages | Affected GUI tests and non-visual i18n/catalog checks. Interface testing and layout reviews use English (`en-US`) only, covering both 900×600 and actual full-screen mode. Visual previews and layout reviews use light mode only; existing automated dark-theme coverage may remain. Default-size or large-window previews do not replace full-screen checks. For long operations, include slow/blocked, phase-change and terminal feedback. |
 | Storage / crypto / manifests | Supported-version and skipped-upgrade fixtures; preserved data/keys, restart/rollback, insufficient-space and visible migration-phase tests; affected canonical-vector, tamper and recovery tests. See [migration safety](SECURITY.md#validation-and-migration-safety). |
@@ -28,6 +29,9 @@ Full source gates (explicit Core/i18n checks also run in CI):
 pwsh ./scripts/check-line-endings.ps1
 pwsh ./scripts/test-line-endings.ps1
 pwsh ./scripts/test-distribution-credentials.ps1
+pwsh ./scripts/test-release-checksums.ps1
+pwsh ./scripts/test-release-version.ps1
+python3 scripts/test-build-local.py
 bash scripts/test-macos-libraries.sh
 bash scripts/test-linux-payloads.sh
 cargo fmt --all --check
@@ -40,9 +44,23 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo deny check
 ```
 
-Long fuzzing, million-row benchmarks and credentialed Telegram tests run in separate protected/manual workflows. GPUI dependency provenance is recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
+Scheduled parser fuzzing runs in `fuzz.yml`. Million-row benchmarks and credentialed Telegram qualification are manual work; the repository does not provide automated workflows for those checks. GPUI dependency provenance is recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
 
 GPUI Kit's development-only `test-support` feature provides real event/focus regression tests. Its reviewed test-only graph adds `convert_case 0.11.0` (MIT), plus `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These helpers are excluded from release features.
+
+## Platform prerequisites
+
+- **macOS:** Rust via rustup and Apple Command Line Tools (`xcode-select --install`). Packaging additionally requires OpenSSL 3 and both Rust architecture targets.
+- **Windows:** the MSVC Rust toolchain, Visual Studio Build Tools with Desktop development with C++, and the Windows SDK. Packaging adds the pinned Inno Setup and WiX tools described in [Packaging](PACKAGING.md#windows).
+- **Linux:** the tested build baseline is Ubuntu 22.04. Install the development libraries used by CI:
+
+```sh
+sudo apt-get install -y --no-install-recommends \
+  pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+  libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+  libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
+  libfontconfig1-dev libfreetype6-dev libssl-dev
+```
 
 ## Native macOS build
 
@@ -58,7 +76,29 @@ Source builds use their own Telegram API ID/Hash configured from the login/setti
 
 ## Local development environment
 
-Use `.env.local` for private development environment values. To initialize a new checkout, copy `.env.example` to `.env.local` only if the local file does not already exist. Restrict private local environment files to the current user: mode `0600` on Unix-like systems, or equivalent user-restricted file ACLs on Windows. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
+Use `.env.local` for private development environment values. Initialize it without overwriting existing values:
+
+```sh
+# macOS/Linux/Git Bash
+if [ ! -e .env.local ]; then
+  (umask 077; set -C; cat .env.example > .env.local)
+fi
+chmod 600 .env.local
+```
+
+```powershell
+# Windows: create only when absent, then restrict the ACL before adding secrets
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+$acl = Get-Acl .env.local
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity, "FullControl", "Allow")
+$acl.SetAccessRule($rule)
+Set-Acl -LiteralPath .env.local -AclObject $acl
+```
+
+Keep private local files accessible only to the current user. Fill values locally without putting them in shell command arguments or history. The root `.gitignore` excludes `.env` and `.env.*`, with `.env.example` explicitly allowed. Do not force-add local files; ignore rules do not untrack previously committed files.
 
 Neither Cargo nor the application automatically loads dotenv files. A plain `cargo run -r` does not read `.env.example` or `.env.local`. `.env.example` is a template only: replace its sample values in `.env.local`, and never load the example for builds or packaging. `scripts/build-local.sh` and `scripts/build-local.ps1` enforce this local packaging workflow. For an authorized development run using the existing build-time Telegram credential variables, load the trusted, locally maintained file in a subshell from the repository root:
 
@@ -78,7 +118,7 @@ Or from Windows PowerShell, launch the helper in a separate PowerShell process:
 pwsh -NoProfile -File .\scripts\run.ps1
 ```
 
-These invocations keep loaded variables in the Bash subshell or child PowerShell process and their descendants. Calling `scripts/run.ps1` or `scripts/build-local.ps1` directly from an existing PowerShell session changes that session's process environment; use the separate process shown above to keep those changes scoped. Variables are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.
+These invocations keep loaded variables in the Bash subshell or child PowerShell process and their descendants. The PowerShell helper also restores environment values and the working directory when called directly. It accepts simple `NAME=value` assignments with optional matching quotes; it does not evaluate shell expressions. Use LF line endings for files shared with Bash. Variables are read at compile time by `option_env!`; changing them requires rebuilding through Cargo, not merely launching an already built binary. Supply the variables on every Cargo build/run that should embed them: a later plain `cargo run -r` uses its current environment and may rebuild without the defaults. The local packaging helper requires both values; personal credentials saved in the app still override the embedded pair. Do not print the file, dump the environment or enable shell tracing. Shell sourcing executes file contents, so source only your trusted local configuration. Use synthetic fixtures for ordinary tests and `--preview-ui` reviews; real startup can open existing state and resume eligible work.
 
 The embedded pair identifies the application and is extractable from the resulting binary. This workflow keeps development values out of Git and logs; it does not prevent others from reusing identifiers in a distributed build. Session credentials and Vault keys have separate protections described in [Security](SECURITY.md#local-data-api-configuration-and-logs).
 
@@ -101,7 +141,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `local-availability`, `batch-groups`, `batch-large`, `batch-deleted`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
+| `--preview-state` | `locked-transfers`, `quit-confirm`, `quit-pausing`, `quit-failed`, `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `local-availability`, `batch-groups`, `batch-large`, `batch-deleted`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
 | `--locale` | `en-US` only for interface tests and previews |
 | `--window-size` | 900×600 is required; also review actual native full-screen mode. Other window sizes are supplemental |
 
@@ -121,9 +161,26 @@ Channel sync fixtures show an active difference or a server wait with queue/timi
 
 Inspect actual affected windows, including keyboard/focus, wrapping, scrolling and loading/error states. The full release matrix also covers login/returning sessions, storage setup/Files/Raw, unlock, transfer and Library bulk actions/details, batch membership, sidebar states, file picker/removal, local-file states and Settings/About. Process survival is not visual verification. Never capture real QR tokens or recovery secrets. CUA/AppKit inspection requires an unlocked Mac.
 
+`--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.
+
+`--screen=transfers --preview-state=native-failure --locale=en-US` shows a synthetic 60-second native part timeout, its connection slot and the right-hand failure inspector. Use it at 900×600 and actual native full-screen in light mode.
+
+`--screen=transfers --preview-state=transfer-rate-limited --locale=en-US` shows a synthetic Telegram cooldown with a long ETA at 900×600 and actual native full-screen. `--preview-state=managed-key-loading` shows the key activity button in the bottom status bar; open it to check the lateral phase inspector and its independent scroll area.
+
+### Application PIN preview
+
+`--preview-ui --preview-state=locked --locale=en-US --window-size=900x600` shows
+the whole-application PIN surface (`--preview-state=locked-transfers` adds a
+synthetic active upload for lifecycle prompt checks) while background projections remain
+available. `--preview-state=unlock` continues to exercise file-key setup/recovery,
+which is independent of the application PIN. Review the locked proxy editor and
+account-switch prompt at 900×600 and native full-screen, then review General →
+Application lock and Network proxy → Sync activity and logs. Sync footer clicks
+must not open an inspector. Previews never save a PIN to real application state.
+
 ## CI and releases
 
-[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs LF checks, the legal baseline and the full locked Linux source gates. Pull requests and ordinary manual runs then run Windows and macOS tests. A matching `vX.Y.Z` tag instead resolves the Cargo version, builds Windows x64, universal macOS and Linux x64 packages, and publishes one exact nine-file release manifest after every package verifies. Branch pushes do not trigger a run: pushing a branch and its version tag together starts only the tag run, which validates the published commit before packaging. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
+[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs script regressions, LF checks, the legal baseline and the full locked Linux source gates. Every trigger then runs Windows and macOS tests. A matching `vX.Y.Z` tag also resolves the Cargo version and, after native tests pass, builds Windows x64, universal macOS and Linux x64 packages, and publishes one exact nine-file release manifest after every package verifies. Branch pushes do not trigger a run: pushing a branch and its version tag together starts only the tag run, which validates the published commit before packaging. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
 
 Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. The macOS app and standalone executable use the persistent self-signed identity; the installer remains unsigned, and Apple notarization is not provided. A tag alone is not evidence of successful signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
 
@@ -139,48 +196,12 @@ These short local campaigns do not substitute for the scheduled ten-minute campa
 
 Protected system, security and platform qualification remains tracked in [implementation status](IMPLEMENTATION_STATUS.md#next-actions-and-release-gates).
 
-## Documentation recovery checkpoints
-
-The v0.4.0 consolidation preserves the complete prior document tree at `checkpoint/pre-doc-consolidation-20260907` and the compact result at `checkpoint/post-doc-consolidation-20260907`. To inspect an old file without changing the worktree:
-
-```bash
-git show checkpoint/pre-doc-consolidation-20260907:docs/UI_REVIEW.md
-```
-
-To restore only the documentation after reviewing local changes:
-
-```bash
-git restore --source=checkpoint/pre-doc-consolidation-20260907 -- AGENTS.md docs
-```
-
-`checkpoint/pre-gpui-kit-redesign-20260907` also preserves the pre-rewrite repository. Restoring source does not downgrade an already migrated user database; never replace or remove user data for a code rollback.
-
 ## Proxy validation
 
 `cargo test -p teleark-telegram --locked network::tests` runs actual loopback socket routing and negative direct-destination traps, including MTProto bootstrap traffic and environment bypass variables. Runtime owner tests check shutdown barriers, restart persistence and probe cancellation/admission; GUI network policy tests block a real framework HTTP request and guard alternate network exits. Run full workspace gates when changing this shared route contract. No real session or external proxy is needed.
 
 Use `--preview-ui --preview-state=proxy-failed --locale=en-US --window-size=900x600` for an isolated persistent-error settings preview, or `proxy-testing`/`proxy-ready` for waiting/configured states. These are synthetic presentation states and do not dial a proxy or measure latency. A successful real settings test means a TCP tunnel to a Telegram DC was accepted, not authenticated API health.
 
-
-`--screen=transfers --preview-state=upload-history --locale=en-US` shows an expanded restored upload batch with completed/interrupted members, saved totals, omitted-history count and interruption guidance. No real history or account is accessed.
-
-`--screen=transfers --preview-state=native-failure --locale=en-US` shows a synthetic 60-second native part timeout, its connection slot and the right-hand failure inspector. Use it at 900×600 and actual native full-screen in light mode.
-
-`--screen=transfers --preview-state=transfer-rate-limited --locale=en-US` shows a synthetic Telegram cooldown with a long ETA at 900×600 and actual native full-screen. `--preview-state=managed-key-loading` shows the key activity button in the bottom status bar; open it to check the lateral phase inspector and its independent scroll area.
-
-
 ## Task completion checkpoints
 
 After completing and validating each repository task, commit only its changes when present and create an annotated Git tag (for example `fix/YYYYMMDD-short-description`). Task checkpoint tags do not change the application version. A requested release tag uses `vX.Y.Z`, matches synchronized application metadata under the [release contract](PACKAGING.md), and requires the release quality gates above. Preserve unrelated pending work; do not push commits or tags without a request. Use English/light-only previews at 900×600 and actual native full-screen for visual changes.
-
-
-### Application PIN preview
-
-`--preview-ui --preview-state=locked --locale=en-US --window-size=900x600` shows
-the whole-application PIN surface (`--preview-state=locked-transfers` adds a
-synthetic active upload for lifecycle prompt checks) while background projections remain
-available. `--preview-state=unlock` continues to exercise file-key setup/recovery,
-which is independent of the application PIN. Review the locked proxy editor and
-account-switch prompt at 900×600 and native full-screen, then review General →
-Application lock and Network proxy → Sync activity and logs. Sync footer clicks
-must not open an inspector. Previews never save a PIN to real application state.

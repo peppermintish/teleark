@@ -13,6 +13,8 @@ appimage="$(pwd)/dist/${base}.AppImage"
 tarball="$(pwd)/dist/${base}.tar.gz"
 deb="$(pwd)/dist/teleark_${label}_${deb_architecture}.deb"
 for path in "$appimage" "$tarball" "$deb" dist/SHA256SUMS; do test -s "$path"; done
+pwsh -NoProfile -File scripts/check-release-checksums.ps1 -Directory dist \
+  "${base}.AppImage" "${base}.tar.gz" "teleark_${label}_${deb_architecture}.deb"
 file "$appimage" | grep -F 'ELF 64-bit' >/dev/null
 test "$(dpkg-deb -f "$deb" Package)" = teleark
 test "$(dpkg-deb -f "$deb" Architecture)" = "$deb_architecture"
@@ -24,12 +26,19 @@ if grep -Eiq '(^|[, ])[^, ]*(-dev|pkg-config|cmake|clang)([, (]|$)' <<< "$depend
   exit 1
 fi
 
-stage="$(mktemp -d)"
 if dpkg-query -W -f='${Status}' teleark 2>/dev/null | grep -Fxq 'install ok installed'; then
   echo 'TeleArk is already installed on this release runner.' >&2
   exit 1
 fi
-trap 'sudo dpkg -r teleark >/dev/null 2>&1 || true; rm -rf "$stage"' EXIT
+stage="$(mktemp -d)"
+install_started=false
+cleanup() {
+  if "$install_started"; then
+    sudo dpkg -r teleark >/dev/null 2>&1 || true
+  fi
+  rm -rf "$stage"
+}
+trap cleanup EXIT
 dpkg-deb -e "$deb" "$stage/control"
 dpkg-deb -x "$deb" "$stage/deb-payload"
 test -x "$stage/control/preinst"
@@ -55,8 +64,7 @@ if grep -Fq 'not found' <<< "$linked_libraries"; then
   exit 1
 fi
 
-(cd dist && sha256sum -c SHA256SUMS)
-
+install_started=true
 sudo apt-get install -y "$deb"
 test -x /usr/bin/teleark
 cmp /usr/bin/teleark "$stage/deb-payload/usr/bin/teleark"

@@ -1,6 +1,6 @@
-# ADR 0035: Vault source metadata and content validation
+# ADR 0035a: Vault source metadata and content validation
 
-Status: Accepted.
+Status: Accepted. Renumbered from the duplicate ADR 0035 identifier; the decision is unchanged.
 
 ## Problem
 

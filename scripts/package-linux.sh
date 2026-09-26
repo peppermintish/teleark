@@ -22,19 +22,18 @@ repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 binary="${paths[0]:-${repository_root}/target/release/teleark}"
 dist_dir="${paths[1]:-${repository_root}/dist}"
 
-# Determine version
 if (( ${#paths[@]} >= 3 )); then
   version="${paths[2]}"
 else
-  version="$(grep -m1 '^version = ' "${repository_root}/Cargo.toml" | cut -d '"' -f 2 || echo 'manual')"
+  version="$(grep -m1 '^version = ' "${repository_root}/Cargo.toml" | cut -d '"' -f 2)"
 fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Installer version must be three numeric components: $version" >&2; exit 2; }
 artifact_label="${paths[3]:-$version}"
 [[ "$artifact_label" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "Invalid artifact label: $artifact_label" >&2; exit 2; }
-target="${paths[4]:-}"
+target="${paths[4]:-${CARGO_BUILD_TARGET:-x86_64-unknown-linux-gnu}}"
 architecture="$(uname -m)"
 case "$architecture:$target" in
-  x86_64:|x86_64:x86_64-unknown-linux-gnu)
+  x86_64:x86_64-unknown-linux-gnu)
     deb_architecture=amd64 ;;
   *)
     echo "Unsupported Linux runner/target combination: $architecture:$target" >&2
@@ -59,6 +58,7 @@ test -f "$binary"
 command -v cargo-deb >/dev/null 2>&1 || { echo 'cargo-deb is required to build the release installer.' >&2; exit 1; }
 linuxdeploy="${LINUXDEPLOY:-linuxdeploy}"
 command -v "$linuxdeploy" >/dev/null 2>&1 || { echo 'linuxdeploy is required to bundle the portable Linux release.' >&2; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required to verify the Linux release outputs.' >&2; exit 1; }
 
 mkdir -p "$dist_dir"
 dist_dir="$(cd "$dist_dir" && pwd)"
@@ -103,32 +103,25 @@ test -s "$appimage_path"
 chmod +x "$appimage_path"
 echo "Created standalone AppImage: $appimage_path"
 
-# Create portable tarball
 tar -C "$stage_root" -czf "$tarball_path" "$package_name"
 echo "Created portable archive: $tarball_path"
 
-# The preinst receives the package's real control version from dpkg. Cargo-deb
-# resolves target/release assets to the selected target directory itself.
-if [[ -n "$target" ]]; then
-  cargo deb -p teleark-gui --no-build --target "$target" --output "$deb_path"
-else
-  cargo deb -p teleark-gui --no-build --output "$deb_path"
-fi
+# Use the exact input executable for Debian too. Cargo-deb resolves the manifest's
+# target/release asset under CARGO_TARGET_DIR; leaving it at the normal build
+# directory could silently package a different, stale executable.
+deb_target_dir="$stage_root/cargo-target"
+mkdir -p "$deb_target_dir/$target/release"
+cp "$binary" "$deb_target_dir/$target/release/teleark"
+CARGO_TARGET_DIR="$deb_target_dir" cargo deb -p teleark-gui --no-build --locked \
+  --manifest-path "$repository_root/crates/teleark-gui/Cargo.toml" \
+  --target "$target" --deb-version "$version" --output "$deb_path"
 test -s "$deb_path"
 echo "Created Debian package with downgrade protection: $deb_path"
 
-# Generate SHA256 checksums
 (
   cd "$dist_dir"
-  rm -f SHA256SUMS
-  for file in "${package_name}.AppImage" "${package_name}.tar.gz" "teleark_${artifact_label}_${deb_architecture}.deb"; do
-    if [ -f "$file" ]; then
-      if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" >> SHA256SUMS
-      elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file" >> SHA256SUMS
-      fi
-    fi
-  done
+  sha256sum "${package_name}.AppImage" "${package_name}.tar.gz" \
+    "teleark_${artifact_label}_${deb_architecture}.deb" > "$stage_root/SHA256SUMS"
+  mv "$stage_root/SHA256SUMS" SHA256SUMS
 )
 echo "Generated checksums in ${dist_dir}/SHA256SUMS"

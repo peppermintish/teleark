@@ -29,7 +29,7 @@ selecting TeleArk's platform application-data directory. The runtime derives
 | `download_speed_limit_bytes_per_second` | unsigned 64-bit integer; `0` means unlimited | `0` |
 | `download_throughput_strategy` | retained legacy: `balanced` or `max_throughput`; inactive | `balanced` |
 | `transfer_soft_limit_policy` | retained legacy: `respect`, `adaptive_override`, or `ignore`; inactive | `adaptive_override` |
-| `manual_transfer_v1` | nine comma-separated integers, order and bounds below | `3,10,2,2,4,3,8,2,4` |
+| `manual_transfer_v1` | nine comma-separated integers, order and bounds below | `2,16,8,2,4,2,16,8,4` |
 | `lock_vault_when_hidden` | retired and ignored | none |
 | `index_batch_size` | retained legacy value: `200`, `500`, or `1000`; inactive | `1000` |
 | `notify_download_completed` | boolean | `true` |
@@ -74,8 +74,10 @@ than copied into per-task recovery records.
 The four retained `upload_*` keys remain parseable so existing version-1
 preferences do not break, but the connected private-channel writer does not use
 them. Vault uploads currently require encryption of content, original name, and
-manifest metadata and use the runtime's conservative 60 MiB plaintext-part
-ceiling. Those protections are presented only in the TeleArk upload
+manifest metadata and use the runtime's 1.9 GiB encoded-container ceiling,
+including headers and authentication tags. The resulting plaintext capacity and
+512 KiB encryption-frame geometry are defined in [Crypto](CRYPTO_FORMAT.md).
+Those protections are presented only in the TeleArk upload
 flow; Settings no longer exposes inactive controls that would imply otherwise.
 
 The two legacy profile/advisory keys are retained and validated for compatibility,
@@ -93,18 +95,19 @@ move files that are open by live workers.
 
 | Parameter | Default | Inclusive bounds |
 | --- | ---: | ---: |
-| Upload files | 3 | 1–8 |
-| Concurrent 512 KiB upload parts per file | 10 | 2–64 |
-| Shared upload MTProto connections | 2 | 1–8 |
+| Upload files | 2 | 1–8 |
+| Concurrent 128 KiB upload requests per file | 16 | 2–64 |
+| Shared upload MTProto connections | 8 | 1–8 |
 | Ready ciphertext queue blocks per file | 2 | 1–16 |
 | Upload part attempts, including the first | 4 | 1–10 |
-| Download files, shared by native/Vault owners | 3 | 1–8 |
-| Concurrent download logical parts per file | 8 | 1–64 |
-| Shared download MTProto connections | 2 | 1–8 |
+| Download files, shared by native/Vault owners | 2 | 1–8 |
+| Concurrent download logical parts per file | 16 | 1–64 |
+| Shared download MTProto connections | 8 | 1–8 |
 | Download part attempts, including the first | 4 | 1–10 |
 
-Missing tuples automatically adopt these defaults, including skipped upgrades;
-existing keys and encrypted bytes are not reinterpreted. All nine values validate
+Missing tuples adopt these defaults, including skipped upgrades. Existing tuples
+retain their saved values; upgrading does not replace earlier defaults that were
+already persisted. All nine values validate
 and save transactionally. Malformed tuples remain intact and fail loading. A new
 incompatible tuple needs a new versioned key and migration. Running part pipelines
 capture their settings at admission; a changed download file limit wakes pending
@@ -211,7 +214,5 @@ random key. It contains no PIN or file encryption key. See
 Current readers/writers support only envelope v1. Malformed/newer records are
 preserved and keep the access gate closed. Settings saves do not rewrite the PIN;
 PIN changes use a separate serialized compare-and-replace operation.
-
-Indexing is automatic. The legacy `index_batch_size` value remains readable for compatibility, but does not control indexing. Runtime scanning uses a bounded automatic batch; Settings exposes no indexing controls. Download notifications are ordinary General settings.
 
 Credential-reference proxy codec 2 is documented in [Data model](DATA_MODEL.md#credential-storage-schema-23). The Keychain preference is owned separately from ordinary desktop preferences so unrelated settings saves cannot change credential storage.

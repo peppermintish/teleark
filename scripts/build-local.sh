@@ -26,9 +26,12 @@ if [[ ! -f .env.local ]]; then
   echo "Missing .env.local; copy .env.example and replace its sample values locally." >&2
   exit 1
 fi
+# Restrict the trusted local file before reading any private values.
+chmod 600 .env.local
 # Do not let inherited values fill gaps in the local configuration.
 unset TELEARK_DISTRIBUTION_TELEGRAM_API_ID TELEARK_DISTRIBUTION_TELEGRAM_API_HASH
 set -a
+# shellcheck source=/dev/null
 . ./.env.local
 set +a
 api_id="${TELEARK_DISTRIBUTION_TELEGRAM_API_ID:-}"

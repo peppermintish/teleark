@@ -16,7 +16,7 @@ resolver = "2"
 version = "0.5.8"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/teleark/teleark"
+repository = "https://github.com/peppermintish/teleark"
 rust-version = "1.88"
 
 [workspace.dependencies]

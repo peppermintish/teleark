@@ -3,7 +3,7 @@ name = "teleark-storage"
 version = "0.5.8"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/teleark/teleark"
+repository.workspace = true
 rust-version = "1.88"
 description = "SQLite persistence adapter for TeleArk"
 

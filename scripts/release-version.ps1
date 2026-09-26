@@ -8,7 +8,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$metadata_json = cargo metadata --format-version 1 --no-deps --locked
+$manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml'
+$metadata_json = cargo metadata --manifest-path $manifest --format-version 1 --no-deps --locked
 if ($LASTEXITCODE -ne 0) {
     throw 'Cargo metadata failed while resolving the release version.'
 }
@@ -20,6 +21,11 @@ if ($packages.Count -ne 1) {
 $version = [string]$packages[0].version
 if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
     throw "Release installers require a three-component numeric version; Cargo has '$version'."
+}
+
+$components = $version.Split('.')
+if ([long]$components[0] -gt 255 -or [long]$components[1] -gt 255 -or [long]$components[2] -gt 65535) {
+    throw 'Release version components must fit the Windows Installer limit: 255.255.65535.'
 }
 
 if ($RefType -eq 'tag' -and $RefName -cne "v$version") {

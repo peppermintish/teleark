@@ -2,14 +2,14 @@
 
 Status: DesktopVault uploads and downloads persist recovery context, support mid-file pause/cancel/retry, and dispatch eligible work after restart and unlock. Native cancellation retains a durable cleanup obligation. Legacy summaries without recovery context remain viewable but cannot be resumed. The evidence and limits below describe synthetic transport tests and native macOS UI review; no live Telegram or other-platform qualification is implied.
 
-## Current streaming recovery (2026-09-15)
+## Current streaming recovery
 
 [ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md) supersedes
 older descriptions of new ciphertext spools, 60 MiB container targets and retiring
 the whole package merely because temporary Telegram parts expired. Encrypted
-containers now have a 1.9 GiB encoded ceiling. Upload and download stream 512 KiB
-blocks through bounded memory; authenticated plaintext alone goes to the download
-partial file. Legacy ciphertext spools remain readable compatibility inputs, never
+containers now have a 1.9 GiB encoded ceiling. A full encoded crypto frame is 512 KiB; the Telegram upload adapter sends
+128 KiB RPC requests. Both directions stream through bounded memory; only
+authenticated plaintext goes to the download partial file. Legacy ciphertext spools remain readable compatibility inputs, never
 new outputs. Full source and per-container hashes share one inspection pass, and
 encryption rechecks source content on its subsequent pass.
 
@@ -37,8 +37,8 @@ RPC attempt window is a client policy, not guaranteed Telegram retention.
 
 ## Context version 2 and supported read/write matrix
 
-SQLite remains 22 with the existing automatic 0–21 migration chain; this change
-adds no tables. Executable contexts read **1 and 2**. Version 2 uses the same
+SQLite reads/writes schema 23 with automatic upgrades from 0–22. Context
+versions are independent of the database schema. Executable contexts read **1 and 2**. Version 2 uses the same
 `TARKVR01` magic, a version u32 of 2, and inserts a little-endian u64
 `container_plaintext_limit` immediately after logical size, before the filename.
 The fixed header is therefore 151 bytes. The checksum covers that field as well.
@@ -92,7 +92,7 @@ whole digest before restoring encryption work; even same-size content changes wi
 a restored modification time are rejected before nonce reuse. The v1 context and
 pending-source revision bytes retain their meanings; v2 adds only geometry as specified above. Existing saved contexts and reservations remain
 readable without conversion. See
-[ADR 0035](adr/0035-vault-source-metadata-validation.md).
+[ADR 0035a](adr/0035a-vault-source-metadata-validation.md).
 
 Download fields after the destination path: positive manifest message ID i64, manifest-envelope BLAKE3-256, complete plaintext BLAKE3-256. The runtime must authenticate the exact manifest, validate its package/part layout and key scope, and revalidate any retained local extents before skipping work. The persisted absolute destination must be honored with non-overwriting publication.
 
@@ -155,9 +155,9 @@ completion follows manifest verification and local inventory persistence.
 
 Before DesktopVault creates any execution owners, Storage recovers interrupted ledger jobs across all retained accounts in one bounded-memory SQL operation: running becomes queued, pausing becomes paused and cancelling becomes cancelled, with a new execution generation. Unknown context versions remain untouched. Legacy history still has no fabricated recovery keys or paths.
 
-After a successful active-key unlock, or history restoration when already unlocked, the desktop retains a background recovery job. It scans queued upload IDs in pages of32, checks the active Telegram account, skips paused/cancelled/failed jobs and continues after individual failures. Preview mode never schedules this work. Login/session generations guard UI callbacks. No user-control interface is delivered merely by this dispatch path.
+After a successful active-key unlock, or history restoration when already unlocked, the desktop retains a background recovery job. It scans queued upload IDs in pages of 32, checks the active Telegram account, skips paused/cancelled/failed jobs and continues after individual failures. Preview mode never schedules this work. Login/session generations guard UI callbacks. Explicit per-task controls use the independent control owner described below.
 
-`submit_resume_upload` accepts an explicit paused/retryable/queued upload and rejects other states. It verifies the wrapped key and source's canonical path, filesystem identity, size and whole digest, then reuses the original package, task, key and context generation. Manifest creation time, key generations and vault identity also come from the original context. An early validation failure is persisted and made visible instead of leaving the task queued indefinitely. Resumed activity is live, rather than replayed historical telemetry. Missing source/access/key/capacity conditions remain retryable; changed content and invalid contexts are blocked.
+`submit_resume_upload` accepts an explicit paused/retryable/queued upload and rejects other states. It verifies the wrapped key and source's canonical path, filesystem identity, size and whole digest, and preserves admitted task/source scope. Verified published containers retain their identities; an unpublished container receives a fresh encryption identity if immutable ciphertext is unavailable. Unsealed manifest commitments require a fresh package/File Key as described below. Manifest creation time, key generations and vault identity also come from the original context. An early validation failure is persisted and made visible instead of leaving the task queued indefinitely. Resumed activity is live, rather than replayed historical telemetry. Missing source/access/key/capacity conditions remain retryable; changed content and invalid contexts are blocked.
 
 Synthetic composition tests exercise the real cold-start constructor, multiple queued failures without starvation, preservation of paused jobs, account rejection and historical-key admission gates. The later service-composition tests additionally cover successful uploads/downloads, blocked transport and restart; the original tests alone establish only the listed cold-start and key gates.
 
@@ -175,13 +175,13 @@ The lost-ack restart test now reopens an empty part worker and completes the sav
 
 ## Download extents
 
-Actual encrypted downloads now admit a version-1 Download context before preparing the output. It binds the authenticated manifest envelope hash/message, wrapped key, whole plaintext hash and chosen absolute destination. Each authenticated part uses an immutable ledger extent reservation before fetching, then plaintext length/hash verification, partial-file write and `sync_all` before a receipt. Failures preserve the partial output. Destination allocation skips retained `.partial` files to avoid replacing failed-download data with a new task.
+Encrypted downloads admit a versioned Download context before preparing the output. It binds the authenticated manifest envelope hash/message, wrapped key, whole plaintext hash and chosen absolute destination. Each authenticated part uses an immutable ledger extent reservation before fetching, then plaintext length/hash verification, partial-file write and `sync_all` before a receipt. Failures preserve the partial output. Destination allocation skips retained `.partial` files to avoid replacing failed-download data with a new task.
 
 The extent identity is exactly 152 bytes: `TARKDE01` (8), codec version LE u32 (4), BLAKE3 of the encoded recovery context (32), part index LE u32 (4), plaintext offset and length LE u64 (8 each), plaintext BLAKE3 (32), encoded ciphertext BLAKE3 (32), remote message ID LE i64 (8), and part instance ID (16). The receipt is exactly 40 bytes: `TARKDR01` (8) followed by BLAKE3 of this identity (32). Its meaning is that the expected plaintext extent was verified, written and fsynced; it never authorizes skipping local verification after restart. The context digest also binds this receipt to the original authenticated manifest and destination.
 
 The download executor can reopen the same ledger/partial file under a new generation. It hashes every receipted extent before reuse and re-fetches corrupt or missing contents. It rejects unverified remote bytes, and a stop arriving during fetch prevents a new write. Whole-file verification and flush precede publication. If a previous attempt already published the final file but did not finish inventory persistence, reopening verifies its size and full hash, rechecks reused ranges, and permits idempotent finalization without another remote download. Conflicting existing output is preserved and rejected. Restart recovery rejects symbolic links and other non-regular final entries, even when the link target contains the expected bytes. A retained read handle supplies both full-file verification and reused ranges; the final path is checked before and after reads and again at completion. Unix checks bind that path to the same device/inode, so replacing it with an identical-byte file cannot earn completion. Other platforms currently compare available file metadata and still require stable-identity parity qualification. A pathname substitution during the initial open remains a separate hardening requirement; these checks do not make blocking filesystem reads cancellable.
 
-This executor is connected to new and explicitly resumed DesktopVault downloads. `submit_resume_download` accepts only paused, retryable or queued download records; it reuses the original task, package, manifest message/hash, wrapped key and destination. It validates package/context scope before queue mutation, fetches the saved manifest directly, verifies the envelope hash and authenticated content, and fences the new execution generation. A preflight failure becomes a durable retryable/blocked result without discarding existing output. Startup download projection and mixed queued dispatch are now connected as described below. Part-level storage tests do not prove successful end-to-end interruption. Crypto frame-boundary cancellation is described below. Final publication uses a sibling hard link to atomically reject existing destination entries, including dangling symlinks. The parent directory is synchronized before removing the partial name; cleanup failure preserves a recoverable extra name rather than invalidating the verified output. Filesystems that reject hard links fail without a rename fallback. Deterministic tests cover a destination created after preparation and a dangling destination link. Exclusive destination admission across native/encrypted workers, partial-file access/identity hardening, stop/finalize races, and live restart qualification remain required.
+This executor is connected to new and explicitly resumed DesktopVault downloads. `submit_resume_download` accepts only paused, retryable or queued download records; it reuses the original task, package, manifest message/hash, wrapped key and destination. It validates package/context scope before queue mutation, fetches the saved manifest directly, verifies the envelope hash and authenticated content, and fences the new execution generation. A preflight failure becomes a durable retryable/blocked result without discarding existing output. Startup download projection and mixed queued dispatch are now connected as described below. Part-level storage tests do not prove successful end-to-end interruption. Crypto frame-boundary cancellation is described below. Final publication uses a sibling hard link to atomically reject existing destination entries, including dangling symlinks. The parent directory is synchronized before removing the partial name; cleanup failure preserves a recoverable extra name rather than invalidating the verified output. Filesystems that reject hard links fail without a rename fallback. Deterministic tests cover a destination created after preparation and a dangling destination link. Shared destination admission and partial-file checks are described below. Remaining pathname-substitution, cross-platform identity, stop/finalize and live-account cases still require qualification.
 
 ## Locked history and mixed startup recovery
 
@@ -189,7 +189,7 @@ History restoration reads a bounded account-scoped download page without opening
 
 Readable saved downloads expose their original name, destination and durable state. Pending saved bytes/part geometry are unknown until local verification, so the UI shows unavailable progress values and a verification explanation rather than reporting a new 0% download. Completed ledger entries retain completed file-size progress. A damaged or unsupported context remains visible as an unavailable saved download with an explanation; the original record/files remain intact and no resume capability is fabricated. Upload history also validates its recovery context before advertising controls.
 
-After unlock/history readiness the retained GUI recovery job submits a mixed upload/download scan. It scans queued IDs in bounded pages, fences account revision, and continues after individual failures. Active keys permit uploads; historical-only sessions skip uploads while allowing downloads. Paused, cancelled, retryable and blocked jobs are never implicitly restarted. Failures from explicit stop requests do not inflate the failed-recovery count. The upload-only API remains available with its active-key admission policy.
+After unlock/history readiness the retained GUI recovery job submits a mixed upload/download scan. It scans queued IDs in bounded pages, fences account revision, and continues after individual failures. The desktop dispatches with its selected channel key. Lower-level compatibility APIs can admit historical-key downloads while rejecting historical-only upload sessions; simultaneous historical-key browsing is no longer a desktop promise under [ADR 0057](adr/0057-single-current-channel-key.md). Paused, cancelled, retryable and blocked jobs are never implicitly restarted. Failures from explicit stop requests do not inflate the failed-recovery count. The upload-only API remains available with its active-key admission policy.
 
 Recovery dispatch walks queued records in pages of 32 on its retained owner, rather than enqueueing every restored task into a fixed-capacity channel. History reads and rendering remain bounded; schema 22 prioritizes active/recoverable work before the 256-row visible cap and exposes omitted counts. Deeper direction/id pages are available in Storage; the GUI does not currently provide an unlimited-history browser. Guidance and English/light compact/full-screen review are described below.
 
@@ -197,7 +197,7 @@ Recovery dispatch walks queued records in pages of 32 on its retained owner, rat
 
 `encrypt_part_cancellable` and `decrypt_part_cancellable` accept a cancellation probe and preserve the existing byte formats. They check before initial work, before each bounded frame, after reads and before output writes. Cancellation returns a structured `CryptoError::Cancelled`, never a successful integrity summary. The original non-cancellable entry points remain wrappers. A frame already inside a synchronous read/write or AEAD operation finishes before the next check; this is not preemptive cancellation of a kernel call.
 
-The actual encrypted upload pipeline copies the task token into each encryption context, and encrypted downloads attach it to decoding. Runtime maps crypto cancellation to the transfer cancellation state. Durable nonce/part reservations remain unchanged when an encryption worker stops; resume validates the original plaintext commitment and can use the same reserved identity. Tests stop encryption/decryption after the first frame, verify that the second frame is not read, and resume a cancelled reserved upload without an earlier remote publication.
+The actual encrypted upload pipeline copies the task token into each encryption context, and encrypted downloads attach it to decoding. Runtime maps crypto cancellation to the transfer cancellation state. Stopping a worker does not authorize re-encryption under an already used nonce. Resume validates the source commitment, reuses only immutable ciphertext or verified published containers, and retires an unpublished reservation when its ciphertext is lost. Tests check frame-boundary cancellation and safe identity retirement before re-encryption.
 
 Restored history placeholders, including queued metadata, can be evicted from the bounded projection to make room for an owned executing task; active owned tasks cannot. Single-task and upload-window admission check projection acceptance and fail with Capacity rather than starting invisible work. A rejected download projection also settles its claimed ledger state. Omitted history remains disclosed. Complete recency/pagination and retention-count qualification remain outstanding.
 
@@ -207,11 +207,17 @@ Per-task upload and download pause/cancel requests use `submit_transfer_control`
 
 The transfer list exposes upload and download pause/resume/retry/cancel from the projected durable state. Download resume permits either active or historical keys; upload resume requires the active key. A queued download resume owns a cancellation token during manifest preflight, then claims its running generation before output work. Legacy summaries without a recovery record receive no fabricated resume capability. Control requests and long-running resume requests have separate retained UI jobs so a pending resume does not disable pause. Paused files have a separate upload-selection count and are not reported as cancelled or successfully uploaded. An explicitly stopped download does not produce a global failure banner. Download progress includes verified local reuse, while speed statistics count newly received data only, including at finalization. A preflight failure during resume refreshes the projected recovery state from Storage.
 
-Deterministic tests use the actual independent control queue with blocked upload/download jobs and a locked vault. Public download-resume tests also verify repeated preflight failure retains context/partial data, account isolation and locked admission; these tests deliberately use an unauthorized transport and do not prove a successful Telegram resume. They verify persisted intent and cancellation before releasing the worker, then durable acknowledgment. Additional tests cover absent owners, repeated acknowledgment and stale generations. These checks do not cover interruption inside an individual AEAD primitive or blocking filesystem call, source pre-admission, account replacement, native previews or full upload-finalization crash windows; those remain required.
+Deterministic tests use the actual independent control queue with blocked upload/download jobs and a locked vault. Public download-resume tests also verify repeated preflight failure retains context/partial data, account isolation and locked admission; these tests deliberately use an unauthorized transport and do not prove a successful Telegram resume. They verify persisted intent and cancellation before releasing the worker, then durable acknowledgment. Additional tests cover absent owners, repeated acknowledgment and stale generations. These control tests do not establish preemptive cancellation inside an AEAD primitive or blocking filesystem call. Separate admission, lifecycle and service-composition tests cover the connected paths below; full upload-finalization crash qualification remains open.
 
-## Completion evidence still required
+## Recovery validation boundaries
 
-Storage transitions and codec tests are necessary but do not qualify the full feature. Production validation must cover durable batch admission, locked startup hydration, mid-file transport/crypto cancellation, pause/cancel races, ciphertext-cache and partial-file validation, unchanged key/package/part identities, remote success before local receipt, manifest success before final local commit, whole-file verification, retry/backoff, source/key/remote/output failures, stale account owners and bounded memory. UI must show true capabilities, actionable unrecoverable reasons and first-use guidance in English/light native900×600 and full-screen reviews before the goal is complete.
+The connected recovery path has deterministic codec, transition, blocked-owner,
+service-composition and abrupt-process tests. Those tests use synthetic remote
+responses and temporary files. Full live-account recovery, hardware power-loss,
+remaining publication/pathname races and platform identity parity require separate
+qualification. UI review uses English/light previews at 900×600 and actual native
+full-screen. [Status](IMPLEMENTATION_STATUS.md#next-actions-and-release-gates)
+tracks open work without treating older implementation checkpoints as current gaps.
 
 ### Partial-file admission checks
 
@@ -237,9 +243,9 @@ The existing immediate-cancel/retry regression now gates both the old backend an
 
 ### Resume-source preflight cancellation
 
-A resumed upload registers its queued execution token before target/source preparation, then rechecks the persisted generation and Queued state. Register-before-read prevents a stop arriving between that check and hashing from being lost. The source hasher checks cancellation before opening, before/after every bounded 1MiB read, and before returning digest evidence; cancellation is independent of the 100ms presentation throttle. A deterministic reader cancels after its first block and proves that no second read or throttled progress callback is needed to stop. A blocking filesystem read itself is not preempted.
+A resumed upload registers its queued execution token before target/source preparation, then rechecks the persisted generation and Queued state. Register-before-read prevents a stop arriving between that check and hashing from being lost. The source hasher checks cancellation before opening, before/after every bounded 1 MiB read, and before returning digest evidence; cancellation is independent of the 100 ms presentation throttle. A deterministic reader cancels after its first block and proves that no second read or throttled progress callback is needed to stop. A blocking filesystem read itself is not preempted.
 
-Resume already owns a visible row, so preparation updates its log/telemetry without replacing a newer Pause/Cancel state. The queued registration is released before claiming Running; the existing generation-fenced transport registration takes over. Unclaimed preflight failures are settled by the resume owner from the ledger rather than transiently publishing a generic failure over an accepted stop. Fresh uploads still lack a durable pre-admission job during full source hashing; pending batch admission remains required. The batch command explicitly means stop after the current file, and its semantics are unchanged.
+Resume already owns a visible row, so preparation updates its log/telemetry without replacing a newer Pause/Cancel state. The queued registration is released before claiming Running; the existing generation-fenced transport registration takes over. Unclaimed preflight failures are settled by the resume owner from the ledger rather than transiently publishing a generic failure over an accepted stop. Fresh selections receive durable metadata-only admission before full hashing, as described below. Batch Stop lets the current file finish and cancels the remaining queued members; per-task controls remain independent.
 
 ## Pending upload storage boundary
 
@@ -346,18 +352,6 @@ double-count tasks. The current 256-row view still uses ID order for candidate
 selection; full history navigation remains under qualification. A 300-entry test verifies the low-ID queued task stays
 visible, duplicate history appears once, and 44 omitted entries are reported.
 
-### Native restart test activation boundary
-
-The observed Running-versus-Queued restart assertion was caused by the test helper
-calling `activate_account` before checking the restored checkpoint. That method
-intentionally refills the queue. A gated restarted backend reproduces Running at
-that point deterministically. The regression now constructs an inactive owner,
-checks Queued and retained bytes without any backend entry, activates the account,
-checks Running while the backend is held, then verifies completion and accumulated
-duration/rate. It needs no extra presentation-driven scheduling call. This resolves
-that test’s timing assumption; other stale-owner persistence and shutdown boundaries
-still require their own qualification.
-
 Pending resume keeps the admitted display name even though the source path is
 canonical. Resolving a selected symbolic link must not silently rename the upload
 or invalidate the immutable name check during pending promotion.
@@ -395,21 +389,11 @@ These tests use synthetic wire replies, not real MTProto delivery. They do not
 qualify all shutdown, lost-acknowledgment, account-replacement or cleanup crash
 windows by themselves.
 
-This composition exposed two actual defects. Resumed queue/history projections
-retained a zero part count after part geometry became known, so completed receipts
-violated the compatibility history's part-count constraint. Upload admission now
-refreshes part geometry and execution start time while preserving control intent.
-The acceptance test checks both the completed ledger and completed projection.
-
-Encrypted download previously downloaded and decrypted each part for discovery,
-then repeated both operations before writing. The connected download path now
-reads directly from the authenticated manifest locator and retains the verified
-plaintext for the durable writer. It still checks ciphertext, frame authentication,
-manifest metadata, source scope and plaintext integrity. The operation-count test
-requires one fetch per needed part and no fetch for a verified reused extent;
-a transport regression rejects this entry point without an opened manifest and
-rejects modified encrypted bytes.
-
+The accepted completion path refreshes known part geometry and execution timing
+without replacing durable control intent. Download execution reads authenticated
+manifest locators directly, streams verification/decryption into the durable writer,
+and fetches each needed extent once. Verified local extents require no new remote
+fetch. Operation-count and tamper tests protect those boundaries.
 
 ### Durable native cancellation cleanup
 
@@ -476,8 +460,8 @@ time. For legacy jobs without a pending receipt, the same transaction uses the s
 upload-history batch only when account and source chat also match. Any existing
 pending receipt remains authoritative, including future codecs or conflicting
 batch metadata. Tests cover these exclusions and verify that the actual update's
-legacy branch uses the batch-history index. Full service promotion/control races,
-and native window interaction remain integration work. When a valid formal
+legacy branch uses the batch-history index. Remaining service promotion/control races and platform UI qualification are
+tracked separately from the tested transaction and hydration behavior. When a valid formal
 recovery context accompanies older upload history, history hydration now uses
 the ledger's queued, running, pausing and cancelling states rather than retaining
 the legacy interrupted label. A locked-history regression uses a real encoded
