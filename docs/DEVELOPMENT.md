@@ -123,7 +123,24 @@ Inspect actual affected windows, including keyboard/focus, wrapping, scrolling a
 
 ## CI and releases
 
-[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs LF checks, the legal baseline and the full locked Linux source gates. Pull requests and ordinary manual runs then run Windows and macOS tests. A matching `vX.Y.Z` tag must point to a commit on `main`; it builds one Windows x64 MSIX plus the universal macOS and Linux packages, submits the MSIX to Partner Center, then publishes the seven platform assets and checksums. Release tags require all three Partner Center identity variables, the four Store submission secrets and the Store Product ID variable. Manual package previews require the identity variables but skip Store submission. Microsoft's documented GitHub Actions path supports free apps that are already live in the Store, so the first submission and certification remain manual. Branch pushes do not trigger a run. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
+[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs LF checks, the legal baseline and the full locked Linux source gates. Pull requests and ordinary manual runs then run Windows and macOS tests. A matching `vX.Y.Z` tag must point to a commit on `main`; it builds one Windows x64 MSIX plus the universal macOS and Linux packages, submits the MSIX to Partner Center, then publishes the seven platform assets and checksums. Release tags require all three Partner Center identity variables, the tenant/client/seller settings, a GitHub OIDC trust entry and the Store Product ID variable. Manual package previews require the identity variables but skip Store submission. Microsoft's documented GitHub Actions path supports free apps that are already live in the Store, so the first submission and certification remain manual. Branch pushes do not trigger a run. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
+
+### Microsoft Store GitHub OIDC authentication
+
+The Store submission job uses Microsoft Store Developer CLI v0.4.2 client-assertion mode. It requests a fresh GitHub Actions OIDC token for each CLI command with audience `api://AzureADTokenExchange`, keeps the token in the CLI process environment, and does not use `AZURE_AD_APPLICATION_SECRET`. The workflow requires the existing `AZURE_AD_TENANT_ID`, `AZURE_AD_APPLICATION_CLIENT_ID`, and `SELLER_ID` secrets plus the `TELEARK_MSSTORE_PRODUCT_ID` repository variable.
+
+Create or confirm the GitHub Actions environment `store-submission` and restrict its permitted deployment refs to release tags matching `v*`. Add a federated credential to the existing Microsoft Entra app used by `AZURE_AD_APPLICATION_CLIENT_ID` with this exact trust configuration:
+
+```json
+{
+  "name": "teleark-store-submission",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:peppermintish@127260537/teleark@1364331653:environment:store-submission",
+  "audiences": ["api://AzureADTokenExchange"]
+}
+```
+
+Create the entry under the app registration's **Federated credentials** page, or save the JSON and run `az ad app federated-credential create --id <application-object-id> --parameters <credential-file>`. Use the app registration's object ID for `--id`, not its client ID. The repository was created after GitHub's July 15, 2026 immutable-subject change, so the subject includes its owner and repository IDs. Store submission will not authenticate until this Entra trust entry exists.
 
 Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. The macOS app and standalone executable use the persistent self-signed identity; the installer remains unsigned, and Apple notarization is not provided. A tag alone is not evidence of successful signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
 

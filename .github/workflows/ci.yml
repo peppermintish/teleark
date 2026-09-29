@@ -46,6 +46,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-msstore-submit-config.ps1
 
+      - name: Test Microsoft Store GitHub OIDC authentication
+        shell: pwsh
+        run: ./scripts/test-msstore-github-oidc.ps1
+
       - name: Test Windows MSIX artifact verification
         shell: pwsh
         run: ./scripts/test-msix-artifact.ps1
@@ -233,7 +237,6 @@ jobs:
         env:
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
           AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           SELLER_ID: ${{ secrets.SELLER_ID }}
           TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
@@ -440,6 +443,10 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: [test, version, package]
     runs-on: windows-2022
+    environment: store-submission
+    permissions:
+      contents: read
+      id-token: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
@@ -456,20 +463,24 @@ jobs:
 
       - name: Configure Microsoft Store CLI
         uses: microsoft/microsoft-store-apppublisher@v1.1
+        with:
+          version: v0.4.2
 
-      - name: Authenticate with Partner Center
+      - name: Authenticate with Partner Center using GitHub OIDC
         shell: pwsh
         env:
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
           AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           SELLER_ID: ${{ secrets.SELLER_ID }}
         run: |
-          msstore reconfigure `
-            --tenantId "$env:AZURE_AD_TENANT_ID" `
-            --sellerId "$env:SELLER_ID" `
-            --clientId "$env:AZURE_AD_APPLICATION_CLIENT_ID" `
-            --clientSecret "$env:AZURE_AD_APPLICATION_SECRET"
+          $arguments = @(
+            'reconfigure',
+            '--tenantId', $env:AZURE_AD_TENANT_ID,
+            '--sellerId', $env:SELLER_ID,
+            '--clientId', $env:AZURE_AD_APPLICATION_CLIENT_ID,
+            '--clientAssertion'
+          )
+          ./scripts/invoke-msstore-with-github-oidc.ps1 -ArgumentList $arguments
 
       - name: Submit MSIX package for Store certification
         shell: pwsh
@@ -480,10 +491,8 @@ jobs:
           if ($packages.Count -ne 1) {
             throw "Expected exactly one verified .msix package, found $($packages.Count)."
           }
-          msstore publish $packages[0].FullName -id "$env:TELEARK_MSSTORE_PRODUCT_ID"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Microsoft Store submission failed with exit code $LASTEXITCODE."
-          }
+          $arguments = @('publish', $packages[0].FullName, '-id', $env:TELEARK_MSSTORE_PRODUCT_ID)
+          ./scripts/invoke-msstore-with-github-oidc.ps1 -ArgumentList $arguments
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'The MSIX package was submitted to Partner Center for Store certification. Certification and publication are still pending.'
 
   publish:

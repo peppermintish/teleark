@@ -14,16 +14,15 @@ $identity = @{
 $complete = @{
     Tenant = 'tenant-secret-sentinel-1234'
     ClientId = 'client-id-sentinel-5678'
-    ClientSecret = 'client-secret-sentinel-9012'
     Seller = 'seller-id-sentinel-3456'
     Product = '9WZDNCRFJ3Q8'
 }
 $cases = @(
     @{ Name = 'package preview without submission credentials'; Identity = $identity; Settings = @{}; Require = $false; Pass = $true; Ready = 'false' },
-    @{ Name = 'complete version-tag submission'; Identity = $identity; Settings = $complete; Require = $true; Pass = $true; Ready = 'true' },
+    @{ Name = 'complete OIDC version-tag submission without client secret'; Identity = $identity; Settings = $complete; Require = $true; Pass = $true; Ready = 'true' },
     @{ Name = 'partial submission configuration'; Identity = $identity; Settings = @{ Tenant = $complete.Tenant; ClientId = $complete.ClientId }; Require = $false; Pass = $false },
-    @{ Name = 'missing client secret'; Identity = $identity; Settings = @{ Tenant = $complete.Tenant; ClientId = $complete.ClientId; Seller = $complete.Seller; Product = $complete.Product }; Require = $true; Pass = $false },
-    @{ Name = 'missing Store Product ID'; Identity = $identity; Settings = @{ Tenant = $complete.Tenant; ClientId = $complete.ClientId; ClientSecret = $complete.ClientSecret; Seller = $complete.Seller }; Require = $true; Pass = $false },
+    @{ Name = 'missing tenant ID'; Identity = $identity; Settings = @{ ClientId = $complete.ClientId; Seller = $complete.Seller; Product = $complete.Product }; Require = $true; Pass = $false },
+    @{ Name = 'missing Store Product ID'; Identity = $identity; Settings = @{ Tenant = $complete.Tenant; ClientId = $complete.ClientId; Seller = $complete.Seller }; Require = $true; Pass = $false },
     @{ Name = 'missing all release submission credentials'; Identity = $identity; Settings = @{}; Require = $true; Pass = $false },
     @{ Name = 'missing package identity value'; Identity = @{ Name = $identity.Name; Publisher = $identity.Publisher }; Settings = @{}; Require = $false; Pass = $false },
     @{ Name = 'malformed package identity name'; Identity = @{ Name = 'invalid identity'; Publisher = $identity.Publisher; DisplayName = $identity.DisplayName }; Settings = @{}; Require = $false; Pass = $false }
@@ -35,7 +34,6 @@ $environmentNames = @(
     'TELEARK_MSIX_PUBLISHER_DISPLAY_NAME',
     'AZURE_AD_TENANT_ID',
     'AZURE_AD_APPLICATION_CLIENT_ID',
-    'AZURE_AD_APPLICATION_SECRET',
     'SELLER_ID',
     'TELEARK_MSSTORE_PRODUCT_ID'
 )
@@ -45,7 +43,6 @@ $valueMap = @{
     TELEARK_MSIX_PUBLISHER_DISPLAY_NAME = 'DisplayName'
     AZURE_AD_TENANT_ID = 'Tenant'
     AZURE_AD_APPLICATION_CLIENT_ID = 'ClientId'
-    AZURE_AD_APPLICATION_SECRET = 'ClientSecret'
     SELLER_ID = 'Seller'
     TELEARK_MSSTORE_PRODUCT_ID = 'Product'
 }
