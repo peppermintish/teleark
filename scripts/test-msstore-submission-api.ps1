@@ -28,6 +28,7 @@ function Assert-StoreApiTest {
     param([Parameter(Mandatory)][bool]$Condition, [Parameter(Mandatory)][string]$Message)
     if (-not $Condition) { throw $Message }
 }
+$assertStoreApiTest = (Get-Command -Name Assert-StoreApiTest).ScriptBlock
 
 function Assert-ContainsExactlyOne {
     param([Parameter(Mandatory)][string]$Value, [Parameter(Mandatory)][string]$Container)
@@ -89,30 +90,30 @@ $transport = {
     }
 
     if ($request.Method -eq 'PUT' -and $request.Uri -like '*comp=block&blockid=*') {
-        Assert-StoreApiTest (-not $request.Headers.ContainsKey('Authorization')) 'The SAS package upload unexpectedly received an OAuth authorization header.'
-        Assert-StoreApiTest ($request.Headers['x-ms-version'] -eq '2023-11-03') 'The Azure Blob Storage REST version was not set.'
-        Assert-StoreApiTest ($request.Bytes.Length -gt 0) 'The package archive block was empty.'
+        & $assertStoreApiTest (-not $request.Headers.ContainsKey('Authorization')) 'The SAS package upload unexpectedly received an OAuth authorization header.'
+        & $assertStoreApiTest ($request.Headers['x-ms-version'] -eq '2023-11-03') 'The Azure Blob Storage REST version was not set.'
+        & $assertStoreApiTest ($request.Bytes.Length -gt 0) 'The package archive block was empty.'
         $observations.Blocks.Add(@{ Uri = [string]$request.Uri; Bytes = [byte[]]$request.Bytes })
         return @{ StatusCode = 201; Content = '' }
     }
 
     if ($request.Method -eq 'PUT' -and $request.Uri -like '*comp=blocklist*') {
-        Assert-StoreApiTest ($request.Headers['x-ms-version'] -eq '2023-11-03') 'The Store package block list omitted the Azure REST version.'
+        & $assertStoreApiTest ($request.Headers['x-ms-version'] -eq '2023-11-03') 'The Store package block list omitted the Azure REST version.'
         $observations.BlockList = [string]$request.Body
         $expectedIds = @('teleark-00000000', 'teleark-00000001') | ForEach-Object {
             [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_))
         }
-        Assert-StoreApiTest ($observations.Blocks.Count -eq 2) 'The multi-block Store upload did not produce exactly two ordered blocks.'
+        & $assertStoreApiTest ($observations.Blocks.Count -eq 2) 'The multi-block Store upload did not produce exactly two ordered blocks.'
         for ($blockIndex = 0; $blockIndex -lt $observations.Blocks.Count; $blockIndex++) {
-            Assert-StoreApiTest ($observations.Blocks[$blockIndex].Uri.Contains([Uri]::EscapeDataString($expectedIds[$blockIndex]))) 'The block upload order did not match its deterministic block IDs.'
+            & $assertStoreApiTest ($observations.Blocks[$blockIndex].Uri.Contains([Uri]::EscapeDataString($expectedIds[$blockIndex]))) 'The block upload order did not match its deterministic block IDs.'
         }
         $zipBuffer = [System.IO.MemoryStream]::new()
         foreach ($block in $observations.Blocks) { $zipBuffer.Write($block.Bytes, 0, $block.Bytes.Length) }
         $zipBuffer.Position = 0
         $zip = [System.IO.Compression.ZipArchive]::new($zipBuffer, [System.IO.Compression.ZipArchiveMode]::Read, $true)
         try {
-            Assert-StoreApiTest ($zip.Entries.Count -eq 1) 'The Store package ZIP did not contain exactly one file.'
-            Assert-StoreApiTest ($zip.Entries[0].FullName -ceq 'TeleArk-1.2.3-windows-x86_64.msix') 'The Store package ZIP entry did not match the MSIX filename.'
+            & $assertStoreApiTest ($zip.Entries.Count -eq 1) 'The Store package ZIP did not contain exactly one file.'
+            & $assertStoreApiTest ($zip.Entries[0].FullName -ceq 'TeleArk-1.2.3-windows-x86_64.msix') 'The Store package ZIP entry did not match the MSIX filename.'
             $entryStream = $zip.Entries[0].Open()
             $entryBuffer = [System.IO.MemoryStream]::new()
             $entryStream.CopyTo($entryBuffer)
@@ -123,7 +124,7 @@ $transport = {
             $zip.Dispose()
             $zipBuffer.Dispose()
         }
-        Assert-StoreApiTest ($observations.BlockList -ceq ("<?xml version=`"1.0`" encoding=`"utf-8`"?><BlockList><Latest>$($expectedIds[0])</Latest><Latest>$($expectedIds[1])</Latest></BlockList>")) 'The Azure block list did not preserve upload ordering.'
+        & $assertStoreApiTest ($observations.BlockList -ceq ("<?xml version=`"1.0`" encoding=`"utf-8`"?><BlockList><Latest>$($expectedIds[0])</Latest><Latest>$($expectedIds[1])</Latest></BlockList>")) 'The Azure block list did not preserve upload ordering.'
         return @{ StatusCode = 201; Content = '' }
     }
 
@@ -295,7 +296,7 @@ try {
             return @{ StatusCode = 200; Content = '{}' }
         }
         if ($request.Method -eq 'PUT' -and $request.Uri -like '*comp=block&blockid=*') {
-            Assert-StoreApiTest (-not $request.Headers.ContainsKey('Authorization')) 'The failed SAS upload unexpectedly received an OAuth authorization header.'
+            & $assertStoreApiTest (-not $request.Headers.ContainsKey('Authorization')) 'The failed SAS upload unexpectedly received an OAuth authorization header.'
             return @{ StatusCode = 503; Content = "$secretSentinel $tokenSentinel $sasSentinel $requestSentinel" }
         }
         throw 'Unexpected synthetic upload-failure request.'
