@@ -24,9 +24,10 @@ env:
 
 jobs:
   quality:
-    name: 1 · LF, legal and Linux quality
+    name: 2 · Repository quality checks
+    needs: preflight
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -46,9 +47,13 @@ jobs:
         shell: pwsh
         run: ./scripts/test-msstore-submit-config.ps1
 
-      - name: Test Microsoft Store GitHub OIDC authentication
+      - name: Test Microsoft Store Submission API
         shell: pwsh
-        run: ./scripts/test-msstore-github-oidc.ps1
+        run: ./scripts/test-msstore-submission-api.ps1
+
+      - name: Test CI workflow dependency graph
+        shell: pwsh
+        run: ./scripts/test-ci-workflow-graph.ps1
 
       - name: Test Windows MSIX artifact verification
         shell: pwsh
@@ -68,29 +73,6 @@ jobs:
 
       - name: Configure Rust
         run: rustup default stable
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
-            libfontconfig1-dev libfreetype6-dev libssl-dev
-
-      - name: Restore Rust cache
-        id: rust-cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: quality-linux
-
-      - name: Report cache
-        shell: bash
-        run: |
-          echo '### Rust cache · Linux quality' >> "$GITHUB_STEP_SUMMARY"
-          echo '| Runner | Exact cache hit |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| ubuntu-22.04 | ${{ steps.rust-cache.outputs.cache-hit == 'true' }} |' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify legal baseline
         run: |
@@ -115,34 +97,15 @@ jobs:
       - name: Verify formatting
         run: cargo fmt --all --check
 
-      - name: Check workspace
-        run: cargo check --workspace --all-targets --locked
-
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test workspace
-        run: cargo test --workspace --all-targets --locked -- --test-threads=1
-
-      - name: Prove Core is frontend-independent
-        run: cargo test -p teleark-core --locked
-
-      - name: Validate localization package
-        run: cargo test -p teleark-i18n --locked
-
-      - name: Validate workspace documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --locked
-
   test:
-    name: 2 · Test (${{ matrix.name }})
+    name: 3 · Test (${{ matrix.name }})
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.package_preview != true }}
-    needs: quality
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
+          - { name: Linux x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { name: Windows x64, os: windows-2022, target: x86_64-pc-windows-msvc }
           - { name: macOS arm64, os: macos-15, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
@@ -156,6 +119,16 @@ jobs:
 
       - name: Configure Rust
         run: rustup default stable
+
+      - name: Install Linux test dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev
 
       - name: Restore Rust cache
         id: rust-cache
@@ -186,10 +159,14 @@ jobs:
       - name: Validate localization package
         run: cargo test -p teleark-i18n --locked
 
-  version:
-    name: 2 · Validate package version
-    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
-    needs: quality
+      - name: Validate workspace documentation
+        if: matrix.os == 'ubuntu-22.04'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+  preflight:
+    name: 1 · Validate release and package configuration
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -199,6 +176,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Configure Rust
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         run: rustup default stable
       - name: Verify release commit is on main
         if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
@@ -210,9 +188,11 @@ jobs:
           }
       - name: Match tag to Cargo version
         id: resolve
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         shell: pwsh
         run: ./scripts/release-version.ps1
       - name: Validate Microsoft Store package identity
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         shell: pwsh
         env:
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
@@ -237,216 +217,91 @@ jobs:
         env:
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
           AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          SELLER_ID: ${{ secrets.SELLER_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
           TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
           TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
         run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
       - name: Validate Telegram distribution configuration
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         shell: pwsh
         env:
           TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
           TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
         run: ./scripts/check-distribution-credentials.ps1
       - name: Validate persistent macOS signing identity
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         shell: bash
         env:
           TELEARK_MACOS_SIGNING_P12_BASE64: ${{ secrets.TELEARK_MACOS_SIGNING_P12_BASE64 }}
         run: bash scripts/check-macos-signing.sh
 
-  package:
-    name: 3 · Package (${{ matrix.name }})
+  package_windows:
+    name: 4 · Package (Windows x64)
     if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
-    needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: Windows x64, os: windows-2022, platform: windows, target: x86_64-pc-windows-msvc, arch: x86_64, artifact: windows-x86_64 }
-          - { name: macOS universal, os: macos-15, platform: macos, target: aarch64-apple-darwin, arch: universal, artifact: macos-universal }
-          - { name: Linux x64, os: ubuntu-22.04, platform: linux, target: x86_64-unknown-linux-gnu, arch: x86_64, artifact: linux-x86_64 }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v7.0.1
+    needs: preflight
+    uses: ./.github/workflows/package-platform.yml
+    with:
+      name: Windows x64
+      runner: windows-2022
+      platform: windows
+      target: x86_64-pc-windows-msvc
+      arch: x86_64
+      artifact: windows-x86_64
+      version: ${{ needs.preflight.outputs.version }}
+      label: ${{ needs.preflight.outputs.label }}
+      msix_identity_name: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+      msix_publisher: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+      msix_publisher_display_name: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+    secrets:
+      telegram_api_id: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+      telegram_api_hash: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
 
-      - name: Configure Rust targets
-        shell: bash
-        run: |
-          rustup default stable
-          rustup target add '${{ matrix.target }}'
-          if [ '${{ matrix.platform }}' = macos ]; then rustup target add x86_64-apple-darwin; fi
+  package_macos:
+    name: 4 · Package (macOS universal)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
+    needs: preflight
+    uses: ./.github/workflows/package-platform.yml
+    with:
+      name: macOS universal
+      runner: macos-15
+      platform: macos
+      target: aarch64-apple-darwin
+      arch: universal
+      artifact: macos-universal
+      version: ${{ needs.preflight.outputs.version }}
+      label: ${{ needs.preflight.outputs.label }}
+    secrets:
+      telegram_api_id: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+      telegram_api_hash: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
+      macos_signing_p12_base64: ${{ secrets.TELEARK_MACOS_SIGNING_P12_BASE64 }}
 
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
-            libfontconfig1-dev libfreetype6-dev libssl-dev dpkg-dev
-
-      - name: Restore Rust cache
-        id: rust-cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: package-${{ matrix.artifact }}
-
-      - name: Report cache
-        shell: bash
-        run: |
-          echo '### Rust cache · ${{ matrix.name }} package' >> "$GITHUB_STEP_SUMMARY"
-          echo '| Target | Exact cache hit |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| `${{ matrix.target }}` | ${{ steps.rust-cache.outputs.cache-hit == 'true' }} |' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Configure OpenSSL 3 for macOS signing
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
-          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
-
-      - name: Test macOS signing with an untrusted synthetic identity
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: bash scripts/test-macos-signing-import.sh
-
-      - name: Install Linux packaging tools
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cargo-deb --version 2.11.1 --locked
-          tool="$RUNNER_TEMP/linuxdeploy-${{ matrix.arch }}.AppImage"
-          curl -fsSL 'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${{ matrix.arch }}.AppImage' -o "$tool"
-          expected=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
-          echo "$expected  $tool" | sha256sum -c -
-          chmod +x "$tool"
-          echo "LINUXDEPLOY=$tool" >> "$GITHUB_ENV"
-
-      - name: Build and test Microsoft Store Windows binary
-        if: matrix.platform == 'windows'
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
-          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
-        run: |
-          cargo test -p teleark-runtime --locked --target ${{ matrix.target }} --features msix data_root
-          cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }} --features msix
-
-      - name: Build universal macOS release
-        if: matrix.platform == 'macos'
-        shell: bash
-        env:
-          MACOSX_DEPLOYMENT_TARGET: '11.0'
-          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
-          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
-        run: |
-          set -euo pipefail
-          cargo build -p teleark-gui --bin teleark --release --locked --target aarch64-apple-darwin
-          cargo build -p teleark-gui --bin teleark --release --locked --target x86_64-apple-darwin
-          mkdir -p target/universal-apple-darwin/release
-          lipo -create target/aarch64-apple-darwin/release/teleark target/x86_64-apple-darwin/release/teleark \
-            -output target/universal-apple-darwin/release/teleark
-
-      - name: Build Linux release
-        if: matrix.platform == 'linux'
-        env:
-          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
-          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
-        run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ matrix.target }}
-
-      - name: Package Windows MSIX
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        env:
-          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
-          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
-          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: |
-          $packageParams = @{
-            BinaryPath = "target/${{ matrix.target }}/release/teleark.exe"
-            OutputDirectory = 'dist'
-            CargoVersion = '${{ needs.version.outputs.version }}'
-            IdentityName = $env:TELEARK_MSIX_IDENTITY_NAME
-            Publisher = $env:TELEARK_MSIX_PUBLISHER
-            PublisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
-          }
-          ./scripts/package-windows-msix.ps1 @packageParams
-          ./scripts/verify-msix-artifact.ps1 `
-            -Directory 'dist' `
-            -ExpectedFileName "TeleArk-${{ needs.version.outputs.version }}-windows-x86_64.msix"
-
-      - name: Package and verify macOS release
-        if: matrix.platform == 'macos'
-        env:
-          TELEARK_MACOS_SIGNING_P12_BASE64: ${{ secrets.TELEARK_MACOS_SIGNING_P12_BASE64 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/test-macos-signing.sh
-          bash scripts/macos/verify-keychain-signing.sh
-          label='${{ needs.version.outputs.label }}'
-          base="teleark-${label}-macos-universal"
-          mkdir -p "dist/$base"
-          scripts/package-macos.sh target/universal-apple-darwin/release/teleark "dist/$base/TeleArk.app" dist \
-            '${{ needs.version.outputs.version }}' "$label" universal
-          cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/$base/"
-          tar -C dist -czf "dist/$base.tar.gz" "$base"
-          (cd dist && shasum -a 256 "$base.bin" "$base.tar.gz" "TeleArk-${label}-macos-universal.pkg" > SHA256SUMS)
-          bash scripts/verify-release-macos.sh '${{ needs.version.outputs.version }}' "$label"
-
-      - name: Package Linux release
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/package-linux.sh "target/${{ matrix.target }}/release/teleark" dist \
-            '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}' '${{ matrix.target }}'
-
-      - name: Verify Linux package contents and installer
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/verify-release-linux.sh '${{ needs.version.outputs.version }}' '${{ needs.version.outputs.label }}'
-
-      - name: Report package assets
-        shell: bash
-        run: |
-          echo '### Verified package assets · ${{ matrix.name }}' >> "$GITHUB_STEP_SUMMARY"
-          echo '| SHA256 | File |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
-          while read -r hash file; do echo "| \`$hash\` | \`$file\` |" >> "$GITHUB_STEP_SUMMARY"; done < dist/SHA256SUMS
-
-      - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: release-${{ matrix.artifact }}
-          path: |
-            dist/*.AppImage
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.pkg
-            dist/*.bin
-            dist/*.msix
-            dist/SHA256SUMS
-          if-no-files-found: error
-          retention-days: 14
-
+  package_linux:
+    name: 4 · Package (Linux x64)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
+    needs: preflight
+    uses: ./.github/workflows/package-platform.yml
+    with:
+      name: Linux x64
+      runner: ubuntu-22.04
+      platform: linux
+      target: x86_64-unknown-linux-gnu
+      arch: x86_64
+      artifact: linux-x86_64
+      version: ${{ needs.preflight.outputs.version }}
+      label: ${{ needs.preflight.outputs.label }}
+    secrets:
+      telegram_api_id: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
+      telegram_api_hash: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
   store_submission:
-    name: 4 · Submit package to Microsoft Store
+    name: 5 · Submit package to Microsoft Store
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [test, version, package]
+    needs: [preflight, quality, test, package_windows]
     runs-on: windows-2022
     environment: store-submission
     permissions:
       contents: read
-      id-token: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
@@ -459,46 +314,27 @@ jobs:
 
       - name: Verify downloaded MSIX and checksum
         shell: pwsh
-        run: ./scripts/verify-msix-artifact.ps1 -Directory 'store-package' -ExpectedFileName "TeleArk-${{ needs.version.outputs.version }}-windows-x86_64.msix"
-
-      - name: Configure Microsoft Store CLI
-        uses: microsoft/microsoft-store-apppublisher@v1.1
-        with:
-          version: v0.4.2
-
-      - name: Authenticate with Partner Center using GitHub OIDC
-        shell: pwsh
-        env:
-          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
-          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          SELLER_ID: ${{ secrets.SELLER_ID }}
-        run: |
-          $arguments = @(
-            'reconfigure',
-            '--tenantId', $env:AZURE_AD_TENANT_ID,
-            '--sellerId', $env:SELLER_ID,
-            '--clientId', $env:AZURE_AD_APPLICATION_CLIENT_ID,
-            '--clientAssertion'
-          )
-          ./scripts/invoke-msstore-with-github-oidc.ps1 -ArgumentList $arguments
+        run: ./scripts/verify-msix-artifact.ps1 -Directory 'store-package' -ExpectedFileName "TeleArk-${{ needs.preflight.outputs.version }}-windows-x86_64.msix"
 
       - name: Submit MSIX package for Store certification
         shell: pwsh
         env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
         run: |
           $packages = @(Get-ChildItem -LiteralPath 'store-package' -Filter '*.msix' -File)
           if ($packages.Count -ne 1) {
             throw "Expected exactly one verified .msix package, found $($packages.Count)."
           }
-          $arguments = @('publish', $packages[0].FullName, '-id', $env:TELEARK_MSSTORE_PRODUCT_ID)
-          ./scripts/invoke-msstore-with-github-oidc.ps1 -ArgumentList $arguments
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'The MSIX package was submitted to Partner Center for Store certification. Certification and publication are still pending.'
+          $submission = ./scripts/submit-msix-to-store.ps1 -PackagePath $packages[0].FullName
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "The MSIX package was committed to Partner Center (status: $($submission -replace '^.*status is ', '')). Certification and publication are controlled by Microsoft."
 
   publish:
-    name: 5 · Publish GitHub Release
+    name: 6 · Publish GitHub Release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [version, package, store_submission]
+    needs: [preflight, quality, test, package_windows, package_macos, package_linux, store_submission]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -513,7 +349,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          label='${{ needs.version.outputs.label }}'
+          label='${{ needs.preflight.outputs.label }}'
           bash scripts/assemble-release-assets.sh artifacts dist "$label"
           echo '### Release assets' >> "$GITHUB_STEP_SUMMARY"
           echo 'Verified downloaded package checksums and assembled seven platform assets plus four accompanying assets: three legal notices and unified SHA256SUMS.' >> "$GITHUB_STEP_SUMMARY"
@@ -537,7 +373,7 @@ jobs:
   summary:
     name: Stage summary
     if: ${{ always() }}
-    needs: [quality, test, version, package, store_submission, publish]
+    needs: [preflight, quality, test, package_windows, package_macos, package_linux, store_submission, publish]
     runs-on: ubuntu-22.04
     steps:
       - name: Report stages
@@ -546,18 +382,19 @@ jobs:
           echo '# TeleArk CI/CD stages' >> "$GITHUB_STEP_SUMMARY"
           echo '| Stage | Result |' >> "$GITHUB_STEP_SUMMARY"
           echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
-          echo '| LF, legal, Linux quality | ${{ needs.quality.result }} |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Release and package configuration | ${{ needs.preflight.result }} |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Repository quality checks | ${{ needs.quality.result }} |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Linux, Windows, macOS tests | ${{ needs.test.result }} |' >> "$GITHUB_STEP_SUMMARY"
           if [[ '${{ github.ref }}' == refs/tags/v* ]] || [ '${{ inputs.package_preview }}' = 'true' ]; then
-            echo '| Version and distribution configuration | ${{ needs.version.result }} |' >> "$GITHUB_STEP_SUMMARY"
-            echo '| Native packages | ${{ needs.package.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            echo '| Windows package | ${{ needs.package_windows.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            echo '| macOS package | ${{ needs.package_macos.result }} |' >> "$GITHUB_STEP_SUMMARY"
+            echo '| Linux package | ${{ needs.package_linux.result }} |' >> "$GITHUB_STEP_SUMMARY"
             if [[ '${{ github.ref }}' == refs/tags/v* ]]; then
               echo '| Microsoft Store submission | ${{ needs.store_submission.result }} |' >> "$GITHUB_STEP_SUMMARY"
             else
               echo '| Microsoft Store submission | Not run for package preview |' >> "$GITHUB_STEP_SUMMARY"
             fi
             echo '| GitHub Release | ${{ needs.publish.result }} |' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo '| Windows and macOS tests | ${{ needs.test.result }} |' >> "$GITHUB_STEP_SUMMARY"
           fi
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'LF counts and violations, exact Rust cache hits, and package checksums are shown in the individual job summaries above.' >> "$GITHUB_STEP_SUMMARY"

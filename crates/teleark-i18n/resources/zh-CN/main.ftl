@@ -1119,6 +1119,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.11 · 并行发布检查与 Microsoft Store API 提交
+
+    - 轻量级版本与配置验证后，质量检查、Linux/Windows/macOS 测试和三个平台的打包任务会并行运行。Store 提交等待质量检查、各操作系统测试以及经过验证的 Windows MSIX 完成。GitHub Release 组装等待所有平台包和 Store 提交成功。
+    - 后续 MSIX 更新通过 Microsoft 的传统 Store Submission API 提交。首次提交仍需手动完成，认证和发布由 Microsoft 控制。
+    - 添加确定性的模拟 HTTP 和工作流依赖关系回归测试。未调用真实 Store API。应用元数据为 0.5.11；运行时行为、持久化架构和加密格式均未更改。
+
     ## 0.5.10 · 提升频道同步与加密下载的可靠性
 
     - 频道目录同步会对暂时性的网络、服务器和冲突错误进行有界退避重试，并遵从 Telegram 提供的 FloodWait 等待期限。即使某个频道正在同步，目录刷新和取消操作仍会针对目录请求。

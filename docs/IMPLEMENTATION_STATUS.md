@@ -1,4 +1,8 @@
-# Implementation status — v0.5.10
+# Implementation status — v0.5.11
+
+## Version 0.5.11 · Store API release pipeline (2026-09-30)
+
+Release CI now starts repository quality checks, Linux/Windows/macOS tests and all three platform package jobs concurrently after lightweight version and configuration validation. Store submission waits for quality, the OS test matrix and the verified Windows MSIX; GitHub Release assembly waits for quality, tests, all verified package outputs and successful Store submission. The workflow submits later MSIX updates through Microsoft's legacy Store Submission API. It sends the existing client secret only in the OAuth HTTPS form body, wraps the verified package in the API-required ZIP, uploads through the returned SAS URL in bounded blocks, updates and commits the draft, and polls submission status. The API does not require Seller ID, so the existing GitHub secret is retained without being read by CI. Local mocked HTTP regressions cover token redaction, submission metadata, ZIP/block upload, commit, polling and failure handling. No live Store call or certification was performed; the app must have an earlier completed submission and age rating before the API can update it. No application runtime behavior, database schema or encrypted format changed.
 
 ## Version 0.5.10 · Reliable channel and encrypted download recovery (2026-09-29)
 
@@ -16,7 +20,7 @@ Removed `hi-IN` from the supported-locale registry, translation resources, setti
 
 ## Windows MSIX-only Store release workflow (2026-09-25)
 
-Windows release builds now produce one x64 `.msix`; the old Windows EXE, ZIP, MSI and Inno Setup package paths are removed. Matching version-tag CI runs require the exact Partner Center identity variables and Store submission settings, verify that the tag points to `main`, build the `msix` data-layout binary, submit the package to Partner Center and publish the cross-platform GitHub Release only after submission succeeds. Store authentication now uses GitHub Actions OIDC through the `store-submission` environment; the Entra federated credential is an external release prerequisite documented in [Development](DEVELOPMENT.md#microsoft-store-github-oidc-authentication) and [ADR 0061](adr/0061-github-oidc-store-submission-authentication.md). Pull requests and package previews do not submit. Microsoft's current GitHub Actions path supports free apps already live in the Store, so the initial upload and certification remain manual. The Store package keeps its separate data set under `%USERPROFILE%\TeleArk`. [Packaging](PACKAGING.md#windows) and [ADR 0060](adr/0060-windows-msix-only-store-release.md) record the current contract; [ADR 0059](adr/0059-microsoft-store-update-submission.md) records the previous optional submission setup.
+Windows release builds now produce one x64 `.msix`; the old Windows EXE, ZIP, MSI and Inno Setup package paths are removed. Matching version-tag CI runs verify the tag's ancestry and version, build the `msix` data-layout binary, submit the package to Partner Center and publish the cross-platform GitHub Release only after submission succeeds. Pull requests and package previews do not submit. The first Store upload and certification remain manual. The Store package keeps its separate data set under `%USERPROFILE%\TeleArk`. [Packaging](PACKAGING.md#windows), [ADR 0060](adr/0060-windows-msix-only-store-release.md) and [ADR 0062](adr/0062-msstore-submission-api-authentication.md) record the current contract.
 
 ## Microsoft Store MSIX distribution checkpoint (superseded, 2026-09-24)
 

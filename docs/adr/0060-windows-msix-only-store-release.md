@@ -6,9 +6,9 @@ Status: Accepted — 2026-09-25. This supersedes the Windows release artifacts a
 
 Windows release builds produce one x64 Microsoft Store `.msix`. The release workflow no longer builds or publishes the standalone executable, ZIP, setup EXE, MSI or `.msixupload` bundle. It uses the `msix` feature binary and the exact Partner Center identity supplied through `TELEARK_MSIX_IDENTITY_NAME`, `TELEARK_MSIX_PUBLISHER` and `TELEARK_MSIX_PUBLISHER_DISPLAY_NAME`. The package script validates the MSIX manifest and required package contents, then records its SHA256 checksum.
 
-Every matching `vX.Y.Z` tag must point to a commit on `main`, match the Cargo version, and have all three package identity variables, Partner Center tenant/client/seller settings, and `TELEARK_MSSTORE_PRODUCT_ID`. After all platform package jobs pass, CI submits the raw `.msix` with Microsoft Store Developer CLI v0.4.2 using a GitHub Actions OIDC client assertion. The Store job is limited to the `store-submission` environment and requires a matching federated identity credential on the existing Entra app; its exact issuer, subject, and audience are documented in [Development](../DEVELOPMENT.md#microsoft-store-github-oidc-authentication). `AZURE_AD_APPLICATION_SECRET` is no longer required. The GitHub Release publishes only after Store submission succeeds. Pull requests and manual package previews never submit.
+Every matching `vX.Y.Z` tag must point to a commit on `main` and match the Cargo version. CI validates the package identity and required configuration, then starts quality, platform tests and Linux/Windows/macOS package jobs concurrently. The Store submission uses Microsoft's legacy MSIX API and waits for quality, all OS tests and the verified Windows package; GitHub Release assembly waits for all packages and successful Store submission. Authentication and draft handling are specified in [ADR 0062](0062-msstore-submission-api-authentication.md). Pull requests and manual package previews never submit.
 
-The first Store upload remains manual through Partner Center. Microsoft's current GitHub Actions update path is for free apps that are already published and live in the Store. Certification is still required for each submission. The Store package retains its distinct data directory under `%USERPROFILE%\TeleArk`; it does not import data from earlier unpackaged Windows installs.
+The legacy Store Submission API requires the app to have at least one completed submission with age ratings information. Create the app and complete its first submission manually through Partner Center; later version-tag submissions use the API. Certification is still required for each submission. The Store package retains its distinct data directory under `%USERPROFILE%\TeleArk`; it does not import data from earlier unpackaged Windows installs.
 
 Use `scripts/build-local-msix.ps1` on Windows to build the first upload from the private `.env.local` Telegram application credentials and the exact non-secret Partner Center identity values. The output is `dist/TeleArk-<version>-windows-x86_64.msix` plus a checksum manifest.
 
@@ -16,16 +16,15 @@ Use `scripts/build-local-msix.ps1` on Windows to build the first upload from the
 
 Windows users install and update through the Microsoft Store. Old Windows EXE/MSI packaging and its Inno Setup/WiX scripts and installer tests are removed. Existing unpackaged data remains separate from the Store package's user-profile data set.
 
-A release tag with missing Store settings fails before native compilation. The repository checks required tenant/client/seller settings and product ID, while Entra federated trust remains an external configuration prerequisite. A Store submission failure prevents the corresponding GitHub Release from publishing, so the two release destinations do not report different outcomes. Microsoft controls certification and live publication.
+A release tag with missing Store settings fails before native compilation. The repository checks the Entra tenant, client ID and client secret and Store Product ID; Seller ID is not an input to the legacy API. A Store submission failure prevents the corresponding GitHub Release from publishing, so the two release destinations do not report different outcomes. Microsoft controls certification and live publication.
 
 ## Verification
 
-The release job checks the tag's ancestry and version, and uses synthetic configuration cases to cover complete preview/release settings without a client secret, missing identity, partial credentials and missing Store Product ID. Deterministic OIDC helper tests verify audience selection, environment-only assertion delivery, argument redaction, cleanup and failure messages. The Windows package build runs the MSIX data-root test, creates one MSIX, and validates its manifest, x64 binary, assets, notices and checksum. Entra trust setup, the first Partner Center upload and certification are external actions and are not verified locally.
+The release job checks the tag's ancestry and version, and uses synthetic configuration cases for complete preview/release settings, missing identity, partial credentials and missing Store Product ID. Deterministic mocked HTTP tests cover token form construction and redaction, submission metadata, ZIP upload, block ordering, commit, polling and failures; workflow graph checks verify job dependencies and tag-only publishing. The Windows package build runs the MSIX data-root test, creates one MSIX, and validates its manifest, x64 binary, assets, notices and checksum. Partner Center configuration, the first submission, live API behavior and certification are not verified locally.
 
 ## References
 
-- [Publish app updates to Microsoft Store with GitHub Actions](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/github-actions)
-- [Microsoft Store Developer CLI commands](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/commands)
-- [Configure an app to trust an external identity provider](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust)
-- [GitHub Actions OpenID Connect reference](https://docs.github.com/en/actions/reference/security/oidc)
+- [Create and manage submissions using Windows Store services](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services)
+- [Manage app submissions](https://learn.microsoft.com/en-us/windows/uwp/monetize/manage-app-submissions)
+- [Update an app submission](https://learn.microsoft.com/en-us/windows/uwp/monetize/update-an-app-submission)
 - [MSIX app package requirements](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/app-package-requirements)

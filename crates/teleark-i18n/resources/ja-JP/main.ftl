@@ -1119,6 +1119,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.11 · リリース検証の並列化とMicrosoft Store APIへの提出
+
+    - 軽量なリリースとバージョンの検証後、品質チェック、Linux/Windows/macOSのテスト、3つのパッケージ作成を並行して実行します。Storeへの提出は品質チェック、各OSのテスト、検証済みWindows MSIXの完了後に行われます。GitHub Releaseの組み立ては、すべてのパッケージとStore提出の成功を待ちます。
+    - Microsoftの従来型Store Submission APIを使い、以後のMSIX更新を提出します。最初の提出は手動で行い、認定と公開はMicrosoftが管理します。
+    - モックHTTPとワークフロー依存関係の決定的な回帰テストを追加しました。実際のStore API呼び出しは行っていません。アプリのメタデータは0.5.11です。実行時の動作、永続スキーマ、暗号化形式に変更はありません。
+
     ## 0.5.10 · チャネル同期と暗号化ダウンロードの信頼性向上
 
     - チャネルディレクトリ同期では、一時的なネットワーク障害、サーバー障害、競合を、待機時間に上限を設けて再試行し、Telegram が指定する FloodWait の待機時間に従います。個別チャネルの同期中でも、ディレクトリの更新とキャンセルはディレクトリ要求を対象にします。

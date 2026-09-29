@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.11 · Parallel release checks and Microsoft Store API submission
+
+- Start quality checks, Linux/Windows/macOS tests and all three package jobs in parallel after lightweight release/version validation. Store submission waits for quality checks, tests and the verified Windows MSIX; GitHub Release assembly waits for all package outputs and successful Store submission.
+- Submit later MSIX updates through Microsoft's legacy Store Submission API. The first submission remains manual, and Microsoft controls certification and publication.
+- Add deterministic mocked HTTP and workflow dependency-graph coverage. No live Store API call was performed. Application metadata is 0.5.11; runtime behavior, persistent schemas and encrypted formats are unchanged.
+
 ## 0.5.10 · Reliable channel and encrypted download recovery
 
 - Channel directory synchronization retries transient network, server and conflict failures with bounded backoff and honors Telegram FloodWait deadlines. Directory refresh and cancellation target the directory request even while an individual channel sync is active.

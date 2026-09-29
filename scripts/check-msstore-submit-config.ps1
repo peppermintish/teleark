@@ -22,15 +22,15 @@ if ($env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME.Length -gt 256) {
 $submissionSettings = @(
     $env:AZURE_AD_TENANT_ID,
     $env:AZURE_AD_APPLICATION_CLIENT_ID,
-    $env:SELLER_ID,
+    $env:AZURE_AD_APPLICATION_SECRET,
     $env:TELEARK_MSSTORE_PRODUCT_ID
 )
 $configuredSubmission = @($submissionSettings | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if ($configuredSubmission.Count -ne 0 -and $configuredSubmission.Count -ne $submissionSettings.Count) {
-    throw 'Configure AZURE_AD_TENANT_ID, AZURE_AD_APPLICATION_CLIENT_ID, SELLER_ID, and TELEARK_MSSTORE_PRODUCT_ID together.'
+    throw 'Configure AZURE_AD_TENANT_ID, AZURE_AD_APPLICATION_CLIENT_ID, AZURE_AD_APPLICATION_SECRET, and TELEARK_MSSTORE_PRODUCT_ID together.'
 }
 if ($RequireSubmission -and $configuredSubmission.Count -ne $submissionSettings.Count) {
-    throw 'Version-tag releases require AZURE_AD_TENANT_ID, AZURE_AD_APPLICATION_CLIENT_ID, SELLER_ID, and TELEARK_MSSTORE_PRODUCT_ID.'
+    throw 'Version-tag releases require AZURE_AD_TENANT_ID, AZURE_AD_APPLICATION_CLIENT_ID, AZURE_AD_APPLICATION_SECRET, and TELEARK_MSSTORE_PRODUCT_ID.'
 }
 
 $submissionReady = $configuredSubmission.Count -eq $submissionSettings.Count

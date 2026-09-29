@@ -1,0 +1,225 @@
+name: Package TeleArk platform
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      artifact:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      label:
+        required: true
+        type: string
+      msix_identity_name:
+        required: false
+        type: string
+      msix_publisher:
+        required: false
+        type: string
+      msix_publisher_display_name:
+        required: false
+        type: string
+    secrets:
+      telegram_api_id:
+        required: false
+      telegram_api_hash:
+        required: false
+      macos_signing_p12_base64:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and package ${{ inputs.name }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Configure Rust targets
+        shell: bash
+        run: |
+          rustup default stable
+          rustup target add '${{ inputs.target }}'
+          if [ '${{ inputs.platform }}' = macos ]; then rustup target add x86_64-apple-darwin; fi
+
+      - name: Install Linux build dependencies
+        if: ${{ inputs.platform == 'linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev dpkg-dev
+
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: package-${{ inputs.artifact }}
+
+      - name: Report cache
+        shell: bash
+        run: |
+          echo '### Rust cache · ${{ inputs.name }} package' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Target | Exact cache hit |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| `${{ inputs.target }}` | ${{ steps.rust-cache.outputs.cache-hit == 'true' }} |' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure OpenSSL 3 for macOS signing
+        if: ${{ inputs.platform == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
+      - name: Test macOS signing with an untrusted synthetic identity
+        if: ${{ inputs.platform == 'macos' }}
+        shell: bash
+        run: bash scripts/test-macos-signing-import.sh
+
+      - name: Install Linux packaging tools
+        if: ${{ inputs.platform == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --version 2.11.1 --locked
+          tool="$RUNNER_TEMP/linuxdeploy-${{ inputs.arch }}.AppImage"
+          curl -fsSL 'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${{ inputs.arch }}.AppImage' -o "$tool"
+          expected=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+          echo "$expected  $tool" | sha256sum -c -
+          chmod +x "$tool"
+          echo "LINUXDEPLOY=$tool" >> "$GITHUB_ENV"
+
+      - name: Build and test Microsoft Store Windows binary
+        if: ${{ inputs.platform == 'windows' }}
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.telegram_api_id }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.telegram_api_hash }}
+        run: |
+          cargo test -p teleark-runtime --locked --target ${{ inputs.target }} --features msix data_root
+          cargo build -p teleark-gui --bin teleark --release --locked --target ${{ inputs.target }} --features msix
+
+      - name: Build universal macOS release
+        if: ${{ inputs.platform == 'macos' }}
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.telegram_api_id }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.telegram_api_hash }}
+        run: |
+          set -euo pipefail
+          cargo build -p teleark-gui --bin teleark --release --locked --target aarch64-apple-darwin
+          cargo build -p teleark-gui --bin teleark --release --locked --target x86_64-apple-darwin
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create target/aarch64-apple-darwin/release/teleark target/x86_64-apple-darwin/release/teleark \
+            -output target/universal-apple-darwin/release/teleark
+
+      - name: Build Linux release
+        if: ${{ inputs.platform == 'linux' }}
+        shell: bash
+        env:
+          TELEARK_DISTRIBUTION_TELEGRAM_API_ID: ${{ secrets.telegram_api_id }}
+          TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.telegram_api_hash }}
+        run: cargo build -p teleark-gui --bin teleark --release --locked --target ${{ inputs.target }}
+
+      - name: Package Windows MSIX
+        if: ${{ inputs.platform == 'windows' }}
+        shell: pwsh
+        env:
+          TELEARK_MSIX_IDENTITY_NAME: ${{ inputs.msix_identity_name }}
+          TELEARK_MSIX_PUBLISHER: ${{ inputs.msix_publisher }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ inputs.msix_publisher_display_name }}
+        run: |
+          $packageParams = @{
+            BinaryPath = "target/${{ inputs.target }}/release/teleark.exe"
+            OutputDirectory = 'dist'
+            CargoVersion = '${{ inputs.version }}'
+            IdentityName = $env:TELEARK_MSIX_IDENTITY_NAME
+            Publisher = $env:TELEARK_MSIX_PUBLISHER
+            PublisherDisplayName = $env:TELEARK_MSIX_PUBLISHER_DISPLAY_NAME
+          }
+          ./scripts/package-windows-msix.ps1 @packageParams
+          ./scripts/verify-msix-artifact.ps1 `
+            -Directory 'dist' `
+            -ExpectedFileName "TeleArk-${{ inputs.version }}-windows-x86_64.msix"
+
+      - name: Package and verify macOS release
+        if: ${{ inputs.platform == 'macos' }}
+        shell: bash
+        env:
+          TELEARK_MACOS_SIGNING_P12_BASE64: ${{ secrets.macos_signing_p12_base64 }}
+        run: |
+          set -euo pipefail
+          bash scripts/test-macos-signing.sh
+          bash scripts/macos/verify-keychain-signing.sh
+          label='${{ inputs.label }}'
+          base="teleark-${label}-macos-universal"
+          mkdir -p "dist/$base"
+          scripts/package-macos.sh target/universal-apple-darwin/release/teleark "dist/$base/TeleArk.app" dist \
+            '${{ inputs.version }}' "$label" universal
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "dist/$base/"
+          tar -C dist -czf "dist/$base.tar.gz" "$base"
+          (cd dist && shasum -a 256 "$base.bin" "$base.tar.gz" "TeleArk-${label}-macos-universal.pkg" > SHA256SUMS)
+          bash scripts/verify-release-macos.sh '${{ inputs.version }}' "$label"
+
+      - name: Package Linux release
+        if: ${{ inputs.platform == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/package-linux.sh "target/${{ inputs.target }}/release/teleark" dist \
+            '${{ inputs.version }}' '${{ inputs.label }}' '${{ inputs.target }}'
+
+      - name: Verify Linux package contents and installer
+        if: ${{ inputs.platform == 'linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-linux.sh '${{ inputs.version }}' '${{ inputs.label }}'
+
+      - name: Report package assets
+        shell: bash
+        run: |
+          echo '### Verified package assets · ${{ inputs.name }}' >> "$GITHUB_STEP_SUMMARY"
+          echo '| SHA256 | File |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| :--- | :--- |' >> "$GITHUB_STEP_SUMMARY"
+          while read -r hash file; do echo "| \`$hash\` | \`$file\` |" >> "$GITHUB_STEP_SUMMARY"; done < dist/SHA256SUMS
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-${{ inputs.artifact }}
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.pkg
+            dist/*.bin
+            dist/*.msix
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
