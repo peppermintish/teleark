@@ -431,7 +431,8 @@ function Invoke-MsStoreSubmission {
         throw 'The Microsoft Store submission requires one .msix package.'
     }
     if ($null -eq $HttpTransport) {
-        $HttpTransport = { param($request) Invoke-MsStoreHttpRequest -Request $request }.GetNewClosure()
+        # Keep the module session state so this closure can resolve the private transport function.
+        $HttpTransport = { param($request) Invoke-MsStoreHttpRequest -Request $request }
     }
     if ($null -eq $SleepAction) {
         $SleepAction = { param($seconds) Start-Sleep -Seconds $seconds }.GetNewClosure()

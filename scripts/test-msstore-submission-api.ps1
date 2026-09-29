@@ -13,6 +13,9 @@ $secretSentinel = 'synthetic-client-secret+/%& value'
 $tokenSentinel = 'synthetic-access-token-never-log'
 $sasSentinel = 'synthetic-sas-signature-never-log'
 $requestSentinel = 'synthetic-request-error-never-log'
+$tenantIdSentinel = 'synthetic-tenant-id-never-log'
+$clientIdSentinel = 'synthetic-client-id-never-log'
+$productIdSentinel = 'synthetic-product-id-never-log'
 $tempArchivesBefore = @(Get-ChildItem -LiteralPath $tempRoot -Filter 'teleark-store-submission-*.zip' -ErrorAction SilentlyContinue)
 $requests = [System.Collections.Generic.List[object]]::new()
 $observations = @{
@@ -230,6 +233,70 @@ try {
     [Array]::Fill[byte]($syntheticPackageBytes, [byte][char]'S')
     $syntheticPackageBytes[0] = [byte][char]'T'
     [System.IO.File]::WriteAllBytes($packagePath, $syntheticPackageBytes)
+
+    if ($null -eq ('TeleArk.StoreApiTest.FailingHandler' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace TeleArk.StoreApiTest
+{
+    public sealed class FailingHandler : HttpMessageHandler
+    {
+        private readonly Exception _failure;
+        private int _sendCount;
+
+        public FailingHandler(Exception failure) { _failure = failure; }
+        public int SendCount => Volatile.Read(ref _sendCount);
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _sendCount);
+            return Task.FromException<HttpResponseMessage>(_failure);
+        }
+    }
+}
+'@
+    }
+    $defaultHandlerFailure = [System.Net.Http.HttpRequestException]::new(
+        "$secretSentinel $tokenSentinel $sasSentinel $requestSentinel $tenantIdSentinel $clientIdSentinel $productIdSentinel",
+        [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::HostNotFound)
+    )
+    $defaultHandler = [TeleArk.StoreApiTest.FailingHandler]::new($defaultHandlerFailure)
+    $defaultHttpClient = [System.Net.Http.HttpClient]::new($defaultHandler)
+    try {
+        $defaultTransportFailure = & $apiModule {
+            param($httpClient, $package, $tenantId, $clientId, $productId, $clientSecret)
+            $script:MsStoreHttpClient = $httpClient
+            [System.Environment]::SetEnvironmentVariable('AZURE_AD_APPLICATION_SECRET', $clientSecret, 'Process')
+            try {
+                Invoke-MsStoreSubmission -TenantId $tenantId -ClientId $clientId `
+                    -ProductId $productId -PackagePath $package -PollTimeoutSeconds 1 -PollIntervalSeconds 0
+                throw 'The default Store HTTP transport unexpectedly succeeded.'
+            } catch {
+                $_.Exception.Message
+            } finally {
+                [System.Environment]::SetEnvironmentVariable('AZURE_AD_APPLICATION_SECRET', $null, 'Process')
+            }
+        } $defaultHttpClient $packagePath $tenantIdSentinel $clientIdSentinel $productIdSentinel $secretSentinel
+
+        Assert-StoreApiTest ($defaultHandler.SendCount -eq 1) 'The default transport did not invoke the synthetic HTTP handler.'
+        Assert-StoreApiTest ($defaultTransportFailure -match 'TokenRequest \[transport phase=send; category=dns; exception=SocketException; HResult=0x[0-9A-F]{8}\]') 'The default transport did not preserve safe send diagnostics.'
+        foreach ($sensitiveSentinel in @(
+            $secretSentinel, $tokenSentinel, $sasSentinel, $requestSentinel,
+            $tenantIdSentinel, $clientIdSentinel, $productIdSentinel
+        )) {
+            Assert-StoreApiTest (-not $defaultTransportFailure.Contains($sensitiveSentinel)) 'The default transport failure exposed synthetic request data.'
+        }
+    } finally {
+        $defaultHttpClient.Dispose()
+        & $apiModule { $script:MsStoreHttpClient = $null }
+    }
+
     $sleepCalls = [System.Collections.Generic.List[int]]::new()
     $sleep = { param($seconds) $sleepCalls.Add([int]$seconds) }.GetNewClosure()
     [System.Environment]::SetEnvironmentVariable('AZURE_AD_APPLICATION_SECRET', $secretSentinel, 'Process')
@@ -416,4 +483,4 @@ try {
     if (Test-Path -LiteralPath $testDirectory) { Remove-Item -LiteralPath $testDirectory -Recurse -Force }
 }
 
-Write-Output 'Microsoft Store Submission API passed mocked token, metadata, ZIP upload, commit, polling, and redaction cases.'
+Write-Output 'Microsoft Store Submission API passed mocked submission, default transport diagnostics, status, upload, and redaction cases.'
