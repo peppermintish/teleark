@@ -1119,6 +1119,13 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.13 · Microsoft Store 传输恢复与诊断
+
+    - 恢复默认 Store HTTP 请求路径。`.GetNewClosure()`` 会导致模块私有的传输函数无法解析，因此工作流在发送令牌请求前就失败了。
+    - 为 Store API 请求准备、发送和读取响应阶段的失败添加脱敏传输诊断。错误会显示阶段、标准化类别（DNS、套接字、TLS、超时或其他）、允许列表中的异常类型以及 HRESULT。
+    - 错误消息不包含原始异常文本、凭据、请求正文、访问令牌、SAS URL 或上传 URL。本次更改未进行真实 Store 提交。
+    - 应用元数据为 0.5.13。应用运行行为、持久化架构和加密格式均未更改。
+
     ## 0.5.12 · 跨平台发布验证
 
     - 改进 Windows Store 包的跨平台发布验证。

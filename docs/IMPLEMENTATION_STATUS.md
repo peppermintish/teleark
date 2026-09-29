@@ -1,4 +1,10 @@
-# Implementation status — v0.5.12
+# Implementation status — v0.5.13
+
+## Version 0.5.13 · Microsoft Store transport recovery (2026-09-30)
+
+The default Store HTTP transport binding is restored. `.GetNewClosure()` prevented the module-private transport function from resolving through the request closure, so the workflow failed before sending token requests. Store API failures during request setup, request sending or response reading now carry a sanitized transport summary. The summary is limited to the phase, normalized category (`dns`, `socket`, `tls`, `timeout` or `other`), allow-listed exception type and HRESULT. Raw exception text, request bodies, client secrets, access tokens, SAS URLs and upload URLs remain excluded. The Store API authentication and submission flow remains unchanged; app runtime behavior, persistent schemas and encrypted formats are unchanged.
+
+The matching v0.5.13 release tag must rerun the hosted Store submission path to qualify the corrected default transport. No live Store API request or submission has been made for this patch.
 
 ## Version 0.5.12 · Cross-platform release validation (2026-09-30)
 

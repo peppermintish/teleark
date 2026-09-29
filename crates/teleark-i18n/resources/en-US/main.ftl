@@ -1147,6 +1147,13 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.13 · Microsoft Store transport recovery
+
+    - Restore the default Store HTTP request path: `.GetNewClosure()` hid the module-private transport function, causing the workflow to fail before sending the token request.
+    - Add redacted diagnostics for Store API request-setup, send and response-read failures. Errors report the phase, normalized DNS/socket/TLS/timeout/other category, allow-listed exception type and HRESULT.
+    - Keep raw exception text, credentials, request bodies, access tokens, SAS URLs and upload URLs out of failure messages. No live Store submission was performed for this change.
+    - Application metadata is 0.5.13. Runtime behavior, persistent schemas and encrypted formats are unchanged.
+
     ## 0.5.12 · Cross-platform release validation
 
     - Improve cross-platform release validation for Windows Store packages.

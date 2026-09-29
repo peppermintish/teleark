@@ -129,6 +129,8 @@ Inspect actual affected windows, including keyboard/focus, wrapping, scrolling a
 
 Tagged releases submit later MSIX updates through Microsoft's legacy [Store submission API](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services). The API flow obtains an Entra access token, creates an app submission draft, updates its full writable submission record, uploads a ZIP containing the verified `.msix` through the returned Azure Blob SAS URL, commits the draft and polls its status. The helper sends the application secret only in the HTTPS OAuth form body; it does not place it in process arguments, generated files or logs, and clears the process environment value after requesting the token. Upload URLs and access tokens are kept out of output and failure messages.
 
+Transport failure messages may include only the request phase (`request-setup`, `send` or `response-read`), a normalized DNS/socket/TLS/timeout/other category, an allow-listed exception type and the HRESULT. They omit raw exception text, request bodies, credentials and URLs.
+
 Configure these existing GitHub values for version-tag releases:
 
 | GitHub setting | Value used by the workflow |

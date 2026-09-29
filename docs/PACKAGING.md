@@ -35,7 +35,7 @@ The legacy MSIX API does not document a Seller ID input. An existing GitHub `SEL
 
 The manifest targets Windows 10 version 1809 or later. General Windows 10 support ended on October 14, 2025, with later support limited to specific LTSC or Extended Security Update editions; confirm that the declared floor fits the intended audience before submission. See [MSIX platform support](https://learn.microsoft.com/en-us/windows/msix/supported-platforms) and the [Windows 10 lifecycle notice](https://learn.microsoft.com/en-us/lifecycle/announcements/windows-10-end-of-support).
 
-The package version maps Cargo `major.minor.patch` to `(major + 1).minor.patch.0`; for example, Cargo `0.5.12` becomes Store package version `1.5.12.0`. Partner Center identity values must remain stable across updates. The package stores the database, session and default managed files under `%USERPROFILE%\TeleArk`; this location persists after uninstall and follows the user's Windows profile permissions.
+The package version maps Cargo `major.minor.patch` to `(major + 1).minor.patch.0`; for example, Cargo `0.5.13` becomes Store package version `1.5.13.0`. Partner Center identity values must remain stable across updates. The package stores the database, session and default managed files under `%USERPROFILE%\TeleArk`; this location persists after uninstall and follows the user's Windows profile permissions.
 
 ### Build the first package locally
 
@@ -93,7 +93,7 @@ The finished files are:
 | `dist/TeleArk-<version>-macos-universal.pkg` | Installer to share; installs the app at `/Applications/TeleArk.app`. |
 | `dist/teleark-<version>-macos-universal.bin` | Signed standalone executable. |
 
-For version 0.5.12, the installer is `dist/TeleArk-0.5.12-macos-universal.pkg`. CI additionally creates the portable `.tar.gz` archive and release checksums. To preview the local output paths without building or accessing credentials, run `scripts/package-macos.sh --dry-run target/universal-apple-darwin/release/teleark dist/TeleArk.app`.
+For version 0.5.13, the installer is `dist/TeleArk-0.5.13-macos-universal.pkg`. CI additionally creates the portable `.tar.gz` archive and release checksums. To preview the local output paths without building or accessing credentials, run `scripts/package-macos.sh --dry-run target/universal-apple-darwin/release/teleark dist/TeleArk.app`.
 
 ### Persistent self-signed release identity
 
