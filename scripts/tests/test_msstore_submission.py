@@ -54,6 +54,8 @@ class Remote:
         self.requests.append((method, uri, headers.copy(), body))
         path = urlsplit(uri).path
         operation = "TokenRequest" if path.endswith("/token") else ""
+        if path.endswith("/applications/9SYNTHETIC"):
+            operation = "GetApplication"
         if path.endswith("/commit"):
             operation = "CommitSubmission"
         if method == "POST" and path.endswith("/submissions"):
@@ -230,6 +232,24 @@ class StoreTests(unittest.TestCase):
             self.submit()
         self.assertFalse(any(item[0] in {"PUT", "DELETE"} for item in self.remote.requests))
         self.assertFalse(any(item[1].endswith("/submissions") for item in self.remote.requests))
+
+    def test_store_access_rejected_after_token_issuance_identifies_account_permissions(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                self.remote = Remote()
+                self.env = ENV.copy()
+                self.remote.fail_operation = "GetApplication"
+                self.remote.failure = status
+                with self.assertRaises(store.StoreError) as caught:
+                    self.submit()
+                message = str(caught.exception)
+                self.assertIn(f"GetApplication failed (HTTP {status})", message)
+                self.assertIn("Partner Center with the Manager role", message)
+                self.assert_redacted(message + self.output.getvalue() + self.journal.path.read_text())
+                self.assertEqual(len(self.remote.requests), 2)
+                self.assertEqual(self.remote.requests[1][0], "GET")
+                self.assertNotIn("AZURE_AD_APPLICATION_SECRET", self.env)
+                self.assertIsNone(self.journal.data["submission_id"])
 
     def test_committed_same_package_resumes_polling_without_upload_or_commit(self):
         self.remote.pending = {"id": "submission-123"}

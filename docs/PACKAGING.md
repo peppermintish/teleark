@@ -36,6 +36,8 @@ All Store runs share a non-canceling concurrency group, preventing overlapping m
 
 Every phase is visible in job output and a versioned `store-result/submission.json` receipt, retained as a workflow artifact for 30 days even when submission fails. Receipt schema 1 records package name/hash, validated submission ID, phase, status and at most 64 timestamped events; omitted events are counted. Receipts contain no credentials or remote listing data. A receipt write failure cannot stall delivery. A timeout retains the submission identity and reports pending status instead of success. Retry the same tag to monitor the matching draft. No automatic cancellation or deletion of Partner Center submissions is performed.
 
+If authentication succeeds but `GetApplication` returns HTTP 401 or 403, verify Store access in Partner Center. Under **Account settings → User management**, find the exact Entra application used by CI and check its **Manager** role for the Windows developer account. Its tenant/client IDs must match the CI secrets, and that tenant must be associated with the developer account that owns TeleArk. Successful token issuance proves Entra accepted the configured credentials; Partner Center association is a separate prerequisite. Keep IDs and secret values out of logs and reports. Once access is corrected, retry the published tag on `main`; no package rebuild is needed. See Microsoft's [application association instructions](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services#how-to-associate-an-azure-ad-application-with-your-partner-center-account).
+
 | GitHub setting | Store value |
 | --- | --- |
 | Secret `AZURE_AD_TENANT_ID` | Microsoft Entra tenant ID associated with Partner Center |

@@ -127,6 +127,11 @@ def request(transport, operation: str, method: str, uri: str, headers=None, body
             409: "An active draft or unsupported Partner Center setting prevents this operation.",
             429: "The service is rate limiting requests; wait before retrying.",
         }.get(status, "Check Partner Center before retrying.")
+        if status in (401, 403) and operation != "TokenRequest":
+            guidance = (
+                "Verify the token audience and the exact tenant/client application associated with "
+                "this Windows developer account in Partner Center with the Manager role."
+            )
         raise StoreError(f"{operation} failed (HTTP {status}). {guidance}")
     return content
 
