@@ -10,7 +10,7 @@ Microsoft's legacy API requires an app with at least one completed submission an
 
 ## Decision
 
-For version-tag releases, use the existing `AZURE_AD_TENANT_ID`, `AZURE_AD_APPLICATION_CLIENT_ID`, and `AZURE_AD_APPLICATION_SECRET` secrets plus `TELEARK_MSSTORE_PRODUCT_ID`. Read the client secret from the scoped process environment inside the submission routine. Send it only in the OAuth form body over HTTPS, then clear the local value, request body reference and process environment value as soon as token acquisition completes. Never place the secret in arguments, files, logs or failure output. The Store job continues to use the `store-submission` GitHub Environment for secret scope and release protection; it does not request `id-token: write`.
+For version-tag releases, use the existing `AZURE_AD_TENANT_ID`, `AZURE_AD_APPLICATION_CLIENT_ID`, and `AZURE_AD_APPLICATION_SECRET` secrets plus `TELEARK_MSSTORE_PRODUCT_ID`. Validate these settings only in the `store-submission` job after the verified Windows package is ready. The job uses the `store-submission` GitHub Environment, so the preflight, quality, test and package jobs never receive Store credentials and can run in parallel. The validation helper reports missing settings without values. Read the client secret from the scoped process environment inside the submission routine. Send it only in the OAuth form body over HTTPS, then clear the local value, request body reference and process environment value as soon as token acquisition completes. Never place the secret in arguments, files, logs or failure output. The Store job does not request `id-token: write`.
 
 Prepare a temporary ZIP containing the verified `.msix` before creating a draft so the upload URL can be used promptly. Use the API's returned writable submission record as the basis of the update, replacing only the package metadata required for upload. Stream the ZIP in bounded Azure Blob blocks to an HTTPS `*.blob.core.windows.net` SAS URL, without forwarding the bearer token or logging the URL. Commit once, then poll status; do not retry an ambiguous draft creation or commit automatically. Report safe HTTP/status information and direct operators to inspect Partner Center before retrying.
 
@@ -22,7 +22,7 @@ Partner Center must already contain a completed submission and age rating before
 
 ## Verification
 
-Synthetic HTTP tests verify OAuth form construction, secret and SAS redaction, full submission metadata handling, ZIP contents, bounded block upload and ordering, commit and polling statuses, ambiguous failures, and environment cleanup. Workflow graph checks verify that Store submission waits for quality gates and the verified Windows package, and release assembly waits for all package jobs and Store submission. No live Store API calls or credentials are used in local tests.
+Synthetic HTTP tests verify OAuth form construction, secret and SAS redaction, full submission metadata handling, ZIP contents, bounded block upload and ordering, commit and polling statuses, ambiguous failures, and environment cleanup. Configuration tests use synthetic values and verify that output omits them. Workflow graph checks verify that Store settings are absent from preflight, are validated in the protected Store job before submission, and that Store submission waits for quality gates and the verified Windows package; release assembly waits for all package jobs and Store submission. No live Store API calls or credentials are used in local tests.
 
 ## References
 

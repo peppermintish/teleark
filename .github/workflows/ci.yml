@@ -211,18 +211,6 @@ jobs:
           if ($publisherDisplayName.Length -gt 256) {
             throw 'TELEARK_MSIX_PUBLISHER_DISPLAY_NAME exceeds the 256-character manifest limit.'
           }
-      - name: Validate required Microsoft Store submission configuration
-        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-        shell: pwsh
-        env:
-          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
-          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
-          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
-          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
-          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
       - name: Validate Telegram distribution configuration
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.package_preview == true }}
         shell: pwsh
@@ -315,6 +303,18 @@ jobs:
       - name: Verify downloaded MSIX and checksum
         shell: pwsh
         run: ./scripts/verify-msix-artifact.ps1 -Directory 'store-package' -ExpectedFileName "TeleArk-${{ needs.preflight.outputs.version }}-windows-x86_64.msix"
+
+      - name: Validate Microsoft Store submission configuration
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
 
       - name: Submit MSIX package for Store certification
         shell: pwsh

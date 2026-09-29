@@ -16,7 +16,7 @@ Use `scripts/build-local-msix.ps1` on Windows to build the first upload from the
 
 Windows users install and update through the Microsoft Store. Old Windows EXE/MSI packaging and its Inno Setup/WiX scripts and installer tests are removed. Existing unpackaged data remains separate from the Store package's user-profile data set.
 
-A release tag with missing Store settings fails before native compilation. The repository checks the Entra tenant, client ID and client secret and Store Product ID; Seller ID is not an input to the legacy API. A Store submission failure prevents the corresponding GitHub Release from publishing, so the two release destinations do not report different outcomes. Microsoft controls certification and live publication.
+Missing package identity, Telegram distribution or macOS signing configuration fails during preflight before package work begins. Store credentials and Product ID are validated only inside the protected `store-submission` environment after the verified Windows package is ready, so those settings remain unavailable to preflight and package jobs while the platform jobs run in parallel. A Store submission failure prevents the corresponding GitHub Release from publishing, so the two release destinations do not report different outcomes. Seller ID is not an input to the legacy API. Microsoft controls certification and live publication.
 
 ## Verification
 
