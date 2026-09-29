@@ -1,6 +1,6 @@
 # ADR 0060: Windows MSIX-only Store release
 
-Status: Accepted — 2026-09-25. This supersedes the Windows release artifacts and optional Store submission described by ADRs 0043, 0047, 0052, 0058 and 0059.
+Status: Accepted for Windows artifact selection — 2026-09-25. Release ordering and delivery are superseded by [ADR 0063](0063-independent-msix-store-delivery.md). This supersedes the Windows artifacts and optional Store submission described by ADRs 0043, 0047, 0052, 0058 and 0059.
 
 ## Decision
 

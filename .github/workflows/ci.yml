@@ -47,9 +47,12 @@ jobs:
         shell: pwsh
         run: ./scripts/test-msstore-submit-config.ps1
 
-      - name: Test Microsoft Store Submission API
-        shell: pwsh
-        run: ./scripts/test-msstore-submission-api.ps1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Test Microsoft Store submission and release verification
+        run: python -m unittest discover -s scripts/tests -p 'test_msstore*.py' -v
 
       - name: Test CI workflow dependency graph
         shell: pwsh
@@ -116,6 +119,13 @@ jobs:
       - name: Check LF line endings and portable scripts
         shell: pwsh
         run: ./scripts/check-line-endings.ps1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Test Store submission on the native runner without credentials
+        run: python -m unittest discover -s scripts/tests -p 'test_msstore*.py' -v
 
       - name: Configure Rust
         run: rustup default stable
@@ -283,58 +293,21 @@ jobs:
       telegram_api_id: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_ID }}
       telegram_api_hash: ${{ secrets.TELEARK_DISTRIBUTION_TELEGRAM_API_HASH }}
   store_submission:
-    name: 5 · Submit package to Microsoft Store
+    name: 6 · Submit published MSIX to Microsoft Store
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [preflight, quality, test, package_windows]
-    runs-on: windows-2022
-    environment: store-submission
-    permissions:
-      contents: read
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Download verified Windows package
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: release-windows-x86_64
-          path: store-package
-
-      - name: Verify downloaded MSIX and checksum
-        shell: pwsh
-        run: ./scripts/verify-msix-artifact.ps1 -Directory 'store-package' -ExpectedFileName "TeleArk-${{ needs.preflight.outputs.version }}-windows-x86_64.msix"
-
-      - name: Validate Microsoft Store submission configuration
-        shell: pwsh
-        env:
-          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
-          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
-          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
-          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
-          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
-
-      - name: Submit MSIX package for Store certification
-        shell: pwsh
-        env:
-          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
-          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
-        run: |
-          $packages = @(Get-ChildItem -LiteralPath 'store-package' -Filter '*.msix' -File)
-          if ($packages.Count -ne 1) {
-            throw "Expected exactly one verified .msix package, found $($packages.Count)."
-          }
-          $submission = ./scripts/submit-msix-to-store.ps1 -PackagePath $packages[0].FullName
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "The MSIX package was committed to Partner Center (status: $($submission -replace '^.*status is ', '')). Certification and publication are controlled by Microsoft."
+    needs: publish
+    uses: ./.github/workflows/store-submission.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+    secrets:
+      AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+      AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+      AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
 
   publish:
-    name: 6 · Publish GitHub Release
+    name: 5 · Publish verified GitHub Release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [preflight, quality, test, package_windows, package_macos, package_linux, store_submission]
+    needs: [preflight, quality, test, package_windows, package_macos, package_linux]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:

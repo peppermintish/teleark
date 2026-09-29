@@ -1,6 +1,6 @@
 # ADR 0062: Microsoft Store Submission API for MSIX releases
 
-Status: Accepted — 2026-09-30. Supersedes the Store authentication and submission mechanism in ADRs 0060 and 0061.
+Status: Superseded in implementation and release ordering by [ADR 0063](0063-independent-msix-store-delivery.md) — 2026-09-30. The MSIX authentication endpoint and existing credential names remain applicable. Previously superseded the Store mechanism in ADRs 0060 and 0061.
 
 ## Context
 

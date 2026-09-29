@@ -1,4 +1,10 @@
-# Implementation status — v0.5.13
+# Implementation status — v0.5.14
+
+## Version 0.5.14 · Independent MSIX Store delivery (2026-09-30)
+
+Replaced the closure-bound PowerShell Store HTTP client with a standard-library Python client based on Microsoft's MSIX submission documentation. Native Linux/Windows/macOS tests exercise its production HTTP path with a synthetic loopback service. CI publishes the verified cross-platform GitHub Release after all quality/test/package gates, then runs a separate protected Store workflow. Store delivery verifies released bytes and manifest identity/version, preserves listing and publication settings, uploads the API-required ZIP in bounded blocks, commits and observes ingestion status. A matching draft can resume by package SHA256; a committed matching draft is only monitored. Unrelated drafts are preserved. Phase output and versioned bounded receipts survive failures, and manual delivery on `main` can retry the same published tag without a version bump or rebuild. [ADR 0063](adr/0063-independent-msix-store-delivery.md) and [Packaging](PACKAGING.md#windows) supersede the old release ordering and Store client instructions.
+
+The root failures were PowerShell transport scope resolution in v0.5.12 and a failing Linux diagnostic assertion in v0.5.13; the native MSIX build itself succeeded. The retired client's JSON/XML constructors also rejected charset parameters in media types, hidden by transport mocks. All 18 synthetic Store tests pass on Windows and Linux, including production HTTP framing. Workflow lint, dependency-graph checks, configuration redaction, MSIX verification, release-asset assembly and line-ending checks pass. Full local Windows source gates pass: formatting, locked workspace/all-target checking, strict Clippy, 915 passing workspace tests (10 existing ignored tests), explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. Hosted native packaging and actual Partner Center acceptance are qualified by the tagged workflow, not these local synthetic tests. Application behavior, persistent schema versions, encrypted formats and supported upgrade paths are unchanged from v0.5.13.
 
 ## Version 0.5.13 · Microsoft Store transport recovery (2026-09-30)
 
@@ -28,9 +34,9 @@ Synthetic regressions cover directory retry/cancel routing, interrupted multi-pa
 
 Removed `hi-IN` from the supported-locale registry, translation resources, settings and locale negotiation. Windows systems configured for Hindi now use the English fallback unless another supported language is selected. The Windows MSIX declares the remaining nine UI languages. Persistent schemas and encrypted formats are unchanged.
 
-## Windows MSIX-only Store release workflow (2026-09-25)
+## Windows MSIX-only Store release workflow (historical ordering, 2026-09-25)
 
-Windows release builds now produce one x64 `.msix`; the old Windows EXE, ZIP, MSI and Inno Setup package paths are removed. Matching version-tag CI runs verify the tag's ancestry and version, build the `msix` data-layout binary, submit the package to Partner Center and publish the cross-platform GitHub Release only after submission succeeds. Pull requests and package previews do not submit. The first Store upload and certification remain manual. The Store package keeps its separate data set under `%USERPROFILE%\TeleArk`. [Packaging](PACKAGING.md#windows), [ADR 0060](adr/0060-windows-msix-only-store-release.md) and [ADR 0062](adr/0062-msstore-submission-api-authentication.md) record the current contract.
+Windows builds produce one x64 `.msix`; the old EXE, ZIP, MSI and Inno Setup artifacts are removed. The original pipeline required Store submission before GitHub publication; v0.5.14 and [ADR 0063](adr/0063-independent-msix-store-delivery.md) supersede that ordering. Pull requests and package previews do not submit. The first Store submission and Microsoft's certification requirements remain applicable. The Store package keeps its separate data set under `%USERPROFILE%\TeleArk`. [Packaging](PACKAGING.md#windows) records current delivery behavior.
 
 ## Microsoft Store MSIX distribution checkpoint (superseded, 2026-09-24)
 

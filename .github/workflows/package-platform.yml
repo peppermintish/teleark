@@ -121,7 +121,9 @@ jobs:
           TELEARK_DISTRIBUTION_TELEGRAM_API_HASH: ${{ secrets.telegram_api_hash }}
         run: |
           cargo test -p teleark-runtime --locked --target ${{ inputs.target }} --features msix data_root
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store data-layout tests failed.' }
           cargo build -p teleark-gui --bin teleark --release --locked --target ${{ inputs.target }} --features msix
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store release compilation failed.' }
 
       - name: Build universal macOS release
         if: ${{ inputs.platform == 'macos' }}

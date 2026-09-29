@@ -19,14 +19,8 @@ foreach ($setting in $requiredSettings) {
 }
 
 try {
-    Import-Module (Join-Path $PSScriptRoot 'msstore-submission-api.psm1') -Force
-    $result = Invoke-MsStoreSubmission `
-        -TenantId $env:AZURE_AD_TENANT_ID `
-        -ClientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
-        -ProductId $env:TELEARK_MSSTORE_PRODUCT_ID `
-        -PackagePath $PackagePath
-
-    Write-Output "Microsoft Store submission committed; current status is $($result.Status)."
+    python (Join-Path $PSScriptRoot 'msstore_submission.py') submit --package-path $PackagePath
+    if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store submission failed; review the sanitized Python report and receipt.' }
 } finally {
     [System.Environment]::SetEnvironmentVariable('AZURE_AD_APPLICATION_SECRET', $null, 'Process')
 }

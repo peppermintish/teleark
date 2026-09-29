@@ -28,6 +28,11 @@ Full source gates (explicit Core/i18n checks also run in CI):
 pwsh ./scripts/check-line-endings.ps1
 pwsh ./scripts/test-line-endings.ps1
 pwsh ./scripts/test-distribution-credentials.ps1
+pwsh ./scripts/test-msstore-submit-config.ps1
+python -m unittest discover -s scripts/tests -p 'test_msstore*.py' -v
+pwsh ./scripts/test-ci-workflow-graph.ps1
+pwsh ./scripts/test-msix-artifact.ps1
+bash scripts/test-release-artifacts.sh
 bash scripts/test-macos-libraries.sh
 bash scripts/test-linux-payloads.sh
 cargo fmt --all --check
@@ -41,6 +46,8 @@ cargo deny check
 ```
 
 Long fuzzing, million-row benchmarks and credentialed Telegram tests run in separate protected/manual workflows. GPUI dependency provenance is recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
+
+Store delivery is a separate workflow after verified GitHub Release publication. CI uses Python 3.13 with no third-party Python packages for the Store client; Python 3.11 or later can run its local synthetic tests. Those tests exercise the default HTTP transport over loopback and controlled submission states without credentials or live Store calls. Store configuration tests also use synthetic values. Retry a published version from **Submit published MSIX to Microsoft Store** on `main`; see [delivery and recovery](PACKAGING.md#retry-store-delivery-without-rebuilding). The PowerShell HTTP module and its closure-bound test script are retired; the optional `submit-msix-to-store.ps1` entry point delegates to Python and does not implement HTTP itself.
 
 GPUI Kit's development-only `test-support` feature provides real event/focus regression tests. Its reviewed test-only graph adds `convert_case 0.11.0` (MIT), plus `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These helpers are excluded from release features.
 
@@ -123,13 +130,11 @@ Inspect actual affected windows, including keyboard/focus, wrapping, scrolling a
 
 ## CI and releases
 
-[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. A lightweight preflight validates release version, package identity, Telegram distribution credentials and macOS signing configuration. Repository quality checks, Linux/Windows/macOS test jobs and all three platform package jobs then run concurrently when applicable. Pull requests run quality and tests. A matching `vX.Y.Z` tag must point to a commit on `main`; it builds Windows x64 MSIX, universal macOS and Linux packages. Store credentials are validated inside the protected `store-submission` environment after the verified Windows package is ready, so missing Store credentials fail at that gate while the package jobs can still run in parallel. Store submission waits for quality checks, all OS tests and the verified Windows package. GitHub Release assembly waits for quality checks, all OS tests, all three verified package outputs and successful Store submission. Manual package previews build without tests or publication. Branch pushes do not trigger a run. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
+[`ci.yml`](../.github/workflows/ci.yml) runs preflight, repository quality checks, native Linux/Windows/macOS tests and the reusable platform packager. A matching `vX.Y.Z` tag must point to a commit on `main` and match Cargo metadata. Preflight validates package identity, Telegram distribution credentials and macOS signing configuration; quality/tests/packages then run concurrently when applicable. GitHub Release assembly waits for every quality/test/package gate and verifies the exact assets and checksums. After publication, it calls [`store-submission.yml`](../.github/workflows/store-submission.yml). Store failures remain visible and leave the verified release available. Pull requests run quality/tests without publication; package previews build without the Rust test matrix or publication. Branch pushes do not trigger CI. Direct pushes to `main` require a pull request or manual dispatch for CI checks.
 
 ### Microsoft Store MSIX submission
 
-Tagged releases submit later MSIX updates through Microsoft's legacy [Store submission API](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services). The API flow obtains an Entra access token, creates an app submission draft, updates its full writable submission record, uploads a ZIP containing the verified `.msix` through the returned Azure Blob SAS URL, commits the draft and polls its status. The helper sends the application secret only in the HTTPS OAuth form body; it does not place it in process arguments, generated files or logs, and clears the process environment value after requesting the token. Upload URLs and access tokens are kept out of output and failure messages.
-
-Transport failure messages may include only the request phase (`request-setup`, `send` or `response-read`), a normalized DNS/socket/TLS/timeout/other category, an allow-listed exception type and the HRESULT. They omit raw exception text, request bodies, credentials and URLs.
+Tagged releases submit MSIX updates using Microsoft's documented [MSIX Store submission API](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services). The Python client verifies the published MSIX, creates/resumes a matching draft, preserves listing/publication metadata, uploads a ZIP to Azure Blob Storage, commits once and polls ingestion status. It sends the client secret only in the OAuth form body, removes it from the process environment before requesting the token and never prints tokens, SAS URLs or raw service responses. Errors identify the failed operation plus a normalized transport category or HTTP status and safe guidance. Phase output and bounded receipt schema 1 remain available when a request fails.
 
 Configure these existing GitHub values for version-tag releases:
 
@@ -140,7 +145,7 @@ Configure these existing GitHub values for version-tag releases:
 | Secret `AZURE_AD_APPLICATION_SECRET` | Client secret of that Entra application |
 | Variable `TELEARK_MSSTORE_PRODUCT_ID` | TeleArk Store Product ID |
 
-The API path does not accept Seller ID; an existing `SELLER_ID` secret can remain configured, but this workflow does not require or read it. Associate the Entra app registration with Partner Center and assign it the Manager role. Keep the `store-submission` GitHub Environment restricted to version-tag releases. The tenant, client and secret values are validated only in that protected environment, after the Windows package has been verified; the preflight and package jobs do not read those Store credentials. Validation reports status and setting names without values. The API requires an app with at least one completed submission and a configured age rating, so upload the first package manually in Partner Center. Microsoft still reviews and certifies each update before publication. See the API's [submission workflow and prerequisites](https://learn.microsoft.com/en-us/windows/uwp/monetize/manage-app-submissions) and [update schema](https://learn.microsoft.com/en-us/windows/uwp/monetize/update-an-app-submission). Local tests use synthetic HTTP responses only and do not contact Partner Center.
+An existing `SELLER_ID` secret can remain configured; the MSIX API does not document it as an input and the workflow does not read it. Associate the Entra app with Partner Center and give it the Manager role. Preserve the existing `store-submission` Environment protection; allow version tags for automatic delivery and trusted `main` for manual retries. Credentials are validated only there, after release-package verification. The API requires an earlier completed Partner Center submission and age ratings. Microsoft's documented unsupported-feature restrictions still apply. Retry **Submit published MSIX to Microsoft Store** on `main` with an existing published tag to reuse its bytes; matching committed drafts are monitored without another commit. See [Packaging](PACKAGING.md#retry-store-delivery-without-rebuilding) for the recovery procedure and official references. Local tests use synthetic values and loopback only.
 
 Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. The macOS app and standalone executable use the persistent self-signed identity; the installer remains unsigned, and Apple notarization is not provided. A tag alone is not evidence of successful signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
 

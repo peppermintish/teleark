@@ -1,0 +1,101 @@
+name: Submit published MSIX to Microsoft Store
+run-name: Microsoft Store · ${{ inputs.release_tag }}
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+    secrets:
+      AZURE_AD_TENANT_ID:
+        required: false
+      AZURE_AD_APPLICATION_CLIENT_ID:
+        required: false
+      AZURE_AD_APPLICATION_SECRET:
+        required: false
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag to submit or resume (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  submit:
+    name: Verify published MSIX and submit to Partner Center
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.ref_name == inputs.release_tag) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-22.04
+    environment: store-submission
+    concurrency:
+      group: teleark-microsoft-store
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Exercise the actual Store HTTP transport without credentials
+        run: python -m unittest discover -s scripts/tests -p 'test_msstore*.py' -v
+
+      - name: Download and verify the published release MSIX
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+        run: python scripts/msstore_submission.py prepare --release-tag "$RELEASE_TAG" --directory store-package
+
+      - name: Validate Microsoft Store submission configuration
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
+          TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
+          TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
+          TELEARK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.TELEARK_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: ./scripts/check-msstore-submit-config.ps1 -RequireSubmission
+
+      - name: Upload MSIX ZIP and commit the Partner Center submission
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
+        run: python scripts/msstore_submission.py submit --package-path "store-package/TeleArk-${RELEASE_TAG#v}-windows-x86_64.msix"
+
+      - name: Report the Store outcome
+        if: ${{ always() }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = Path('store-result/submission.json')
+          text = 'Submission did not start; inspect the preceding verification or configuration step.'
+          if receipt.exists():
+              result = json.loads(receipt.read_text(encoding='utf-8'))
+              text = f"Phase: {result['phase']}; status: {result['status'] or 'unknown'}. Package SHA256: `{result['package_sha256']}`."
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('### Microsoft Store submission\n\n' + text + '\n\nMicrosoft controls certification and publication. Retry this workflow on main with the same published release tag; matching committed submissions are monitored without another commit.\n')
+          PY
+
+      - name: Retain sanitized submission receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: store-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: store-result/submission.json
+          if-no-files-found: ignore
+          retention-days: 30
