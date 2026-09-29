@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.10 · Reliable channel and encrypted download recovery
+
+- Channel directory synchronization retries transient network, server and conflict failures with bounded backoff and honors Telegram FloodWait deadlines. Directory refresh and cancellation target the directory request even while an individual channel sync is active.
+- Encrypted downloads retry incomplete remote part streams from the start of the current part, with at most two bounded retries. Integrity failures remain terminal, incomplete parts receive no receipt, and final files stay unpublished until whole-file verification succeeds.
+- The Transfers inspector now shows measured download activity, retry timing and per-part state in its chart, timeline and bounded part map. Maps with more than 4,096 parts disclose the omitted detail.
+- Release CI verifies the Windows MSIX checksum before Store submission and verifies the exact downloaded platform artifacts and their checksums before assembling the GitHub release assets.
+- Application metadata is 0.5.10. SQLite schema 23, Vault recovery records and encrypted file formats are unchanged.
+
 ## 0.5.9 · Remove Hindi interface language
 
 - Hindi is no longer an available interface language. Windows systems configured for Hindi use the English fallback unless another supported language is selected, and the Windows Store package declares the nine remaining supported interface languages.
