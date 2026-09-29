@@ -5,6 +5,7 @@ $script:AzureBlobApiVersion = '2023-11-03'
 $script:MsStoreUploadBlockSize = 16MB
 $script:MsStoreMaximumBlockCount = 50000
 $script:MsStoreHttpClient = $null
+$script:MsStoreHttpTransportDiagnosticKey = [object]::new()
 
 function ConvertTo-MsStoreFormBody {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Values)
@@ -26,6 +27,114 @@ function Get-MsStoreHttpClient {
     return $script:MsStoreHttpClient
 }
 
+function Get-MsStoreHttpTransportDiagnostic {
+    param(
+        [Parameter(Mandatory)][System.Exception]$Exception,
+        [Parameter(Mandatory)][ValidateSet('request-setup', 'send', 'response-read')][string]$Phase
+    )
+
+    $exceptionTypeNames = @{
+        'System.Exception' = 'Exception'
+        'System.IO.IOException' = 'IOException'
+        'System.InvalidOperationException' = 'InvalidOperationException'
+        'System.Net.Http.HttpRequestException' = 'HttpRequestException'
+        'System.Net.Sockets.SocketException' = 'SocketException'
+        'System.OperationCanceledException' = 'OperationCanceledException'
+        'System.Security.Authentication.AuthenticationException' = 'AuthenticationException'
+        'System.Threading.Tasks.TaskCanceledException' = 'TaskCanceledException'
+        'System.TimeoutException' = 'TimeoutException'
+    }
+
+    $diagnosticException = $Exception
+    $category = 'other'
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.TimeoutException] -or
+            $current -is [System.Threading.Tasks.TaskCanceledException] -or
+            $current -is [System.OperationCanceledException]) {
+            $diagnosticException = $current
+            $category = 'timeout'
+            break
+        }
+        if ($current -is [System.Security.Authentication.AuthenticationException]) {
+            $diagnosticException = $current
+            $category = 'tls'
+            break
+        }
+        if ($current -is [System.Net.Sockets.SocketException]) {
+            $diagnosticException = $current
+            $socketError = [string]$current.SocketErrorCode
+            if ($socketError -in @('HostNotFound', 'TryAgain', 'NoData', 'NoRecovery')) {
+                $category = 'dns'
+            } elseif ($socketError -ceq 'TimedOut') {
+                $category = 'timeout'
+            } else {
+                $category = 'socket'
+            }
+            break
+        }
+        $current = $current.InnerException
+    }
+
+    $typeName = [string]$diagnosticException.GetType().FullName
+    if (-not $exceptionTypeNames.ContainsKey($typeName)) {
+        $diagnosticException = $Exception
+        $typeName = [string]$diagnosticException.GetType().FullName
+    }
+    $safeTypeName = if ($exceptionTypeNames.ContainsKey($typeName)) {
+        $exceptionTypeNames[$typeName]
+    } else {
+        'Exception'
+    }
+    $hresultBytes = [BitConverter]::GetBytes([int]$diagnosticException.HResult)
+    $hresult = '0x{0:X8}' -f [BitConverter]::ToUInt32($hresultBytes, 0)
+
+    return @{
+        Phase = $Phase
+        Category = $category
+        ExceptionType = $safeTypeName
+        HResult = $hresult
+    }
+}
+
+function New-MsStoreHttpTransportException {
+    param(
+        [Parameter(Mandatory)][System.Exception]$Exception,
+        [Parameter(Mandatory)][ValidateSet('request-setup', 'send', 'response-read')][string]$Phase
+    )
+
+    $safeException = [System.InvalidOperationException]::new('HTTP transport request failed.')
+    $safeException.Data[$script:MsStoreHttpTransportDiagnosticKey] =
+        Get-MsStoreHttpTransportDiagnostic -Exception $Exception -Phase $Phase
+    return $safeException
+}
+
+function Get-MsStoreHttpTransportDiagnosticSuffix {
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+
+    if (-not $Exception.Data.Contains($script:MsStoreHttpTransportDiagnosticKey)) {
+        return ''
+    }
+
+    $diagnostic = $Exception.Data[$script:MsStoreHttpTransportDiagnosticKey]
+    $validPhases = @('request-setup', 'send', 'response-read')
+    $validCategories = @('dns', 'other', 'socket', 'timeout', 'tls')
+    $validExceptionTypes = @(
+        'AuthenticationException', 'Exception', 'HttpRequestException', 'IOException',
+        'InvalidOperationException', 'OperationCanceledException', 'SocketException',
+        'TaskCanceledException', 'TimeoutException'
+    )
+    if ($diagnostic -isnot [System.Collections.IDictionary] -or
+        [string]$diagnostic.Phase -cnotin $validPhases -or
+        [string]$diagnostic.Category -cnotin $validCategories -or
+        [string]$diagnostic.ExceptionType -cnotin $validExceptionTypes -or
+        [string]$diagnostic.HResult -cnotmatch '^0x[0-9A-F]{8}$') {
+        return ''
+    }
+
+    return " [transport phase=$($diagnostic.Phase); category=$($diagnostic.Category); exception=$($diagnostic.ExceptionType); HResult=$($diagnostic.HResult)]"
+}
+
 function Invoke-MsStoreHttpRequest {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Request)
 
@@ -34,43 +143,56 @@ function Invoke-MsStoreHttpRequest {
     $stream = $null
     $response = $null
     try {
-        $message = [System.Net.Http.HttpRequestMessage]::new(
-            [System.Net.Http.HttpMethod]::new([string]$Request.Method),
-            [string]$Request.Uri
-        )
+        try {
+            $message = [System.Net.Http.HttpRequestMessage]::new(
+                [System.Net.Http.HttpMethod]::new([string]$Request.Method),
+                [string]$Request.Uri
+            )
 
-        foreach ($header in $Request.Headers.GetEnumerator()) {
-            if (-not $message.Headers.TryAddWithoutValidation([string]$header.Key, [string]$header.Value)) {
-                throw 'Request header could not be applied.'
+            foreach ($header in $Request.Headers.GetEnumerator()) {
+                if (-not $message.Headers.TryAddWithoutValidation([string]$header.Key, [string]$header.Value)) {
+                    throw 'Request header could not be applied.'
+                }
             }
+
+            if ($Request.Contains('FilePath')) {
+                $stream = [System.IO.File]::OpenRead([string]$Request.FilePath)
+                $message.Content = [System.Net.Http.StreamContent]::new($stream)
+                $message.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new(
+                    [string]$Request.ContentType
+                )
+            } elseif ($Request.Contains('Bytes')) {
+                $message.Content = [System.Net.Http.ByteArrayContent]::new([byte[]]$Request.Bytes)
+                $message.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new(
+                    [string]$Request.ContentType
+                )
+            } elseif ($Request.Contains('Body')) {
+                $message.Content = [System.Net.Http.StringContent]::new(
+                    [string]$Request.Body,
+                    [System.Text.Encoding]::UTF8,
+                    [string]$Request.ContentType
+                )
+            }
+        } catch {
+            throw (New-MsStoreHttpTransportException -Exception $_.Exception -Phase 'request-setup')
         }
 
-        if ($Request.Contains('FilePath')) {
-            $stream = [System.IO.File]::OpenRead([string]$Request.FilePath)
-            $message.Content = [System.Net.Http.StreamContent]::new($stream)
-            $message.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new(
-                [string]$Request.ContentType
-            )
-        } elseif ($Request.Contains('Bytes')) {
-            $message.Content = [System.Net.Http.ByteArrayContent]::new([byte[]]$Request.Bytes)
-            $message.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new(
-                [string]$Request.ContentType
-            )
-        } elseif ($Request.Contains('Body')) {
-            $message.Content = [System.Net.Http.StringContent]::new(
-                [string]$Request.Body,
-                [System.Text.Encoding]::UTF8,
-                [string]$Request.ContentType
-            )
+        try {
+            $response = $client.SendAsync($message).GetAwaiter().GetResult()
+        } catch {
+            throw (New-MsStoreHttpTransportException -Exception $_.Exception -Phase 'send')
         }
-
-        $response = $client.SendAsync($message).GetAwaiter().GetResult()
-        $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        try {
+            $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        } catch {
+            throw (New-MsStoreHttpTransportException -Exception $_.Exception -Phase 'response-read')
+        }
         return @{
             StatusCode = [int]$response.StatusCode
             Content = $content
         }
     } catch {
+        if ($_.Exception.Data.Contains($script:MsStoreHttpTransportDiagnosticKey)) { throw }
         throw [System.InvalidOperationException]::new('HTTP transport request failed.')
     } finally {
         if ($null -ne $response) { $response.Dispose() }
@@ -89,18 +211,19 @@ function Invoke-MsStoreSafeRequest {
     try {
         $response = & $Transport $Request
     } catch {
+        $diagnosticSuffix = Get-MsStoreHttpTransportDiagnosticSuffix -Exception $_.Exception
         if ($Operation -eq 'CreateSubmission') {
             throw [System.InvalidOperationException]::new(
-                'The Store submission creation request failed or timed out. It may have created a draft; inspect Partner Center before retrying.'
+                "The Store submission creation request failed or timed out$diagnosticSuffix. It may have created a draft; inspect Partner Center before retrying."
             )
         }
         if ($Operation -eq 'UploadPackageBlock' -or $Operation -eq 'CommitPackageUpload') {
             throw [System.InvalidOperationException]::new(
-                'The Store package upload request failed. An in-progress draft may remain; inspect Partner Center before retrying.'
+                "The Store package upload request failed$diagnosticSuffix. An in-progress draft may remain; inspect Partner Center before retrying."
             )
         }
         throw [System.InvalidOperationException]::new(
-            "The Store submission request failed during $Operation. Inspect Partner Center before retrying."
+            "The Store submission request failed during $Operation$diagnosticSuffix. Inspect Partner Center before retrying."
         )
     }
 

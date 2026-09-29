@@ -36,6 +36,89 @@ function Assert-ContainsExactlyOne {
     Assert-StoreApiTest ($matches.Count -eq 1) 'A synthetic credential was not confined to its expected request field.'
 }
 
+$apiModule = Get-Module -Name msstore-submission-api
+$diagnosticCases = @(
+    @{
+        Exception = [System.Net.Http.HttpRequestException]::new(
+            "$secretSentinel $tokenSentinel $sasSentinel $requestSentinel",
+            [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::HostNotFound)
+        )
+        Phase = 'send'
+        Category = 'dns'
+        ExceptionType = 'SocketException'
+    }
+    @{
+        Exception = [System.Net.Http.HttpRequestException]::new(
+            "$secretSentinel $tokenSentinel $sasSentinel $requestSentinel",
+            [System.Security.Authentication.AuthenticationException]::new("$secretSentinel $requestSentinel")
+        )
+        Phase = 'response-read'
+        Category = 'tls'
+        ExceptionType = 'AuthenticationException'
+    }
+    @{
+        Exception = [System.Threading.Tasks.TaskCanceledException]::new("$secretSentinel $requestSentinel")
+        Phase = 'send'
+        Category = 'timeout'
+        ExceptionType = 'TaskCanceledException'
+    }
+    @{
+        Exception = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::ConnectionRefused)
+        Phase = 'response-read'
+        Category = 'socket'
+        ExceptionType = 'SocketException'
+    }
+    @{
+        Exception = [System.InvalidOperationException]::new("$secretSentinel $tokenSentinel $sasSentinel $requestSentinel")
+        Phase = 'request-setup'
+        Category = 'other'
+        ExceptionType = 'InvalidOperationException'
+    }
+)
+foreach ($diagnosticCase in $diagnosticCases) {
+    $diagnostic = & $apiModule {
+        param($exception, $phase)
+        Get-MsStoreHttpTransportDiagnostic -Exception $exception -Phase $phase
+    } $diagnosticCase.Exception $diagnosticCase.Phase
+    Assert-StoreApiTest ($diagnostic.Phase -ceq $diagnosticCase.Phase) 'A transport failure reported an incorrect phase.'
+    Assert-StoreApiTest ($diagnostic.Category -ceq $diagnosticCase.Category) 'A transport failure reported an incorrect category.'
+    Assert-StoreApiTest ($diagnostic.ExceptionType -ceq $diagnosticCase.ExceptionType) 'A transport failure reported an incorrect exception type.'
+    Assert-StoreApiTest ([string]$diagnostic.HResult -cmatch '^0x[0-9A-F]{8}$') 'A transport failure omitted its safe HResult identifier.'
+    $serializedDiagnostic = $diagnostic | ConvertTo-Json -Compress
+    foreach ($sensitiveSentinel in @($secretSentinel, $tokenSentinel, $sasSentinel, $requestSentinel)) {
+        Assert-StoreApiTest (-not $serializedDiagnostic.Contains($sensitiveSentinel)) 'A transport diagnostic retained sensitive exception text.'
+    }
+}
+
+$safeDiagnosticException = & $apiModule {
+    param($exception, $phase)
+    New-MsStoreHttpTransportException -Exception $exception -Phase $phase
+} $diagnosticCases[0].Exception $diagnosticCases[0].Phase
+Assert-StoreApiTest ($safeDiagnosticException.Message -ceq 'HTTP transport request failed.') 'A sanitized transport exception retained the original message.'
+Assert-StoreApiTest ($null -eq $safeDiagnosticException.InnerException) 'A sanitized transport exception retained the original exception.'
+$diagnosticRequestUri = "https://$requestSentinel.invalid/path?secret=$secretSentinel&sig=$sasSentinel"
+$safeDiagnosticMessage = & $apiModule {
+    param($safeException, $requestUri)
+    $transport = {
+        param($request)
+        throw $safeException
+    }.GetNewClosure()
+    try {
+        Invoke-MsStoreSafeRequest -Request @{
+            Method = 'POST'
+            Uri = $requestUri
+            Headers = @{ Authorization = "Bearer $tokenSentinel" }
+            Body = $secretSentinel
+        } -Transport $transport -Operation 'TokenRequest'
+    } catch {
+        $_.Exception.Message
+    }
+} $safeDiagnosticException $diagnosticRequestUri
+Assert-StoreApiTest ($safeDiagnosticMessage -match 'TokenRequest \[transport phase=send; category=dns; exception=SocketException; HResult=0x[0-9A-F]{8}\]') 'A safe transport failure omitted its allow-listed diagnostics.'
+foreach ($sensitiveSentinel in @($secretSentinel, $tokenSentinel, $sasSentinel, $requestSentinel)) {
+    Assert-StoreApiTest (-not $safeDiagnosticMessage.Contains($sensitiveSentinel)) 'A surfaced transport diagnostic exposed synthetic request data.'
+}
+
 $transport = {
     param($request)
     $requests.Add($request)
