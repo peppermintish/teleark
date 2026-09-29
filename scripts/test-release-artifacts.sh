@@ -30,7 +30,7 @@ write_group() {
   : > "$directory/SHA256SUMS"
   for filename in "$@"; do
     printf 'synthetic package contents for %s\n' "$filename" > "$directory/$filename"
-    (cd "$directory" && sha256sum "$filename" >> SHA256SUMS)
+    (cd "$directory" && sha256sum --text "$filename" >> SHA256SUMS)
   done
 }
 
@@ -42,12 +42,15 @@ write_group release-linux-x86_64 "${linux[@]}"
 windows_manifest="$artifact_root/release-windows-x86_64/SHA256SUMS"
 windows_manifest_line="$(cat "$windows_manifest")"
 printf '%s\r\n' "$windows_manifest_line" > "$windows_manifest"
-if ! grep -q $'\r' "$windows_manifest"; then
+# Inspect bytes instead of asking grep to match CR: MSYS text-mode input strips
+# carriage returns even though Linux grep preserves them.
+windows_manifest_hex="$(od -An -tx1 "$windows_manifest" | tr -d ' \n')"
+if [[ "$windows_manifest_hex" != *0d0a ]]; then
   echo 'Synthetic Windows checksum manifest must contain CRLF.' >&2
   exit 1
 fi
 
-if ! "$assembler" "$artifact_root" "$destination" "$label" >/dev/null; then
+if ! bash "$assembler" "$artifact_root" "$destination" "$label" >/dev/null; then
   echo 'Valid platform artifacts should assemble.' >&2
   exit 1
 fi
@@ -64,7 +67,7 @@ case "$destination" in
   *) echo 'Refusing to remove a destination outside the designated test directory.' >&2; exit 1 ;;
 esac
 printf 'unexpected file\n' > "$artifact_root/release-linux-x86_64/unexpected.txt"
-if "$assembler" "$artifact_root" "$destination" "$label" >/dev/null 2>&1; then
+if bash "$assembler" "$artifact_root" "$destination" "$label" >/dev/null 2>&1; then
   echo 'Unexpected files in downloaded artifacts must be rejected.' >&2
   exit 1
 fi
@@ -75,7 +78,7 @@ fi
 rm -f -- "$artifact_root/release-linux-x86_64/unexpected.txt"
 
 printf 'tampered package\n' >> "$artifact_root/release-windows-x86_64/${windows[0]}"
-if "$assembler" "$artifact_root" "$destination" "$label" >/dev/null 2>&1; then
+if bash "$assembler" "$artifact_root" "$destination" "$label" >/dev/null 2>&1; then
   echo 'Packages with an invalid downloaded checksum must be rejected.' >&2
   exit 1
 fi
