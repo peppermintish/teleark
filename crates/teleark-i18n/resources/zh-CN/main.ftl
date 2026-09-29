@@ -1119,6 +1119,10 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.12 · 跨平台发布验证
+
+    - 改进 Windows Store 包的跨平台发布验证。
+
     ## 0.5.11 · 并行发布检查与 Microsoft Store API 提交
 
     - 轻量级版本与配置验证后，质量检查、Linux/Windows/macOS 测试和三个平台的打包任务会并行运行。Store 提交等待质量检查、各操作系统测试以及经过验证的 Windows MSIX 完成。GitHub Release 组装等待所有平台包和 Store 提交成功。

@@ -1119,6 +1119,10 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.12 · クロスプラットフォームのリリース検証
+
+    - Windows Store パッケージのクロスプラットフォーム リリース検証を改善しました。
+
     ## 0.5.11 · リリース検証の並列化とMicrosoft Store APIへの提出
 
     - 軽量なリリースとバージョンの検証後、品質チェック、Linux/Windows/macOSのテスト、3つのパッケージ作成を並行して実行します。Storeへの提出は品質チェック、各OSのテスト、検証済みWindows MSIXの完了後に行われます。GitHub Releaseの組み立ては、すべてのパッケージとStore提出の成功を待ちます。

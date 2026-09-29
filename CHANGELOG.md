@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.12 · Cross-platform release validation
+
+- Improve cross-platform release validation for Windows Store packages.
+
 ## 0.5.11 · Parallel release checks and Microsoft Store API submission
 
 - Start quality checks, Linux/Windows/macOS tests and all three package jobs in parallel after lightweight release/version validation. Store submission waits for quality checks, tests and the verified Windows MSIX; GitHub Release assembly waits for all package outputs and successful Store submission.

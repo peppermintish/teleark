@@ -1,4 +1,8 @@
-# Implementation status — v0.5.11
+# Implementation status — v0.5.12
+
+## Version 0.5.12 · Cross-platform release validation (2026-09-30)
+
+The v0.5.11 tag run passed all three OS test jobs and all three package jobs. Its Linux quality job failed in the mocked Store upload failure regression because the mocked callback could not see the assertion helper in its PowerShell scope; Store submission and GitHub Release were consequently skipped. Capture the assertion scriptblock in the mock callbacks to make the check scope-stable across Linux and Windows PowerShell. This is test-only. The v0.5.11 tag remains unchanged. The corrected synthetic API test passes locally on Windows and Linux PowerShell 7.6.6, including a GitHub-style dot-sourced wrapper, and actionlint passes. The v0.5.12 tagged workflow must still qualify the release jobs. No app runtime behavior, persistent schemas or encrypted formats changed.
 
 ## Version 0.5.11 · Store API release pipeline (2026-09-30)
 

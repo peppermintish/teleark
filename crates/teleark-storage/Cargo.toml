@@ -1,6 +1,6 @@
 [package]
 name = "teleark-storage"
-version = "0.5.11"
+version = "0.5.12"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/teleark/teleark"
@@ -9,7 +9,7 @@ description = "SQLite persistence adapter for TeleArk"
 
 [dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-teleark-core = { version = "=0.5.11", path = "../teleark-core" }
+teleark-core = { version = "=0.5.12", path = "../teleark-core" }
 zeroize = "1.8.2"
 
 [dev-dependencies]
