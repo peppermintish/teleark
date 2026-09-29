@@ -1119,6 +1119,14 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.10 · チャネル同期と暗号化ダウンロードの信頼性向上
+
+    - チャネルディレクトリ同期では、一時的なネットワーク障害、サーバー障害、競合を、待機時間に上限を設けて再試行し、Telegram が指定する FloodWait の待機時間に従います。個別チャネルの同期中でも、ディレクトリの更新とキャンセルはディレクトリ要求を対象にします。
+    - 暗号化ダウンロードでは、途中で切れたリモートパートのストリームを、現在のパートの先頭から最大2回再試行します。整合性エラーは再試行せず、不完全なパートには受領記録を作成しません。ファイル全体の検証に成功するまで、最終ファイルは公開されません。
+    - Transfers インスペクターに、実測ダウンロードの動作、再試行の待ち時間、各パートの状態を、チャート、タイムライン、上限付きパートマップで表示します。4,096パートを超えるマップは、省略された内容を明示します。
+    - リリースCIは、Storeへの提出前にWindows MSIXのチェックサムを検証し、GitHubリリースを組み立てる前に、ダウンロード済みのプラットフォーム成果物とそのチェックサムを検証します。
+    - アプリケーションのメタデータは0.5.10です。SQLiteスキーマ23、Vaultの復旧記録、暗号化ファイル形式に変更はありません。
+
     ## 0.5.9 · Remove Hindi interface language
 
     - Hindi is no longer an available interface language. The Windows Store package declares the nine remaining supported interface languages.
@@ -1381,6 +1389,9 @@ channel-sync-empty = ローカルにファイルのキャッシュがありま�
 channel-sync-seeding = 初回のローカルキャッシュを準備中
 channel-sync-history-loading = リクエストした過去の履歴を受信中
 channel-sync-details-title = チャンネルの同期
+global-sync-cancel-directory = チャンネル一覧の同期をキャンセル
+global-sync-cancel-channel = { $source } の同期をキャンセル（{ $chat_id }）
+global-sync-cancel-pending-channel-retries = 保留中のすべてのチャンネル再試行をキャンセル（{ $count }）
 channel-sync-rate-limited = Telegram のレート制限を待機中
 
 startup-title = ローカルライブラリを開いています
@@ -1507,6 +1518,27 @@ vault-transfer-error-permission = 暗号化転送に必要なアクセスが拒�
 vault-transfer-error-invalid-request = 暗号化転送リクエストまたはパッケージが無効です。
 vault-transfer-error-conflict = 暗号化転送が現在のアカウント、ストレージチャンネル、またはローカル状態と競合しています。
 vault-transfer-error-source-changed = 元ファイルまたは暗号化された内容が変更されたか、整合性検証に失敗しました。
+
+transfer-download-activity-elapsed = { $phase } · 経過 { $elapsed }
+transfer-download-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
+transfer-download-activity-container-bytes = { $phase } · 現在の暗号化コンテナ：{ $done } / { $total } · 経過 { $elapsed }
+transfer-download-waiting-retry = ダウンロードの再試行を待機中
+transfer-download-verifying = ダウンロードした内容を検証中
+transfer-recovery-download-guidance = 検証前にダウンロードが停止しました。再試行すると続きから再開できます。整合性検証が成功するまで部分ファイルは非公開です。
+transfer-recovery-download-blocked-guidance = このダウンロードは現在の状態では続行できません。暗号化された Vault の内容と保存先にアクセスできることを確認してください。内容が利用できない場合は別のコピーから復元してください。内容が利用可能になったら Vault のファイル一覧から新しいダウンロードを開始してください。
+transfer-recovery-integrity-guidance = ダウンロードした暗号化データの整合性を確認できませんでした。最終ファイルは公開されていません。Vault のファイル一覧から新しいダウンロードを開始してください。同じ失敗が再び発生する場合、保存された暗号化データが破損している可能性があります。
+vault-transfer-error-download-integrity = ダウンロードした暗号化データが変更されたか、整合性検証に失敗しました。最終ファイルは公開されていません。Vault のファイル一覧から新しいダウンロードを開始してください。同じ失敗が再び発生する場合は、別のコピーから復元するかサポートにお問い合わせください。
+download-pipeline-title = ダウンロード処理
+download-chart-title = 時間ごとのダウンロード速度
+download-chart-sample = { $time } · { $speed } · 計測間隔 { $interval }
+download-chart-explanation = 1 秒あたりに受信した暗号化コンテナのデータ量です。空白は計測サンプルがない時間を示します。
+download-part-map-title = ダウンロードしたコンテナ
+download-part-map-legend = 各セルは 1 個以上のコンテナを示します。青は受信中、琥珀色は再試行待ち、緑は検証済み、灰色はキュー内です。
+download-part-queued = キュー内
+download-part-active = 受信中
+download-part-waiting = 再試行待ち
+download-part-confirmed = 検証済み
+transfer-part-map-truncated = このマップはコンテナ { $total } 個中 { $shown } 個を表示しています。大きな転送では 4,096 件まで表示します。
 detail-failure-last-phase = 最後に記録された段階
 
 # Bound channel resilience
@@ -1658,6 +1690,7 @@ speed-limits-close = 閉じる
 global-sync-connecting = アカウントの接続を待機中
 global-sync-discovering = チャンネル一覧を更新中
 global-sync-account = アカウント
+global-sync-channel-id = Telegram チャンネル { $chat_id }
 
 global-sync-library = ファイルライブラリを更新中
 global-sync-library-failed = ファイルライブラリの更新を確認してください
@@ -1750,6 +1783,9 @@ transfer-upload-upgrading = 新しい暗号化識別子でアップロード形�
 transfer-upload-sealing = 暗号化コンテナを検証中
 upload-pipeline-title = アップロード状況
 upload-pipeline-queue = 待機バッファ：{ $queued } · 実行中 part：{ $active } · 最終更新：{ $idle } 前 · 再試行待ち：{ $wait }
+download-pipeline-queue = 残りのコンテナ：{ $queued } · アクティブなコンテナ：{ $active } · 最終更新：{ $idle } 前 · 再試行待ち：{ $wait }
+download-pipeline-transport = Telegram ストリームチャンク：受信中 { $active } · 待機中 { $waiting } · 次の再試行まで：{ $wait }
+download-chart-empty = Telegram からの暗号化バイト受信を待っています。ダウンロード速度は不明です。
 upload-chart-title = 確認済みデータ / 秒
 upload-chart-empty = 確認応答を待っています。速度はまだ不明です。
 upload-chart-sample = { $time } · { $interval } 間で { $speed }
@@ -1764,6 +1800,7 @@ upload-part-waiting = 再試行待ち
 upload-part-confirmed = 確認済み
 upload-timeline-title = アクティビティ履歴
 upload-timeline-event = { $time } · { $phase } · Part { $part } · 試行 { $attempt } · 待機 { $wait }
+upload-timeline-terminal-event = { $time } · { $outcome }
 upload-history-omitted = 以前の履歴を省略：イベント { $events } 件、サンプル { $samples } 件。
 upload-timeline-recent = 直近 12 件を表示。リプレイで保持されている以前のイベントを確認できます。
 
@@ -1875,6 +1912,7 @@ detail-server-status = Telegram サーバー応答状態
 transfer-persistence-parallel = { $activity } · 復旧情報を保存中
 transfer-eta-compact = 残り { $eta }
 transfer-rate-basis = 確認済みアプリデータ · 直近 3 秒 · 1 秒ごとに更新
+transfer-download-rate-basis = 暗号化コンテナで受信した実測バイト/秒 · アプリケーション換算の進捗はファイル全体の検証を意味しません · 直近 3 秒 · 1 秒ごとに更新
 transfer-rate-awaiting = 確認待ち · 最終確認は { $elapsed } 前
 
 vault-health-pending-upload = アップロード未完了
@@ -1886,9 +1924,11 @@ transfer-download-receiving-blocks = ブロックを受信・復号中
 transfer-rate-awaiting-first = 最初の確認を待機中
 transfer-bytes-heading = 処理済み / 合計
 transfer-eta-heading = 残り時間
+download-part-group = コンテナ { $first }–{ $last } · 検証済み { $confirmed } · { $state }
 upload-part-group = ブロック { $first }–{ $last } · 確認済み { $confirmed } · { $state }
 storage-channel-pending-explanation = アップロードは未完了です。復旧キーを復元し、同じ元ファイルを選んで続行できます。公開済みで検証できたコンテナのみ再利用します。
 upload-part-map-grouping = { $count } ブロック · 1 セル最大 { $size } 個。範囲はホバーで確認できます。
+download-part-map-grouping = { $count } 個のコンテナ · 1 セル最大 { $size } 個。正確な範囲はホバーで確認できます。
 
 ## Windows setup wizard
 installer-preparing = TeleArk をインストールしています。インストール画面で進行状況を確認し、安全に停止できます。

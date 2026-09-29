@@ -11,6 +11,42 @@ fn open(path: &std::path::Path, remote: &Arc<TestVaultRemote>) -> (DesktopVault,
     (vault, library)
 }
 
+fn assert_terminal_event(snapshot: &VaultTransferSnapshot, expected: VaultUploadOutcome) {
+    let activity = snapshot
+        .upload_activity
+        .as_ref()
+        .expect("terminal transfer retains activity");
+    assert_eq!(activity.active, 0, "terminal snapshot is not active");
+    assert_eq!(
+        activity.wait_until, None,
+        "terminal snapshot is not waiting"
+    );
+    assert!(
+        activity.parts.iter().all(|part| {
+            !matches!(
+                part.state,
+                crate::vault_progress::VaultUploadPartState::Uploading
+                    | crate::vault_progress::VaultUploadPartState::Waiting
+            )
+        }),
+        "terminal map does not retain active or waiting parts"
+    );
+    let terminal = activity
+        .events
+        .iter()
+        .filter_map(|event| event.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.last(), Some(&expected));
+    assert!(
+        activity
+            .events
+            .iter()
+            .zip(activity.events.iter().skip(1))
+            .all(|(previous, next)| previous.outcome.is_none() || next.outcome.is_none()),
+        "terminal markers are not duplicated adjacently"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn metadata_only_changes_during_preparation_and_transport_preserve_authenticated_upload() {
@@ -65,11 +101,214 @@ fn metadata_only_changes_during_preparation_and_transport_preserve_authenticated
     let package = crate::transfer::package_id_from_bytes(saved.package_id)
         .expect("package")
         .get();
+    let previous_stream_attempts = remote.download_stream_attempts();
+    remote.truncate_download_streams_once(0, 0, 1);
     let downloaded = vault
         .download_file(7, 11, package)
         .expect("authenticated download");
     assert_eq!(std::fs::read(downloaded).expect("plaintext"), bytes);
+    assert_eq!(
+        remote.download_stream_attempts() - previous_stream_attempts,
+        2,
+        "an empty first read is retried once from the same part"
+    );
     assert_eq!(remote.objects(), 2, "exactly one part and manifest");
+}
+
+#[test]
+fn small_download_retries_a_truncated_first_frame_and_publishes_exact_bytes() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("initialize");
+    let bytes = vec![0x6d; 64 * 1024];
+    let source = dir.path().join("small.bin");
+    std::fs::write(&source, &bytes).expect("source");
+    let uploaded = vault.upload_file(7, 11, source).expect("upload");
+    let upload_row = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("completed upload");
+    assert_terminal_event(&upload_row, VaultUploadOutcome::Completed);
+    let package = uploaded.package_numeric_id;
+
+    let previous_stream_attempts = remote.download_stream_attempts();
+    remote.truncate_download_streams_once(0, 0, 1);
+    let downloaded = vault
+        .download_file(7, 11, package)
+        .expect("retry truncated first frame");
+    assert_eq!(std::fs::read(downloaded).expect("output"), bytes);
+    assert_eq!(
+        remote.download_stream_attempts() - previous_stream_attempts,
+        2,
+        "one truncated attempt is followed by one complete stream"
+    );
+
+    let row = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Download)
+        .expect("download projection");
+    let log = std::fs::read_to_string(row.session_log_path.expect("session log"))
+        .expect("download activity log");
+    assert!(log.contains("download_retry_scheduled"));
+    assert_eq!(
+        Database::open(library.database_path.as_ref())
+            .expect("database")
+            .vault_job(7, row.id)
+            .expect("download job")
+            .expect("completed download")
+            .state,
+        VaultJobState::Completed
+    );
+}
+
+#[test]
+fn integrity_failed_download_records_terminal_failure_without_publication() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("initialize");
+    let bytes = vec![0x6d; 64 * 1024];
+    let source = dir.path().join("integrity.bin");
+    std::fs::write(&source, &bytes).expect("source");
+    let uploaded = vault.upload_file(7, 11, source).expect("upload");
+    let corrupted_id = remote.corrupt_first_payload_last_byte();
+
+    let error = vault
+        .download_file(7, 11, uploaded.package_numeric_id)
+        .expect_err("corrupt authenticated extent is rejected");
+    assert_eq!(error.kind(), ApplicationErrorKind::SourceChanged);
+    let row = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Download)
+        .expect("failed download");
+    assert_eq!(
+        row.state,
+        VaultTransferState::Failed(ApplicationErrorKind::SourceChanged)
+    );
+    assert_terminal_event(&row, VaultUploadOutcome::Failed);
+    let destination = row.destination.expect("reserved destination");
+    assert!(
+        !destination.exists(),
+        "integrity failure is never published"
+    );
+    assert!(destination.with_extension("bin.partial").exists());
+    let database = Database::open(library.database_path.as_ref()).expect("database");
+    let parts = database.vault_parts(7, row.id, None, 256).expect("parts");
+    assert_eq!(parts.len(), 1);
+    assert!(parts.iter().all(|part| part.receipt.is_none()));
+    assert!(remote.downloads().contains(&corrupted_id));
+}
+
+#[test]
+fn truncated_download_streams_retry_from_the_part_start_and_fail_without_publication() {
+    for (skip, after, truncations, should_succeed) in [
+        (0, 512 * 1024, 1, true),
+        (1, usize::MAX, 1, true),
+        (0, 512 * 1024, 3, false),
+    ] {
+        let dir = tempfile::tempdir().expect("directory");
+        let remote = TestVaultRemote::new();
+        let (vault, library) = open(dir.path(), &remote);
+        vault.initialize(PASSWORD.into()).expect("initialize");
+        // A small test-only limit creates multiple containers without large
+        // fixture allocations; normal encrypted frames and transport blocks
+        // keep their production geometry.
+        vault.set_test_container_part_limit(1024 * 1024);
+        let bytes = (0..2 * 1024 * 1024)
+            .map(|index| (index % 239) as u8)
+            .collect::<Vec<_>>();
+        let source = dir.path().join("multi-container.bin");
+        std::fs::write(&source, &bytes).expect("source");
+        vault.upload_file(7, 11, source).expect("upload");
+        let db = Database::open(library.database_path.as_ref()).expect("database");
+        let upload = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.direction == VaultTransferDirection::Upload)
+            .expect("upload projection");
+        assert_eq!(upload.part_count, 2, "test geometry creates two containers");
+        assert_terminal_event(&upload, VaultUploadOutcome::Completed);
+        let job = db
+            .vault_job(7, upload.id)
+            .expect("job")
+            .expect("upload job");
+        let package = crate::transfer::package_id_from_bytes(job.package_id)
+            .expect("package")
+            .get();
+
+        let previous_stream_attempts = remote.download_stream_attempts();
+        remote.truncate_download_streams_once(skip, after, truncations);
+        let download = vault
+            .submit_download_file(7, 11, package)
+            .expect("download admitted");
+        let result = download.wait();
+        let attempts = remote.download_stream_attempts() - previous_stream_attempts;
+
+        if should_succeed {
+            let destination = result.expect("transient truncation retries successfully");
+            assert_eq!(
+                std::fs::read(destination).expect("downloaded output"),
+                bytes
+            );
+            assert_eq!(attempts, 3, "two containers plus one retry");
+            let row = vault
+                .transfers()
+                .into_iter()
+                .find(|row| row.direction == VaultTransferDirection::Download)
+                .expect("completed download projection");
+            assert_terminal_event(&row, VaultUploadOutcome::Completed);
+            let log = std::fs::read_to_string(row.session_log_path.expect("session log"))
+                .expect("download activity log");
+            assert!(log.contains("download_retry_scheduled"));
+            assert!(log.contains("\"direction\":\"download\""));
+            let id = row.id;
+            drop(vault);
+            drop(library);
+            drop(db);
+            let (vault, _library) = open(dir.path(), &remote);
+            vault.restore_upload_history(7).expect("restored history");
+            let restored = vault
+                .transfers()
+                .into_iter()
+                .find(|row| row.id == id)
+                .expect("restored completed download");
+            assert_terminal_event(&restored, VaultUploadOutcome::Completed);
+        } else {
+            assert_eq!(
+                result.expect_err("bounded retries eventually stop").kind(),
+                ApplicationErrorKind::Network
+            );
+            assert_eq!(attempts, 3, "initial request plus two retries");
+            let row = vault
+                .transfers()
+                .into_iter()
+                .find(|row| row.direction == VaultTransferDirection::Download)
+                .expect("failed download projection");
+            assert_terminal_event(&row, VaultUploadOutcome::Failed);
+            let destination = row.destination.expect("reserved destination");
+            let partial = destination.with_file_name(format!(
+                "{}.partial",
+                destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("destination name")
+            ));
+            assert!(partial.exists(), "unpublished bytes remain recoverable");
+            assert!(!destination.exists(), "failed data is never published");
+            let db = Database::open(library.database_path.as_ref()).expect("database");
+            let parts = db.vault_parts(7, row.id, None, 2).expect("part receipts");
+            assert_eq!(parts.len(), 1, "only the attempted part is reserved");
+            assert!(
+                parts[0].receipt.is_none(),
+                "truncated extent has no receipt"
+            );
+            assert_eq!(parts[0].part_index, 0);
+        }
+    }
 }
 
 #[test]
@@ -382,6 +621,12 @@ fn download_paused_during_transport_resumes_same_task_after_restart() {
             .state,
         VaultJobState::Paused
     );
+    let paused = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("paused download");
+    assert_terminal_event(&paused, VaultUploadOutcome::Paused);
     drop(vault);
     drop(library);
     drop(db);
@@ -418,6 +663,73 @@ fn download_paused_during_transport_resumes_same_task_after_restart() {
         db.vault_job_ids_by_direction(7, VaultJobDirection::Download, None, 256)
             .expect("download IDs"),
         vec![id]
+    );
+}
+
+#[test]
+fn resumed_download_preflight_failure_replays_pause_then_failure() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, _library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("initialize");
+    let source = dir.path().join("preflight.bin");
+    std::fs::write(&source, vec![0x85; 64 * 1024]).expect("source");
+    let uploaded = vault.upload_file(7, 11, source).expect("upload");
+    let (entered, release) = remote.gate(GateKind::DownloadPart, 0);
+    let work = vault
+        .submit_download_file(7, 11, uploaded.package_numeric_id)
+        .expect("download");
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("part transport entered");
+    let id = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Download)
+        .expect("download row")
+        .id;
+    vault
+        .submit_transfer_control(7, id, control::VaultUploadControl::Pause)
+        .expect("pause")
+        .wait()
+        .expect("durable pause");
+    release.send(()).expect("release transport");
+    assert!(work.wait().is_err());
+    let paused = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("paused row");
+    assert_terminal_event(&paused, VaultUploadOutcome::Paused);
+
+    let damaged_manifest = remote.corrupt_manifest_last_byte();
+    assert!(damaged_manifest > 0);
+    let error = vault
+        .submit_resume_download(7, id)
+        .expect("resume request")
+        .wait()
+        .expect_err("preflight rejects damaged manifest");
+    assert_eq!(error.kind(), ApplicationErrorKind::SourceChanged);
+    let failed = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("failed same task");
+    assert_eq!(
+        failed.state,
+        VaultTransferState::Failed(ApplicationErrorKind::SourceChanged)
+    );
+    let outcomes = failed
+        .upload_activity
+        .expect("retained timeline")
+        .events
+        .into_iter()
+        .filter_map(|event| event.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes,
+        [VaultUploadOutcome::Paused, VaultUploadOutcome::Failed],
+        "a new preflight attempt appends its outcome without erasing the pause"
     );
 }
 
@@ -498,6 +810,12 @@ fn upload_transport_restart(gate: GateKind, remove_source: bool) {
     release.send(()).expect("release transport");
     let report = work.wait().expect("stopped batch");
     assert_eq!(report.paused_count, 1);
+    let paused = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("paused upload");
+    assert_terminal_event(&paused, VaultUploadOutcome::Paused);
     let db = Database::open(library.database_path.as_ref()).expect("database");
     assert_eq!(
         db.vault_job(7, id).expect("job").expect("ledger").state,
@@ -920,6 +1238,12 @@ fn resumed_upload_rejects_changed_bytes_even_when_size_and_mtime_are_preserved()
         result.expect_err("changed bytes rejected").kind(),
         ApplicationErrorKind::SourceChanged
     );
+    let failed_row = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("failed upload");
+    assert_terminal_event(&failed_row, VaultUploadOutcome::Failed);
     assert_eq!(remote.objects(), 0, "changed bytes must not reach Telegram");
     let failed = db.vault_job(7, id).expect("job").expect("retained");
     assert_eq!(failed.state, VaultJobState::Blocked);
@@ -935,8 +1259,137 @@ fn resumed_upload_rejects_changed_bytes_even_when_size_and_mtime_are_preserved()
 }
 
 #[test]
-fn network_failed_download_retries_same_task_after_restart() {
-    network_failure_restart(GateKind::DownloadPart);
+fn network_failed_download_recovers_within_the_owner() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("initialize");
+    let bytes = vec![0x27; 2 * 1024 * 1024];
+    let source = dir.path().join("retry.bin");
+    std::fs::write(&source, &bytes).expect("source");
+    vault.upload_file(7, 11, source).expect("upload");
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let upload = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("upload");
+    let job = db.vault_job(7, upload.id).expect("job").expect("ledger");
+    let package = crate::transfer::package_id_from_bytes(job.package_id)
+        .expect("package")
+        .get();
+
+    let attempts_before = remote.download_stream_attempts();
+    remote.fail_once(GateKind::DownloadPart);
+    let output = vault
+        .download_file(7, 11, package)
+        .expect("transient failure retries in owner");
+    assert_eq!(std::fs::read(output).expect("output"), bytes);
+    assert_eq!(
+        remote.download_stream_attempts() - attempts_before,
+        2,
+        "one failed read is followed by one successful read"
+    );
+    let download = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Download)
+        .expect("download");
+    assert_terminal_event(&download, VaultUploadOutcome::Completed);
+    assert_eq!(
+        db.vault_job(7, download.id)
+            .expect("job")
+            .expect("ledger")
+            .state,
+        VaultJobState::Completed
+    );
+}
+
+#[test]
+fn exhausted_download_retries_resume_same_task_after_restart() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("initialize");
+    let bytes = vec![0x27; 2 * 1024 * 1024];
+    let source = dir.path().join("retry.bin");
+    std::fs::write(&source, &bytes).expect("source");
+    vault.upload_file(7, 11, source).expect("upload");
+    let db = Database::open(library.database_path.as_ref()).expect("database");
+    let upload = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Upload)
+        .expect("upload");
+    let job = db.vault_job(7, upload.id).expect("job").expect("ledger");
+    let package = crate::transfer::package_id_from_bytes(job.package_id)
+        .expect("package")
+        .get();
+
+    let attempts_before = remote.download_stream_attempts();
+    remote.truncate_download_streams_once(0, usize::MAX, 3);
+    let error = vault
+        .download_file(7, 11, package)
+        .expect_err("bounded retries are exhausted");
+    assert_eq!(error.kind(), ApplicationErrorKind::Network);
+    assert_eq!(
+        remote.download_stream_attempts() - attempts_before,
+        3,
+        "initial read and two bounded retries"
+    );
+    let id = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.direction == VaultTransferDirection::Download)
+        .expect("failed download")
+        .id;
+    let failed_row = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("failed row");
+    assert_eq!(
+        failed_row.state,
+        VaultTransferState::Failed(ApplicationErrorKind::Network)
+    );
+    assert_terminal_event(&failed_row, VaultUploadOutcome::Failed);
+    let failed = db.vault_job(7, id).expect("job").expect("ledger");
+    assert_eq!(failed.state, VaultJobState::Retryable);
+    let destination = failed_row.destination.expect("reserved destination");
+    assert!(!destination.exists(), "failed plaintext is never published");
+    assert!(destination.with_extension("bin.partial").exists());
+    let receipts = db.vault_parts(7, id, None, 256).expect("part receipts");
+    assert!(receipts.iter().all(|part| part.receipt.is_none()));
+
+    drop(vault);
+    drop(library);
+    drop(db);
+    let (vault, library) = open(dir.path(), &remote);
+    vault.restore_upload_history(7).expect("restored history");
+    let restored_failed = vault
+        .transfers()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("same task");
+    assert_eq!(
+        restored_failed.recovery_state,
+        Some(VaultJobState::Retryable)
+    );
+    assert_terminal_event(&restored_failed, VaultUploadOutcome::Failed);
+    vault.unlock_with_password(PASSWORD.into()).expect("unlock");
+    let output = vault
+        .submit_resume_download(7, id)
+        .expect("resume same task")
+        .wait()
+        .expect("retry after restart");
+    assert_eq!(std::fs::read(output).expect("output"), bytes);
+    let completed = Database::open(library.database_path.as_ref())
+        .expect("database")
+        .vault_job(7, id)
+        .expect("job")
+        .expect("same durable task");
+    assert_eq!(completed.state, VaultJobState::Completed);
+    assert!(completed.generation > failed.generation);
 }
 
 #[test]
@@ -1146,21 +1599,27 @@ fn cancelled_upload_and_download_remain_terminal_after_restart() {
             db.vault_job(7, id).expect("job").expect("ledger").state,
             VaultJobState::Cancelled
         );
+        let cancelled = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("cancelled transfer");
+        assert_terminal_event(&cancelled, VaultUploadOutcome::Cancelled);
         let requests = (remote.uploads().len(), remote.downloads().len());
         drop(vault);
         drop(library);
         drop(db);
         let (vault, library) = open(dir.path(), &remote);
         vault.restore_upload_history(7).expect("history");
-        assert_eq!(
-            vault
-                .transfers()
-                .into_iter()
-                .find(|row| row.id == id)
-                .expect("restored")
-                .state,
-            VaultTransferState::Cancelled
-        );
+        let restored = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("restored");
+        assert_eq!(restored.state, VaultTransferState::Cancelled);
+        if !upload {
+            assert_terminal_event(&restored, VaultUploadOutcome::Cancelled);
+        }
         vault.unlock_with_password(PASSWORD.into()).expect("unlock");
         let error = if upload {
             vault

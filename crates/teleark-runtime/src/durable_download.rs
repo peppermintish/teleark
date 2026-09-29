@@ -5,6 +5,8 @@ use teleark_crypto::ManifestPart;
 use teleark_storage::{Database, VaultJobLease, VaultJobState, VaultPartRecord};
 use teleark_transfer::{ContentDigest, DestinationId, FileSystemPort, NativeFileSystem};
 
+const REMOTE_READ_RETRIES: u8 = 2;
+
 mod published;
 use published::PublishedOutput;
 
@@ -84,7 +86,7 @@ impl DurableDownload {
         &mut self,
         database: &mut Database,
         part: &ManifestPart,
-        fetch: impl FnOnce() -> Result<Vec<u8>, TransferError>,
+        mut fetch: impl FnMut() -> Result<Vec<u8>, TransferError>,
     ) -> Result<ExtentSource, TransferError> {
         self.restore_part_to(database, part, |out| {
             let bytes = fetch()?;
@@ -92,11 +94,22 @@ impl DurableDownload {
         })
     }
 
+    #[cfg(test)]
     pub fn restore_part_to(
         &mut self,
         database: &mut Database,
         part: &ManifestPart,
-        fetch: impl FnOnce(&mut dyn std::io::Write) -> Result<(), TransferError>,
+        fetch: impl FnMut(&mut dyn std::io::Write) -> Result<(), TransferError>,
+    ) -> Result<ExtentSource, TransferError> {
+        self.restore_part_to_with_retry(database, part, fetch, |_, _| {})
+    }
+
+    pub fn restore_part_to_with_retry(
+        &mut self,
+        database: &mut Database,
+        part: &ManifestPart,
+        mut fetch: impl FnMut(&mut dyn std::io::Write) -> Result<(), TransferError>,
+        mut retry_scheduled: impl FnMut(u8, std::time::Duration),
     ) -> Result<ExtentSource, TransferError> {
         let identity = self.identity(part)?;
         let reservation = VaultPartRecord {
@@ -140,34 +153,54 @@ impl DurableDownload {
             if saved_receipt != receipt {
                 return Err(TransferError::ManifestCorrupted);
             }
-            let digest = range_digest(
+            let digest = match range_digest(
                 part,
                 |offset, length| {
                     self.files
                         .read_partial(DestinationId(self.lease.id), offset, length)
                 },
                 &self.cancellation,
-            )?;
-            if digest == part.plaintext_blake3 {
+            ) {
+                Ok(digest) => Some(digest),
+                // A receipt proves the intended extent identity, not the
+                // current bytes in the local cache. Short/corrupt local ranges
+                // are cache misses; preserve genuine I/O and permission errors.
+                Err(TransferError::HashMismatch) => None,
+                Err(error) => return Err(error),
+            };
+            if digest == Some(part.plaintext_blake3) {
                 return Ok(ExtentSource::Local);
             }
         }
-        let mut writer = ExtentWriter {
-            files: &mut self.files,
-            id: DestinationId(self.lease.id),
-            offset: part.plaintext_offset,
-            remaining: part.plaintext_length,
-            hash: blake3::Hasher::new(),
-            error: None,
-            cancellation: &self.cancellation,
-        };
-        let fetched = fetch(&mut writer);
-        if let Some(error) = writer.error {
-            return Err(error);
-        }
-        fetched?;
-        if writer.remaining != 0 || writer.hash.finalize().as_bytes() != &part.plaintext_blake3 {
-            return Err(TransferError::HashMismatch);
+        let mut retries = 0_u8;
+        loop {
+            let mut writer = ExtentWriter {
+                files: &mut self.files,
+                id: DestinationId(self.lease.id),
+                offset: part.plaintext_offset,
+                remaining: part.plaintext_length,
+                hash: blake3::Hasher::new(),
+                error: None,
+                cancellation: &self.cancellation,
+            };
+            let fetched = fetch(&mut writer);
+            if let Some(error) = writer.error.take() {
+                return Err(error);
+            }
+            let complete = writer.remaining == 0
+                && writer.hash.finalize().as_bytes() == &part.plaintext_blake3;
+            drop(writer);
+            match fetched {
+                Ok(()) if complete => break,
+                Ok(()) => return Err(TransferError::HashMismatch),
+                Err(TransferError::Network) if retries < REMOTE_READ_RETRIES => {
+                    retries += 1;
+                    let delay = remote_read_retry_delay(retries);
+                    retry_scheduled(retries, delay);
+                    wait_for_retry(delay, &self.cancellation)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
         if self.cancellation.is_cancelled()
             || !database
@@ -251,6 +284,29 @@ impl DurableDownload {
     }
 }
 
+fn remote_read_retry_delay(retry: u8) -> std::time::Duration {
+    // Small bounded backoff for transient remote reads; durable control and
+    // cancellation remain responsive during the wait.
+    std::time::Duration::from_millis(100 * u64::from(retry))
+}
+
+fn wait_for_retry(
+    delay: std::time::Duration,
+    cancellation: &crate::TelegramScanCancellation,
+) -> Result<(), TransferError> {
+    let started = std::time::Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let remaining = delay.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    }
+}
+
 fn range_digest(
     part: &ManifestPart,
     mut read: impl FnMut(u64, u64) -> Result<Vec<u8>, TransferError>,
@@ -322,6 +378,23 @@ mod tests {
     use teleark_storage::VaultJobTransition;
 
     fn fixture(path: &std::path::Path) -> (Database, VaultJobLease, Vec<ManifestPart>) {
+        fixture_with_data(path, b"abcdefgh", 4)
+    }
+
+    fn fixture_with_data(
+        path: &std::path::Path,
+        bytes: &[u8],
+        part_size: usize,
+    ) -> (Database, VaultJobLease, Vec<ManifestPart>) {
+        fixture_with_expected_digest(path, bytes, part_size, *blake3::hash(bytes).as_bytes())
+    }
+
+    fn fixture_with_expected_digest(
+        path: &std::path::Path,
+        bytes: &[u8],
+        part_size: usize,
+        whole_plaintext_blake3: [u8; 32],
+    ) -> (Database, VaultJobLease, Vec<ManifestPart>) {
         let mut db = Database::open(path).expect("database");
         let context = VaultRecoveryContext {
             container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
@@ -343,12 +416,12 @@ mod tests {
             .expect("wrapped key"),
             file_name: "restored.bin".into(),
             created_at_unix_ms: 100,
-            size_bytes: 8,
+            size_bytes: bytes.len() as u64,
             direction: VaultRecoveryDirection::Download {
                 destination: path.with_file_name("restored.bin"),
                 manifest_message_id: 10,
                 manifest_blake3: [5; 32],
-                whole_plaintext_blake3: *blake3::hash(b"abcdefgh").as_bytes(),
+                whole_plaintext_blake3,
             },
         };
         db.admit_vault_job(&context.admission_record().expect("context"))
@@ -369,7 +442,29 @@ mod tests {
             .expect("start")
         );
         lease.generation = 1;
-        (db, lease, fixture_parts())
+        let parts = bytes
+            .chunks(part_size)
+            .enumerate()
+            .map(|(index, plaintext)| ManifestPart {
+                part_index: index as u32,
+                part_instance_id: [index as u8 + 1; 16],
+                plaintext_offset: (index * part_size) as u64,
+                plaintext_length: plaintext.len() as u64,
+                encoded_length: plaintext.len() as u64 + 128,
+                frame_count: plaintext.len().div_ceil(512 * 1024) as u32,
+                plaintext_blake3: *blake3::hash(plaintext).as_bytes(),
+                encoded_ciphertext_blake3: [index as u8; 32],
+                remote_locator: RemoteLocator {
+                    account_id: 7,
+                    chat_id: 11,
+                    message_id: index as i64 + 20,
+                    remote_name: format!("part-{index}"),
+                    locator_version: 1,
+                    locator_extension: None,
+                },
+            })
+            .collect();
+        (db, lease, parts)
     }
 
     fn fixture_parts() -> Vec<ManifestPart> {
@@ -601,6 +696,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn restart_recovers_nonzero_truncated_partial_and_refetches_short_receipt_range() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("jobs.sqlite");
+        let (mut db, mut lease, parts) = fixture(&path);
+        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        worker
+            .restore_part(&mut db, &parts[0], || Ok(b"abcd".to_vec()))
+            .expect("saved receipt extent");
+        assert_eq!(
+            worker.restore_part_to(&mut db, &parts[1], |output| {
+                output
+                    .write_all(b"ef")
+                    .map_err(|_| TransferError::Database)?;
+                Err(TransferError::HashMismatch)
+            }),
+            Err(TransferError::HashMismatch),
+            "a failed extent remains unreceipted"
+        );
+        assert!(
+            db.vault_parts(7, 9, Some(0), 1)
+                .expect("second receipt query")[0]
+                .receipt
+                .is_none()
+        );
+        drop(worker);
+        drop(db);
+
+        let partial = dir.path().join("restored.bin.partial");
+        std::fs::write(&partial, b"ab").expect("truncate to a nonzero prefix");
+        let metadata = std::fs::metadata(&partial).expect("truncated partial");
+        assert_eq!(metadata.len(), 2);
+
+        let mut db = Database::open(&path).expect("restart database");
+        db.recover_vault_jobs(7, 102).expect("recover job");
+        lease.generation = 2;
+        assert!(
+            db.transition_vault_job(
+                lease,
+                VaultJobState::Queued,
+                VaultJobTransition::Start,
+                103,
+                None,
+            )
+            .expect("resume job")
+        );
+        lease.generation = 3;
+        let mut worker = DurableDownload::open(&db, lease).expect("open truncated partial");
+        assert_eq!(
+            std::fs::metadata(&partial)
+                .expect("partial stays truncated")
+                .len(),
+            2,
+            "opening must not hide a truncated receipt range by extending it with zeros"
+        );
+
+        let mut refetched_receipted_extent = false;
+        assert_eq!(
+            worker
+                .restore_part(&mut db, &parts[0], || {
+                    refetched_receipted_extent = true;
+                    Ok(b"abcd".to_vec())
+                })
+                .expect("short local range is a cache miss"),
+            ExtentSource::Remote
+        );
+        assert!(refetched_receipted_extent);
+        let mut fetched_missing_extent = false;
+        assert_eq!(
+            worker
+                .restore_part(&mut db, &parts[1], || {
+                    fetched_missing_extent = true;
+                    Ok(b"efgh".to_vec())
+                })
+                .expect("resume missing extent"),
+            ExtentSource::Remote
+        );
+        assert!(fetched_missing_extent);
+        assert!(!dir.path().join("restored.bin").exists());
+        assert!(partial.exists());
+
+        worker
+            .finalize(&db)
+            .expect("verify whole file before publish");
+        assert_eq!(
+            std::fs::read(dir.path().join("restored.bin")).expect("published file"),
+            b"abcdefgh"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn restart_rejects_symlink_output_even_when_target_has_expected_bytes() {
@@ -705,5 +890,171 @@ mod tests {
         );
         assert_eq!(worker.finalize(&db), Err(TransferError::HashMismatch));
         assert!(!dir.path().join("restored.bin").exists());
+    }
+
+    #[test]
+    fn truncated_extents_restart_at_the_part_start_and_only_confirm_full_verified_bytes() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("jobs.sqlite");
+        let part_size = 512 * 1024;
+        let bytes = (0..part_size * 3)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let (mut db, lease, parts) = fixture_with_data(&path, &bytes, part_size);
+        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        let cuts = [0, part_size / 2, part_size - 1];
+
+        for (part, cut) in parts.iter().zip(cuts) {
+            let start = part.plaintext_offset as usize;
+            let end = start + part.plaintext_length as usize;
+            let plaintext = &bytes[start..end];
+            let mut attempts = 0;
+            let mut scheduled = Vec::new();
+            worker
+                .restore_part_to_with_retry(
+                    &mut db,
+                    part,
+                    |output| {
+                        attempts += 1;
+                        if attempts == 1 {
+                            output
+                                .write_all(&plaintext[..cut])
+                                .map_err(|_| TransferError::Database)?;
+                            return Err(TransferError::Network);
+                        }
+
+                        let independent = Database::open(&path).expect("independent database");
+                        assert!(
+                            independent
+                                .vault_parts(7, 9, part.part_index.checked_sub(1), 1)
+                                .expect("reserved extent")
+                                .into_iter()
+                                .find(|saved| saved.part_index == part.part_index)
+                                .expect("reservation")
+                                .receipt
+                                .is_none(),
+                            "a truncated attempt must not create a receipt"
+                        );
+                        if cut > 0 {
+                            let partial = std::fs::read(dir.path().join("restored.bin.partial"))
+                                .expect("partial bytes remain available for retry");
+                            assert_eq!(&partial[start..start + cut], &plaintext[..cut]);
+                        }
+                        output
+                            .write_all(plaintext)
+                            .map_err(|_| TransferError::Database)?;
+                        Ok(())
+                    },
+                    |attempt, delay| scheduled.push((attempt, delay)),
+                )
+                .expect("bounded retry restores complete extent");
+            assert_eq!(attempts, 2);
+            assert_eq!(scheduled, [(1, std::time::Duration::from_millis(100))]);
+            assert!(!dir.path().join("restored.bin").exists());
+            let saved = db
+                .vault_parts(7, 9, part.part_index.checked_sub(1), 1)
+                .expect("part receipt")
+                .into_iter()
+                .find(|saved| saved.part_index == part.part_index)
+                .expect("reservation");
+            assert!(saved.receipt.is_some());
+        }
+
+        worker.finalize(&db).expect("verified publish");
+        assert_eq!(
+            std::fs::read(dir.path().join("restored.bin")).expect("published bytes"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn retries_are_bounded_and_integrity_failures_are_terminal_without_receipts() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("jobs.sqlite");
+        let bytes = b"abcdefgh";
+        let (mut db, lease, parts) = fixture_with_data(&path, bytes, 4);
+        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        let mut attempts = 0;
+        let mut retries = Vec::new();
+        assert_eq!(
+            worker.restore_part_to_with_retry(
+                &mut db,
+                &parts[0],
+                |output| {
+                    attempts += 1;
+                    output
+                        .write_all(b"ab")
+                        .map_err(|_| TransferError::Database)?;
+                    Err(TransferError::Network)
+                },
+                |attempt, _| retries.push(attempt),
+            ),
+            Err(TransferError::Network)
+        );
+        assert_eq!(attempts, 3, "initial request plus two bounded retries");
+        assert_eq!(retries, [1, 2]);
+        assert!(dir.path().join("restored.bin.partial").exists());
+        assert!(!dir.path().join("restored.bin").exists());
+        assert!(
+            db.vault_parts(7, 9, None, 1).expect("reservation")[0]
+                .receipt
+                .is_none()
+        );
+
+        drop(worker);
+        let dir = tempfile::tempdir().expect("integrity fixture");
+        let path = dir.path().join("jobs.sqlite");
+        let (mut db, lease, parts) = fixture_with_data(&path, bytes, 4);
+        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        for terminal in [
+            TransferError::HashMismatch,
+            TransferError::AuthenticationFailed,
+        ] {
+            let mut attempts = 0;
+            let mut retries = 0;
+            assert_eq!(
+                worker.restore_part_to_with_retry(
+                    &mut db,
+                    &parts[0],
+                    |_| {
+                        attempts += 1;
+                        Err(terminal.clone())
+                    },
+                    |_, _| retries += 1,
+                ),
+                Err(terminal)
+            );
+            assert_eq!(attempts, 1);
+            assert_eq!(retries, 0);
+            assert!(
+                db.vault_parts(7, 9, None, 1).expect("reservation")[0]
+                    .receipt
+                    .is_none()
+            );
+        }
+        assert!(!dir.path().join("restored.bin").exists());
+    }
+
+    #[test]
+    fn final_whole_file_integrity_failure_never_publishes_the_local_destination() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("jobs.sqlite");
+        let bytes = b"abcdefgh";
+        let (mut db, lease, parts) = fixture_with_expected_digest(&path, bytes, 4, [0x55; 32]);
+        let mut worker = DurableDownload::open(&db, lease).expect("open");
+        for (part, part_bytes) in parts.iter().zip([b"abcd", b"efgh"]) {
+            worker
+                .restore_part(&mut db, part, || Ok(part_bytes.to_vec()))
+                .expect("extent-level authenticated bytes");
+        }
+        assert_eq!(worker.finalize(&db), Err(TransferError::HashMismatch));
+        assert!(dir.path().join("restored.bin.partial").exists());
+        assert!(!dir.path().join("restored.bin").exists());
+        assert!(
+            db.vault_parts(7, 9, None, 2)
+                .expect("receipts")
+                .iter()
+                .all(|part| part.receipt.is_some())
+        );
     }
 }

@@ -1147,6 +1147,14 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.10 · Reliable channel and encrypted download recovery
+
+    - Channel directory synchronization retries transient network, server and conflict failures with bounded backoff and honors Telegram FloodWait deadlines. Directory refresh and cancellation target the directory request even while an individual channel sync is active.
+    - Encrypted downloads retry incomplete remote part streams from the start of the current part, with at most two bounded retries. Integrity failures remain terminal, incomplete parts receive no receipt, and final files stay unpublished until whole-file verification succeeds.
+    - The Transfers inspector now shows measured download activity, retry timing and per-part state in its chart, timeline and bounded part map. Maps with more than 4,096 parts disclose the omitted detail.
+    - Release CI verifies the Windows MSIX checksum before Store submission and verifies the exact downloaded platform artifacts and their checksums before assembling the GitHub release assets.
+    - Application metadata is 0.5.10. SQLite schema 23, Vault recovery records and encrypted file formats are unchanged.
+
     ## 0.5.9 · Remove Hindi interface language
 
     - Hindi is no longer an available interface language. Windows systems configured for Hindi use the English fallback unless another supported language is selected, and the Windows Store package declares the nine remaining supported interface languages.
@@ -1409,6 +1417,9 @@ channel-sync-empty = No files in the local cache yet. Background synchronization
 channel-sync-seeding = Preparing the initial local cache
 channel-sync-history-loading = Receiving requested earlier history
 channel-sync-details-title = Channel synchronization
+global-sync-cancel-directory = Cancel channel directory sync
+global-sync-cancel-channel = Cancel sync for { $source } ({ $chat_id })
+global-sync-cancel-pending-channel-retries = Cancel all pending channel retries ({ $count })
 channel-sync-rate-limited = Waiting for Telegram rate limit
 
 startup-title = Opening your local library
@@ -1535,6 +1546,27 @@ vault-transfer-error-permission = Access required by this encrypted transfer was
 vault-transfer-error-invalid-request = The encrypted transfer request or package is invalid.
 vault-transfer-error-conflict = The encrypted transfer conflicts with the current account, storage channel or local state.
 vault-transfer-error-source-changed = The source or encrypted content changed, or failed integrity verification.
+
+transfer-download-activity-elapsed = { $phase } · Elapsed { $elapsed }
+transfer-download-activity-bytes = { $phase } · { $done } / { $total } · Elapsed { $elapsed }
+transfer-download-activity-container-bytes = { $phase } · Current encrypted container: { $done } / { $total } · Elapsed { $elapsed }
+transfer-download-waiting-retry = Waiting before retrying the download
+transfer-download-verifying = Verifying downloaded content
+transfer-recovery-download-guidance = The download stopped before verification. Retry it to continue. The partial file stays private until integrity verification succeeds.
+transfer-recovery-download-blocked-guidance = This download cannot continue in its current state. Check that the encrypted Vault content and destination are accessible. If the content is unavailable, restore it from another copy. Start a new download from the Vault file list when the content is available.
+transfer-recovery-integrity-guidance = The downloaded encrypted content did not pass integrity verification. No final file was published. Start a new download from the Vault file list. If another download fails the same way, the stored encrypted content may be damaged.
+vault-transfer-error-download-integrity = The downloaded encrypted content changed or failed integrity verification. No final file was published. Start a new download from the Vault file list. If it fails the same way again, restore from another copy or contact support.
+download-pipeline-title = Download pipeline
+download-chart-title = Download rate over time
+download-chart-sample = { $time } · { $speed } · { $interval } interval
+download-chart-explanation = Encrypted container bytes received per second over time. Gaps indicate periods without a measured sample.
+download-part-map-title = Downloaded containers
+download-part-map-legend = Each cell shows one or more containers. Blue is receiving, amber is waiting to retry, green is verified, and gray is queued.
+download-part-queued = Queued
+download-part-active = Receiving
+download-part-waiting = Waiting to retry
+download-part-confirmed = Verified
+transfer-part-map-truncated = This bounded map shows { $shown } of { $total } containers; maps stop at 4,096 entries for large transfers.
 detail-failure-last-phase = Last recorded phase
 
 # Bound channel resilience
@@ -1686,6 +1718,7 @@ speed-limits-close = Close
 global-sync-connecting = Waiting for account connection
 global-sync-discovering = Updating channel directory
 global-sync-account = Account
+global-sync-channel-id = Telegram channel { $chat_id }
 
 global-sync-library = Updating file library
 global-sync-library-failed = File library update needs attention
@@ -1778,6 +1811,9 @@ transfer-upload-upgrading = Upgrading upload format with a fresh encryption iden
 transfer-upload-sealing = Validating encrypted container
 upload-pipeline-title = Upload activity
 upload-pipeline-queue = Queued buffers: { $queued } · Active parts: { $active } · Last activity: { $idle } ago · Retry wait: { $wait }
+download-pipeline-queue = Containers remaining: { $queued } · Active containers: { $active } · Last activity: { $idle } ago · Retry wait: { $wait }
+download-pipeline-transport = Telegram stream chunks: { $active } receiving · { $waiting } waiting · next retry in { $wait }
+download-chart-empty = Waiting for encrypted bytes from Telegram. Download rate is unknown.
 upload-chart-title = Confirmed payload / second
 upload-chart-empty = Waiting for measured acknowledgements. Speed is unknown.
 upload-chart-sample = { $time } · { $speed } over { $interval }
@@ -1792,6 +1828,7 @@ upload-part-waiting = Waiting to retry
 upload-part-confirmed = Acknowledged
 upload-timeline-title = Activity timeline
 upload-timeline-event = { $time } · { $phase } · Part { $part } · Attempt { $attempt } · Wait { $wait }
+upload-timeline-terminal-event = { $time } · { $outcome }
 upload-history-omitted = Earlier history omitted: { $events } events, { $samples } samples.
 upload-timeline-recent = Showing the latest 12 events. Replay opens earlier retained events.
 
@@ -1903,6 +1940,7 @@ detail-server-status = Telegram server status
 transfer-persistence-parallel = { $activity } · Saving recovery information
 transfer-eta-compact = ETA { $eta }
 transfer-rate-basis = Confirmed application payload · 3 s window · updated every 1 s
+transfer-download-rate-basis = Measured encrypted container bytes received per second · application-equivalent progress is not whole-file verification · 3 s window · updated every 1 s
 transfer-rate-awaiting = Waiting for confirmation · last confirmation { $elapsed } ago
 
 vault-health-pending-upload = Upload incomplete
@@ -1914,9 +1952,11 @@ transfer-download-receiving-blocks = Receiving and decrypting blocks
 transfer-rate-awaiting-first = Waiting for first confirmation
 transfer-bytes-heading = Processed / Total
 transfer-eta-heading = ETA
+download-part-group = Containers { $first }–{ $last } · { $confirmed } verified · { $state }
 upload-part-group = Blocks { $first }–{ $last } · { $confirmed } confirmed · { $state }
 storage-channel-pending-explanation = This upload is incomplete. Restore its recovery key and select the same original file to continue; only published, verified containers can be reused.
 upload-part-map-grouping = { $count } blocks · Up to { $size } per cell. Hover for exact ranges.
+download-part-map-grouping = { $count } containers · Up to { $size } per cell. Hover for exact ranges.
 
 ## Windows setup wizard
 installer-preparing = Installing TeleArk. The installation window shows progress and lets you stop safely.

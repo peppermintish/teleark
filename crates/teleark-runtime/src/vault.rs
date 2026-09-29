@@ -33,7 +33,11 @@ use teleark_transfer::{
 use zeroize::Zeroizing;
 
 use crate::transfer::{hex_id, package_id_from_bytes};
-use crate::vault_progress::{VaultUploadActivity, VaultUploadObserver, VaultUploadPhase};
+#[cfg(test)]
+use crate::vault_progress::VaultUploadPartState;
+use crate::vault_progress::{
+    VaultUploadActivity, VaultUploadObserver, VaultUploadOutcome, VaultUploadPhase,
+};
 use crate::{
     DesktopLibrary, DesktopTelegram, EncryptedRemoteTransport, ManifestPublishRequest,
     TelegramObjectStore, encrypted_part_sizes,
@@ -491,6 +495,8 @@ struct VaultInner {
     transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
     upload_controls: UploadControls,
+    #[cfg(test)]
+    test_container_part_limit: Arc<std::sync::atomic::AtomicU64>,
     joins: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -663,6 +669,8 @@ struct VaultOwner {
     transfers: Arc<TransferSnapshots<VaultTransferSnapshot>>,
     active_upload_batch: ActiveUploadBatch,
     upload_controls: UploadControls,
+    #[cfg(test)]
+    test_container_part_limit: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DesktopVault {
@@ -801,6 +809,8 @@ impl DesktopVault {
         let transfers = Arc::new(TransferSnapshots::new(Vec::new())?);
         let active_upload_batch: ActiveUploadBatch = Arc::new(Mutex::new(None));
         let upload_controls = UploadControls::default();
+        #[cfg(test)]
+        let test_container_part_limit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut senders = Vec::new();
         let mut joins = Vec::new();
         for name in [
@@ -826,6 +836,8 @@ impl DesktopVault {
                 transfers: transfers.clone(),
                 active_upload_batch: active_upload_batch.clone(),
                 upload_controls: upload_controls.clone(),
+                #[cfg(test)]
+                test_container_part_limit: test_container_part_limit.clone(),
             };
             joins.push(
                 thread::Builder::new()
@@ -854,9 +866,18 @@ impl DesktopVault {
                 transfers,
                 active_upload_batch,
                 upload_controls,
+                #[cfg(test)]
+                test_container_part_limit,
                 joins: Mutex::new(joins),
             }),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_container_part_limit(&self, limit: u64) {
+        self.inner
+            .test_container_part_limit
+            .store(limit, Ordering::Release);
     }
 
     /// Admit before spawning background work so logout can invalidate delayed completion.
@@ -1485,6 +1506,28 @@ impl Drop for VaultInner {
 }
 
 impl VaultOwner {
+    fn container_plaintext_limit(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let limit = self.test_container_part_limit.load(Ordering::Acquire);
+            if limit != 0 {
+                return limit;
+            }
+        }
+        crate::encrypted_part_plaintext_limit()
+    }
+
+    fn upload_part_sizes(&self, total_bytes: u64) -> Result<Vec<u64>, TransferError> {
+        #[cfg(test)]
+        {
+            let limit = self.test_container_part_limit.load(Ordering::Acquire);
+            if limit != 0 {
+                return crate::transfer::encrypted_part_sizes_with_limit(total_bytes, limit);
+            }
+        }
+        encrypted_part_sizes(total_bytes)
+    }
+
     fn run(mut self, receiver: mpsc::Receiver<VaultEnvelope>) {
         while let Ok(envelope) = receiver.recv() {
             if matches!(envelope.command, VaultCommand::Shutdown) {
@@ -2555,11 +2598,6 @@ impl VaultOwner {
                         progress.phase(VaultUploadSelectionPhase::Uploading);
                     }
                 }
-                if policy.blocked.is_none() {
-                    for plan in plans {
-                        self.update_transfer(plan.id, |snapshot| snapshot.upload_activity = None);
-                    }
-                }
                 let parallel_run = parallel && policy.blocked.is_none();
                 let results = if parallel_run {
                     self.upload_window(plans, &cancel, progress, &mut recent, &mut recent_bytes)?
@@ -2670,6 +2708,8 @@ impl VaultOwner {
             transfers: self.transfers.clone(),
             active_upload_batch: self.active_upload_batch.clone(),
             upload_controls: self.upload_controls.clone(),
+            #[cfg(test)]
+            test_container_part_limit: self.test_container_part_limit.clone(),
         }
     }
     fn upload_window(
@@ -2783,7 +2823,6 @@ impl VaultOwner {
                 } else {
                     VaultTransferState::Cancelled
                 };
-                row.upload_activity = None;
             });
         }
         if saved.state != S::Queued || saved.generation != plan.generation {
@@ -3180,9 +3219,6 @@ impl VaultOwner {
             self.update_transfer(task_id, |snapshot| {
                 snapshot.recovery_state = recovery_state;
                 snapshot.state = stopped.unwrap_or(VaultTransferState::Failed(error.kind()));
-                if stopped.is_some() {
-                    snapshot.upload_activity = None;
-                }
             });
             self.persist_upload_id(task_id)?;
         }
@@ -3317,7 +3353,7 @@ impl VaultOwner {
         let part_sizes = restored_context
             .as_ref()
             .map_or_else(
-                || encrypted_part_sizes(metadata.len()),
+                || self.upload_part_sizes(metadata.len()),
                 |context| context.part_sizes(),
             )
             .map_err(map_transfer_error)?;
@@ -3461,7 +3497,7 @@ impl VaultOwner {
                 )
                 .map_err(map_crypto_error)?;
                 crate::VaultRecoveryContext {
-                    container_plaintext_limit: crate::encrypted_part_plaintext_limit(),
+                    container_plaintext_limit: self.container_plaintext_limit(),
                     account_id,
                     task_id: transfer_id,
                     chat_id,
@@ -3812,7 +3848,6 @@ impl VaultOwner {
         if let Some(state) = stopped {
             self.update_transfer(transfer_id, |snapshot| {
                 snapshot.state = state;
-                snapshot.upload_activity = None;
             });
         } else if let Err(error) = &result {
             self.update_transfer(transfer_id, |snapshot| {
@@ -3886,7 +3921,6 @@ impl VaultOwner {
         self.update_transfer(task_id, |row| {
             row.state = VaultTransferState::Queued;
             row.recovery_state = Some(VaultJobState::Queued);
-            row.upload_activity = None;
         });
         let result = self.download(account_id, context.chat_id, package_id, Some(record));
         if let Err(error) = &result {
@@ -4092,7 +4126,7 @@ impl VaultOwner {
             .as_ref()
             .is_some_and(|saved| saved != &context)
         {
-            return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         let mut database = teleark_storage::Database::open(self.library.database_path.as_ref())
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?;
@@ -4125,10 +4159,15 @@ impl VaultOwner {
             .generation
             .checked_add(1)
             .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Capacity))?;
+        let upload_activity = self
+            .transfers
+            .get(transfer_id)
+            .and_then(|snapshot| snapshot.upload_activity)
+            .unwrap_or_else(|| VaultUploadActivity::new(VaultUploadPhase::Downloading));
         if let Err(error) = self.push_transfer(VaultTransferSnapshot {
             recovery_state: Some(teleark_storage::VaultJobState::Running),
             restored: false,
-            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Downloading)),
+            upload_activity: Some(upload_activity),
             id: transfer_id,
             account_id: expected_account_id,
             chat_id,
@@ -4157,10 +4196,10 @@ impl VaultOwner {
         let mut received_bytes = 0_u64;
         let mut result = (|| {
             let registration = self.register_transfer(lease)?;
-            let observer = Arc::new(VaultUploadObserver::new(
-                self.transfers.clone(),
-                transfer_id,
-            ));
+            let observer = Arc::new(
+                VaultUploadObserver::new(self.transfers.clone(), transfer_id)
+                    .with_log(session_log.writer.event_sink()),
+            );
             let store =
                 TelegramObjectStore::new(self.telegram.clone(), expected_account_id, chat_id)
                     .with_tuning(self.library.preferences()?.transfer_tuning)
@@ -4176,22 +4215,37 @@ impl VaultOwner {
                 lease,
                 registration.cancellation.clone(),
             )
-            .map_err(map_transfer_error)?;
+            .map_err(map_download_transfer_error)?;
             let mut completed_bytes = 0_u64;
             let mut completed_parts = 0_u32;
             for part in parts {
-                observer.begin_part(part.plaintext_length);
                 observer.phase(VaultUploadPhase::Downloading);
+                observer.begin_download_part(part.part_index, part.plaintext_length);
                 let key = RemotePartKey {
                     account_id,
                     package_id,
                     part_index: PartIndex::new(part.part_index),
                 };
                 let extent_source = durable
-                    .restore_part_to(&mut database, &part, |output| {
-                        remote.download_manifest_part_to(key, output)
-                    })
-                    .map_err(map_transfer_error)?;
+                    .restore_part_to_with_retry(
+                        &mut database,
+                        &part,
+                        |output| {
+                            observer.download_attempt_started(part.part_index);
+                            remote.download_manifest_part_to(key, output)
+                        },
+                        |attempt, delay| {
+                            observer.retry_download_part(part.part_index, attempt, delay);
+                            let _ = session_log.append_download_retry(
+                                part.part_index,
+                                attempt,
+                                delay,
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            );
+                        },
+                    )
+                    .map_err(map_download_transfer_error)?;
+                observer.complete_download_part(part.part_index);
                 if extent_source == crate::durable_download::ExtentSource::Remote {
                     received_bytes = received_bytes.saturating_add(part.plaintext_length);
                 }
@@ -4248,7 +4302,9 @@ impl VaultOwner {
                 });
             }
             observer.phase(VaultUploadPhase::Verifying);
-            durable.finalize(&database).map_err(map_transfer_error)?;
+            durable
+                .finalize(&database)
+                .map_err(map_download_transfer_error)?;
             self.library
                 .record_vault_download(teleark_storage::VaultDownloadRecord {
                     account_id: expected_account_id,
@@ -4290,12 +4346,11 @@ impl VaultOwner {
             result.as_ref().err().map(ApplicationError::kind),
             &controller.snapshot(),
         );
-        self.finish_transfer(transfer_id, started, received_bytes);
-        if let Err(error) = &result {
-            self.update_transfer(transfer_id, |snapshot| {
-                snapshot.state = stopped.unwrap_or(VaultTransferState::Failed(error.kind()));
-            });
-        }
+        let final_state = result.as_ref().map_or_else(
+            |error| stopped.unwrap_or(VaultTransferState::Failed(error.kind())),
+            |_| VaultTransferState::Completed,
+        );
+        self.finish_transfer(transfer_id, started, received_bytes, final_state);
         result
     }
 
@@ -4313,19 +4368,36 @@ impl VaultOwner {
     }
 
     fn update_transfer(&self, id: u64, update: impl FnOnce(&mut VaultTransferSnapshot)) {
-        self.transfers.update(id, update);
+        self.transfers.update(id, |snapshot| {
+            let previous_outcome = transfer_terminal_outcome(snapshot.state);
+            update(snapshot);
+            let now_terminal = transfer_terminal_outcome(snapshot.state);
+            if previous_outcome.is_some()
+                && previous_outcome != now_terminal
+                && let Some(activity) = &mut snapshot.upload_activity
+            {
+                activity.record_transition();
+            }
+            if let Some(outcome) = now_terminal {
+                append_terminal_activity(snapshot, outcome);
+            }
+        });
     }
 
-    fn finish_transfer(&self, id: u64, started: Instant, received_bytes: u64) {
+    fn finish_transfer(
+        &self,
+        id: u64,
+        started: Instant,
+        received_bytes: u64,
+        state: VaultTransferState,
+    ) {
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.update_transfer(id, |snapshot| {
             snapshot.duration_ms = Some(duration_ms);
             snapshot.average_bytes_per_second = received_bytes
                 .saturating_mul(1_000)
                 .checked_div(duration_ms.max(1));
-            if snapshot.state == VaultTransferState::Running {
-                snapshot.state = VaultTransferState::Completed;
-            }
+            snapshot.state = state;
         });
     }
 
@@ -4339,6 +4411,30 @@ impl VaultOwner {
             );
         }
     }
+}
+
+fn transfer_terminal_outcome(state: VaultTransferState) -> Option<VaultUploadOutcome> {
+    match state {
+        VaultTransferState::Completed => Some(VaultUploadOutcome::Completed),
+        VaultTransferState::Failed(_) => Some(VaultUploadOutcome::Failed),
+        VaultTransferState::Paused => Some(VaultUploadOutcome::Paused),
+        VaultTransferState::Cancelled => Some(VaultUploadOutcome::Cancelled),
+        VaultTransferState::Queued
+        | VaultTransferState::Running
+        | VaultTransferState::Pausing
+        | VaultTransferState::Cancelling
+        | VaultTransferState::Interrupted => None,
+    }
+}
+
+pub(super) fn append_terminal_activity(
+    snapshot: &mut VaultTransferSnapshot,
+    outcome: VaultUploadOutcome,
+) {
+    snapshot
+        .upload_activity
+        .get_or_insert_with(|| VaultUploadActivity::terminal_only(outcome))
+        .record_terminal(outcome);
 }
 
 pub(crate) struct TransferSessionLog {
@@ -4484,6 +4580,22 @@ impl TransferSessionLog {
             telemetry.parts.retry_parts,
             telemetry.parts.failed_parts,
             lane_telemetry_json,
+        )
+        .map_err(map_log_io)?;
+        self.writer.flush().map_err(map_log_io)
+    }
+
+    pub(crate) fn append_download_retry(
+        &mut self,
+        part_index: u32,
+        attempt: u8,
+        delay: std::time::Duration,
+        elapsed_ms: u64,
+    ) -> Result<(), ApplicationError> {
+        writeln!(
+            self.writer,
+            "{{\"schema\":1,\"event\":\"download_retry_scheduled\",\"elapsed_ms\":{elapsed_ms},\"part_index\":{part_index},\"attempt\":{attempt},\"delay_ms\":{},\"reason\":\"transient_remote_read\"}}",
+            delay.as_millis().min(u64::MAX as u128),
         )
         .map_err(map_log_io)?;
         self.writer.flush().map_err(map_log_io)
@@ -4982,6 +5094,18 @@ fn retryable_upload_failure(kind: ApplicationErrorKind) -> bool {
     )
 }
 
+fn map_download_transfer_error(error: TransferError) -> ApplicationError {
+    match error {
+        TransferError::HashMismatch
+        | TransferError::AuthenticationFailed
+        | TransferError::ManifestCorrupted
+        | TransferError::SourceChanged => {
+            ApplicationError::new(ApplicationErrorKind::SourceChanged)
+        }
+        error => map_transfer_error(error),
+    }
+}
+
 fn map_transfer_error(error: TransferError) -> ApplicationError {
     if let TransferError::FloodWait { retry_after } = error {
         return ApplicationError::new(ApplicationErrorKind::Network).with_retry_after(retry_after);
@@ -4995,9 +5119,8 @@ fn map_transfer_error(error: TransferError) -> ApplicationError {
         TransferError::SourceMissing | TransferError::RemoteMissing => {
             ApplicationErrorKind::SourceMissing
         }
-        TransferError::SourceChanged | TransferError::HashMismatch => {
-            ApplicationErrorKind::SourceChanged
-        }
+        TransferError::SourceChanged => ApplicationErrorKind::SourceChanged,
+        TransferError::HashMismatch => ApplicationErrorKind::SourceChanged,
         TransferError::DiskFull => ApplicationErrorKind::Capacity,
         TransferError::PermissionDenied => ApplicationErrorKind::PermissionDenied,
         TransferError::ManifestCorrupted | TransferError::UnsupportedManifestVersion { .. } => {
@@ -5250,6 +5373,7 @@ mod tests {
             transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
             active_upload_batch: Arc::new(Mutex::new(None)),
             upload_controls: UploadControls::default(),
+            test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let source = temp.path().join("source.bin");
         std::fs::write(&source, b"data")?;
@@ -5579,6 +5703,490 @@ mod tests {
     }
 
     #[test]
+    fn download_retry_activity_resets_attempt_state_logs_retransmission_and_confirms_only_success()
+    {
+        use teleark_telegram::{ByteTransferEvent, ByteTransferObserver};
+        let directory = tempfile::tempdir().expect("temporary log directory");
+        let log_path = directory.path().join("download.jsonl");
+        let log_writer = crate::session_log_writer::SessionLogWriter::new(Some(
+            std::fs::File::create(&log_path).expect("download log"),
+        ));
+        let snapshot = VaultTransferSnapshot {
+            recovery_state: Some(teleark_storage::VaultJobState::Running),
+            restored: false,
+            upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::Downloading)),
+            id: 51,
+            account_id: 7,
+            chat_id: 11,
+            batch_id: None,
+            queued_at_unix_ms: 100,
+            direction: VaultTransferDirection::Download,
+            file_name: "download fixture.bin".into(),
+            package_id: Some("fixture".into()),
+            size_bytes: 1_000_000,
+            transferred_bytes: 0,
+            completed_parts: 0,
+            part_count: 1_000_000,
+            started_at_unix_ms: 100,
+            duration_ms: None,
+            average_bytes_per_second: None,
+            destination: Some(directory.path().join("download fixture.bin")),
+            session_log_path: Some(log_path.clone()),
+            telemetry: transfer_controller(false, 0, teleark_telegram::TransferTuning::default())
+                .expect("controller")
+                .snapshot(),
+            server_status: None,
+            state: VaultTransferState::Running,
+        };
+        let transfers = Arc::new(TransferSnapshots::new(vec![snapshot]).expect("snapshot store"));
+        let observer =
+            VaultUploadObserver::new(transfers.clone(), 51).with_log(log_writer.event_sink());
+        let current = || transfers.get(51).expect("download projection");
+
+        observer.begin_download_part(0, 8);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("bounded part map")
+                .parts
+                .len(),
+            4096,
+            "large transfer projections retain a bounded container map"
+        );
+        assert_eq!(
+            current().upload_activity.expect("queued map").queued,
+            1_000_000,
+            "queued tracks the manifest count, not only the bounded map"
+        );
+        observer.download_attempt_started(0);
+        assert_eq!(
+            current().upload_activity.expect("active map").queued,
+            1_000_000,
+            "active containers remain in the unacknowledged total"
+        );
+        let waiting_for_first_bytes = current().upload_activity.expect("active before bytes");
+        assert_eq!(waiting_for_first_bytes.active, 1);
+        assert_eq!(
+            (waiting_for_first_bytes.bytes, waiting_for_first_bytes.total),
+            (0, 0)
+        );
+        assert_eq!(
+            waiting_for_first_bytes.parts[0].state,
+            VaultUploadPartState::Uploading,
+            "a slow request is shown active before its first byte arrives"
+        );
+        observer.observe(ByteTransferEvent::Downloading { bytes: 4, total: 8 });
+        let first_attempt = current().upload_activity.expect("download activity");
+        assert_eq!(first_attempt.active, 1);
+        assert_eq!(first_attempt.acknowledged_bytes, 4);
+        assert_eq!(
+            first_attempt.parts[0].state,
+            VaultUploadPartState::Uploading
+        );
+
+        observer.retry_download_part(0, 1, std::time::Duration::from_millis(100));
+        let waiting = current().upload_activity.expect("retry wait activity");
+        assert_eq!(waiting.phase, VaultUploadPhase::WaitingForTelegram);
+        assert_eq!((waiting.bytes, waiting.total), (0, 0));
+        assert_eq!(waiting.active, 0);
+        assert_eq!(
+            waiting.acknowledged_bytes, 4,
+            "failed bytes stay cumulative"
+        );
+        assert_eq!(waiting.parts[0].state, VaultUploadPartState::Waiting);
+        assert_eq!(waiting.parts[0].attempt, 1);
+        assert_eq!(
+            waiting.queued, 1_000_000,
+            "retry wait remains unacknowledged"
+        );
+        assert_eq!(waiting.events.back().expect("retry event").attempt, 1);
+        assert_eq!(waiting.events.back().expect("retry event").wait_millis, 100);
+
+        observer.download_attempt_started(0);
+        let restarted = current().upload_activity.expect("restarted attempt");
+        assert_eq!(restarted.phase, VaultUploadPhase::Downloading);
+        assert_eq!(restarted.active, 1);
+        assert_eq!((restarted.bytes, restarted.total), (0, 0));
+        assert_eq!(
+            restarted.queued, 1_000_000,
+            "retry does not change outstanding count"
+        );
+        assert_eq!(
+            restarted.parts[0].state,
+            VaultUploadPartState::Uploading,
+            "a retry attempt is active before new bytes arrive"
+        );
+        observer.observe(ByteTransferEvent::Downloading { bytes: 8, total: 8 });
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("final bytes received")
+                .active,
+            1,
+            "the container remains active until verification and receipt complete"
+        );
+        assert_eq!(
+            current().upload_activity.expect("download progress").parts[0].state,
+            VaultUploadPartState::Uploading,
+            "a retrying part returns to active only after new bytes arrive"
+        );
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("download progress")
+                .acknowledged_bytes,
+            12,
+            "the retry contributes its full measured network traffic"
+        );
+        observer.observe(ByteTransferEvent::DownloadChunkStarted {
+            index: 17,
+            attempt: 2,
+            active_chunks: 1,
+            waiting_chunks: 0,
+            next_wait_millis: 0,
+        });
+        let receiving = current().upload_activity.expect("transport chunk started");
+        assert_eq!(receiving.transport_chunks_active, 1);
+        assert_eq!(receiving.transport_chunks_waiting, 0);
+        assert_eq!(receiving.active, 1);
+        assert_eq!(receiving.parts[0].state, VaultUploadPartState::Uploading);
+        assert_eq!(
+            receiving.events.back().expect("container event").part,
+            Some(0),
+            "Telegram chunk index 17 must not be interpreted as manifest container 17"
+        );
+
+        let throttle_deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_millis() as i64
+            + 30_000;
+        observer.observe(ByteTransferEvent::DownloadServerThrottled {
+            code: 420,
+            wait_until_unix_ms: throttle_deadline,
+        });
+        let gated = current().upload_activity.expect("shared server wait");
+        assert_eq!(gated.phase, VaultUploadPhase::WaitingForTelegram);
+        assert_eq!(gated.active, 0);
+        assert_eq!(gated.transport_chunks_active, 0);
+        assert_eq!(gated.transport_chunks_waiting, 1);
+        assert!(gated.wait_until.is_some());
+        assert_eq!(
+            current()
+                .server_status
+                .expect("exact throttle deadline")
+                .wait_until_unix_ms,
+            throttle_deadline
+        );
+        observer.observe(ByteTransferEvent::Downloading { bytes: 8, total: 8 });
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("wait remains visible")
+                .active,
+            0,
+            "aggregate byte progress must not erase an active shared FloodWait"
+        );
+
+        observer.observe(ByteTransferEvent::DownloadChunkWaiting {
+            index: 17,
+            attempt: 2,
+            wait_millis: 500,
+            server_code: Some(420),
+            server_wait_until_unix_ms: Some(i64::MAX),
+            active_chunks: 0,
+            waiting_chunks: 1,
+            next_wait_millis: 500,
+        });
+        let waiting_on_gate = current().upload_activity.expect("chunk gate wait");
+        assert_eq!(waiting_on_gate.phase, VaultUploadPhase::WaitingForTelegram);
+        assert_eq!(waiting_on_gate.active, 0);
+        assert_eq!(waiting_on_gate.transport_chunks_waiting, 1);
+        assert!(waiting_on_gate.wait_until.is_some());
+        assert_eq!(
+            current()
+                .server_status
+                .as_ref()
+                .map(|status| status.flag.as_str()),
+            Some("FLOOD_WAIT")
+        );
+        assert_eq!(
+            waiting_on_gate.events.back().expect("waiting event").part,
+            Some(0),
+            "wait telemetry remains attached to the manifest container"
+        );
+        transfers.update(51, |row| {
+            let expired = teleark_telegram::TransferServerStatus {
+                code: 420,
+                flag: "FLOOD_WAIT_TEST".into(),
+                wait_until_unix_ms: 0,
+            };
+            row.server_status = Some(expired.clone());
+            row.upload_activity
+                .as_mut()
+                .expect("download activity")
+                .server_status = Some(expired);
+        });
+        observer.observe(ByteTransferEvent::DownloadChunkStarted {
+            index: 17,
+            attempt: 2,
+            active_chunks: 1,
+            waiting_chunks: 0,
+            next_wait_millis: 0,
+        });
+        let resumed_transport = current().upload_activity.expect("gate resumed");
+        assert_eq!(resumed_transport.phase, VaultUploadPhase::Downloading);
+        assert_eq!(resumed_transport.active, 1);
+        assert_eq!(resumed_transport.transport_chunks_waiting, 0);
+        assert_eq!(resumed_transport.wait_until, None);
+        assert_eq!(current().server_status, None);
+        observer.observe(ByteTransferEvent::DownloadChunkFinished {
+            index: 17,
+            active_chunks: 0,
+            waiting_chunks: 0,
+            next_wait_millis: 0,
+        });
+        let awaiting_receipt = current()
+            .upload_activity
+            .expect("chunk done, container pending");
+        assert_eq!(awaiting_receipt.phase, VaultUploadPhase::Downloading);
+        assert_eq!(
+            awaiting_receipt.active, 1,
+            "stream completion stays active through decrypt, verification, and receipt"
+        );
+        assert_eq!(
+            awaiting_receipt.parts[0].state,
+            VaultUploadPartState::Uploading
+        );
+        transfers.update(51, |row| {
+            let activity = row.upload_activity.as_mut().expect("download activity");
+            assert!(activity.sample(activity.started + std::time::Duration::from_secs(2), false,));
+        });
+        let sample = current()
+            .upload_activity
+            .expect("measured retry traffic")
+            .samples
+            .back()
+            .copied()
+            .expect("rate sample");
+        assert_eq!(
+            sample.bytes_per_second * sample.interval_millis / 1000,
+            12,
+            "sampling includes bytes received before and after the retry"
+        );
+        observer.complete_download_part(0);
+        let verified = current().upload_activity.expect("confirmed extent");
+        assert_eq!(verified.active, 0);
+        assert_eq!(verified.parts[0].state, VaultUploadPartState::Acknowledged);
+        assert_eq!(
+            verified.queued, 999_999,
+            "confirmed completion removes one unacknowledged container"
+        );
+        assert!(
+            verified
+                .events
+                .back()
+                .expect("completion event")
+                .acknowledged
+        );
+        observer.begin_download_part(0, 8);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("restored local receipt")
+                .parts[0]
+                .state,
+            VaultUploadPartState::Queued,
+            "resume reopens a receipt while it is revalidated"
+        );
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("restored local receipt counter")
+                .queued,
+            1_000_000,
+            "a previously confirmed extent becomes outstanding during revalidation"
+        );
+        observer.download_attempt_started(0);
+        assert_eq!(
+            current().upload_activity.expect("refetch attempt").queued,
+            1_000_000,
+            "refetch remains in the unacknowledged count"
+        );
+        observer.observe(ByteTransferEvent::Downloading { bytes: 8, total: 8 });
+        observer.complete_download_part(0);
+        assert_eq!(
+            current().upload_activity.expect("refetched receipt").queued,
+            999_999,
+            "a confirmed refetch removes the reopened outstanding container"
+        );
+        observer.begin_download_part(1, 8);
+        assert_eq!(
+            current().upload_activity.expect("queued next part").queued,
+            999_999
+        );
+        observer.download_attempt_started(1);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("second active part")
+                .queued,
+            999_999,
+            "active work stays within the outstanding container total"
+        );
+        observer.begin_download_part(1, 8);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("re-admitted remote part")
+                .parts[1]
+                .state,
+            VaultUploadPartState::Queued
+        );
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("re-admitted queue count")
+                .queued,
+            999_999,
+            "resuming active work leaves outstanding count unchanged"
+        );
+        observer.download_attempt_started(1);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("remote retry after resume")
+                .queued,
+            999_999
+        );
+        observer.complete_download_part(1);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("second confirmation")
+                .queued,
+            999_998
+        );
+        observer.begin_download_part(2, 8);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("local receipt queued")
+                .queued,
+            999_998
+        );
+        observer.complete_download_part(2);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("local receipt complete")
+                .queued,
+            999_997,
+            "a verified local receipt removes one outstanding container"
+        );
+
+        for index in 3..4096 {
+            observer.begin_download_part(index, 8);
+            observer.download_attempt_started(index);
+            observer.complete_download_part(index);
+        }
+        assert_eq!(
+            current().upload_activity.expect("large backlog").queued,
+            995_904,
+            "later containers remain counted after the displayed map is exhausted"
+        );
+        observer.begin_download_part(4096, 8);
+        observer.download_attempt_started(4096);
+        observer.complete_download_part(4096);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("first unshown completion")
+                .queued,
+            995_903
+        );
+        observer.begin_download_part(4096, 8);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("reopened unshown receipt")
+                .queued,
+            995_904,
+            "revalidating an acknowledged container beyond the map is counted"
+        );
+        observer.complete_download_part(4096);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("unshown local receipt")
+                .queued,
+            995_903
+        );
+        observer.begin_download_part(4097, 8);
+        observer.download_attempt_started(4097);
+        observer.retry_download_part(4097, 1, std::time::Duration::from_millis(100));
+        observer.begin_download_part(4097, 8);
+        observer.download_attempt_started(4097);
+        observer.complete_download_part(4097);
+        assert_eq!(
+            current()
+                .upload_activity
+                .expect("recovered unshown retry")
+                .queued,
+            995_902,
+            "retry and resume beyond the map count one completion"
+        );
+        for index in 4098..5000 {
+            observer.begin_download_part(index, 8);
+            observer.download_attempt_started(index);
+            if index == 4999 {
+                let before_completion = current().upload_activity.expect("last active part");
+                assert_eq!(before_completion.queued, 995_001);
+                assert_eq!(before_completion.active, 1);
+            }
+            observer.complete_download_part(index);
+        }
+        let remaining = current().upload_activity.expect("remaining containers");
+        assert_eq!(remaining.queued, 995_000);
+        assert_eq!(remaining.parts.len(), 4096, "visual map remains bounded");
+
+        log_writer.wait_until_idle();
+        drop(observer);
+        drop(log_writer);
+        let records = std::fs::read_to_string(log_path).expect("download activity log");
+        assert!(records.contains("\"event\":\"download_progress\""));
+        assert!(records.contains("\"direction\":\"download\""));
+        assert!(records.contains("download_retry"));
+        assert!(!records.contains("download fixture.bin"));
+    }
+
+    #[test]
+    fn download_integrity_errors_keep_a_terminal_direction_specific_reason() {
+        assert_eq!(
+            map_download_transfer_error(TransferError::HashMismatch).kind(),
+            ApplicationErrorKind::SourceChanged
+        );
+        assert_eq!(
+            map_download_transfer_error(TransferError::AuthenticationFailed).kind(),
+            ApplicationErrorKind::SourceChanged
+        );
+        assert_eq!(
+            map_download_transfer_error(TransferError::Network).kind(),
+            ApplicationErrorKind::Network
+        );
+        assert_eq!(
+            map_transfer_error(TransferError::SourceChanged).kind(),
+            ApplicationErrorKind::SourceChanged,
+            "local upload source changes remain typed as source changes"
+        );
+        assert_eq!(
+            map_transfer_error(TransferError::HashMismatch).kind(),
+            ApplicationErrorKind::SourceChanged,
+            "upload source hash changes retain upload-specific guidance"
+        );
+    }
+
+    #[test]
     fn batch_publishes_queue_before_remote_validation_and_keeps_failures_visible()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -5614,6 +6222,7 @@ mod tests {
                 transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshot store")),
                 active_upload_batch: Arc::new(Mutex::new(None)),
                 upload_controls: UploadControls::default(),
+                test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             };
             let mut calls = 0;
             let mut admitted_ids = Vec::new();
@@ -5783,6 +6392,7 @@ mod tests {
                 transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshots")),
                 active_upload_batch: Arc::new(Mutex::new(None)),
                 upload_controls: UploadControls::default(),
+                test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             };
             let progress = VaultUploadSelectionProgress::new(paths.len());
             let mut calls = 0;
@@ -6046,6 +6656,7 @@ mod tests {
             transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
             active_upload_batch: Arc::new(Mutex::new(None)),
             upload_controls: UploadControls::default(),
+            test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         owner.initialize("synthetic independent password")?;
         assert!(
@@ -6172,6 +6783,14 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name, "旅の写真.zip");
         assert_eq!(files[0].size_bytes, 12);
+        let empty = root.path().join("empty.bin");
+        std::fs::write(&empty, []).expect("empty source");
+        assert_eq!(
+            inspect_upload_sources(&[empty])
+                .expect_err("empty upload remains rejected")
+                .kind(),
+            ApplicationErrorKind::SourceMissing
+        );
         assert!(inspect_upload_sources(&[]).is_err());
         assert_eq!(
             inspect_upload_sources(&vec![source.clone(); 4096])

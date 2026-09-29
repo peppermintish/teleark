@@ -42,6 +42,44 @@ pub enum ByteTransferEvent {
         code: i32,
         wait_seconds: u32,
     },
+    /// Download FloodWait deadline already includes the shared gate's jitter.
+    DownloadServerThrottled {
+        code: i32,
+        wait_until_unix_ms: i64,
+    },
+    /// Retry state for a transport segment inside a logical download container.
+    /// `index` is a Telegram stream segment index, not a manifest container index.
+    DownloadChunkStarted {
+        index: u64,
+        attempt: u16,
+        active_chunks: u16,
+        waiting_chunks: u16,
+        next_wait_millis: u64,
+    },
+    DownloadChunkRetry {
+        index: u64,
+        attempt: u16,
+        wait_millis: u64,
+        active_chunks: u16,
+        waiting_chunks: u16,
+        next_wait_millis: u64,
+    },
+    DownloadChunkWaiting {
+        index: u64,
+        attempt: u16,
+        wait_millis: u64,
+        server_code: Option<i32>,
+        server_wait_until_unix_ms: Option<i64>,
+        active_chunks: u16,
+        waiting_chunks: u16,
+        next_wait_millis: u64,
+    },
+    DownloadChunkFinished {
+        index: u64,
+        active_chunks: u16,
+        waiting_chunks: u16,
+        next_wait_millis: u64,
+    },
     SendingMessage,
     Downloading {
         bytes: u64,

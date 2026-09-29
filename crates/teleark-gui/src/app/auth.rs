@@ -137,6 +137,7 @@ impl TeleArkApp {
         }
         self.channel_sync_task = None;
         self.channel_sync_snapshot = None;
+        self.channel_sync_source_names.clear();
         self.channel_view_cache.clear();
         self.lock_vault(window, cx);
         self.qr_poll_task = None;

@@ -936,7 +936,7 @@ impl<S> EncryptedRemoteTransport<S> {
         if let Some(error) = encoded.error() {
             return Err(error);
         }
-        let summary = decoded.map_err(map_crypto_error)?;
+        let summary = decoded.map_err(map_remote_crypto_error)?;
         part.verify_decrypted_part(public, &summary)
             .map_err(map_crypto_error)
     }
@@ -1937,6 +1937,21 @@ fn map_crypto_error(error: CryptoError) -> TransferError {
     }
 }
 
+/// `UnexpectedEof` from a local upload source still means that the selected
+/// source changed. On the remote download path it means the object stream
+/// ended before the authenticated container did, which is a transient read
+/// failure and can be retried from the start of the current extent.
+fn map_remote_crypto_error(error: CryptoError) -> TransferError {
+    match error {
+        CryptoError::Truncated { .. } => TransferError::Network,
+        CryptoError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            ..
+        } => TransferError::Network,
+        error => map_crypto_error(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2076,6 +2091,34 @@ mod tests {
         );
         assert_eq!(make(maximum).frame_count, 3892);
         assert!(encrypted_part_sizes_with_limit(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn empty_upload_is_rejected_and_remote_truncation_stays_distinct_from_local_source_change() {
+        assert_eq!(encrypted_part_sizes(0), Err(TransferError::SourceMissing));
+
+        let truncated = CryptoError::Io {
+            operation: "read",
+            kind: std::io::ErrorKind::UnexpectedEof,
+        };
+        assert_eq!(
+            map_crypto_error(truncated.clone()),
+            TransferError::SourceChanged
+        );
+        assert_eq!(map_remote_crypto_error(truncated), TransferError::Network);
+        assert_eq!(
+            map_crypto_error(CryptoError::Truncated { context: "frame" }),
+            TransferError::ManifestCorrupted
+        );
+        assert_eq!(
+            map_remote_crypto_error(CryptoError::Truncated { context: "frame" }),
+            TransferError::Network
+        );
+        assert_eq!(
+            map_remote_crypto_error(CryptoError::AuthenticationFailed),
+            TransferError::AuthenticationFailed,
+            "confirmed authentication failures stay fail-closed"
+        );
     }
 
     #[test]

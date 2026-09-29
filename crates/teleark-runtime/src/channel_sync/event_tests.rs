@@ -24,6 +24,7 @@ fn file(id: i64) -> TelegramFileSummary {
 pub(super) fn shared() -> Arc<Shared> {
     Arc::new(Shared {
         snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
+        pending_channel_retries: AtomicU64::new(0),
         changes: tokio::sync::watch::channel(()).0,
         deltas: Mutex::new(feed::DeltaJournal::default()),
         sources: Mutex::new((0, Arc::new(Vec::new()))),
@@ -490,6 +491,614 @@ fn transient_failure_recovers_after_more_than_three_attempts_without_refresh() {
 }
 
 #[test]
+fn ordinary_and_managed_channels_start_and_retry_independently() {
+    let (_temp, library, mut scheduler) = setup();
+    let initial = Scheduler::new(vec![chat(2), chat(3)]);
+    assert_eq!(initial.queue, VecDeque::from([2, 3]));
+
+    let shared = shared();
+    handle_command(Command::Watch(2), &library, 1, &mut scheduler, &shared);
+    scheduler.hint(3, 51);
+    assert_eq!(scheduler.jobs[&2].catalog_ready, Some(false));
+    assert_eq!(scheduler.pop(Instant::now()), Some(2));
+
+    let now = Instant::now();
+    let managed = scheduler.jobs.get_mut(&2).expect("managed channel");
+    assert_eq!(
+        managed.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Network,
+                retry_after: None,
+            },
+            now,
+            0,
+        ),
+        ChannelSyncPhase::Waiting
+    );
+    assert_eq!(managed.catalog_ready, Some(false));
+    scheduler.enqueue(2);
+
+    // The ordinary channel still gets its turn while the managed source waits.
+    assert_eq!(scheduler.pop(now), Some(3));
+    let ordinary = scheduler.jobs.get_mut(&3).expect("ordinary channel");
+    assert_eq!(
+        ordinary.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Server,
+                retry_after: None,
+            },
+            now,
+            0,
+        ),
+        ChannelSyncPhase::Waiting
+    );
+    scheduler.enqueue(3);
+
+    let retry_clock = now + Duration::from_secs(60);
+    let mut retried = std::collections::BTreeSet::new();
+    for _ in 0..5 {
+        let id = scheduler.pop(retry_clock).expect("retry work");
+        retried.insert(id);
+        scheduler.enqueue(id);
+    }
+    assert!(retried.contains(&2), "managed catalog work retries");
+    assert!(retried.contains(&3), "ordinary channel work retries");
+}
+
+#[test]
+fn complete_source_snapshot_retires_departed_channels_but_keeps_managed_watch_work() {
+    let (_temp, _library, mut scheduler) = setup();
+    scheduler
+        .jobs
+        .get_mut(&2)
+        .expect("managed channel")
+        .catalog_ready = Some(false);
+    scheduler.in_flight.extend([2, 3]);
+
+    let removed = scheduler.update_sources(vec![]);
+
+    assert_eq!(removed, vec![3]);
+    assert!(scheduler.jobs.contains_key(&2));
+    assert!(!scheduler.jobs.contains_key(&3));
+    assert!(scheduler.in_flight.contains(&2));
+    assert!(scheduler.in_flight.contains(&3));
+}
+
+#[test]
+fn queued_hint_during_in_flight_failure_is_counted_and_bulk_cancelled() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    scheduler.queue.clear();
+    scheduler.enqueue(2);
+    assert_eq!(scheduler.pop(now), Some(2));
+    scheduler.in_flight.insert(2);
+    scheduler.hint(2, 51);
+    assert_eq!(scheduler.queue, VecDeque::from([2]));
+    assert_eq!(scheduler.pending_retry_count, 0);
+
+    let was_waiting_before_completion = scheduler.is_waiting_retry(2);
+    assert!(!was_waiting_before_completion);
+    scheduler.in_flight.remove(&2);
+    let job = scheduler.jobs.get_mut(&2).expect("completed channel");
+    job.failure = Some(ApplicationErrorKind::Network);
+    job.retry_at = Some(now + Duration::from_secs(5));
+    job.paused = false;
+    scheduler.enqueue_after_completion(2, was_waiting_before_completion);
+
+    assert_eq!(scheduler.pending_retry_count, 1);
+    assert_eq!(scheduler.cancel_pending_retries(), vec![2]);
+    assert_eq!(scheduler.pending_retry_count, 0);
+    assert!(scheduler.jobs[&2].paused);
+    assert_eq!(scheduler.jobs[&2].retry_at, None);
+    assert!(scheduler.queue.is_empty());
+}
+
+#[test]
+fn directory_failures_back_off_and_explicit_refresh_queues_directory_work() {
+    let now = Instant::now();
+    let mut retry = DirectoryRetry::starting(now);
+    let mut pending = false;
+    let mut last_check = now;
+    let transient = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Network,
+        retry_after: None,
+    };
+    let due = retry.failed(&transient, now, 1).expect("network retry");
+    assert!(due > now && due <= now + Duration::from_secs(60));
+
+    let refresh = Command::RefreshDirectory;
+    assert!(refreshes_directory(&refresh, None));
+    let requested_at = due + Duration::from_secs(5);
+    request_directory_refresh(
+        &mut retry,
+        &mut pending,
+        &mut last_check,
+        requested_at,
+        None,
+    );
+    assert!(pending);
+    assert_eq!(retry.retry_at, Some(requested_at));
+    assert!(last_check < requested_at);
+    assert!(!refreshes_directory(&Command::Refresh(2), None));
+    assert!(refreshes_directory(
+        &Command::Refresh(2),
+        Some(ApplicationErrorKind::Persistence)
+    ));
+    assert!(!refreshes_directory(
+        &Command::Refresh(2),
+        Some(ApplicationErrorKind::Cancelled)
+    ));
+
+    let flood_wait = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Server,
+        retry_after: Some(Duration::from_secs(120)),
+    };
+    assert_eq!(
+        retry.failed(&flood_wait, requested_at, 1),
+        Some(requested_at + Duration::from_secs(120)),
+        "the server deadline overrides local backoff"
+    );
+    assert_eq!(
+        retry.attempt, 1,
+        "server deadlines do not consume local attempts"
+    );
+
+    let denied = ChannelSyncFailure {
+        kind: ApplicationErrorKind::PermissionDenied,
+        retry_after: None,
+    };
+    assert_eq!(retry.failed(&denied, requested_at, 1), None);
+    assert_eq!(
+        retry.attempt, 1,
+        "permanent failures do not consume local attempts"
+    );
+    assert_eq!(retry.retry_at, None, "permission failure remains visible");
+}
+
+#[test]
+fn overlapping_flood_waits_keep_the_later_active_deadline() {
+    let now = Instant::now();
+    let later = now + Duration::from_secs(120);
+    let shorter = now + Duration::from_secs(30);
+
+    assert_eq!(merged_flood_deadline(None, Some(later), now), Some(later));
+    assert_eq!(
+        merged_flood_deadline(Some(later), Some(shorter), now),
+        Some(later),
+        "a shorter second FloodWait cannot release the shared gate early"
+    );
+    assert_eq!(
+        merged_flood_deadline(Some(shorter), Some(later), now),
+        Some(later),
+        "a later deadline replaces a shorter active gate"
+    );
+    assert_eq!(
+        merged_flood_deadline(Some(later), Some(shorter), later),
+        None,
+        "expired waits do not become active deadlines again"
+    );
+}
+
+#[test]
+fn manual_directory_refresh_skips_local_backoff_but_preserves_and_can_cancel_flood_wait() {
+    let start = Instant::now();
+    let network = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Network,
+        retry_after: None,
+    };
+    let mut retry = DirectoryRetry::starting(start);
+    assert_eq!(
+        retry.failed_with_entropy(&network, start, 0),
+        Some(start + Duration::from_millis(500))
+    );
+    let mut pending = false;
+    let mut last_check = start;
+    let manual_at = start + Duration::from_millis(10);
+    request_directory_refresh(&mut retry, &mut pending, &mut last_check, manual_at, None);
+    assert!(pending);
+    assert_eq!(retry.retry_at, Some(manual_at));
+    assert_eq!(retry.attempt, 1, "manual refresh preserves backoff history");
+
+    let mut rate_limited = DirectoryRetry::starting(start);
+    let flood_until = rate_limited
+        .failed_with_entropy(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Server,
+                retry_after: Some(Duration::from_secs(120)),
+            },
+            start,
+            0,
+        )
+        .expect("FloodWait deadline");
+    let refresh_at = start + Duration::from_secs(1);
+    request_directory_refresh(
+        &mut rate_limited,
+        &mut pending,
+        &mut last_check,
+        refresh_at,
+        Some(flood_until),
+    );
+    assert_eq!(rate_limited.retry_at, Some(flood_until));
+    rate_limited.cancelled();
+    assert_eq!(
+        rate_limited.retry_at, None,
+        "pending server-gated work cancels"
+    );
+}
+
+#[test]
+fn directory_flood_wait_does_not_advance_the_next_local_retry_attempt() {
+    let start = Instant::now();
+    let mut retry = DirectoryRetry::starting(start);
+    let flood_wait = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Server,
+        retry_after: Some(Duration::from_secs(120)),
+    };
+
+    assert_eq!(
+        retry.failed(&flood_wait, start, 1),
+        Some(start + Duration::from_secs(120))
+    );
+    assert_eq!(
+        retry.attempt, 0,
+        "FloodWait keeps the local retry attempt unchanged"
+    );
+
+    let after_flood_wait = start + Duration::from_secs(120);
+    let network = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Network,
+        retry_after: None,
+    };
+    let local_deadline = retry
+        .failed(&network, after_flood_wait, 1)
+        .expect("network errors schedule local backoff");
+    assert!(local_deadline > after_flood_wait);
+    assert_eq!(
+        retry.attempt, 1,
+        "the first local retry advances from attempt zero"
+    );
+}
+
+#[test]
+fn cancelling_directory_retry_resets_its_backoff_attempt() {
+    let now = Instant::now();
+    let mut retry = DirectoryRetry::starting(now);
+    let transient = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Network,
+        retry_after: None,
+    };
+
+    assert!(retry.failed(&transient, now, 1).is_some());
+    assert_eq!(retry.attempt, 1);
+
+    retry.cancelled();
+
+    assert_eq!(
+        retry.attempt, 0,
+        "explicit refresh starts a fresh backoff sequence"
+    );
+    assert_eq!(
+        retry.retry_at, None,
+        "cancellation clears the pending deadline"
+    );
+}
+
+#[test]
+fn cancelling_pending_channel_retry_removes_only_its_queued_work() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    let retry_at = now + Duration::from_secs(5);
+    scheduler.queue.clear();
+    let retrying = scheduler.jobs.get_mut(&2).expect("retrying channel");
+    retrying.force = true;
+    retrying.failure = Some(ApplicationErrorKind::Network);
+    retrying.retry_at = Some(retry_at);
+    scheduler.enqueue(2);
+    scheduler.enqueue(3);
+    assert_eq!(scheduler.pending_retry_count, 1);
+
+    scheduler.command(Command::Cancel(2));
+
+    assert_eq!(scheduler.queue.iter().copied().collect::<Vec<_>>(), vec![3]);
+    let cancelled = scheduler.jobs.get(&2).expect("cancelled channel");
+    assert!(cancelled.paused);
+    assert_eq!(cancelled.failure, Some(ApplicationErrorKind::Cancelled));
+    assert_eq!(cancelled.retry_at, None);
+    assert_eq!(scheduler.pending_retry_count, 0);
+    assert_eq!(scheduler.pop(retry_at + Duration::from_secs(1)), Some(3));
+    assert_eq!(
+        scheduler.pop(retry_at + Duration::from_secs(1)),
+        None,
+        "the cancelled channel is not dispatched when its backoff deadline arrives"
+    );
+}
+
+#[test]
+fn cancel_all_pending_channel_retries_removes_waiters_but_preserves_active_work() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    let retry_at = now + Duration::from_secs(5);
+    assert!(
+        scheduler
+            .update_sources(vec![chat(2), chat(3), chat(4), chat(5)])
+            .is_empty()
+    );
+    scheduler.queue.clear();
+    for id in [2, 4] {
+        let waiting = scheduler.jobs.get_mut(&id).expect("waiting channel");
+        waiting.force = true;
+        waiting.failure = Some(ApplicationErrorKind::Network);
+        waiting.retry_at = Some(retry_at);
+        scheduler.enqueue(id);
+    }
+    scheduler.in_flight.insert(3);
+    scheduler.jobs.get_mut(&3).expect("active retry").failure = Some(ApplicationErrorKind::Network);
+    scheduler.jobs.get_mut(&3).expect("active retry").retry_at = Some(retry_at);
+    scheduler.enqueue(5);
+    assert_eq!(scheduler.pending_retry_count, 2);
+
+    let cancelled = scheduler.cancel_pending_retries();
+
+    assert_eq!(cancelled, vec![2, 4]);
+    assert_eq!(scheduler.pending_retry_count, 0);
+    assert_eq!(
+        scheduler.queue.iter().copied().collect::<Vec<_>>(),
+        vec![5],
+        "only a waiting retry is removed; unrelated queued work remains"
+    );
+    for id in [2, 4] {
+        let waiting = scheduler.jobs.get(&id).expect("cancelled retry");
+        assert!(waiting.paused);
+        assert_eq!(waiting.failure, Some(ApplicationErrorKind::Cancelled));
+        assert_eq!(waiting.retry_at, None);
+    }
+    assert!(scheduler.in_flight.contains(&3));
+    let active = scheduler.jobs.get(&3).expect("active channel");
+    assert!(!active.paused);
+    assert_eq!(active.retry_at, Some(retry_at));
+    assert_eq!(scheduler.pop(retry_at + Duration::from_secs(1)), Some(5));
+}
+
+#[test]
+fn cancelled_retry_batch_notifies_subscribers_and_resolves_each_target() {
+    let shared = shared();
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        snapshot.transition(
+            ChannelSyncPhase::Waiting,
+            Some(2),
+            Some(ApplicationErrorKind::Network),
+            Some(Instant::now() + Duration::from_secs(5)),
+        );
+        snapshot.transition(
+            ChannelSyncPhase::RateLimited,
+            Some(3),
+            Some(ApplicationErrorKind::Server),
+            Some(Instant::now() + Duration::from_secs(120)),
+        );
+    }
+    let mut changes = shared.changes.subscribe();
+    changes.borrow_and_update();
+
+    publish_cancelled_retries(&shared, &[2, 3]);
+
+    assert!(changes.has_changed().expect("change notification"));
+    let snapshot = shared.snapshot.lock().expect("snapshot");
+    assert!(snapshot.retry_target().is_none());
+}
+
+#[test]
+fn pending_retry_count_projection_is_bounded_and_readable() {
+    let shared = shared();
+    shared
+        .pending_channel_retries
+        .store(4_096, Ordering::Release);
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    let sync = ChannelSync {
+        inner: Arc::new(Owner {
+            sender,
+            shared,
+            join: Mutex::new(None),
+            worker: thread::current(),
+        }),
+    };
+
+    assert_eq!(sync.pending_channel_retries(), 4_096);
+}
+
+#[test]
+fn manual_refresh_skips_local_backoff_but_keeps_telegram_flood_wait() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    scheduler.queue.clear();
+    let local_deadline = now + Duration::from_secs(10);
+    let local = scheduler.jobs.get_mut(&2).expect("local backoff");
+    local.failure = Some(ApplicationErrorKind::Network);
+    local.retry_at = Some(local_deadline);
+    local.retries = 3;
+    scheduler.enqueue(2);
+
+    let flood_deadline = now + Duration::from_secs(120);
+    let flood = scheduler.jobs.get_mut(&3).expect("FloodWait");
+    flood.failure = Some(ApplicationErrorKind::Server);
+    flood.retry_at = Some(flood_deadline);
+    flood.rate_limited = true;
+    scheduler.enqueue(3);
+    assert_eq!(scheduler.pending_retry_count, 2);
+
+    scheduler.command(Command::Refresh(2));
+    scheduler.command(Command::Refresh(3));
+
+    let local = scheduler.jobs.get(&2).expect("refreshed local channel");
+    assert_eq!(local.retry_at, None, "manual retry skips local backoff");
+    assert_eq!(local.failure, None);
+    assert!(!local.rate_limited);
+    let flood = scheduler.jobs.get(&3).expect("refreshed FloodWait channel");
+    assert_eq!(flood.retry_at, Some(flood_deadline));
+    assert_eq!(flood.failure, Some(ApplicationErrorKind::Server));
+    assert!(flood.rate_limited);
+    assert_eq!(scheduler.pending_retry_count, 1);
+}
+
+#[test]
+fn watch_then_refresh_preserves_a_pending_flood_wait() {
+    let (_temp, library, mut scheduler) = setup();
+    let shared = shared();
+    let now = Instant::now();
+    let flood_deadline = now + Duration::from_secs(120);
+    scheduler.queue.clear();
+    let local = scheduler.jobs.get_mut(&3).expect("local retry channel");
+    local.failure = Some(ApplicationErrorKind::Network);
+    local.retry_at = Some(now + Duration::from_secs(10));
+    local.retries = 2;
+    scheduler.enqueue(3);
+    let flood = scheduler.jobs.get_mut(&2).expect("FloodWait channel");
+    flood.failure = Some(ApplicationErrorKind::Server);
+    flood.retry_at = Some(flood_deadline);
+    flood.rate_limited = true;
+    scheduler.enqueue(2);
+    assert_eq!(scheduler.pending_retry_count, 2);
+
+    handle_command(Command::Watch(2), &library, 1, &mut scheduler, &shared);
+    let watched = scheduler.jobs.get(&2).expect("watched channel");
+    assert_eq!(watched.failure, Some(ApplicationErrorKind::Server));
+    assert_eq!(watched.retry_at, Some(flood_deadline));
+    assert!(watched.rate_limited);
+    assert_eq!(scheduler.pending_retry_count, 2);
+
+    handle_command(Command::Watch(3), &library, 1, &mut scheduler, &shared);
+    let locally_retried = scheduler.jobs.get(&3).expect("local retry reset by watch");
+    assert_eq!(locally_retried.failure, None);
+    assert_eq!(locally_retried.retry_at, None);
+    assert_eq!(locally_retried.retries, 0);
+    assert_eq!(scheduler.pending_retry_count, 1);
+
+    scheduler.command(Command::Refresh(2));
+    let refreshed = scheduler.jobs.get(&2).expect("refreshed channel");
+    assert_eq!(refreshed.failure, Some(ApplicationErrorKind::Server));
+    assert_eq!(refreshed.retry_at, Some(flood_deadline));
+    assert!(refreshed.rate_limited);
+    assert_eq!(scheduler.pending_retry_count, 1);
+    assert_eq!(scheduler.pop(now + Duration::from_secs(30)), Some(3));
+    assert_eq!(scheduler.pop(flood_deadline), Some(2));
+    assert_eq!(scheduler.pending_retry_count, 0);
+}
+
+#[test]
+fn retry_target_survives_other_channel_progress_until_its_own_success() {
+    let mut snapshot = ChannelSyncSnapshot::new(1, 0);
+    snapshot.transition(
+        ChannelSyncPhase::Failed,
+        Some(7),
+        Some(ApplicationErrorKind::Network),
+        None,
+    );
+    for index in 0..EVENT_CAPACITY * 2 {
+        snapshot.transition(
+            if index % 2 == 0 {
+                ChannelSyncPhase::Receiving
+            } else {
+                ChannelSyncPhase::Persisting
+            },
+            Some(3),
+            None,
+            None,
+        );
+    }
+
+    assert_eq!(snapshot.failure, None);
+    assert_eq!(snapshot.chat_id, Some(3));
+    assert_eq!(snapshot.events.len(), EVENT_CAPACITY);
+    assert_eq!(
+        snapshot.retry_target().map(|event| event.chat_id),
+        Some(Some(7))
+    );
+    assert!(snapshot.events.iter().any(|event| {
+        event.chat_id == Some(7) && event.failure == Some(ApplicationErrorKind::Network)
+    }));
+
+    snapshot.transition(ChannelSyncPhase::Idle, Some(7), None, None);
+    assert!(snapshot.retry_target().is_none());
+    assert!(
+        snapshot.events.iter().any(|event| {
+            event.chat_id == Some(7) && event.failure == Some(ApplicationErrorKind::Network)
+        }),
+        "completed failures remain available in the event history"
+    );
+
+    for index in 0..EVENT_CAPACITY {
+        snapshot.transition(
+            if index % 2 == 0 {
+                ChannelSyncPhase::Receiving
+            } else {
+                ChannelSyncPhase::Persisting
+            },
+            Some(3),
+            None,
+            None,
+        );
+    }
+    assert!(snapshot.events.iter().all(|event| {
+        event.chat_id != Some(7) || event.failure != Some(ApplicationErrorKind::Network)
+    }));
+}
+
+#[test]
+fn cancelled_failure_event_resolves_its_retry_target() {
+    let mut snapshot = ChannelSyncSnapshot::new(1, 0);
+    snapshot.transition(
+        ChannelSyncPhase::Failed,
+        None,
+        Some(ApplicationErrorKind::Network),
+        None,
+    );
+    snapshot.transition(
+        ChannelSyncPhase::Cancelled,
+        None,
+        Some(ApplicationErrorKind::Cancelled),
+        None,
+    );
+
+    assert!(snapshot.retry_target().is_none());
+}
+
+#[test]
+fn directory_retry_waiting_survives_timeline_overflow_until_cancelled() {
+    let mut snapshot = ChannelSyncSnapshot::new(1, 0);
+    snapshot.transition(
+        ChannelSyncPhase::Waiting,
+        None,
+        Some(ApplicationErrorKind::Network),
+        Some(Instant::now() + Duration::from_secs(1)),
+    );
+    for index in 0..EVENT_CAPACITY * 2 {
+        snapshot.transition(
+            if index % 2 == 0 {
+                ChannelSyncPhase::Receiving
+            } else {
+                ChannelSyncPhase::Persisting
+            },
+            Some(3),
+            None,
+            None,
+        );
+    }
+    assert!(snapshot.directory_retry_waiting());
+    assert!(snapshot.events.iter().any(|event| {
+        event.chat_id.is_none()
+            && event.phase == ChannelSyncPhase::Waiting
+            && event.failure == Some(ApplicationErrorKind::Network)
+    }));
+
+    snapshot.transition(
+        ChannelSyncPhase::Cancelled,
+        None,
+        Some(ApplicationErrorKind::Cancelled),
+        None,
+    );
+    assert!(!snapshot.directory_retry_waiting());
+}
+
+#[test]
 fn retry_policy_is_bounded_jittered_and_classified_without_error_prose() {
     for (attempt, seconds) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
         let lower = recovery_delay(ApplicationErrorKind::Server, attempt as u32, 0).expect("retry");
@@ -505,6 +1114,14 @@ fn retry_policy_is_bounded_jittered_and_classified_without_error_prose() {
     for kind in [
         ApplicationErrorKind::Authorization,
         ApplicationErrorKind::PermissionDenied,
+        ApplicationErrorKind::StorageAccessDenied,
+        ApplicationErrorKind::StorageConfigurationUnsafe,
+        ApplicationErrorKind::StorageIdentityDamaged,
+        ApplicationErrorKind::StorageIdentityUnsupported,
+        ApplicationErrorKind::SourceMissing,
+        ApplicationErrorKind::InvalidRequest,
+        ApplicationErrorKind::NotFound,
+        ApplicationErrorKind::Capacity,
         ApplicationErrorKind::Persistence,
         ApplicationErrorKind::Cancelled,
     ] {
@@ -549,6 +1166,60 @@ fn server_deadline_overrides_jitter_and_storage_failure_preserves_committed_stat
     assert!(job.paused);
     assert_eq!(job.retry_at, None);
     assert_eq!(job.state, original);
+}
+
+#[test]
+fn local_backoff_advances_across_server_flood_waits() {
+    let (_temp, _library, mut scheduler) = setup();
+    let job = scheduler.jobs.get_mut(&2).expect("job");
+    let mut now = Instant::now();
+    let flood_wait = ChannelSyncFailure {
+        kind: ApplicationErrorKind::Server,
+        retry_after: Some(Duration::from_secs(120)),
+    };
+
+    assert_eq!(job.fail(&flood_wait, now, 0), ChannelSyncPhase::RateLimited);
+    assert_eq!(job.retries, 0, "the server supplies this delay");
+    now = job.retry_at.expect("first server deadline");
+
+    assert_eq!(
+        job.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Network,
+                retry_after: None,
+            },
+            now,
+            0,
+        ),
+        ChannelSyncPhase::Waiting
+    );
+    let first_local_delay = job.retry_at.expect("first local deadline") - now;
+    assert_eq!(first_local_delay, Duration::from_millis(500));
+    assert_eq!(job.retries, 1);
+    now = job.retry_at.expect("first local deadline");
+
+    assert_eq!(job.fail(&flood_wait, now, 0), ChannelSyncPhase::RateLimited);
+    assert_eq!(job.retries, 1, "FloodWait preserves prior local attempts");
+    now = job.retry_at.expect("second server deadline");
+
+    assert_eq!(
+        job.fail(
+            &ChannelSyncFailure {
+                kind: ApplicationErrorKind::Server,
+                retry_after: None,
+            },
+            now,
+            0,
+        ),
+        ChannelSyncPhase::Waiting
+    );
+    let second_local_delay = job.retry_at.expect("second local deadline") - now;
+    assert_eq!(second_local_delay, Duration::from_secs(1));
+    assert_eq!(job.retries, 2);
+    assert!(
+        second_local_delay > first_local_delay,
+        "local backoff grows after FloodWait expires and a transient failure recurs"
+    );
 }
 
 #[test]

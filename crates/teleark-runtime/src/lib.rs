@@ -82,8 +82,8 @@ pub use app_pin::AppPinRecord;
 mod download_slots;
 mod vault_progress;
 pub use vault_progress::{
-    VaultUploadActivity, VaultUploadEvent, VaultUploadPart, VaultUploadPartState, VaultUploadPhase,
-    VaultUploadSample,
+    VaultUploadActivity, VaultUploadEvent, VaultUploadOutcome, VaultUploadPart,
+    VaultUploadPartState, VaultUploadPhase, VaultUploadSample,
 };
 
 pub use channel_transfer::{

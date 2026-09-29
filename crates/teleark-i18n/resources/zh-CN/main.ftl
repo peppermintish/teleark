@@ -1119,6 +1119,14 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.10 · 提升频道同步与加密下载的可靠性
+
+    - 频道目录同步会对暂时性的网络、服务器和冲突错误进行有界退避重试，并遵从 Telegram 提供的 FloodWait 等待期限。即使某个频道正在同步，目录刷新和取消操作仍会针对目录请求。
+    - 加密下载会从当前分块的起点重试不完整的远程数据流，最多进行两次有界重试。完整性错误不会重试；不完整的分块不会生成收据；只有整个文件通过验证后，最终文件才会发布。
+    - Transfers 检查器现在会通过图表、时间线和有界分块图显示实测下载活动、重试等待时间和各分块状态。超过 4,096 个分块时，会说明图中省略了后续分块。
+    - 发布 CI 会在提交到 Microsoft Store 前验证 Windows MSIX 的校验和，并在组装 GitHub Release 资产前验证下载的全部平台文件及其校验和。
+    - 应用元数据为 0.5.10。SQLite 架构 23、Vault 恢复记录和加密文件格式均未更改。
+
     ## 0.5.9 · Remove Hindi interface language
 
     - Hindi is no longer an available interface language. The Windows Store package declares the nine remaining supported interface languages.
@@ -1381,6 +1389,9 @@ channel-sync-empty = 本地尚无文件缓存，后台同步会更新此列表�
 channel-sync-seeding = 正在准备首次本地缓存
 channel-sync-history-loading = 正在接收请求的更早历史
 channel-sync-details-title = 频道同步
+global-sync-cancel-directory = 取消频道列表同步
+global-sync-cancel-channel = 取消 { $source } 的同步（{ $chat_id }）
+global-sync-cancel-pending-channel-retries = 取消所有待处理的频道重试（{ $count }）
 channel-sync-rate-limited = 等待 Telegram 限流结束
 
 startup-title = 正在打开本地文件库
@@ -1507,6 +1518,27 @@ vault-transfer-error-permission = 此加密传输所需的访问被拒绝。请�
 vault-transfer-error-invalid-request = 加密传输请求或文件包无效。
 vault-transfer-error-conflict = 加密传输与当前账号、存储频道或本地状态冲突。
 vault-transfer-error-source-changed = 源文件或加密内容发生变化，或未通过完整性校验。
+
+transfer-download-activity-elapsed = { $phase } · 已用时 { $elapsed }
+transfer-download-activity-bytes = { $phase } · { $done } / { $total } · 已用时 { $elapsed }
+transfer-download-activity-container-bytes = { $phase } · 当前加密容器：{ $done } / { $total } · 已用时 { $elapsed }
+transfer-download-waiting-retry = 正在等待重试下载
+transfer-download-verifying = 正在验证下载内容
+transfer-recovery-download-guidance = 下载在验证完成前停止。重试即可继续。完整性验证成功前，部分文件会保持私有状态。
+transfer-recovery-download-blocked-guidance = 此下载在当前状态下无法继续。请确认可以访问加密的 Vault 内容和保存位置。如果内容不可用，请从其他副本恢复。内容可用后，请从 Vault 文件列表开始新的下载。
+transfer-recovery-integrity-guidance = 下载的加密内容未通过完整性验证。尚未发布最终文件。请从 Vault 文件列表开始新的下载。如果再次出现相同的失败，保存的加密内容可能已损坏。
+vault-transfer-error-download-integrity = 下载的加密内容已更改或未通过完整性验证。尚未发布最终文件。请从 Vault 文件列表开始新的下载。如果再次出现相同的失败，请从其他副本恢复或联系支持人员。
+download-pipeline-title = 下载流程
+download-chart-title = 下载速率随时间变化
+download-chart-sample = { $time } · { $speed } · 间隔 { $interval }
+download-chart-explanation = 每秒接收的加密容器数据量。空白表示该时段没有测量样本。
+download-part-map-title = 已下载容器
+download-part-map-legend = 每个单元格表示一个或多个容器。蓝色表示正在接收，琥珀色表示等待重试，绿色表示已验证，灰色表示排队中。
+download-part-queued = 排队中
+download-part-active = 正在接收
+download-part-waiting = 等待重试
+download-part-confirmed = 已验证
+transfer-part-map-truncated = 此受限地图显示 { $total } 个容器中的 { $shown } 个；大型传输最多显示 4,096 项。
 detail-failure-last-phase = 最后记录的阶段
 
 # Bound channel resilience
@@ -1658,6 +1690,7 @@ speed-limits-close = 关闭
 global-sync-connecting = 等待账号连接
 global-sync-discovering = 正在更新频道列表
 global-sync-account = 账号
+global-sync-channel-id = Telegram 频道 { $chat_id }
 
 global-sync-library = 正在更新文件库
 global-sync-library-failed = 文件库更新需要处理
@@ -1750,6 +1783,9 @@ transfer-upload-upgrading = 正在使用新的加密标识升级上传格式
 transfer-upload-sealing = 验证加密容器
 upload-pipeline-title = 上传活动
 upload-pipeline-queue = 缓冲队列：{ $queued } · 活跃 part：{ $active } · 距上次活动：{ $idle } · 重试等待：{ $wait }
+download-pipeline-queue = 剩余容器：{ $queued } · 活跃容器：{ $active } · 距上次活动：{ $idle } · 重试等待：{ $wait }
+download-pipeline-transport = Telegram 流分块：接收中 { $active } · 等待中 { $waiting } · 下次重试：{ $wait }
+download-chart-empty = 正在等待从 Telegram 接收加密字节。下载速率未知。
 upload-chart-title = 已确认数据 / 秒
 upload-chart-empty = 等待实际确认回执，速度尚未知。
 upload-chart-sample = { $time } · { $interval } 内为 { $speed }
@@ -1764,6 +1800,7 @@ upload-part-waiting = 等待重试
 upload-part-confirmed = 已确认
 upload-timeline-title = 活动时间线
 upload-timeline-event = { $time } · { $phase } · Part { $part } · 尝试 { $attempt } · 等待 { $wait }
+upload-timeline-terminal-event = { $time } · { $outcome }
 upload-history-omitted = 已省略更早历史：{ $events } 个事件，{ $samples } 个样本。
 upload-timeline-recent = 显示最近 12 个事件；回放可查看保留的较早事件。
 
@@ -1875,6 +1912,7 @@ detail-server-status = Telegram 服务端状态
 transfer-persistence-parallel = { $activity } · 正在保存恢复信息
 transfer-eta-compact = 剩余 { $eta }
 transfer-rate-basis = 已确认的应用数据 · 最近 3 秒窗口 · 每秒更新
+transfer-download-rate-basis = 实际接收的加密容器字节/秒 · 应用等效进度不代表整个文件已验证 · 最近 3 秒窗口 · 每秒更新
 transfer-rate-awaiting = 等待确认 · 上次确认在 { $elapsed } 前
 
 vault-health-pending-upload = 尚未上传完成
@@ -1886,9 +1924,11 @@ transfer-download-receiving-blocks = 正在接收并解密数据块
 transfer-rate-awaiting-first = 等待首次确认
 transfer-bytes-heading = 已处理 / 总大小
 transfer-eta-heading = 预计剩余
+download-part-group = 容器 { $first }–{ $last } · 已验证 { $confirmed } · { $state }
 upload-part-group = 块 { $first }–{ $last } · 已确认 { $confirmed } · { $state }
 storage-channel-pending-explanation = 此上传尚未完成。恢复对应密钥并选择相同的原文件后可继续；仅复用已发布且验证通过的容器。
 upload-part-map-grouping = 共 { $count } 个块 · 每格最多 { $size } 个。悬停可查看具体范围。
+download-part-map-grouping = 共 { $count } 个容器 · 每格最多 { $size } 个。悬停可查看准确范围。
 
 ## Windows setup wizard
 installer-preparing = 正在安装 TeleArk。安装窗口会显示进度，您可以安全地停止安装。

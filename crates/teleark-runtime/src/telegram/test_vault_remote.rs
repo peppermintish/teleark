@@ -30,12 +30,20 @@ struct Object {
     summary: TelegramFileSummary,
     bytes: Vec<u8>,
 }
+#[derive(Clone, Copy)]
+struct StreamTruncation {
+    skip: usize,
+    after_bytes: usize,
+    remaining: usize,
+}
 #[derive(Default)]
 struct State {
     objects: BTreeMap<i64, Object>,
     publications: BTreeMap<i64, i64>,
     uploads: Vec<(i64, [u8; 32])>,
     downloads: Vec<i64>,
+    download_stream_attempts: usize,
+    stream_truncation: Option<StreamTruncation>,
     validations: Vec<bool>,
     storage_created: bool,
     fail_once: Option<GateKind>,
@@ -187,6 +195,60 @@ impl TestVaultRemote {
     }
     pub(crate) fn downloads(&self) -> Vec<i64> {
         self.state.lock().expect("state").downloads.clone()
+    }
+    pub(crate) fn download_stream_attempts(&self) -> usize {
+        self.state.lock().expect("state").download_stream_attempts
+    }
+    /// Truncate the requested number of later part streams after `after_bytes`.
+    /// `usize::MAX` means all but the final byte of that stream.
+    pub(crate) fn truncate_download_streams_once(
+        &self,
+        skip_streams: usize,
+        after_bytes: usize,
+        count: usize,
+    ) {
+        assert!(count > 0, "at least one stream must be truncated");
+        let previous =
+            self.state
+                .lock()
+                .expect("state")
+                .stream_truncation
+                .replace(StreamTruncation {
+                    skip: skip_streams,
+                    after_bytes,
+                    remaining: count,
+                });
+        assert!(previous.is_none(), "one stream fault injection at a time");
+    }
+    pub(crate) fn corrupt_first_payload_last_byte(&self) -> i64 {
+        let mut state = self.state.lock().expect("state");
+        let (&id, object) = state
+            .objects
+            .iter_mut()
+            .find(|(_, object)| {
+                object.summary.caption != crate::transfer::MANIFEST_CAPTION
+                    && object.summary.caption != crate::vault::remote_upload::CAPTION
+                    && object.summary.caption != crate::vault::CHANNEL_KEY_PROOF_CAPTION
+            })
+            .expect("uploaded payload object");
+        let last = object.bytes.len().checked_sub(1).expect("nonempty payload");
+        object.bytes[last] ^= 1;
+        id
+    }
+    pub(crate) fn corrupt_manifest_last_byte(&self) -> i64 {
+        let mut state = self.state.lock().expect("state");
+        let (&id, object) = state
+            .objects
+            .iter_mut()
+            .find(|(_, object)| object.summary.caption == crate::transfer::MANIFEST_CAPTION)
+            .expect("uploaded manifest object");
+        let last = object
+            .bytes
+            .len()
+            .checked_sub(1)
+            .expect("nonempty manifest");
+        object.bytes[last] ^= 1;
+        id
     }
     pub(crate) fn summaries(&self) -> Vec<TelegramFileSummary> {
         self.state
@@ -511,12 +573,37 @@ impl TestVaultRemote {
             } => {
                 let result = (|| {
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                    let object = {
+                    let (object, truncated_after) = {
                         let mut state = self.state.lock().expect("state");
                         state.downloads.push(message_id);
-                        state.objects.get(&message_id).cloned().ok_or_else(|| {
+                        state.download_stream_attempts += 1;
+                        let object = state.objects.get(&message_id).cloned().ok_or_else(|| {
                             ApplicationError::new(ApplicationErrorKind::SourceMissing)
-                        })?
+                        })?;
+                        let truncated_after =
+                            if let Some(truncation) = state.stream_truncation.as_mut() {
+                                if truncation.skip > 0 {
+                                    truncation.skip -= 1;
+                                    None
+                                } else if truncation.remaining > 0 {
+                                    truncation.remaining -= 1;
+                                    Some(if truncation.after_bytes == usize::MAX {
+                                        object.bytes.len().saturating_sub(1)
+                                    } else {
+                                        truncation.after_bytes.min(object.bytes.len())
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                        if state.stream_truncation.is_some_and(|truncation| {
+                            truncation.skip == 0 && truncation.remaining == 0
+                        }) {
+                            state.stream_truncation = None;
+                        }
+                        (object, truncated_after)
                     };
                     assert_eq!(object.bytes.len() as u64, expected);
                     if let Some(observer) = &observer {
@@ -528,7 +615,10 @@ impl TestVaultRemote {
                     self.cross_gate(GateKind::DownloadPart)?;
                     self.fail_if_armed(GateKind::DownloadPart)?;
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
-                    for block in object.bytes.chunks(teleark_telegram::UPLOAD_PART_BYTES) {
+                    let stream_length = truncated_after.unwrap_or(object.bytes.len());
+                    for block in
+                        object.bytes[..stream_length].chunks(teleark_telegram::UPLOAD_PART_BYTES)
+                    {
                         if abort.is_cancelled() {
                             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
                         }

@@ -188,11 +188,16 @@ impl FileSystemPort for NativeFileSystem {
             return Err(TransferError::PermissionDenied);
         }
         let existing = opened.len();
-        if existing != 0 && existing != total_bytes {
+        if existing > total_bytes {
             return Err(TransferError::HashMismatch);
         }
-        file.set_len(total_bytes)
-            .map_err(|error| map_destination_io(&error))?;
+        // A nonzero short file is a recoverable interrupted download. Keep its
+        // real length so receipt checks can detect truncated ranges and refetch
+        // them; newly created or empty files may be sparsely extended.
+        if existing_metadata.is_none() || existing == 0 {
+            file.set_len(total_bytes)
+                .map_err(|error| map_destination_io(&error))?;
+        }
         self.partials.insert(destination_id, file);
         Ok(())
     }

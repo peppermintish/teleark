@@ -1,4 +1,14 @@
-# Implementation status — v0.5.9
+# Implementation status — v0.5.10
+
+## Version 0.5.10 · Reliable channel and encrypted download recovery (2026-09-29)
+
+Channel directory synchronization now retries typed transient network, server and write-conflict failures with bounded backoff and honors Telegram-provided FloodWait deadlines. Directory refresh and cancellation have their own commands, and the global retry action follows the failure event when another channel is active. Authentication, permission, capacity, persistence and explicit cancellation outcomes do not receive automatic retries.
+
+An incomplete remote encrypted-part stream is classified as a transient network failure. Download recovery retries that extent from its start at most twice, waits 100 ms then 200 ms, and records a receipt only after the full expected length and plaintext digest are verified and synchronized. Authentication and integrity failures are terminal. A retry-exhausted download retains its partial file without publishing the destination; whole-file verification still precedes publication.
+
+The Transfers inspector now renders measured download progress, retry attempts and waits, per-part states, and a bounded download timeline and rate chart. Part maps show up to 4,096 parts and disclose when later parts are omitted. Telemetry and log records identify upload and download direction. Release artifact assembly checks each downloaded platform checksum manifest and the exact seven-package set; Windows validates the exact MSIX and its checksum after build and after artifact download.
+
+Synthetic regressions cover directory retry/cancel routing, interrupted multi-part downloads, receipt and publication boundaries, inspector routing/map truncation, and release artifact checksum failures. No SQLite schema, Vault recovery codec or encrypted payload format changed. The release workflow's hosted package run remains the qualification for published artifacts.
 
 ## Version 0.5.9 · Remove Hindi interface language (2026-09-25)
 

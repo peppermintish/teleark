@@ -465,7 +465,7 @@ impl VaultOwner {
             },
             pending: local,
         };
-        let row = VaultTransferSnapshot {
+        let mut row = VaultTransferSnapshot {
             recovery_state: Some(teleark_storage::VaultJobState::Queued),
             restored: false,
             upload_activity: Some(VaultUploadActivity::new(VaultUploadPhase::CheckingSource)),
@@ -492,6 +492,13 @@ impl VaultOwner {
             state: VaultTransferState::Running,
         };
         if self.transfers.get(task).is_some() {
+            if let Some(activity) = self
+                .transfers
+                .get(task)
+                .and_then(|existing| existing.upload_activity)
+            {
+                row.upload_activity = Some(activity);
+            }
             self.update_transfer(task, |existing| *existing = row);
         } else {
             self.push_transfer(row)?;
@@ -599,7 +606,11 @@ impl VaultOwner {
                 .map_err(|_| ApplicationError::new(ApplicationErrorKind::Persistence))?
                 && saved.state != teleark_storage::PendingVaultUploadState::Promoted
             {
-                let row = super::pending_upload::pending_snapshot(&saved)?;
+                let mut row = super::pending_upload::pending_snapshot(&saved)?;
+                row.upload_activity = self
+                    .transfers
+                    .get(task)
+                    .and_then(|existing| existing.upload_activity);
                 self.update_transfer(task, |existing| *existing = row);
             }
         }

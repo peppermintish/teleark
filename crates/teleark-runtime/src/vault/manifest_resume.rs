@@ -144,7 +144,6 @@ impl VaultOwner {
                         .map_or(ApplicationErrorKind::Persistence, ApplicationError::kind),
                 ),
             };
-            row.upload_activity = None;
             row.duration_ms = Some(elapsed);
             row.average_bytes_per_second = None;
             if let Ok(file) = &result {

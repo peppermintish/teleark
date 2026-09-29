@@ -1098,6 +1098,8 @@ impl TelegramConnection {
                             flood_gate,
                             bandwidth,
                             receipts,
+                            None,
+                            pending_part.attempt as u16,
                         )
                         .await;
                         (
@@ -1302,6 +1304,8 @@ impl TelegramConnection {
                             flood_gate.clone(),
                             bandwidth.clone(),
                             None,
+                            None,
+                            attempt as u16,
                         )
                         .await;
                         match result {
@@ -1591,21 +1595,39 @@ impl DownloadFloodGate {
             .deadline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
         let jitter = random_jitter(1000) + Duration::from_millis(250);
-        let next = Instant::now() + delay + jitter;
-        *deadline = Some(deadline.map_or(next, |old| old.max(next)));
+        let next = now + delay + jitter;
+        let previous_deadline = *deadline;
+        let actual_deadline = previous_deadline.map_or(next, |old| old.max(next));
+        let new_wait_supplies_deadline = previous_deadline.is_none_or(|old| next >= old);
+        *deadline = Some(actual_deadline);
 
-        let now_unix = std::time::SystemTime::now()
+        let status_now = Instant::now();
+        let now_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
-        let wait_until_unix_ms = now_unix + (delay + jitter).as_millis() as i64;
+            .map_or(0, |duration| {
+                duration.as_millis().min(i64::MAX as u128) as i64
+            });
+        let actual_wait_ms = actual_deadline
+            .saturating_duration_since(status_now)
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let wait_until_unix_ms = now_unix_ms.saturating_add(actual_wait_ms);
         let mut status = self
             .last_status
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (status_code, status_flag) = if new_wait_supplies_deadline {
+            (code, flag.to_owned())
+        } else if let Some(previous) = status.as_ref() {
+            (previous.code, previous.flag.clone())
+        } else {
+            (code, flag.to_owned())
+        };
         *status = Some(TransferServerStatus {
-            code,
-            flag: flag.to_owned(),
+            code: status_code,
+            flag: status_flag,
             wait_until_unix_ms,
         });
     }
@@ -1654,6 +1676,44 @@ struct DownloadedLogicalPart {
     bytes: Vec<u8>,
     elapsed_millis: u64,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DownloadChunkActivityUpdate {
+    Started {
+        index: u64,
+        attempt: u16,
+        now: Instant,
+    },
+    RetryScheduled {
+        index: u64,
+        attempt: u16,
+        delay: Duration,
+        now: Instant,
+    },
+    FloodWaitRetryScheduled {
+        index: u64,
+        attempt: u16,
+        delay: Duration,
+        code: i32,
+        wait_until_unix_ms: i64,
+        now: Instant,
+    },
+    WaitingForGate {
+        index: u64,
+        attempt: u16,
+        delay: Duration,
+        server_code: Option<i32>,
+        server_wait_until_unix_ms: Option<i64>,
+        now: Instant,
+    },
+    Finished {
+        index: u64,
+        now: Instant,
+    },
+}
+
+pub(crate) type DownloadChunkActivitySink =
+    Arc<dyn Fn(DownloadChunkActivityUpdate) + Send + Sync + 'static>;
 
 #[derive(Clone, Copy)]
 struct PendingDownloadPart {
@@ -1706,6 +1766,8 @@ async fn download_logical_part(
     flood_gate: Arc<DownloadFloodGate>,
     bandwidth: BandwidthBudget,
     receipts: Option<Arc<dyn DownloadReceiptObserver>>,
+    activity: Option<DownloadChunkActivitySink>,
+    attempt: u16,
 ) -> Result<DownloadedLogicalPart, TelegramError> {
     let chunk_size = bandwidth.download_chunk_size().min(UPLOAD_PART_BYTES);
     let skipped_chunks = i32::try_from(offset_bytes / chunk_size as u64)
@@ -1718,11 +1780,39 @@ async fn download_logical_part(
         .iter_download(&document)
         .chunk_size(chunk_size as i32)
         .skip_chunks(skipped_chunks);
+    let mut activity_started = false;
     while bytes.len() < expected_length {
+        let gate_wait = flood_gate.remaining();
+        if !gate_wait.is_zero()
+            && let Some(activity) = &activity
+        {
+            let gate_status = flood_gate.status();
+            activity(DownloadChunkActivityUpdate::WaitingForGate {
+                index: part_index,
+                attempt,
+                delay: gate_wait,
+                server_code: gate_status.as_ref().map(|status| status.code),
+                server_wait_until_unix_ms: gate_status
+                    .as_ref()
+                    .map(|status| status.wait_until_unix_ms),
+                now: Instant::now(),
+            });
+            activity_started = false;
+        }
         flood_gate.wait().await;
         bandwidth
             .acquire(chunk_size.min(expected_length - bytes.len()))
             .await;
+        if !activity_started {
+            if let Some(activity) = &activity {
+                activity(DownloadChunkActivityUpdate::Started {
+                    index: part_index,
+                    attempt,
+                    now: Instant::now(),
+                });
+            }
+            activity_started = true;
+        }
         let chunk = tokio::time::timeout(Duration::from_secs(60), download.next())
             .await
             .map_err(|_| TelegramError::new(TelegramErrorKind::Timeout))?
@@ -2697,10 +2787,14 @@ mod tests {
     fn shared_flood_gate_never_shortens_an_existing_deadline() {
         let gate = Arc::new(DownloadFloodGate::default());
         let second_part = Arc::clone(&gate);
-        gate.extend(Duration::from_secs(120));
-        second_part.extend(Duration::from_secs(1));
+        gate.extend_with_status(Duration::from_secs(120), 420, "FLOOD_WAIT_120");
+        second_part.extend_with_status(Duration::from_secs(1), 429, "FLOOD_WAIT_1");
         assert!(gate.remaining() > Duration::from_secs(110));
         assert!(second_part.remaining() > Duration::from_secs(110));
+        let status = gate.status().expect("active shared wait status");
+        assert_eq!(status.code, 420);
+        assert_eq!(status.flag, "FLOOD_WAIT_120");
+        assert!(status.wait_remaining_seconds() > 110);
     }
 
     #[test]

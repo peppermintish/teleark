@@ -1,7 +1,7 @@
 //! Account-owned channel synchronization. Selecting a source changes priority,
 //! never freshness. All public snapshots are local and cheap to read.
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
@@ -35,6 +35,13 @@ const COMMAND_CAPACITY: usize = 64;
 pub const CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES: u64 = 7;
 const UPDATE_SILENCE_RECOVERY: Duration =
     Duration::from_secs(CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES * 60);
+type SyncClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+type SyncEntropy = Arc<dyn Fn(i64, u32) -> u64 + Send + Sync>;
+
+struct RetryControls {
+    clock: SyncClock,
+    entropy: SyncEntropy,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelSyncPhase {
@@ -145,11 +152,7 @@ impl ChannelSyncSnapshot {
         self.retry_at = retry_at;
         self.phase_started = now;
         self.last_activity = now;
-        if self.events.len() == EVENT_CAPACITY {
-            self.events.pop_front();
-            self.dropped_events = self.dropped_events.saturating_add(1);
-        }
-        self.events.push_back(ChannelSyncEvent {
+        self.record_event(ChannelSyncEvent {
             phase,
             chat_id,
             at: now,
@@ -157,6 +160,67 @@ impl ChannelSyncSnapshot {
         });
         true
     }
+
+    /// Returns the target of the newest unresolved failure event. Its event is
+    /// retained in the bounded timeline until a later success or terminal
+    /// cancellation resolves that target. A returned event with no chat ID
+    /// targets the directory.
+    pub fn retry_target(&self) -> Option<ChannelSyncEvent> {
+        unresolved_retry_event_index(&self.events).map(|index| self.events[index].clone())
+    }
+
+    /// Whether the directory has a queued automatic retry awaiting its deadline.
+    pub fn directory_retry_waiting(&self) -> bool {
+        directory_retry_event_index(&self.events).is_some()
+    }
+
+    fn record_event(&mut self, event: ChannelSyncEvent) {
+        if self.events.len() >= EVENT_CAPACITY {
+            let retry_target = unresolved_retry_event_index(&self.events);
+            let directory_retry = directory_retry_event_index(&self.events);
+            let remove = (0..self.events.len())
+                .find(|index| Some(*index) != retry_target && Some(*index) != directory_retry)
+                .unwrap_or(0);
+            self.events.remove(remove);
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
+        self.events.push_back(event);
+    }
+}
+
+fn unresolved_retry_event_index(events: &VecDeque<ChannelSyncEvent>) -> Option<usize> {
+    let mut resolved = BTreeSet::new();
+    for (index, event) in events.iter().enumerate().rev() {
+        if resolved.contains(&event.chat_id) {
+            continue;
+        }
+        if event.phase == ChannelSyncPhase::Cancelled {
+            resolved.insert(event.chat_id);
+            continue;
+        }
+        if event.failure.is_some() {
+            return Some(index);
+        }
+        if event.phase == ChannelSyncPhase::Idle {
+            resolved.insert(event.chat_id);
+        }
+    }
+    None
+}
+
+fn directory_retry_event_index(events: &VecDeque<ChannelSyncEvent>) -> Option<usize> {
+    events
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| event.chat_id.is_none())
+        .and_then(|(index, event)| {
+            matches!(
+                event.phase,
+                ChannelSyncPhase::Waiting | ChannelSyncPhase::RateLimited
+            )
+            .then_some(index)
+        })
 }
 
 #[derive(Clone)]
@@ -173,6 +237,7 @@ struct Shared {
     observation: AtomicU64,
     manifest_generation: AtomicU64,
     snapshot: Mutex<ChannelSyncSnapshot>,
+    pending_channel_retries: AtomicU64,
     stop: AtomicBool,
     active: Mutex<BTreeMap<i64, TelegramScanCancellation>>,
 }
@@ -192,6 +257,9 @@ enum Command {
     Acknowledge(i64, u64),
     History(i64),
     Refresh(i64),
+    RefreshDirectory,
+    CancelDirectory,
+    CancelPendingRetries,
     Cancel(i64),
 }
 
@@ -211,12 +279,41 @@ impl ChannelSync {
         account: TelegramAccount,
         chats: Vec<TelegramChatSummary>,
     ) -> Result<Self, ApplicationError> {
+        Self::start_with_clock(telegram, library, account, chats, Arc::new(Instant::now))
+    }
+
+    fn start_with_clock<T: AccountSource>(
+        telegram: T,
+        library: DesktopLibrary,
+        account: TelegramAccount,
+        chats: Vec<TelegramChatSummary>,
+        clock: SyncClock,
+    ) -> Result<Self, ApplicationError> {
+        Self::start_with_clock_and_entropy(
+            telegram,
+            library,
+            account,
+            chats,
+            clock,
+            Arc::new(recovery_entropy),
+        )
+    }
+
+    fn start_with_clock_and_entropy<T: AccountSource>(
+        telegram: T,
+        library: DesktopLibrary,
+        account: TelegramAccount,
+        chats: Vec<TelegramChatSummary>,
+        clock: SyncClock,
+        entropy: SyncEntropy,
+    ) -> Result<Self, ApplicationError> {
         if chats.len() > MAX_SOURCES {
             return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
         }
         let scheduler = Scheduler::new(chats);
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(account.id, scheduler.queue.len())),
+            pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
             sources: Mutex::new((0, Arc::new(Vec::new()))),
@@ -239,6 +336,7 @@ impl ChannelSync {
                     scheduler,
                     receiver,
                     worker_shared,
+                    RetryControls { clock, entropy },
                 );
             })
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
@@ -273,6 +371,17 @@ impl ChannelSync {
             .lock()
             .map(|s| s.clone())
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Conflict))
+    }
+
+    /// Number of queued channel retries, including entries older than the retained event log.
+    pub fn pending_channel_retries(&self) -> usize {
+        usize::try_from(
+            self.inner
+                .shared
+                .pending_channel_retries
+                .load(Ordering::Acquire),
+        )
+        .unwrap_or(usize::MAX)
     }
 
     pub fn subscribe(&self) -> ChannelSyncSubscription {
@@ -323,6 +432,10 @@ impl ChannelSync {
     pub fn refresh(&self, chat: i64) -> Result<(), ApplicationError> {
         self.command(Command::Refresh(chat))
     }
+    /// Requests a new Telegram directory snapshot after a directory-level failure.
+    pub fn refresh_directory(&self) -> Result<(), ApplicationError> {
+        self.command(Command::RefreshDirectory)
+    }
     pub fn cancel(&self, chat: i64) -> Result<(), ApplicationError> {
         if let Ok(active) = self.inner.shared.active.lock()
             && let Some(token) = active.get(&chat)
@@ -330,6 +443,19 @@ impl ChannelSync {
             token.cancel();
         }
         self.command(Command::Cancel(chat))
+    }
+    /// Cancels active directory work or its pending automatic retry without a chat identifier.
+    pub fn cancel_directory(&self) -> Result<(), ApplicationError> {
+        if let Ok(active) = self.inner.shared.active.lock()
+            && let Some(token) = active.get(&0)
+        {
+            token.cancel();
+        }
+        self.command(Command::CancelDirectory)
+    }
+    /// Cancels every queued channel retry while leaving active work and the directory unchanged.
+    pub fn cancel_pending_retries(&self) -> Result<(), ApplicationError> {
+        self.command(Command::CancelPendingRetries)
     }
     pub fn stop(&self) {
         self.inner.shared.stop.store(true, Ordering::Release);
@@ -342,11 +468,13 @@ impl ChannelSync {
     fn command(&self, command: Command) -> Result<(), ApplicationError> {
         let acknowledgment = match &command {
             Command::History(chat) | Command::Refresh(chat) => {
-                Some((ChannelSyncPhase::Queued, *chat))
+                Some((ChannelSyncPhase::Queued, Some(*chat)))
             }
-            Command::Cancel(chat) => Some((ChannelSyncPhase::Cancelled, *chat)),
+            Command::RefreshDirectory => Some((ChannelSyncPhase::Queued, None)),
+            Command::Cancel(chat) => Some((ChannelSyncPhase::Cancelled, Some(*chat))),
+            Command::CancelDirectory => Some((ChannelSyncPhase::Cancelled, None)),
             Command::Watch(chat) | Command::Acknowledge(chat, _) => {
-                Some((ChannelSyncPhase::Queued, *chat))
+                Some((ChannelSyncPhase::Queued, Some(*chat)))
             }
             _ => None,
         };
@@ -361,15 +489,11 @@ impl ChannelSync {
                 snapshot.phase,
                 ChannelSyncPhase::Idle | ChannelSyncPhase::Failed | ChannelSyncPhase::Cancelled
             ) {
-                snapshot.transition(phase, Some(chat), None, None);
+                snapshot.transition(phase, chat, None, None);
             } else {
-                if snapshot.events.len() == EVENT_CAPACITY {
-                    snapshot.events.pop_front();
-                    snapshot.dropped_events = snapshot.dropped_events.saturating_add(1);
-                }
-                snapshot.events.push_back(ChannelSyncEvent {
+                snapshot.record_event(ChannelSyncEvent {
                     phase,
-                    chat_id: Some(chat),
+                    chat_id: chat,
                     at: Instant::now(),
                     failure: None,
                 });
@@ -456,10 +580,12 @@ struct Job {
     failure: Option<ApplicationErrorKind>,
     retries: u32,
     retry_at: Option<Instant>,
+    rate_limited: bool,
 }
 
-// Retry policy is independent of wall-clock time. The owner supplies an entropy
-// sample; tests supply fixed samples and advance Instant without sleeping.
+// Retry only typed transport/server/write-conflict failures. Authentication,
+// permission, capacity, and persistence failures stay visible for an event or
+// explicit retry. The owner supplies entropy; tests advance Instant directly.
 fn recovery_delay(kind: ApplicationErrorKind, attempt: u32, entropy: u64) -> Option<Duration> {
     if !matches!(
         kind,
@@ -481,6 +607,109 @@ fn recovery_entropy(chat: i64, attempt: u32) -> u64 {
     std::collections::hash_map::RandomState::new().hash_one((chat, attempt))
 }
 
+fn retry_deadline(
+    kind: ApplicationErrorKind,
+    retry_after: Option<Duration>,
+    attempt: u32,
+    now: Instant,
+    entropy: u64,
+) -> Option<Instant> {
+    retry_after
+        .or_else(|| recovery_delay(kind, attempt, entropy))
+        .and_then(|delay| now.checked_add(delay))
+}
+
+fn merged_flood_deadline(
+    current: Option<Instant>,
+    incoming: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    match (
+        current.filter(|deadline| *deadline > now),
+        incoming.filter(|deadline| *deadline > now),
+    ) {
+        (Some(current), Some(incoming)) => Some(current.max(incoming)),
+        (current, incoming) => incoming.or(current),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectoryRetry {
+    attempt: u32,
+    retry_at: Option<Instant>,
+}
+
+impl DirectoryRetry {
+    fn starting(now: Instant) -> Self {
+        Self {
+            attempt: 0,
+            retry_at: Some(now),
+        }
+    }
+
+    #[cfg(test)]
+    fn failed(
+        &mut self,
+        error: &ChannelSyncFailure,
+        now: Instant,
+        account: i64,
+    ) -> Option<Instant> {
+        self.failed_with_entropy(error, now, recovery_entropy(account, self.attempt))
+    }
+
+    fn failed_with_entropy(
+        &mut self,
+        error: &ChannelSyncFailure,
+        now: Instant,
+        entropy: u64,
+    ) -> Option<Instant> {
+        let retry_at = retry_deadline(error.kind, error.retry_after, self.attempt, now, entropy);
+        if error.retry_after.is_none() && retry_at.is_some() {
+            self.attempt = self.attempt.saturating_add(1);
+        }
+        self.retry_at = retry_at;
+        retry_at
+    }
+
+    fn request(&mut self, now: Instant, flood_until: Option<Instant>) {
+        // A manual refresh bypasses local backoff, but never Telegram's server gate.
+        self.retry_at = Some(flood_until.filter(|at| *at > now).unwrap_or(now));
+    }
+
+    fn succeeded(&mut self) {
+        self.attempt = 0;
+        self.retry_at = None;
+    }
+
+    fn new_connection(&mut self, now: Instant) {
+        self.attempt = 0;
+        self.retry_at = Some(now);
+    }
+
+    fn cancelled(&mut self) {
+        self.attempt = 0;
+        self.retry_at = None;
+    }
+}
+
+fn refreshes_directory(command: &Command, source_failure: Option<ApplicationErrorKind>) -> bool {
+    matches!(command, Command::RefreshDirectory | Command::Refresh(0))
+        || matches!(command, Command::Refresh(_))
+            && source_failure.is_some_and(|failure| failure != ApplicationErrorKind::Cancelled)
+}
+
+fn request_directory_refresh(
+    retry: &mut DirectoryRetry,
+    pending: &mut bool,
+    last_check: &mut Instant,
+    now: Instant,
+    flood_until: Option<Instant>,
+) {
+    *pending = true;
+    retry.request(now, flood_until);
+    *last_check = now.checked_sub(Duration::from_secs(30)).unwrap_or(now);
+}
+
 impl Job {
     fn fail(&mut self, error: &ChannelSyncFailure, now: Instant, entropy: u64) -> ChannelSyncPhase {
         self.failure = Some(error.kind);
@@ -488,10 +717,8 @@ impl Job {
             // Reload the committed winner before retrying a failed CAS.
             self.state = None;
         }
-        let delay = error
-            .retry_after
-            .or_else(|| recovery_delay(error.kind, self.retries, entropy));
-        self.retry_at = delay.and_then(|delay| now.checked_add(delay));
+        self.retry_at = retry_deadline(error.kind, error.retry_after, self.retries, now, entropy);
+        self.rate_limited = error.retry_after.is_some();
         self.paused = self.retry_at.is_none();
         if error.retry_after.is_some() {
             ChannelSyncPhase::RateLimited
@@ -509,6 +736,7 @@ impl Job {
 struct Scheduler {
     jobs: BTreeMap<i64, Job>,
     queue: VecDeque<i64>,
+    pending_retry_count: usize,
     preferred: Option<i64>,
     preferred_turns: u8,
     source_failure: Option<ApplicationErrorKind>,
@@ -537,6 +765,7 @@ impl Scheduler {
                         failure: None,
                         retries: 0,
                         retry_at: None,
+                        rate_limited: false,
                     },
                 )
             })
@@ -544,6 +773,7 @@ impl Scheduler {
         Self {
             queue: jobs.keys().copied().collect(),
             jobs,
+            pending_retry_count: 0,
             preferred: None,
             preferred_turns: 0,
             source_failure: None,
@@ -551,20 +781,32 @@ impl Scheduler {
             in_flight: Default::default(),
         }
     }
-    fn update_sources(&mut self, chats: Vec<TelegramChatSummary>) {
+    fn update_sources(&mut self, chats: Vec<TelegramChatSummary>) -> Vec<i64> {
         if chats.len() > MAX_SOURCES {
             self.source_failure = Some(ApplicationErrorKind::Capacity);
-            return;
+            return Vec::new();
         }
+        let source_ids: BTreeSet<_> = chats
+            .iter()
+            .filter(|chat| chat.kind == TelegramChatKind::Channel)
+            .map(|chat| chat.id)
+            .collect();
+        let removed: Vec<_> = self
+            .jobs
+            .iter()
+            .filter(|(id, job)| job.catalog_ready.is_none() && !source_ids.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        let removed_waiters = removed
+            .iter()
+            .filter(|id| self.is_waiting_retry(**id))
+            .count();
         // Discovery is a complete snapshot. Retire departed sources so stale
         // jobs cannot consume the bounded capacity or issue inaccessible RPCs.
-        self.jobs.retain(|id, job| {
-            job.catalog_ready.is_some()
-                || chats
-                    .iter()
-                    .any(|chat| chat.id == *id && chat.kind == TelegramChatKind::Channel)
-        });
+        self.jobs
+            .retain(|id, job| job.catalog_ready.is_some() || source_ids.contains(id));
         self.queue.retain(|id| self.jobs.contains_key(id));
+        self.pending_retry_count = self.pending_retry_count.saturating_sub(removed_waiters);
         self.source_failure = None;
         for chat in chats
             .into_iter()
@@ -586,6 +828,7 @@ impl Scheduler {
                         failure: None,
                         retries: 0,
                         retry_at: None,
+                        rate_limited: false,
                     },
                 );
                 self.enqueue(chat.id);
@@ -593,10 +836,38 @@ impl Scheduler {
                 self.hint(chat.id, pts);
             }
         }
+        removed
     }
     fn enqueue(&mut self, id: i64) {
+        let was_waiting = self.is_waiting_retry(id);
+        self.queue_job(id);
+        self.adjust_pending_retry_count(id, was_waiting);
+    }
+
+    fn enqueue_after_completion(&mut self, id: i64, was_waiting: bool) {
+        self.queue_job(id);
+        self.adjust_pending_retry_count(id, was_waiting);
+    }
+
+    fn queue_job(&mut self, id: i64) {
         if self.jobs.contains_key(&id) && !self.queue.contains(&id) {
             self.queue.push_back(id);
+        }
+    }
+    fn is_waiting_retry(&self, id: i64) -> bool {
+        self.queue.contains(&id)
+            && !self.in_flight.contains(&id)
+            && self
+                .jobs
+                .get(&id)
+                .is_some_and(|job| !job.paused && job.failure.is_some() && job.retry_at.is_some())
+    }
+    fn adjust_pending_retry_count(&mut self, id: i64, was_waiting: bool) {
+        let is_waiting = self.is_waiting_retry(id);
+        match (was_waiting, is_waiting) {
+            (false, true) => self.pending_retry_count = self.pending_retry_count.saturating_add(1),
+            (true, false) => self.pending_retry_count = self.pending_retry_count.saturating_sub(1),
+            _ => {}
         }
     }
     fn hint(&mut self, id: i64, pts: i32) {
@@ -614,11 +885,14 @@ impl Scheduler {
     }
     fn command(&mut self, command: Command) {
         let id = match command {
-            Command::Watch(_) | Command::Acknowledge(_, _) => return,
-            Command::Sources(chats) => {
-                self.update_sources(chats);
-                return;
-            }
+            Command::Watch(_)
+            | Command::Acknowledge(_, _)
+            | Command::RefreshDirectory
+            | Command::CancelDirectory
+            | Command::CancelPendingRetries => return,
+            // Source snapshots need the owner to cancel active tokens and record
+            // retirement events, so they are applied by `handle_command`.
+            Command::Sources(_) => return,
             Command::Prioritize(id)
             | Command::History(id)
             | Command::Refresh(id)
@@ -628,6 +902,7 @@ impl Scheduler {
             self.preferred = Some(id);
             return;
         }
+        let was_waiting = self.is_waiting_retry(id);
         let Some(job) = self.jobs.get_mut(&id) else {
             return;
         };
@@ -635,13 +910,20 @@ impl Scheduler {
             Command::Cancel(_) => {
                 job.paused = true;
                 job.failure = Some(ApplicationErrorKind::Cancelled);
+                job.retries = 0;
+                job.retry_at = None;
+                job.rate_limited = false;
                 self.queue.retain(|queued| *queued != id);
             }
             Command::History(_) | Command::Refresh(_) => {
+                if !job.rate_limited {
+                    // A deliberate retry bypasses local backoff, while a Telegram
+                    // FloodWait remains authoritative until its deadline.
+                    job.retry_at = None;
+                    job.failure = None;
+                }
                 job.paused = false;
-                job.failure = None;
                 job.retries = 0;
-                // Do not erase a server rate-limit deadline on a manual retry.
                 if matches!(command, Command::History(_)) {
                     job.history = true;
                 } else {
@@ -652,22 +934,65 @@ impl Scheduler {
             Command::Prioritize(_)
             | Command::Sources(_)
             | Command::Watch(_)
-            | Command::Acknowledge(_, _) => {}
+            | Command::Acknowledge(_, _)
+            | Command::RefreshDirectory
+            | Command::CancelDirectory
+            | Command::CancelPendingRetries => {}
         }
+        self.adjust_pending_retry_count(id, was_waiting);
     }
+
+    fn cancel_pending_retries(&mut self) -> Vec<i64> {
+        let cancelled: Vec<_> = self
+            .queue
+            .iter()
+            .copied()
+            .filter(|id| self.is_waiting_retry(*id))
+            .collect();
+        if cancelled.is_empty() {
+            return cancelled;
+        }
+        let cancelled_set: BTreeSet<_> = cancelled.iter().copied().collect();
+        self.queue.retain(|id| !cancelled_set.contains(id));
+        self.pending_retry_count = self.pending_retry_count.saturating_sub(cancelled.len());
+        for id in &cancelled {
+            if let Some(job) = self.jobs.get_mut(id) {
+                job.paused = true;
+                job.failure = Some(ApplicationErrorKind::Cancelled);
+                job.retries = 0;
+                job.retry_at = None;
+                job.rate_limited = false;
+            }
+        }
+        cancelled
+    }
+
     fn transport_available(&mut self, now: Instant, flood_until: Option<Instant>) {
         if flood_until.is_some_and(|at| at > now) {
             return;
         }
         // Actual pushed data proves delivery resumed. A close/gap hint alone
         // does not. Recover network waits early, preserving non-network errors.
-        for id in &self.queue {
-            if let Some(job) = self.jobs.get_mut(id)
+        let resumed: Vec<_> = self
+            .queue
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.jobs.get(id).is_some_and(|job| {
+                    !job.paused && job.failure == Some(ApplicationErrorKind::Network)
+                })
+            })
+            .collect();
+        for id in resumed {
+            let was_waiting = self.is_waiting_retry(id);
+            if let Some(job) = self.jobs.get_mut(&id)
                 && !job.paused
                 && job.failure == Some(ApplicationErrorKind::Network)
             {
                 job.retry_at = None;
+                job.rate_limited = false;
             }
+            self.adjust_pending_retry_count(id, was_waiting);
         }
     }
 
@@ -718,8 +1043,12 @@ impl Scheduler {
         let position = preferred
             .or_else(|| self.queue.iter().position(|id| !priority(id) && ready(id)))
             .or_else(|| self.queue.iter().position(ready))?;
-        let id = self.queue.remove(position)?;
-        if priority(&id) {
+        let id = *self.queue.get(position)?;
+        let was_priority = priority(&id);
+        let was_waiting = self.is_waiting_retry(id);
+        self.queue.remove(position)?;
+        self.adjust_pending_retry_count(id, was_waiting);
+        if was_priority {
             self.preferred_turns = self.preferred_turns.saturating_add(1);
         } else {
             self.preferred_turns = 0;
@@ -748,7 +1077,13 @@ fn handle_command(
     shared: &Shared,
 ) {
     let result = match command {
+        Command::Sources(chats) => {
+            publish_sources(shared, &chats);
+            apply_source_snapshot(shared, scheduler, chats);
+            Ok(())
+        }
         Command::Watch(chat) => {
+            let was_waiting = scheduler.is_waiting_retry(chat);
             for (id, job) in &mut scheduler.jobs {
                 if *id != chat && job.catalog_ready.is_some() {
                     job.catalog_ready = None;
@@ -764,6 +1099,7 @@ fn handle_command(
                 failure: None,
                 retries: 0,
                 retry_at: None,
+                rate_limited: false,
                 pushes: VecDeque::new(),
                 catalog_ready: Some(false),
                 watch_loaded: false,
@@ -773,7 +1109,15 @@ fn handle_command(
             job.catalog_ready = Some(false);
             job.watch_loaded = false;
             job.paused = false;
-            job.failure = None;
+            if job.rate_limited && job.retry_at.is_some() {
+                // Watch is an explicit re-registration, so it may bypass a local
+                // backoff; Telegram's server deadline remains authoritative.
+            } else {
+                job.failure = None;
+                job.retry_at = None;
+                job.rate_limited = false;
+                job.retries = 0;
+            }
             shared.managed_id.store(chat, Ordering::Release);
             if let Ok(mut snapshot) = shared.snapshot.lock() {
                 if snapshot.managed_chat_id != Some(chat) {
@@ -783,6 +1127,7 @@ fn handle_command(
                 snapshot.managed_chat_id = Some(chat);
             }
             scheduler.enqueue(chat);
+            scheduler.adjust_pending_retry_count(chat, was_waiting);
             Ok(())
         }
         Command::Acknowledge(chat, through) => {
@@ -811,6 +1156,59 @@ fn handle_command(
             Some(error.kind()),
             None,
         );
+    }
+    shared.changes.send_replace(());
+}
+
+fn apply_source_snapshot(
+    shared: &Shared,
+    scheduler: &mut Scheduler,
+    chats: Vec<TelegramChatSummary>,
+) {
+    let removed = scheduler.update_sources(chats);
+    if removed.is_empty() {
+        return;
+    }
+
+    if let Ok(active) = shared.active.lock() {
+        for (chat, token) in active.iter() {
+            if removed.binary_search(chat).is_ok() {
+                token.cancel();
+            }
+        }
+    }
+
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        let current_was_removed = snapshot
+            .chat_id
+            .is_some_and(|chat| removed.binary_search(&chat).is_ok());
+        snapshot.active.retain(|activity| {
+            activity
+                .chat_id
+                .is_none_or(|chat| removed.binary_search(&chat).is_err())
+        });
+        for chat in &removed {
+            snapshot.record_event(ChannelSyncEvent {
+                phase: ChannelSyncPhase::Cancelled,
+                chat_id: Some(*chat),
+                at: Instant::now(),
+                failure: Some(ApplicationErrorKind::SourceMissing),
+            });
+        }
+        if current_was_removed {
+            if let Some(activity) = snapshot.active.first().cloned() {
+                snapshot.phase = activity.phase;
+                snapshot.chat_id = activity.chat_id;
+                snapshot.phase_started = activity.at;
+            } else {
+                snapshot.phase = ChannelSyncPhase::Cancelled;
+                snapshot.chat_id = None;
+                snapshot.phase_started = Instant::now();
+            }
+            snapshot.failure = None;
+            snapshot.retry_at = None;
+            snapshot.last_activity = Instant::now();
+        }
     }
     shared.changes.send_replace(());
 }
@@ -881,6 +1279,38 @@ fn publish(
     }
 }
 
+fn publish_cancelled_retries(shared: &Shared, cancelled: &[i64]) {
+    if cancelled.is_empty() {
+        return;
+    }
+    if let Ok(mut snapshot) = shared.snapshot.lock() {
+        for chat_id in cancelled {
+            snapshot.record_event(ChannelSyncEvent {
+                phase: ChannelSyncPhase::Cancelled,
+                chat_id: Some(*chat_id),
+                at: Instant::now(),
+                failure: Some(ApplicationErrorKind::Cancelled),
+            });
+        }
+        if snapshot.active.is_empty() {
+            snapshot.phase = ChannelSyncPhase::Cancelled;
+            snapshot.chat_id = cancelled.last().copied();
+            snapshot.failure = Some(ApplicationErrorKind::Cancelled);
+            snapshot.retry_at = None;
+            snapshot.phase_started = Instant::now();
+            snapshot.last_activity = snapshot.phase_started;
+        }
+    }
+    shared.changes.send_replace(());
+}
+
+fn publish_pending_retry_count(shared: &Shared, count: usize) {
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    if shared.pending_channel_retries.swap(count, Ordering::AcqRel) != count {
+        shared.changes.send_replace(());
+    }
+}
+
 fn transport_waker(shared: &Arc<Shared>, worker: thread::Thread) -> teleark_telegram::ChannelWake {
     let weak = Arc::downgrade(shared);
     Arc::new(move |chat, mutation| {
@@ -946,12 +1376,14 @@ fn run<T: AccountSource>(
     mut scheduler: Scheduler,
     receiver: mpsc::Receiver<Command>,
     shared: Arc<Shared>,
+    retry: RetryControls,
 ) {
+    let RetryControls { clock, entropy } = retry;
     publish(&shared, ChannelSyncPhase::ReadingLocal, None, None, None);
     match library.cached_channel_directory(account.id) {
         Ok(chats) if !chats.is_empty() => {
             publish_sources(&shared, &chats);
-            scheduler.update_sources(chats);
+            apply_source_snapshot(&shared, &mut scheduler, chats);
         }
         Ok(_) => {}
         Err(error) => publish(
@@ -1004,47 +1436,84 @@ fn run<T: AccountSource>(
             None,
         ),
     }
-    let mut last_check = Instant::now();
+    let mut last_check = clock();
     let mut last_delivery = last_check;
     let mut source_probe = false;
     let mut source_probe_started: Option<Instant> = None;
-    let mut source_retry_at = Some(Instant::now());
-    let mut source_attempt = 0_u32;
+    let mut directory_retry = DirectoryRetry::starting(clock());
     let mut flood_until = None;
     let mut source_refresh_pending = false;
     let mut executions = execution::Executions::new();
     let mut metadata_ready = false;
     while !shared.stop.load(Ordering::Acquire) {
         while let Some(completion) = executions.take() {
-            if let Ok(mut active) = shared.active.lock() {
-                active.remove(&completion.id);
-            }
+            let was_waiting_before_completion = scheduler.is_waiting_retry(completion.id);
+            let removed_active = shared
+                .active
+                .lock()
+                .is_ok_and(|mut active| active.remove(&completion.id).is_some());
             scheduler.in_flight.remove(&completion.id);
+            if removed_active && completion.id != 0 && !scheduler.jobs.contains_key(&completion.id)
+            {
+                shared.changes.send_replace(());
+            }
             if completion.id == 0 {
                 source_probe_started = None;
             }
             let current_revision = lifecycle.snapshot().0;
             match completion.outcome {
                 execution::Outcome::Failed(error) => {
+                    if completion.revision != current_revision {
+                        continue;
+                    }
+                    let mut retry_channel = None;
                     if completion.id == 0 {
                         scheduler.source_failure = Some(error);
-                        source_retry_at = None;
+                        directory_retry.failed_with_entropy(
+                            &ChannelSyncFailure {
+                                kind: error,
+                                retry_after: None,
+                            },
+                            clock(),
+                            entropy(account.id, directory_retry.attempt),
+                        );
+                        publish(
+                            &shared,
+                            if directory_retry.retry_at.is_some() {
+                                ChannelSyncPhase::Waiting
+                            } else {
+                                ChannelSyncPhase::Failed
+                            },
+                            None,
+                            Some(error),
+                            directory_retry.retry_at,
+                        );
                     } else if let Some(job) = scheduler.jobs.get_mut(&completion.id) {
-                        job.paused = true;
-                        job.failure = Some(error);
-                        job.state = None;
-                        job.force = true;
-                        if let Ok(mut history) = shared.history.lock() {
+                        let phase = job.fail(
+                            &ChannelSyncFailure {
+                                kind: error,
+                                retry_after: None,
+                            },
+                            clock(),
+                            entropy(completion.id, job.retries),
+                        );
+                        if job.paused
+                            && let Ok(mut history) = shared.history.lock()
+                        {
                             history.fail(completion.id, error);
                         }
+                        retry_channel = (!job.paused && needed(job)).then_some(completion.id);
+                        publish(
+                            &shared,
+                            phase,
+                            Some(completion.id),
+                            Some(error),
+                            job.retry_at,
+                        );
                     }
-                    publish(
-                        &shared,
-                        ChannelSyncPhase::Failed,
-                        (completion.id != 0).then_some(completion.id),
-                        Some(error),
-                        None,
-                    );
+                    if let Some(id) = retry_channel {
+                        scheduler.enqueue_after_completion(id, was_waiting_before_completion);
+                    }
                 }
                 execution::Outcome::Sources(result) => {
                     if completion.revision != current_revision {
@@ -1060,41 +1529,51 @@ fn run<T: AccountSource>(
                                 publish_completed(&shared, None);
                             }
                             publish_sources(&shared, &chats);
-                            scheduler.update_sources(chats);
-                            source_attempt = 0;
-                            source_retry_at = None;
+                            apply_source_snapshot(&shared, &mut scheduler, chats);
+                            directory_retry.succeeded();
                         }
                         Err(error) => {
                             scheduler.source_failure = Some(error.kind);
-                            let delay = error.retry_after.or_else(|| {
-                                recovery_delay(
-                                    error.kind,
-                                    source_attempt,
-                                    recovery_entropy(account.id, source_attempt),
-                                )
-                            });
-                            source_retry_at =
-                                delay.and_then(|delay| Instant::now().checked_add(delay));
-                            source_attempt = source_attempt.saturating_add(1);
-                            if error.retry_after.is_some() {
-                                flood_until = source_retry_at;
-                            }
-                            publish(
-                                &shared,
+                            let now = clock();
+                            let phase = if error.kind == ApplicationErrorKind::Cancelled {
+                                // An explicit directory cancellation is terminal until the user
+                                // requests another refresh. It must not be presented as a failed
+                                // sync merely because cancellation has no retry deadline.
+                                directory_retry.retry_at = None;
+                                ChannelSyncPhase::Cancelled
+                            } else {
+                                directory_retry.failed_with_entropy(
+                                    &error,
+                                    now,
+                                    entropy(account.id, directory_retry.attempt),
+                                );
                                 if error.retry_after.is_some() {
                                     ChannelSyncPhase::RateLimited
-                                } else if source_retry_at.is_some() {
+                                } else if directory_retry.retry_at.is_some() {
                                     ChannelSyncPhase::Waiting
                                 } else {
                                     ChannelSyncPhase::Failed
-                                },
+                                }
+                            };
+                            if error.retry_after.is_some()
+                                && error.kind != ApplicationErrorKind::Cancelled
+                            {
+                                flood_until = merged_flood_deadline(
+                                    flood_until,
+                                    directory_retry.retry_at,
+                                    now,
+                                );
+                            }
+                            publish(
+                                &shared,
+                                phase,
                                 None,
                                 Some(error.kind),
-                                source_retry_at,
+                                directory_retry.retry_at,
                             );
                         }
                     }
-                    last_check = Instant::now();
+                    last_check = clock();
                 }
                 execution::Outcome::Channel(mut completed, result) => {
                     let id = completion.id;
@@ -1136,6 +1615,7 @@ fn run<T: AccountSource>(
                                         completed.retries = 0;
                                         completed.failure = None;
                                         completed.retry_at = None;
+                                        completed.rate_limited = false;
                                     }
                                     Err(error) if error.kind == ApplicationErrorKind::Cancelled => {
                                         completed.history = shared
@@ -1144,15 +1624,21 @@ fn run<T: AccountSource>(
                                             .is_ok_and(|history| history.pending(id));
                                         completed.failure = None;
                                         completed.retry_at = None;
+                                        completed.rate_limited = false;
                                     }
                                     Err(error) => {
+                                        let now = clock();
                                         let phase = completed.fail(
                                             &error,
-                                            Instant::now(),
-                                            recovery_entropy(id, completed.retries),
+                                            now,
+                                            entropy(id, completed.retries),
                                         );
                                         if error.retry_after.is_some() {
-                                            flood_until = completed.retry_at;
+                                            flood_until = merged_flood_deadline(
+                                                flood_until,
+                                                completed.retry_at,
+                                                now,
+                                            );
                                         }
                                         if completed.paused
                                             && let Ok(mut history) = shared.history.lock()
@@ -1183,25 +1669,76 @@ fn run<T: AccountSource>(
                             pending.force = true;
                         }
                         if !pending.paused && needed(pending) {
-                            scheduler.enqueue(id);
+                            scheduler.enqueue_after_completion(id, was_waiting_before_completion);
                         }
                     }
                 }
             }
         }
-        if source_probe_started.is_some_and(|at| at.elapsed() >= Duration::from_secs(1)) {
+        if source_probe_started
+            .is_some_and(|at| clock().saturating_duration_since(at) >= Duration::from_secs(1))
+        {
             // An ordinary empty liveness response is silent; a slow request is visible once.
             source_probe = false;
             source_probe_started = None;
             publish(&shared, ChannelSyncPhase::Discovering, None, None, None);
         }
         while let Ok(command) = receiver.try_recv() {
-            if matches!(command, Command::Refresh(0))
-                || matches!(command, Command::Refresh(_)) && scheduler.source_failure.is_some()
-            {
-                source_refresh_pending = true;
-                source_retry_at = Some(Instant::now());
-                last_check = Instant::now() - Duration::from_secs(30);
+            if let Command::CancelDirectory = &command {
+                directory_retry.cancelled();
+                source_refresh_pending = false;
+                source_probe = false;
+                source_probe_started = None;
+                scheduler.source_failure = Some(ApplicationErrorKind::Cancelled);
+                last_check = clock();
+                let directory_active = shared
+                    .active
+                    .lock()
+                    .is_ok_and(|active| active.contains_key(&0));
+                if !directory_active {
+                    publish(
+                        &shared,
+                        ChannelSyncPhase::Cancelled,
+                        None,
+                        Some(ApplicationErrorKind::Cancelled),
+                        None,
+                    );
+                }
+                continue;
+            }
+            if let Command::CancelPendingRetries = &command {
+                let cancelled = scheduler.cancel_pending_retries();
+                if let Ok(mut history) = shared.history.lock() {
+                    for chat_id in &cancelled {
+                        history.fail(*chat_id, ApplicationErrorKind::Cancelled);
+                    }
+                }
+                publish_cancelled_retries(&shared, &cancelled);
+                publish_pending_retry_count(&shared, scheduler.pending_retry_count);
+                continue;
+            }
+            if refreshes_directory(&command, scheduler.source_failure) {
+                scheduler.source_failure = None;
+                let requested_at = clock();
+                request_directory_refresh(
+                    &mut directory_retry,
+                    &mut source_refresh_pending,
+                    &mut last_check,
+                    requested_at,
+                    flood_until,
+                );
+                let rate_limited = flood_until.is_some_and(|at| at > requested_at);
+                publish(
+                    &shared,
+                    if rate_limited {
+                        ChannelSyncPhase::RateLimited
+                    } else {
+                        ChannelSyncPhase::Queued
+                    },
+                    None,
+                    rate_limited.then_some(scheduler.source_failure).flatten(),
+                    directory_retry.retry_at,
+                );
             }
             handle_command(command, &library, account.id, &mut scheduler, &shared);
         }
@@ -1224,24 +1761,28 @@ fn run<T: AccountSource>(
                 // A new reactor has its own peer cache and push coverage. Discover
                 // metadata again, then recover from durable cursors, never reset them.
                 scheduler.source_failure = None;
-                source_retry_at = Some(Instant::now());
-                source_attempt = 0;
-                for job in scheduler.jobs.values_mut() {
-                    job.state = None;
-                    job.pushes.clear();
-                    job.force = true;
-                    if matches!(
-                        job.failure,
-                        Some(
-                            ApplicationErrorKind::Network
-                                | ApplicationErrorKind::Server
-                                | ApplicationErrorKind::Authorization
-                        )
-                    ) {
-                        job.paused = false;
-                        job.failure = None;
-                        job.retry_at = None;
+                directory_retry.new_connection(clock());
+                for id in scheduler.jobs.keys().copied().collect::<Vec<_>>() {
+                    let was_waiting = scheduler.is_waiting_retry(id);
+                    if let Some(job) = scheduler.jobs.get_mut(&id) {
+                        job.state = None;
+                        job.pushes.clear();
+                        job.force = true;
+                        if matches!(
+                            job.failure,
+                            Some(
+                                ApplicationErrorKind::Network
+                                    | ApplicationErrorKind::Server
+                                    | ApplicationErrorKind::Authorization
+                            )
+                        ) {
+                            job.paused = false;
+                            job.failure = None;
+                            job.retry_at = None;
+                            job.rate_limited = false;
+                        }
                     }
+                    scheduler.adjust_pending_retry_count(id, was_waiting);
                 }
                 for id in scheduler.jobs.keys().copied().collect::<Vec<_>>() {
                     scheduler.enqueue(id);
@@ -1267,12 +1808,12 @@ fn run<T: AccountSource>(
                 .saturating_add(hints.overflow_count);
         }
         if !hints.pushes.is_empty() || !hints.channels.is_empty() {
-            let now = Instant::now();
+            let now = clock();
             scheduler.transport_available(now, flood_until);
             if scheduler.source_failure == Some(ApplicationErrorKind::Network)
                 && flood_until.is_none_or(|at| at <= now)
             {
-                source_retry_at = Some(now);
+                directory_retry.request(now, flood_until);
             }
         }
         for push in hints.pushes {
@@ -1290,7 +1831,7 @@ fn run<T: AccountSource>(
             shared.changes.send_replace(());
         }
         if !hints.channels.is_empty() || hints.metadata_changed || hints.reconcile_all {
-            last_delivery = Instant::now();
+            last_delivery = clock();
         }
         for (id, pts) in hints.channels {
             source_refresh_pending |= !scheduler.jobs.contains_key(&id);
@@ -1306,16 +1847,19 @@ fn run<T: AccountSource>(
             }
         }
         if executions.available(0)
-            && (source_retry_at.is_some_and(|at| at <= Instant::now())
-                || (source_retry_at.is_none()
+            && (directory_retry.retry_at.is_some_and(|at| at <= clock())
+                || (directory_retry.retry_at.is_none()
                     && scheduler.source_failure.is_none()
-                    && (last_check.max(last_delivery).elapsed() >= UPDATE_SILENCE_RECOVERY
+                    && (clock().saturating_duration_since(last_check.max(last_delivery))
+                        >= UPDATE_SILENCE_RECOVERY
                         || (source_refresh_pending
-                            && last_check.elapsed() >= Duration::from_secs(1)))))
-            && flood_until.is_none_or(|at| at <= Instant::now())
+                            && clock().saturating_duration_since(last_check)
+                                >= Duration::from_secs(1)))))
+            && flood_until.is_none_or(|at| at <= clock())
         {
-            source_probe = metadata_ready && !source_refresh_pending && source_retry_at.is_none();
-            source_probe_started = source_probe.then(Instant::now);
+            source_probe =
+                metadata_ready && !source_refresh_pending && directory_retry.retry_at.is_none();
+            source_probe_started = source_probe.then(|| clock());
             if !source_probe {
                 publish(&shared, ChannelSyncPhase::Discovering, None, None, None);
             }
@@ -1383,8 +1927,7 @@ fn run<T: AccountSource>(
             match result {
                 Ok(()) => {
                     source_refresh_pending = false;
-                    source_retry_at = None;
-                    last_check = Instant::now();
+                    last_check = clock();
                 }
                 Err(error) => {
                     source_probe_started = None;
@@ -1392,26 +1935,36 @@ fn run<T: AccountSource>(
                         active.remove(&0);
                     }
                     scheduler.source_failure = Some(error.kind());
-                    source_retry_at = None;
+                    directory_retry.failed_with_entropy(
+                        &ChannelSyncFailure::from(error.clone()),
+                        clock(),
+                        entropy(account.id, directory_retry.attempt),
+                    );
                     publish(
                         &shared,
-                        ChannelSyncPhase::Failed,
+                        if directory_retry.retry_at.is_some() {
+                            ChannelSyncPhase::Waiting
+                        } else {
+                            ChannelSyncPhase::Failed
+                        },
                         None,
                         Some(error.kind()),
-                        None,
+                        directory_retry.retry_at,
                     );
                 }
             }
         }
+        let failed_channels = scheduler
+            .jobs
+            .values()
+            .filter(|job| job.failure.is_some() && job.paused)
+            .count();
         if let Ok(mut snapshot) = shared.snapshot.lock() {
             snapshot.queued = scheduler.queue.len();
-            snapshot.failed_channels = scheduler
-                .jobs
-                .values()
-                .filter(|job| job.failure.is_some() && job.paused)
-                .count();
+            snapshot.failed_channels = failed_channels;
         }
-        let now = Instant::now();
+        publish_pending_retry_count(&shared, scheduler.pending_retry_count);
+        let now = clock();
         if let Ok(mut journal) = shared.deltas.lock() {
             journal.retain_sources(&scheduler.jobs);
         }
@@ -1423,6 +1976,7 @@ fn run<T: AccountSource>(
         } else {
             scheduler.pop(now)
         };
+        publish_pending_retry_count(&shared, scheduler.pending_retry_count);
         if let Some(id) = next {
             let token = TelegramScanCancellation::new();
             if let Ok(mut active) = shared.active.lock() {
@@ -1481,18 +2035,34 @@ fn run<T: AccountSource>(
                 }
             }
         } else {
-            let retry_at = flood_until.filter(|at| *at > now).or_else(|| {
-                scheduler
-                    .queue
-                    .iter()
-                    .filter(|id| !scheduler.in_flight.contains(id))
-                    .filter_map(|id| scheduler.jobs.get(id)?.retry_at)
-                    .filter(|at| *at > now)
-                    .chain(source_retry_at)
-                    .min()
+            let pending_channel_chat = scheduler.queue.iter().find(|id| {
+                !scheduler.in_flight.contains(id)
+                    && scheduler
+                        .jobs
+                        .get(id)
+                        .is_some_and(|job| !job.paused && needed(job))
             });
-            let (failure_chat, failure) = scheduler
-                .source_failure
+            let channel_work_pending = pending_channel_chat.is_some();
+            let retry_work_pending = channel_work_pending
+                || source_refresh_pending
+                || directory_retry.retry_at.is_some();
+            let retry_at = retry_work_pending
+                .then_some(flood_until.filter(|at| *at > now))
+                .flatten()
+                .or_else(|| {
+                    scheduler
+                        .queue
+                        .iter()
+                        .filter(|id| !scheduler.in_flight.contains(id))
+                        .filter_map(|id| scheduler.jobs.get(id)?.retry_at)
+                        .filter(|at| *at > now)
+                        .chain(directory_retry.retry_at.filter(|at| *at > now))
+                        .min()
+                });
+            let directory_failure = (source_refresh_pending || directory_retry.retry_at.is_some())
+                .then_some(scheduler.source_failure)
+                .flatten();
+            let (failure_chat, failure) = directory_failure
                 .map(|error| (None, Some(error)))
                 .or_else(|| {
                     scheduler
@@ -1500,11 +2070,13 @@ fn run<T: AccountSource>(
                         .iter()
                         .find_map(|(id, job)| job.failure.map(|error| (Some(*id), Some(error))))
                 })
+                .or_else(|| pending_channel_chat.map(|id| (Some(*id), None)))
+                .or_else(|| scheduler.source_failure.map(|error| (None, Some(error))))
                 .unwrap_or((None, None));
             if !executions.any() {
                 publish(
                     &shared,
-                    if flood_until.is_some_and(|at| at > now) {
+                    if retry_work_pending && flood_until.is_some_and(|at| at > now) {
                         ChannelSyncPhase::RateLimited
                     } else if retry_at.is_some() {
                         ChannelSyncPhase::Waiting
@@ -1520,7 +2092,7 @@ fn run<T: AccountSource>(
                     retry_at,
                 );
             }
-            let metadata_deadline = source_retry_at.or_else(|| {
+            let metadata_deadline = directory_retry.retry_at.or_else(|| {
                 (scheduler.source_failure.is_none() && executions.available(0)).then(|| {
                     source_reconciliation_deadline(
                         last_check,
@@ -1542,7 +2114,7 @@ fn run<T: AccountSource>(
             // Only actual recovery/coalescing deadlines wake an otherwise idle owner.
             // Permanent failures and occupied workers wait for a command or completion.
             if let Some(deadline) = deadline {
-                thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+                thread::park_timeout(deadline.saturating_duration_since(clock()));
             } else {
                 thread::park();
             }
@@ -1993,6 +2565,7 @@ mod tests {
     fn shared() -> Shared {
         Shared {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 1)),
+            pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
             sources: Mutex::new((0, Arc::new(Vec::new()))),
@@ -2396,7 +2969,10 @@ mod tests {
     fn selection_and_manual_retry_cannot_bypass_a_rate_limit() {
         let now = Instant::now();
         let mut scheduler = Scheduler::new(vec![chat(2, 50)]);
-        scheduler.jobs.get_mut(&2).expect("job").retry_at = Some(now + Duration::from_secs(30));
+        let job = scheduler.jobs.get_mut(&2).expect("job");
+        job.failure = Some(ApplicationErrorKind::Server);
+        job.rate_limited = true;
+        job.retry_at = Some(now + Duration::from_secs(30));
         scheduler.command(Command::Prioritize(2));
         scheduler.command(Command::Refresh(2));
         assert_eq!(scheduler.pop(now + Duration::from_secs(29)), None);
