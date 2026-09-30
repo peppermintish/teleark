@@ -16,7 +16,7 @@ Read the app before draft creation. A matching package SHA256 marker in certific
 
 An explicitly selected completed Store run can establish ownership when creation succeeded but the marker update failed. Verify its workflow, commit ancestry, immutable receipt, exact package hash/name, ordered pre-commit events and active submission ID. Refuse a missing/replaced draft, conflicting marker or committed state. Grant only read access to GitHub Actions for this receipt download. This closes the create-before-marker recovery gap without adopting arbitrary drafts.
 
-Preserve the validated submission `id` in the update body as well as its URI. A live request without body identity returned HTTP 400 with `InvalidParameterValue` and field `id`. The synthetic service now enforces this identity boundary, and mismatched GET response identities fail before mutation.
+Preserve the validated submission `id` in the update body as well as its URI. Mismatched GET response identities fail before mutation. Recognized error field names are diagnostic hints rather than proof of a missing field: retaining body identity alone did not resolve the observed HTTP 400. Ordered static validation words improve context without allowing arbitrary service prose or values into public logs.
 
 Record phase acknowledgment before each expensive operation. Receipt schema 1 contains only package name/hash, validated submission ID, allow-listed status, phase and a bounded timestamped timeline, with optional static validation code/field names. Receipt failures cannot stall submission. Retain receipts on success/failure; do not log OAuth forms/tokens, SAS URLs, remote listing data or raw exception/response text. Report accepted ingestion separately from Microsoft's certification/publication.
 

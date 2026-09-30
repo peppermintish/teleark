@@ -383,13 +383,28 @@ class StoreTests(unittest.TestCase):
         receipt = json.loads(self.journal.path.read_text())
         self.assertEqual(receipt["api_error_codes"], ["InvalidParameterValue"])
         self.assertEqual(receipt["api_error_fields"], ["pricing", "trialPeriod"])
-        self.assertIn("Validation fields: pricing, trialPeriod", error_output.getvalue())
+        self.assertIn("Recognized protocol fields: pricing, trialPeriod", error_output.getvalue())
         self.assert_redacted(error_output.getvalue() + self.output.getvalue() + self.journal.path.read_text())
         self.assertFalse(any(item[1].endswith("/commit") or "comp=" in item[1] for item in self.remote.requests))
         self.assertEqual(store.safe_api_validation(b"not json " + SECRET.encode()), ([], []))
         self.assertEqual(store.safe_api_validation(b"x" * (64 * 1024 + 1)), ([], []))
         codes, fields = store.safe_api_validation(json.dumps({"code": TOKEN, "details": SECRET}).encode())
         self.assertEqual((codes, fields), ([], []))
+
+    def test_validation_context_redacts_every_unrecognized_token_and_correlation_value(self):
+        content = json.dumps({"code": "InvalidParameterValue", "message":
+            f"The required pricing.trialPeriod value is invalid: {SECRET} {TOKEN} https://test.blob.core.windows.net/?sig={SAS}",
+            "correlationId": "the field is required", "details": [{"message": "The body id must match the submission id"}]}).encode()
+        context = store.safe_validation_context(content)
+        self.assertLessEqual(len(context), 60)
+        self.assertIn("trialPeriod", context)
+        self.assertIn("match", context)
+        self.assertTrue(all(word in store.SAFE_VALIDATION_WORDS or word == "[redacted]" for word in context))
+        self.assert_redacted(" ".join(context))
+        self.assertNotIn("field", context)
+        self.assertEqual(store.safe_validation_context(b"not JSON"), [])
+        self.assertEqual(store.safe_validation_context(b"x" * (64 * 1024 + 1)), [])
+        self.assertEqual(len(store.safe_validation_context(json.dumps({"message": "required " * 1000}).encode())), 60)
 
     def test_first_submission_requires_partner_center(self):
         self.remote.published = None

@@ -44,19 +44,28 @@ SAFE_API_CODES = {
     "InvalidOperation", "InvalidState", "ResourceNotFound", "ServiceError", "Other",
 }
 SAFE_API_FIELDS = WRITABLE | {
-    "id", "fileName", "fileStatus", "minimumDirectXVersion", "minimumSystemRam",
+    "id", "applicationId", "submissionId", "fileName", "fileStatus", "minimumDirectXVersion", "minimumSystemRam",
     "priceId", "trialPeriod", "marketSpecificPricings", "baseListing", "platformOverrides",
     "images", "imageType", "description", "title", "packageRollout", "isMandatoryUpdate",
+}
+SAFE_VALIDATION_WORDS = SAFE_API_CODES | SAFE_API_FIELDS | {
+    "a", "an", "and", "are", "as", "at", "be", "because", "body", "cannot", "contains", "does", "empty",
+    "error", "expected", "field", "for", "found", "from", "has", "in", "invalid", "is", "it", "match",
+    "missing", "must", "no", "not", "null", "of", "on", "only", "or", "parameter", "provided", "request",
+    "required", "requires", "same", "should", "submission", "supported", "the", "this", "to", "type",
+    "unknown", "unsupported", "update", "uri", "valid", "value", "was", "with", "without",
+    "PendingUpload", "PendingDelete", "Uploaded", "None", "NoFreeTrial", "Free", "Unknown",
 }
 
 
 class StoreError(Exception):
     """An operator-safe error, containing no response bodies, URLs or credentials."""
 
-    def __init__(self, message, *, api_codes=(), api_fields=()):
+    def __init__(self, message, *, api_codes=(), api_fields=(), api_context=()):
         super().__init__(message)
         self.api_codes = sorted(SAFE_API_CODES.intersection(api_codes))[:4]
         self.api_fields = sorted(SAFE_API_FIELDS.intersection(api_fields))[:12]
+        self.api_context = [value for value in api_context if value in SAFE_VALIDATION_WORDS or value == "[redacted]"][:60]
 
 
 def safe_api_validation(content: bytes) -> tuple[list[str], list[str]]:
@@ -73,6 +82,39 @@ def safe_api_validation(content: bytes) -> tuple[list[str], list[str]]:
     def present(words):
         return sorted(word for word in words if re.search(rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", text, re.I))
     return present(SAFE_API_CODES)[:4], present(SAFE_API_FIELDS)[:12]
+
+
+def safe_validation_context(content: bytes) -> list[str]:
+    """Retain ordered static protocol/grammar words, replacing every other token."""
+    if len(content) > 64 * 1024:
+        return []
+    try:
+        value = json.loads(content)
+    except (ValueError, UnicodeError, RecursionError):
+        return []
+    canonical = {word.lower(): word for word in SAFE_VALIDATION_WORDS}
+    context = []
+    pending = [value]
+    visited = 0
+    while pending and visited < 256 and len(context) < 60:
+        value = pending.pop()
+        visited += 1
+        if isinstance(value, dict):
+            # Service correlation IDs and other values are excluded altogether.
+            for key in ("error", "errors", "details", "message", "description", "code", "target"):
+                if key in value:
+                    pending.append(value[key])
+        elif isinstance(value, list):
+            pending.extend(reversed(value[:16]))
+        elif isinstance(value, str):
+            value = re.sub(r"https?://\S+", "REDACTED", value, flags=re.I)
+            for token in re.findall(r"[A-Za-z0-9_]+", value):
+                word = canonical.get(token.lower(), "[redacted]")
+                if not context or word != "[redacted]" or context[-1] != word:
+                    context.append(word)
+                if len(context) == 60:
+                    break
+    return context
 
 
 def sha256(path: Path) -> str:
@@ -163,12 +205,15 @@ def request(transport, operation: str, method: str, uri: str, headers=None, body
                 "this Windows developer account in Partner Center with the Manager role."
             )
         codes, fields = safe_api_validation(content)
+        context = safe_validation_context(content)
         diagnostic = ""
         if codes:
             diagnostic += " API codes: " + ", ".join(codes) + "."
         if fields:
-            diagnostic += " Validation fields: " + ", ".join(fields) + "."
-        raise StoreError(f"{operation} failed (HTTP {status}). {guidance}{diagnostic}", api_codes=codes, api_fields=fields)
+            diagnostic += " Recognized protocol fields: " + ", ".join(fields) + "."
+        if context:
+            diagnostic += " Static validation context: " + " ".join(context) + "."
+        raise StoreError(f"{operation} failed (HTTP {status}). {guidance}{diagnostic}", api_codes=codes, api_fields=fields, api_context=context)
     return content
 
 
@@ -191,7 +236,6 @@ def submission_id(draft: dict) -> str:
 
 def update_payload(draft: dict, package_name: str, digest: str) -> dict:
     payload = {key: copy.deepcopy(value) for key, value in draft.items() if key in WRITABLE}
-    # The live service validates body identity as well as the request URI.
     # Retain the validated identity returned by GET/POST without changing it.
     payload["id"] = submission_id(draft)
     if "pricing" in payload:
@@ -466,7 +510,8 @@ def main() -> int:
         return 130
     except Exception as failure:
         if journal:
-            diagnostic = {"api_error_codes": failure.api_codes, "api_error_fields": failure.api_fields} if isinstance(failure, StoreError) else {}
+            diagnostic = {"api_error_codes": failure.api_codes, "api_error_fields": failure.api_fields,
+                          "api_error_context": failure.api_context} if isinstance(failure, StoreError) else {}
             journal.record("failed", **diagnostic)
         message = str(failure) if isinstance(failure, StoreError) else "Local submission preparation failed. Check file access and tool availability."
         print(f"Microsoft Store: {message}", file=sys.stderr)
