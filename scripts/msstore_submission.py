@@ -55,7 +55,12 @@ SAFE_VALIDATION_WORDS = SAFE_API_CODES | SAFE_API_FIELDS | {
     "required", "requires", "same", "should", "submission", "supported", "the", "this", "to", "type",
     "unknown", "unsupported", "update", "uri", "valid", "value", "was", "with", "without",
     "PendingUpload", "PendingDelete", "Uploaded", "None", "NoFreeTrial", "Free", "Unknown",
+    "app", "application", "applicationPackage", "package", "packages", "image", "images", "price", "tier",
+    "have", "contain", "include", "set", "specify", "present", "positive", "integer", "number", "equal",
+    "unique", "non", "zero", "exist", "existing", "deletion", "delete", "marked", "each", "all", "new",
 }
+SAFE_VALIDATION_WORDS |= {part.lower() for field in SAFE_API_FIELDS
+                          for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)", field)}
 
 
 class StoreError(Exception):
@@ -250,7 +255,11 @@ def update_payload(draft: dict, package_name: str, digest: str) -> dict:
     for previous in draft.get("applicationPackages", []):
         if previous.get("fileName") == package_name:
             continue
+        identifier = previous.get("id")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", identifier):
+            raise StoreError("An existing application package is missing its immutable ID. Inspect the draft before retrying.")
         packages.append({
+            "id": identifier,
             "fileName": previous["fileName"], "fileStatus": "PendingDelete",
             "minimumDirectXVersion": previous.get("minimumDirectXVersion", "None"),
             "minimumSystemRam": previous.get("minimumSystemRam", "None"),

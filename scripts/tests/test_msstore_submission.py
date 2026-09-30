@@ -36,7 +36,7 @@ def draft():
         "pricing": {"priceId": "Free", "trialPeriod": "NoFreeTrial", "isAdvancedPricingModel": True, "sales": []},
         "listings": {"en-us": {"baseListing": {"title": "Keep my title", "images": [{"fileStatus": "Uploaded"}]}}},
         "visibility": "Public", "targetPublishMode": "Manual", "notesForCertification": "Keep these notes",
-        "applicationPackages": [{"fileName": "prior.msix", "fileStatus": "Uploaded", "architecture": "x64"}],
+        "applicationPackages": [{"id": "package-456", "fileName": "prior.msix", "fileStatus": "Uploaded", "architecture": "x64"}],
     }
 
 
@@ -81,6 +81,9 @@ class Remote:
             self.updated = json.loads(body)
             if self.updated.get("id") != self.current["id"]:
                 return 400, b'{"code":"InvalidParameterValue","details":"id"}'
+            for package in self.updated.get("applicationPackages", []):
+                if package.get("fileStatus") == "PendingDelete" and not package.get("id"):
+                    return 400, b'{"code":"InvalidParameterValue","message":"Package should have id","target":"id"}'
             return 200, json.dumps({"fileUploadUrl": f"https://test.blob.core.windows.net/current-archive?sig={SAS}"}).encode()
         if method == "PUT" and "comp=" in uri:
             return 201, b""
@@ -135,6 +138,8 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn("friendlyName", self.remote.updated)
         self.assertNotIn("fileUploadUrl", self.remote.updated)
         self.assertEqual(self.remote.updated["applicationPackages"][0]["fileStatus"], "PendingDelete")
+        self.assertEqual(self.remote.updated["applicationPackages"][0]["id"], "package-456")
+        self.assertNotIn("id", self.remote.updated["applicationPackages"][1])
         self.assertEqual(self.remote.updated["applicationPackages"][1]["fileName"], self.package.name)
         self.assertEqual(self.remote.updated["applicationPackages"][1]["fileStatus"], "PendingUpload")
         uploads = [item for item in self.remote.requests if "comp=block&" in item[1]]
@@ -245,6 +250,16 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(store.StoreError, "does not match the requested submission"):
             self.submit()
         self.assertEqual([item[0] for item in self.remote.requests], ["POST", "GET", "GET"])
+
+    def test_existing_package_identity_is_required_before_requesting_deletion(self):
+        for identifier in (None, "", 123, "bad/id"):
+            with self.subTest(identifier=identifier):
+                self.remote = Remote()
+                self.env = ENV.copy()
+                self.remote.current["applicationPackages"][0]["id"] = identifier
+                with self.assertRaisesRegex(store.StoreError, "missing its immutable ID"):
+                    self.submit()
+                self.assertFalse(any(item[0] == "PUT" or item[1].endswith("/commit") for item in self.remote.requests))
 
     def test_store_access_rejected_after_token_issuance_identifies_account_permissions(self):
         for status in (401, 403):
@@ -405,6 +420,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.safe_validation_context(b"not JSON"), [])
         self.assertEqual(store.safe_validation_context(b"x" * (64 * 1024 + 1)), [])
         self.assertEqual(len(store.safe_validation_context(json.dumps({"message": "required " * 1000}).encode())), 60)
+        self.assertEqual(store.safe_validation_context(b'{"message":"Package should have id"}'), ["package", "should", "have", "id"])
 
     def test_first_submission_requires_partner_center(self):
         self.remote.published = None
