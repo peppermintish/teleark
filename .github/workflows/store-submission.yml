@@ -7,6 +7,10 @@ on:
       release_tag:
         required: true
         type: string
+      recovery_run_id:
+        required: false
+        type: string
+        default: ''
     secrets:
       AZURE_AD_TENANT_ID:
         required: false
@@ -20,9 +24,15 @@ on:
         description: Published release tag to submit or resume (vX.Y.Z)
         required: true
         type: string
+      recovery_run_id:
+        description: Completed Store run whose receipt owns an unmarked draft (normally empty)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   submit:
@@ -51,9 +61,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           TELEARK_MSIX_IDENTITY_NAME: ${{ vars.TELEARK_MSIX_IDENTITY_NAME }}
           TELEARK_MSIX_PUBLISHER: ${{ vars.TELEARK_MSIX_PUBLISHER }}
-        run: python scripts/msstore_submission.py prepare --release-tag "$RELEASE_TAG" --directory store-package
+        run: python scripts/msstore_submission.py prepare --release-tag "$RELEASE_TAG" --directory store-package --recovery-run-id "$RECOVERY_RUN_ID"
 
       - name: Validate Microsoft Store submission configuration
         shell: pwsh
@@ -70,11 +81,17 @@ jobs:
       - name: Upload MSIX ZIP and commit the Partner Center submission
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
           AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
           AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
           TELEARK_MSSTORE_PRODUCT_ID: ${{ vars.TELEARK_MSSTORE_PRODUCT_ID }}
-        run: python scripts/msstore_submission.py submit --package-path "store-package/TeleArk-${RELEASE_TAG#v}-windows-x86_64.msix"
+        run: |
+          args=(submit --package-path "store-package/TeleArk-${RELEASE_TAG#v}-windows-x86_64.msix")
+          if [[ -n "$RECOVERY_RUN_ID" ]]; then
+            args+=(--recovery-receipt store-recovery/submission.json)
+          fi
+          python scripts/msstore_submission.py "${args[@]}"
 
       - name: Report the Store outcome
         if: ${{ always() }}

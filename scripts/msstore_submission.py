@@ -39,10 +39,40 @@ WRITABLE = {
     "notesForCertification", "applicationPackages", "packageDeliveryOptions", "enterpriseLicensing",
     "allowMicrosoftDecideAppAvailabilityToFutureDeviceFamilies", "allowTargetFutureDeviceFamilies", "trailers",
 }
+SAFE_API_CODES = {
+    "InvalidArchive", "MissingFiles", "PackageValidationFailed", "InvalidParameterValue",
+    "InvalidOperation", "InvalidState", "ResourceNotFound", "ServiceError", "Other",
+}
+SAFE_API_FIELDS = WRITABLE | {
+    "id", "fileName", "fileStatus", "minimumDirectXVersion", "minimumSystemRam",
+    "priceId", "trialPeriod", "marketSpecificPricings", "baseListing", "platformOverrides",
+    "images", "imageType", "description", "title", "packageRollout", "isMandatoryUpdate",
+}
 
 
 class StoreError(Exception):
     """An operator-safe error, containing no response bodies, URLs or credentials."""
+
+    def __init__(self, message, *, api_codes=(), api_fields=()):
+        super().__init__(message)
+        self.api_codes = sorted(SAFE_API_CODES.intersection(api_codes))[:4]
+        self.api_fields = sorted(SAFE_API_FIELDS.intersection(api_fields))[:12]
+
+
+def safe_api_validation(content: bytes) -> tuple[list[str], list[str]]:
+    """Recognize only fixed protocol words; never return service text or values."""
+    if len(content) > 64 * 1024:
+        return [], []
+    try:
+        value = json.loads(content)
+        if not isinstance(value, (dict, list)):
+            return [], []
+        text = json.dumps(value)
+    except (ValueError, UnicodeError, RecursionError):
+        return [], []
+    def present(words):
+        return sorted(word for word in words if re.search(rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", text, re.I))
+    return present(SAFE_API_CODES)[:4], present(SAFE_API_FIELDS)[:12]
 
 
 def sha256(path: Path) -> str:
@@ -132,7 +162,13 @@ def request(transport, operation: str, method: str, uri: str, headers=None, body
                 "Verify the token audience and the exact tenant/client application associated with "
                 "this Windows developer account in Partner Center with the Manager role."
             )
-        raise StoreError(f"{operation} failed (HTTP {status}). {guidance}")
+        codes, fields = safe_api_validation(content)
+        diagnostic = ""
+        if codes:
+            diagnostic += " API codes: " + ", ".join(codes) + "."
+        if fields:
+            diagnostic += " Validation fields: " + ", ".join(fields) + "."
+        raise StoreError(f"{operation} failed (HTTP {status}). {guidance}{diagnostic}", api_codes=codes, api_fields=fields)
     return content
 
 
@@ -219,7 +255,8 @@ def poll(transport, uri: str, headers: dict, journal: Journal, timeout: int, clo
     raise StoreError("Commit status is still pending. Retry the same release to monitor its existing submission; do not create another draft.")
 
 
-def submit(package: Path, journal: Journal, *, transport=None, environment=None, timeout=900, clock=time.monotonic, sleep=time.sleep) -> str:
+def submit(package: Path, journal: Journal, *, transport=None, environment=None, recovery=None,
+           timeout=900, clock=time.monotonic, sleep=time.sleep) -> str:
     transport = transport or HttpTransport()
     environment = os.environ if environment is None else environment
     for name in ("AZURE_AD_TENANT_ID", "AZURE_AD_APPLICATION_CLIENT_ID", "AZURE_AD_APPLICATION_SECRET", "TELEARK_MSSTORE_PRODUCT_ID"):
@@ -250,12 +287,23 @@ def submit(package: Path, journal: Journal, *, transport=None, environment=None,
         journal.record("checking-existing-submission")
         app = json_response(request(transport, "GetApplication", "GET", app_uri, headers))
         pending = app.get("pendingApplicationSubmission")
+        if recovery and (not pending or submission_id(pending) != recovery["submission_id"]):
+            raise StoreError("The receipt's draft is no longer the active submission. Inspect Partner Center before retrying.")
         if pending:
             identifier = submission_id(pending)
             draft = json_response(request(transport, "GetSubmission", "GET", f"{app_uri}/submissions/{identifier}", headers))
+            if submission_id(draft) != identifier:
+                raise StoreError("The returned draft does not match the requested submission.")
             marker = f"TeleArk CI package SHA256: {digest}"
             if marker not in str(draft.get("notesForCertification") or "").splitlines():
-                raise StoreError("A different Partner Center draft is active. Finish or remove that draft in Partner Center before retrying.")
+                notes = str(draft.get("notesForCertification") or "")
+                if (not recovery or recovery.get("submission_id") != identifier
+                        or recovery.get("package_sha256") != digest
+                        or recovery.get("package_name") != package.name
+                        or draft.get("status") != "PendingCommit"
+                        or any(line.startswith("TeleArk CI package SHA256:") for line in notes.splitlines())):
+                    raise StoreError("A different Partner Center draft is active. Inspect its owner and the failed run's receipt before retrying.")
+                journal.record("recovering-owned-draft", submission_id=identifier)
         else:
             if not app.get("lastPublishedApplicationSubmission"):
                 raise StoreError("The MSIX API requires an earlier completed Partner Center submission with age ratings. Complete the first submission in Partner Center.")
@@ -337,23 +385,75 @@ def prepare_release(directory: Path, tag: str) -> Path:
     return verify_package(directory, tag)
 
 
+def load_recovery(path: Path, package: Path) -> dict:
+    if path.stat().st_size > 64 * 1024:
+        raise StoreError("The recovery receipt exceeds the supported size.")
+    receipt = json_response(path.read_bytes())
+    events = receipt.get("events")
+    phases = [event.get("phase") for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+    origins = {"creating-draft", "recovering-owned-draft"}
+    ordered = (isinstance(events, list) and 1 <= len(events) <= 64 and len(phases) == len(events)
+               and all(isinstance(phase, str) for phase in phases) and "draft-ready" in phases
+               and any(phase in origins for phase in phases[:phases.index("draft-ready")]))
+    if (receipt.get("schema_version") != 1 or receipt.get("package_name") != package.name
+            or receipt.get("package_sha256") != sha256(package)
+            or not ordered
+            or any(phase in phases for phase in ("committing", "waiting-for-commit", "accepted"))):
+        raise StoreError("The recovery receipt does not identify an uncommitted CI draft for these exact package bytes.")
+    return {"submission_id": submission_id({"id": receipt.get("submission_id")}),
+            "package_name": package.name, "package_sha256": receipt["package_sha256"]}
+
+
+def prepare_recovery(run_id: str, package: Path, directory: Path, environment=None) -> Path:
+    environment = os.environ if environment is None else environment
+    repository = environment.get("GH_REPO", "")
+    if not re.fullmatch(r"[1-9][0-9]{0,19}", run_id) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise StoreError("Recovery requires a numeric completed Store run from this GitHub repository.")
+    emit("verifying-recovery-run")
+    run = json_response(run_tool(["gh", "api", f"repos/{repository}/actions/runs/{run_id}"]).encode())
+    revision = run.get("head_sha", "")
+    attempt = run.get("run_attempt")
+    workflow = run.get("path", "")
+    if (str(run.get("id")) != run_id or run.get("status") != "completed"
+            or not isinstance(workflow, str) or workflow.split("@")[0] not in {".github/workflows/store-submission.yml", ".github/workflows/ci.yml"}
+            or not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision)
+            or type(attempt) is not int or not 1 <= attempt <= 999):
+        raise StoreError("The recovery run is not a completed TeleArk Store workflow.")
+    run_tool(["git", "merge-base", "--is-ancestor", revision, "origin/main"])
+    directory.mkdir(parents=True, exist_ok=False)
+    emit("downloading-recovery-receipt")
+    run_tool(["gh", "run", "download", run_id, "--repo", repository,
+              "--name", f"store-receipt-{run_id}-{attempt}", "--dir", str(directory)])
+    path = directory / "submission.json"
+    if {item.name for item in directory.iterdir()} != {"submission.json"} or not path.is_file():
+        raise StoreError("Recovery download must contain exactly the sanitized submission receipt.")
+    load_recovery(path, package)
+    emit("verified-recovery-receipt")
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Submit a verified MSIX release to Microsoft Store.")
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--release-tag", required=True)
     prepare.add_argument("--directory", type=Path, required=True)
+    prepare.add_argument("--recovery-run-id", default="")
     upload = commands.add_parser("submit")
     upload.add_argument("--package-path", type=Path, required=True)
     upload.add_argument("--receipt-path", type=Path, default=Path("store-result/submission.json"))
+    upload.add_argument("--recovery-receipt", type=Path)
     args = parser.parse_args()
     journal = None
     try:
         if args.command == "prepare":
-            prepare_release(args.directory, args.release_tag)
+            package = prepare_release(args.directory, args.release_tag)
+            if args.recovery_run_id:
+                prepare_recovery(args.recovery_run_id, package, args.directory.parent / "store-recovery")
         else:
             journal = Journal(args.receipt_path, args.package_path)
-            status = submit(args.package_path, journal)
+            recovery = load_recovery(args.recovery_receipt, args.package_path) if args.recovery_receipt else None
+            status = submit(args.package_path, journal, recovery=recovery)
             print(f"Microsoft Store accepted the submission ({status}); Microsoft controls certification and publication.", flush=True)
         return 0
     except KeyboardInterrupt:
@@ -363,7 +463,8 @@ def main() -> int:
         return 130
     except Exception as failure:
         if journal:
-            journal.record("failed")
+            diagnostic = {"api_error_codes": failure.api_codes, "api_error_fields": failure.api_fields} if isinstance(failure, StoreError) else {}
+            journal.record("failed", **diagnostic)
         message = str(failure) if isinstance(failure, StoreError) else "Local submission preparation failed. Check file access and tool availability."
         print(f"Microsoft Store: {message}", file=sys.stderr)
         return 1

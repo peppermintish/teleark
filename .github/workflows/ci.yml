@@ -296,6 +296,9 @@ jobs:
     name: 6 · Submit published MSIX to Microsoft Store
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: publish
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/store-submission.yml
     with:
       release_tag: ${{ github.ref_name }}

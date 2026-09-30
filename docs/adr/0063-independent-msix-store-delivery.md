@@ -14,7 +14,9 @@ Publish the checksummed GitHub Release only after all existing quality, native-t
 
 Read the app before draft creation. A matching package SHA256 marker in certification notes permits safe resumption of an uncommitted draft or monitoring of a committed draft. Preserve unrelated/unmarked drafts and report operator guidance. Never automatically repeat ambiguous create/commit calls or delete/cancel submissions. Preserve the original certification notes when appending the marker.
 
-Record phase acknowledgment before each expensive operation. Receipt schema 1 contains only package name/hash, validated submission ID, allow-listed status, phase and a bounded timestamped timeline. Receipt failures cannot stall submission. Retain receipts on success/failure; do not log OAuth forms/tokens, SAS URLs, remote listing data or raw exception/response text. Report accepted ingestion separately from Microsoft's certification/publication.
+An explicitly selected completed Store run can establish ownership when creation succeeded but the marker update failed. Verify its workflow, commit ancestry, immutable receipt, exact package hash/name, ordered pre-commit events and active submission ID. Refuse a missing/replaced draft, conflicting marker or committed state. Grant only read access to GitHub Actions for this receipt download. This closes the create-before-marker recovery gap without adopting arbitrary drafts.
+
+Record phase acknowledgment before each expensive operation. Receipt schema 1 contains only package name/hash, validated submission ID, allow-listed status, phase and a bounded timestamped timeline, with optional static validation code/field names. Receipt failures cannot stall submission. Retain receipts on success/failure; do not log OAuth forms/tokens, SAS URLs, remote listing data or raw exception/response text. Report accepted ingestion separately from Microsoft's certification/publication.
 
 ## Consequences and validation
 

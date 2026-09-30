@@ -1,6 +1,6 @@
 """Synthetic Store contract tests, including the real HTTP client over loopback."""
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import http.client
 import io
@@ -33,7 +33,7 @@ def draft():
     return {
         "id": "submission-123", "status": "PendingCommit", "friendlyName": "Synthetic submission",
         "fileUploadUrl": f"https://test.blob.core.windows.net/archive?sig={SAS}",
-        "pricing": {"priceId": "Free", "trialPeriod": "NotAvailable", "isAdvancedPricingModel": True, "sales": []},
+        "pricing": {"priceId": "Free", "trialPeriod": "NoFreeTrial", "isAdvancedPricingModel": True, "sales": []},
         "listings": {"en-us": {"baseListing": {"title": "Keep my title", "images": [{"fileStatus": "Uploaded"}]}}},
         "visibility": "Public", "targetPublishMode": "Manual", "notesForCertification": "Keep these notes",
         "applicationPackages": [{"fileName": "prior.msix", "fileStatus": "Uploaded", "architecture": "x64"}],
@@ -49,6 +49,7 @@ class Remote:
         self.statuses = ["CommitStarted", "PreProcessing"]
         self.fail_operation = None
         self.failure = None
+        self.failure_content = None
 
     def request(self, method, uri, headers, body=None):
         self.requests.append((method, uri, headers.copy(), body))
@@ -60,12 +61,14 @@ class Remote:
             operation = "CommitSubmission"
         if method == "POST" and path.endswith("/submissions"):
             operation = "CreateSubmission"
+        if method == "PUT" and path.endswith("/submission-123"):
+            operation = "UpdateSubmission"
         if "comp=block&" in uri:
             operation = "UploadPackageBlock"
         if self.fail_operation == operation:
             if isinstance(self.failure, Exception):
                 raise self.failure
-            return self.failure, f"{SECRET} {TOKEN} {SAS}".encode()
+            return self.failure, self.failure_content or f"{SECRET} {TOKEN} {SAS}".encode()
         if path.endswith("/token"):
             return 200, json.dumps({"access_token": TOKEN}).encode()
         if path.endswith("/applications/9SYNTHETIC"):
@@ -103,10 +106,10 @@ class StoreTests(unittest.TestCase):
     def sleep(self, duration):
         self.time += duration
 
-    def submit(self, transport=None, timeout=30):
+    def submit(self, transport=None, timeout=30, recovery=None):
         with redirect_stdout(self.output):
             return store.submit(self.package, self.journal, transport=transport or self.remote,
-                                environment=self.env, timeout=timeout, clock=lambda: self.time, sleep=self.sleep)
+                                environment=self.env, recovery=recovery, timeout=timeout, clock=lambda: self.time, sleep=self.sleep)
 
     def assert_redacted(self, value):
         for sensitive in (SECRET, TOKEN, SAS, ENV["AZURE_AD_TENANT_ID"], ENV["AZURE_AD_APPLICATION_CLIENT_ID"]):
@@ -125,7 +128,7 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn("Authorization", headers)
         self.assertEqual(self.remote.updated["listings"], draft()["listings"])
         self.assertEqual(self.remote.updated["targetPublishMode"], "Manual")
-        self.assertEqual(self.remote.updated["pricing"], {"priceId": "Free", "trialPeriod": "NotAvailable"})
+        self.assertEqual(self.remote.updated["pricing"], {"priceId": "Free", "trialPeriod": "NoFreeTrial"})
         self.assertNotIn("friendlyName", self.remote.updated)
         self.assertNotIn("fileUploadUrl", self.remote.updated)
         self.assertEqual(self.remote.updated["applicationPackages"][0]["fileStatus"], "PendingDelete")
@@ -263,6 +266,120 @@ class StoreTests(unittest.TestCase):
         self.remote.current["notesForCertification"] = f"TeleArk CI package SHA256: {store.sha256(self.package)}"
         self.assertEqual(self.submit(), "PreProcessing")
         self.assertFalse(any(item[0] == "POST" and item[1].endswith("/submissions") for item in self.remote.requests))
+
+    def recovery_receipt(self):
+        with redirect_stdout(self.output):
+            self.journal.record("creating-draft")
+            self.journal.record("draft-ready", submission_id="submission-123")
+            self.journal.record("updating-draft")
+            self.journal.record("failed")
+        return store.load_recovery(self.journal.path, self.package)
+
+    def test_receipt_recovers_exact_unmarked_draft_without_creating_or_deleting(self):
+        recovery = self.recovery_receipt()
+        self.remote.pending = {"id": "submission-123"}
+        self.assertEqual(self.submit(recovery=recovery), "PreProcessing")
+        self.assertIn("recovering-owned-draft", self.output.getvalue())
+        self.assertFalse(any(item[0] == "DELETE" or (item[0] == "POST" and item[1].endswith("/submissions")) for item in self.remote.requests))
+        self.assertEqual(self.remote.updated["listings"], draft()["listings"])
+        self.assert_redacted(self.output.getvalue() + self.journal.path.read_text())
+
+    def test_recovery_never_adopts_different_bytes_identifier_state_or_marker(self):
+        recovery = self.recovery_receipt()
+        cases = [({"submission_id": "different"}, {}), ({"package_sha256": "0" * 64}, {}),
+                 ({"package_name": "different.msix"}, {}), ({}, {"status": "CommitStarted"}),
+                 ({}, {"notesForCertification": "TeleArk CI package SHA256: " + "0" * 64})]
+        for changed_receipt, changed_draft in cases:
+            with self.subTest(change=changed_receipt or changed_draft):
+                self.remote = Remote()
+                self.env = ENV.copy()
+                self.remote.pending = {"id": "submission-123"}
+                self.remote.current.update(changed_draft)
+                with self.assertRaisesRegex(store.StoreError, "different Partner Center draft|no longer the active submission"):
+                    self.submit(recovery=recovery | changed_receipt)
+                expected = ["POST", "GET"] if "submission_id" in changed_receipt else ["POST", "GET", "GET"]
+                self.assertEqual([item[0] for item in self.remote.requests], expected)
+
+    def test_missing_recovery_draft_never_creates_a_replacement(self):
+        with self.assertRaisesRegex(store.StoreError, "no longer the active submission"):
+            self.submit(recovery=self.recovery_receipt())
+        self.assertEqual([item[0] for item in self.remote.requests], ["POST", "GET"])
+
+    def test_recovery_receipt_requires_supported_schema_exact_bytes_and_precommit_events(self):
+        self.recovery_receipt()
+        receipt = json.loads(self.journal.path.read_text())
+        for change in ({"schema_version": 2}, {"submission_id": "bad/id"}, {"package_name": "another.msix"},
+                       {"package_sha256": "0" * 64}, {"events": []},
+                       {"events": [{"phase": "draft-ready"}, {"phase": "creating-draft"}]},
+                       {"events": receipt["events"] + ["invalid-event"]},
+                       {"events": receipt["events"] + [{"phase": "committing"}]}):
+            with self.subTest(change=change):
+                self.journal.path.write_text(json.dumps(receipt | change))
+                with self.assertRaises(store.StoreError):
+                    store.load_recovery(self.journal.path, self.package)
+        self.journal.path.write_bytes(b"x" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(store.StoreError, "supported size"):
+            store.load_recovery(self.journal.path, self.package)
+
+    def test_recovery_download_verifies_workflow_ancestry_attempt_and_receipt(self):
+        self.recovery_receipt()
+        content = self.journal.path.read_bytes()
+        run = {"id": 12345, "status": "completed", "head_sha": "a" * 40, "run_attempt": 3,
+               "path": ".github/workflows/store-submission.yml"}
+        destination = self.directory / "recovery"
+        def tool(arguments):
+            if arguments[:2] == ["gh", "api"]:
+                return json.dumps(run)
+            if arguments[:3] == ["gh", "run", "download"]:
+                (destination / "submission.json").write_bytes(content)
+            return ""
+        with redirect_stdout(self.output), patch.object(store, "run_tool", side_effect=tool) as command:
+            result = store.prepare_recovery("12345", self.package, destination, {"GH_REPO": "example/teleark"})
+        self.assertEqual(result, destination / "submission.json")
+        self.assertEqual(command.call_args_list[1].args[0], ["git", "merge-base", "--is-ancestor", "a" * 40, "origin/main"])
+        self.assertIn("store-receipt-12345-3", command.call_args_list[2].args[0])
+        self.assert_redacted(self.output.getvalue())
+
+    def test_invalid_or_untrusted_recovery_run_cannot_download_receipt(self):
+        valid = {"id": 12345, "status": "completed", "head_sha": "a" * 40, "run_attempt": 1,
+                 "path": ".github/workflows/store-submission.yml"}
+        with patch.object(store, "run_tool") as command:
+            for run_id in ("0", "../12345", "12345; echo", "12345\n"):
+                with self.subTest(run_id=run_id), self.assertRaises(store.StoreError):
+                    store.prepare_recovery(run_id, self.package, self.directory / "unused", {"GH_REPO": "example/teleark"})
+            command.assert_not_called()
+        for change in ({"id": 999}, {"status": "in_progress"}, {"path": ".github/workflows/foreign.yml"},
+                       {"head_sha": "bad/revision"}, {"run_attempt": True}, {"run_attempt": 0}):
+            with self.subTest(change=change), redirect_stdout(self.output):
+                with patch.object(store, "run_tool", return_value=json.dumps(valid | change)) as command:
+                    with self.assertRaises(store.StoreError):
+                        store.prepare_recovery("12345", self.package, self.directory / "unused", {"GH_REPO": "example/teleark"})
+                    self.assertEqual(command.call_count, 1)
+        with redirect_stdout(self.output), patch.object(store, "run_tool", side_effect=[json.dumps(valid), store.StoreError("Outside main")]) as command:
+            with self.assertRaises(store.StoreError):
+                store.prepare_recovery("12345", self.package, self.directory / "unused", {"GH_REPO": "example/teleark"})
+            self.assertEqual(command.call_count, 2)
+
+    def test_validation_details_emit_fixed_protocol_words_only(self):
+        self.remote.fail_operation = "UpdateSubmission"
+        self.remote.failure = 400
+        self.remote.failure_content = json.dumps({"code": "InvalidParameterValue", "details":
+            f"pricing.trialPeriod rejected: {SECRET} {TOKEN} https://test.blob.core.windows.net/?sig={SAS}"}).encode()
+        error_output = io.StringIO()
+        arguments = ["msstore_submission.py", "submit", "--package-path", str(self.package), "--receipt-path", str(self.journal.path)]
+        with redirect_stdout(self.output), redirect_stderr(error_output), patch.object(sys, "argv", arguments), \
+                patch.dict(store.os.environ, ENV, clear=True), patch.object(store, "HttpTransport", return_value=self.remote):
+            self.assertEqual(store.main(), 1)
+        receipt = json.loads(self.journal.path.read_text())
+        self.assertEqual(receipt["api_error_codes"], ["InvalidParameterValue"])
+        self.assertEqual(receipt["api_error_fields"], ["pricing", "trialPeriod"])
+        self.assertIn("Validation fields: pricing, trialPeriod", error_output.getvalue())
+        self.assert_redacted(error_output.getvalue() + self.output.getvalue() + self.journal.path.read_text())
+        self.assertFalse(any(item[1].endswith("/commit") or "comp=" in item[1] for item in self.remote.requests))
+        self.assertEqual(store.safe_api_validation(b"not json " + SECRET.encode()), ([], []))
+        self.assertEqual(store.safe_api_validation(b"x" * (64 * 1024 + 1)), ([], []))
+        codes, fields = store.safe_api_validation(json.dumps({"code": TOKEN, "details": SECRET}).encode())
+        self.assertEqual((codes, fields), ([], []))
 
     def test_first_submission_requires_partner_center(self):
         self.remote.published = None
