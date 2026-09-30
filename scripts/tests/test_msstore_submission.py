@@ -79,6 +79,8 @@ class Remote:
             return 200, json.dumps(self.current).encode()
         if method == "PUT" and path.endswith("/submission-123"):
             self.updated = json.loads(body)
+            if self.updated.get("id") != self.current["id"]:
+                return 400, b'{"code":"InvalidParameterValue","details":"id"}'
             return 200, json.dumps({"fileUploadUrl": f"https://test.blob.core.windows.net/current-archive?sig={SAS}"}).encode()
         if method == "PUT" and "comp=" in uri:
             return 201, b""
@@ -127,6 +129,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(form["resource"], ["https://manage.devcenter.microsoft.com"])
         self.assertNotIn("Authorization", headers)
         self.assertEqual(self.remote.updated["listings"], draft()["listings"])
+        self.assertEqual(self.remote.updated["id"], self.remote.current["id"])
         self.assertEqual(self.remote.updated["targetPublishMode"], "Manual")
         self.assertEqual(self.remote.updated["pricing"], {"priceId": "Free", "trialPeriod": "NoFreeTrial"})
         self.assertNotIn("friendlyName", self.remote.updated)
@@ -235,6 +238,13 @@ class StoreTests(unittest.TestCase):
             self.submit()
         self.assertFalse(any(item[0] in {"PUT", "DELETE"} for item in self.remote.requests))
         self.assertFalse(any(item[1].endswith("/submissions") for item in self.remote.requests))
+
+    def test_returned_draft_identity_must_match_the_requested_submission(self):
+        self.remote.pending = {"id": "submission-123"}
+        self.remote.current["id"] = "different-submission"
+        with self.assertRaisesRegex(store.StoreError, "does not match the requested submission"):
+            self.submit()
+        self.assertEqual([item[0] for item in self.remote.requests], ["POST", "GET", "GET"])
 
     def test_store_access_rejected_after_token_issuance_identifies_account_permissions(self):
         for status in (401, 403):

@@ -191,6 +191,9 @@ def submission_id(draft: dict) -> str:
 
 def update_payload(draft: dict, package_name: str, digest: str) -> dict:
     payload = {key: copy.deepcopy(value) for key, value in draft.items() if key in WRITABLE}
+    # The live service validates body identity as well as the request URI.
+    # Retain the validated identity returned by GET/POST without changing it.
+    payload["id"] = submission_id(draft)
     if "pricing" in payload:
         pricing = payload["pricing"]
         # Pricing Version 2 is not writable through this API. Package-only updates
