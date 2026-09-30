@@ -18,6 +18,8 @@ An explicitly selected completed Store run can establish ownership when creation
 
 Preserve the validated submission `id` in the update body as well as its URI. Mismatched GET response identities fail before mutation. Recognized error field names are diagnostic hints rather than proof of a missing field: retaining body identity alone did not resolve the observed HTTP 400. Ordered static validation words improve context without allowing arbitrary service prose or values into public logs.
 
+Existing package resources retain their immutable Partner Center `id` when changing their state to `PendingDelete`. The documentation's four-field minimum was insufficient for this replacement operation: omitting old package IDs produced HTTP 400, and retaining them allowed the same draft update and upload to succeed. A new `PendingUpload` package has no invented ID. Reject missing/invalid old IDs before mutation and exercise this rule through the production loopback transport.
+
 Record phase acknowledgment before each expensive operation. Receipt schema 1 contains only package name/hash, validated submission ID, allow-listed status, phase and a bounded timestamped timeline, with optional static validation code/field names. Receipt failures cannot stall submission. Retain receipts on success/failure; do not log OAuth forms/tokens, SAS URLs, remote listing data or raw exception/response text. Report accepted ingestion separately from Microsoft's certification/publication.
 
 ## Consequences and validation
