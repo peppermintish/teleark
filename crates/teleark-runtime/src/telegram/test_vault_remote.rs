@@ -250,6 +250,27 @@ impl TestVaultRemote {
         object.bytes[last] ^= 1;
         id
     }
+    pub(crate) fn corrupt_manifest(&self, id: i64) {
+        let mut state = self.state.lock().expect("state");
+        let object = state.objects.get_mut(&id).expect("uploaded manifest");
+        assert_eq!(object.summary.caption, crate::transfer::MANIFEST_CAPTION);
+        let last = object
+            .bytes
+            .len()
+            .checked_sub(1)
+            .expect("nonempty manifest");
+        object.bytes[last] ^= 1;
+    }
+    pub(crate) fn remove_manifest(&self, id: i64) {
+        let object = self
+            .state
+            .lock()
+            .expect("state")
+            .objects
+            .remove(&id)
+            .expect("uploaded manifest");
+        assert_eq!(object.summary.caption, crate::transfer::MANIFEST_CAPTION);
+    }
     pub(crate) fn summaries(&self) -> Vec<TelegramFileSummary> {
         self.state
             .lock()
@@ -616,15 +637,17 @@ impl TestVaultRemote {
                     self.fail_if_armed(GateKind::DownloadPart)?;
                     Self::scope(account_id, chat_id, cancellation.as_ref())?;
                     let stream_length = truncated_after.unwrap_or(object.bytes.len());
-                    for block in
-                        object.bytes[..stream_length].chunks(teleark_telegram::UPLOAD_PART_BYTES)
+                    for segment in object.bytes[..stream_length]
+                        .chunks(teleark_telegram::DOWNLOAD_PART_SIZE_BYTES as usize)
                     {
-                        if abort.is_cancelled() {
-                            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                        for block in teleark_telegram::download_stream_blocks(segment) {
+                            if abort.is_cancelled() {
+                                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+                            }
+                            blocks.blocking_send(block.to_vec()).map_err(|_| {
+                                ApplicationError::new(ApplicationErrorKind::Cancelled)
+                            })?;
                         }
-                        blocks
-                            .blocking_send(block.to_vec())
-                            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))?;
                     }
                     if let Some(observer) = &observer {
                         observer.observe(teleark_telegram::ByteTransferEvent::Downloading {

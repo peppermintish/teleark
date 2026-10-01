@@ -32,9 +32,33 @@ pub(super) fn load(
     observer: &crate::ManagedScanObserver,
 ) -> Result<Option<ManagedVaultFile>, ApplicationError> {
     observer.phase(crate::ChannelSyncPhase::ManifestReceiving);
-    let bytes = store
-        .download(object.object_id)
-        .map_err(map_transfer_error)?;
+    let bytes = match store.download(object.object_id).map_err(map_transfer_error) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ApplicationErrorKind::SourceMissing | ApplicationErrorKind::NotFound
+            ) =>
+        {
+            // A document can disappear between the committed catalog read and
+            // this fetch. Preserve its authenticated inventory and continue
+            // projecting the other files instead of failing the entire scan.
+            observer.phase(crate::ChannelSyncPhase::Persisting);
+            library
+                .worker
+                .request("save_vault_message_health", |reply| {
+                    StorageRequest::SaveVaultMessageHealth {
+                        account: scope.0,
+                        chat: scope.1,
+                        messages: vec![(object.object_id as i64, false)],
+                        observed_at: now_unix_ms().unwrap_or(0),
+                        reply,
+                    }
+                })?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
     if bytes.len() as u64 != object.encoded_size {
         mark_invalid(library, scope, object.object_id as i64, true)?;

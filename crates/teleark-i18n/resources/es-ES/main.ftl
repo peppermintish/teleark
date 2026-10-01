@@ -821,3 +821,9 @@ download-pipeline-transport = Telegram stream chunks: { $active } receiving · {
 download-chart-empty = Waiting for encrypted bytes from Telegram. Download rate is unknown.
 download-part-group = Containers { $first }–{ $last } · { $confirmed } verified · { $state }
 download-part-map-grouping = { $count } containers · Up to { $size } per cell. Hover for exact ranges.
+
+storage-channel-managed-empty = Todavía no hay archivos autenticados. Sube tu primer archivo. Los nuevos archivos aparecen automáticamente.
+global-sync-automatic = La sincronización es automática. Los fallos de conexión se reintentan en segundo plano.
+
+channel-sync-timing = Fase: { $duration } · Última actividad: hace { $activity }
+channel-sync-next-at = Reintento automático en { $seconds } s.

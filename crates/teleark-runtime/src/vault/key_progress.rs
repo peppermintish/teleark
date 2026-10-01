@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6,6 +7,7 @@ pub enum VaultKeyPhase {
     Queued,
     Loading,
     CheckingChannel,
+    Waiting,
     Generating,
     WrappingPassword,
     WrappingRecovery,
@@ -27,6 +29,8 @@ pub struct VaultKeySnapshot {
     pub timeline: Vec<(VaultKeyPhase, u64)>,
     pub finished: bool,
     pub error: Option<ApplicationErrorKind>,
+    pub retry_at: Option<Instant>,
+    pub dropped_events: u64,
     started: Instant,
 }
 impl Default for VaultKeyProgress {
@@ -46,6 +50,8 @@ impl VaultKeyProgress {
                 timeline: vec![(VaultKeyPhase::Queued, 0)],
                 finished: false,
                 error: None,
+                retry_at: None,
+                dropped_events: 0,
             })),
             cancelled: Arc::new(AtomicBool::new(false)),
             changed: Arc::new(watch::channel(0).0),
@@ -86,6 +92,8 @@ impl VaultKeyProgress {
         let changed = !state.finished && state.phase != phase;
         if changed {
             state.phase = phase;
+            state.error = None;
+            state.retry_at = None;
             state.phase_since = Instant::now();
             state.last_activity = state.phase_since;
             let millis = state
@@ -95,9 +103,11 @@ impl VaultKeyProgress {
                 .min(u128::from(u64::MAX)) as u64;
             // A command can combine setup and rotation. Retain all transitions
             // in that bounded sequence, including its terminal outcome.
-            if state.timeline.len() < 16 {
-                state.timeline.push((phase, millis));
+            if state.timeline.len() == 16 {
+                state.timeline.remove(0);
+                state.dropped_events = state.dropped_events.saturating_add(1);
             }
+            state.timeline.push((phase, millis));
         }
         drop(state);
         if changed {
@@ -110,6 +120,7 @@ impl VaultKeyProgress {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.error = error;
         state.finished = true;
+        state.retry_at = None;
         state.last_activity = Instant::now();
         if error.is_none() {
             state.phase = VaultKeyPhase::Completed;
@@ -119,13 +130,29 @@ impl VaultKeyProgress {
                 .elapsed()
                 .as_millis()
                 .min(u128::from(u64::MAX)) as u64;
-            if state.timeline.len() < 16 {
-                state.timeline.push((VaultKeyPhase::Completed, millis));
+            if state.timeline.len() == 16 {
+                state.timeline.remove(0);
+                state.dropped_events = state.dropped_events.saturating_add(1);
             }
+            state.timeline.push((VaultKeyPhase::Completed, millis));
         }
         drop(state);
         self.changed
             .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+    pub(super) fn waiting(
+        &self,
+        error: ApplicationErrorKind,
+        delay: Duration,
+    ) -> Result<(), ApplicationError> {
+        self.phase(VaultKeyPhase::Waiting)?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.error = Some(error);
+        state.retry_at = Some(Instant::now() + delay);
+        drop(state);
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        Ok(())
     }
 }
 
@@ -144,5 +171,29 @@ mod signal_tests {
         progress.finish(None);
         assert!(changes.has_changed().expect("terminal event"));
         assert!(progress.snapshot().finished);
+    }
+    #[test]
+    fn repeated_automatic_retries_bound_history_and_retain_terminal_feedback() {
+        let progress = VaultKeyProgress::new();
+        for _ in 0..40 {
+            progress.phase(VaultKeyPhase::Loading).expect("phase");
+            progress
+                .waiting(ApplicationErrorKind::Network, Duration::from_secs(2))
+                .expect("wait");
+            let waiting = progress.snapshot();
+            assert!(!waiting.finished);
+            assert_eq!(waiting.error, Some(ApplicationErrorKind::Network));
+            assert!(waiting.retry_at.is_some());
+        }
+        progress.finish(None);
+        let state = progress.snapshot();
+        assert_eq!(state.timeline.len(), 16);
+        assert_eq!(
+            state.timeline.last().expect("terminal").0,
+            VaultKeyPhase::Completed
+        );
+        assert!(state.dropped_events > 0);
+        assert!(state.finished);
+        assert!(state.retry_at.is_none());
     }
 }

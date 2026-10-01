@@ -517,6 +517,7 @@ enum VaultCommand {
         account: i64,
         chat: i64,
         initialize_empty: Option<VaultChannelSetupScope>,
+        finish_progress: bool,
         progress: VaultKeyProgress,
         reply: mpsc::SyncSender<Result<VaultKeySelection, ApplicationError>>,
     },
@@ -746,6 +747,7 @@ impl DesktopVault {
             account,
             chat,
             initialize_empty: None,
+            finish_progress: true,
             progress,
             reply,
         });
@@ -775,6 +777,7 @@ impl DesktopVault {
             account,
             chat,
             initialize_empty: Some(scope),
+            finish_progress: true,
             progress,
             reply,
         });
@@ -1593,11 +1596,14 @@ impl VaultOwner {
                 account,
                 chat,
                 initialize_empty,
+                finish_progress,
                 progress,
                 reply,
             } => {
                 let result = self.select_channel_key(account, chat, initialize_empty, &progress);
-                progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                if finish_progress {
+                    progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                }
                 let _ = reply.send(result);
             }
             VaultCommand::ManageKey {

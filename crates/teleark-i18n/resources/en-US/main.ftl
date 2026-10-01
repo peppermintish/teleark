@@ -791,7 +791,7 @@ storage-channel-teleark-files = Files
 storage-channel-tabs-description = Raw Telegram objects and reconstructed logical files
 storage-channel-managed-title = TeleArk-managed files
 storage-channel-managed-runtime-note = TeleArk recognizes package manifests and parts here. Automatic decryption and reconstruction will become available when the desktop Vault owner is connected; this alpha does not claim that locked packages are restored.
-storage-channel-managed-empty = No authenticated files yet. Upload your first file or refresh to scan this channel.
+storage-channel-managed-empty = No authenticated files yet. Upload your first file. New files appear automatically.
 storage-channel-managed-name-locked = Encrypted logical file
 storage-channel-managed-detail-title = File details
 storage-channel-managed-detail-empty = Select a managed file to inspect its package.
@@ -1147,6 +1147,15 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.15 · Reliable managed files and automatic channel synchronization
+
+    - Correct encrypted downloads at the native 1 MiB transport boundary. Streams deliver bounded 512 KiB blocks, and final files appear only after authentication and whole-file verification.
+    - Select the channel key from its authenticated proof. A damaged or deleted file keeps its own health state and cannot hide unrelated files or erase completed downloads.
+    - Synchronize from Telegram pushes and a seven-minute fallback for each quiet channel. Persist successful checks, including empty differences, and reuse them after restart.
+    - Retry transient key-validation and catalog failures automatically in the background. Remove manual synchronization retry/cancel controls from the sync inspector.
+    - Upgrade SQLite schemas 0–23 automatically to 24, preserving cursors, credentials, recovery state and downloaded-file records. Existing encrypted formats are unchanged.
+    - Remove the Upload options drawer; file selection, automatic encryption and the upload queue remain available.
+
     ## 0.5.13 · Microsoft Store transport recovery
 
     - Restore the default Store HTTP request path: `.GetNewClosure()` hid the module-private transport function, causing the workflow to fail before sending the token request.
@@ -2063,3 +2072,9 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+
+global-sync-automatic = Synchronization is automatic. Connection failures are retried in the background.
+
+channel-sync-timing = Phase: { $duration } · Last activity: { $activity } ago
+channel-sync-next-at = Automatic retry in { $seconds } s.

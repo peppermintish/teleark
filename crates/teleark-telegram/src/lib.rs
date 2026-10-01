@@ -32,6 +32,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::task::{JoinHandle, JoinSet};
 
 mod download_stream;
+pub use download_stream::download_stream_blocks;
 mod upload;
 pub use upload::{
     StreamUploadOptions, UPLOAD_PART_BYTES, UPLOAD_RESUME_WINDOW_MS, UploadCheckpoint, UploadStream,

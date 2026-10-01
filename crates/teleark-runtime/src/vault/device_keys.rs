@@ -284,7 +284,7 @@ impl VaultOwner {
                 }
             }
         }
-        let choice = if available.is_empty() {
+        let mut choice = if available.is_empty() {
             None
         } else {
             progress.phase(VaultKeyPhase::CheckingChannel)?;
@@ -308,7 +308,10 @@ impl VaultOwner {
             } else {
                 None
             };
-            if candidates.is_empty() && proof.is_some() {
+            if proof.is_some() {
+                // The newest authenticated proof selects the channel's upload
+                // key. A file-local edit, corruption or historical epoch must
+                // never revoke it or hide every unrelated file.
                 proof_choice
             } else if candidates.is_empty() && !bound_channel {
                 preferred
@@ -327,52 +330,112 @@ impl VaultOwner {
                 for candidate in candidates {
                     progress.check_cancelled()?;
                     let object = catalog::byte_object(&candidate)?;
-                    let bytes = store
-                        .download(object.object_id)
-                        .map_err(map_transfer_error)?;
+                    let bytes = match store.download(object.object_id).map_err(map_transfer_error) {
+                        Ok(bytes) => bytes,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ApplicationErrorKind::SourceMissing
+                                    | ApplicationErrorKind::NotFound
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if bytes.len() as u64 != object.encoded_size {
-                        selected = None;
-                        break;
+                        continue;
                     }
                     let id = match teleark_crypto::manifest_vault_id_hint(
                         &bytes,
                         teleark_crypto::ManifestLimits::default(),
                     ) {
                         Ok(id) => id,
-                        Err(_) => {
-                            selected = None;
-                            break;
-                        }
+                        Err(_) => continue,
                     };
                     let index = available
                         .iter()
                         .position(|(record, _)| record.vault_id == id);
-                    let Some(index) = index else {
-                        selected = None;
-                        break;
+                    let Some(index) = index else { continue };
+                    let Ok(manifest) = teleark_crypto::open_manifest(
+                        &bytes,
+                        &available[index].1,
+                        teleark_crypto::ManifestLimits::default(),
+                    ) else {
+                        continue;
                     };
-                    if selected.is_some_and(|previous| previous != index)
-                        || teleark_crypto::open_manifest(
-                            &bytes,
-                            &available[index].1,
-                            teleark_crypto::ManifestLimits::default(),
-                        )
-                        .is_err()
+                    if object.name
+                        != teleark_crypto::remote_manifest_name(&manifest.public_header.package_id)
+                        || manifest.metadata.parts.iter().any(|part| {
+                            (part.remote_locator.account_id, part.remote_locator.chat_id)
+                                != (account, chat)
+                        })
                     {
-                        selected = None;
-                        break;
+                        continue;
                     }
                     selected = Some(index);
                     progress.activity()?;
+                    // Legacy channels without a proof select the newest
+                    // authenticated envelope; older entries keep their own
+                    // health/key requirement instead of vetoing the channel.
+                    break;
                 }
-                if proof.is_some() {
-                    selected.filter(|index| Some(*index) == proof_choice)
-                } else {
-                    selected
-                }
+                selected
             }
         };
+        if choice.is_none() && proof.is_none() && !available.is_empty() {
+            // Older channels may have no proof and only one now-damaged remote
+            // manifest. Authenticate the retained envelope for this exact
+            // account/channel before choosing its key; never guess a local key.
+            let mut before = i64::MAX;
+            for _ in 0..MAX_MANIFEST_SCAN {
+                progress.check_cancelled()?;
+                let records = self
+                    .library
+                    .worker
+                    .request("vault_inventory_page", |reply| {
+                        crate::StorageRequest::VaultInventoryPage {
+                            account,
+                            chat,
+                            before,
+                            reply,
+                        }
+                    })?;
+                let Some(record) = records.into_iter().next() else {
+                    break;
+                };
+                before = record.manifest_message_id;
+                let Some(index) = available
+                    .iter()
+                    .position(|(key, _)| key.vault_id == record.vault_id)
+                else {
+                    continue;
+                };
+                let Ok(manifest) = teleark_crypto::open_manifest(
+                    &record.sealed_manifest,
+                    &available[index].1,
+                    teleark_crypto::ManifestLimits::default(),
+                ) else {
+                    continue;
+                };
+                if record.remote_name
+                    == teleark_crypto::remote_manifest_name(&manifest.public_header.package_id)
+                    && manifest.public_header.vault_id == record.vault_id
+                    && manifest.metadata.parts.iter().all(|part| {
+                        (part.remote_locator.account_id, part.remote_locator.chat_id)
+                            == (account, chat)
+                    })
+                {
+                    choice = Some(index);
+                    break;
+                }
+            }
+        }
         self.check_key_generation()?;
+        if let Some(scope) = initialize_empty {
+            self.check_channel_setup_scope(scope, chat)?;
+        }
+        progress.check_cancelled()?;
         let outcome = if !stored_material_found {
             VaultKeySelection::NoKeys
         } else if let Some(index) = choice {
@@ -925,6 +988,265 @@ mod tests {
             imported.status().active_vault_id,
             Some(channel_record.vault_id)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_single_file_corruption_retains_authenticated_inventory_and_output() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        library.save_telegram_sources(
+            &crate::TelegramAccount {
+                id: 7,
+                display_name: "Synthetic".into(),
+                username: None,
+            },
+            &[crate::TelegramChatSummary {
+                id: 11,
+                name: "Legacy".into(),
+                username: None,
+                kind: crate::TelegramChatKind::Channel,
+                sync_pts: None,
+            }],
+        )?;
+        let vault = DesktopVault::with_device_keys(
+            telegram,
+            library.clone(),
+            Arc::new(MemoryStore::default()),
+        )?;
+        vault.submit_prepare_key(VaultKeyProgress::new())?.wait()?;
+        let source = temp.path().join("original.txt");
+        std::fs::write(&source, b"synthetic legacy content")?;
+        let file = vault.upload_file(7, 11, source)?;
+        library.cache_telegram_files(7, 11, &remote.summaries())?;
+        assert!(remote.proof_bytes().is_empty());
+        let output = vault.download_file(7, 11, file.package_numeric_id)?;
+        remote.corrupt_manifest(file.manifest_message_id);
+        assert_eq!(
+            vault
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        let scan =
+            vault.scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?;
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].logical_name, "original.txt");
+        assert_eq!(
+            scan.files[0].health,
+            crate::VaultFileHealth::InvalidManifest
+        );
+        remote.remove_manifest(file.manifest_message_id);
+        assert_eq!(
+            vault
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        assert_eq!(
+            vault
+                .scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?
+                .files
+                .len(),
+            1
+        );
+        assert_eq!(std::fs::read(output)?, b"synthetic legacy content");
+        library.save_storage_channel_id(7, 12)?;
+        assert_eq!(
+            vault
+                .submit_select_channel_key(7, 12, VaultKeyProgress::new())?
+                .wait()
+                .expect_err("foreign channel denied")
+                .kind(),
+            ApplicationErrorKind::Authorization,
+            "another channel cannot use retained evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn large_channel_file_survives_sync_restart_and_file_local_corruption() -> TestResult {
+        use crate::telegram::test_vault_remote::TestVaultRemote;
+        let temp = tempfile::tempdir()?;
+        let library = DesktopLibrary::open(temp.path().join("catalog.sqlite"))?;
+        let remote = TestVaultRemote::new();
+        let keys = Arc::new(MemoryStore::default());
+        let telegram = remote.connect(&temp.path().join("synthetic.session"));
+        library.save_telegram_sources(
+            &crate::TelegramAccount {
+                id: 7,
+                display_name: "Synthetic".into(),
+                username: None,
+            },
+            &[crate::TelegramChatSummary {
+                id: 11,
+                name: "Synthetic storage".into(),
+                username: None,
+                kind: crate::TelegramChatKind::Channel,
+                sync_pts: None,
+            }],
+        )?;
+        let vault =
+            DesktopVault::with_device_keys(telegram.clone(), library.clone(), keys.clone())?;
+        telegram.ensure_storage_channel_with_key_observed(
+            &library,
+            &vault,
+            vault.channel_setup_scope(7)?,
+            "Synthetic storage".into(),
+            "Synthetic description".into(),
+            crate::StorageSetupProgress::new(),
+        )?;
+        let source = temp.path().join("boundary.pdf");
+        remote.fail_once(crate::telegram::test_vault_remote::GateKind::ProofDownload);
+        let progress = VaultKeyProgress::new();
+        assert_eq!(
+            vault.synchronize_channel_key(7, 11, progress.clone(), None)?,
+            VaultKeySelection::Ready
+        );
+        assert!(
+            progress
+                .snapshot()
+                .timeline
+                .iter()
+                .any(|(phase, _)| *phase == VaultKeyPhase::Waiting)
+        );
+        let plaintext: Vec<_> = (0..11 * 1024 * 1024 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        std::fs::write(&source, &plaintext)?;
+        let uploaded = vault.upload_file(7, 11, source)?;
+        library.cache_telegram_files(7, 11, &remote.summaries())?;
+        let select = || {
+            vault
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()
+        };
+        assert_eq!(select()?, VaultKeySelection::Ready);
+        let scan =
+            vault.scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?;
+        assert!(
+            scan.files
+                .iter()
+                .any(|file| file.package_numeric_id == uploaded.package_numeric_id)
+        );
+        let output = vault.download_file(7, 11, uploaded.package_numeric_id)?;
+        assert_eq!(std::fs::read(&output)?, plaintext);
+
+        // Backoff never holds the key owner. An explicit lock stops the old
+        // attempt instead of letting it silently reopen the session later.
+        remote.fail_once(crate::telegram::test_vault_remote::GateKind::ProofDownload);
+        let (waiting, ready) = mpsc::sync_channel(1);
+        let observer = crate::ManagedScanObserver::new(
+            11,
+            Arc::new(move |state, changed| {
+                if changed && state.phase == crate::ChannelSyncPhase::Waiting {
+                    waiting.send(()).expect("waiting observer");
+                }
+            }),
+        );
+        let work = vault.clone();
+        let blocked = std::thread::spawn(move || {
+            work.synchronize_channel_key(7, 11, VaultKeyProgress::new(), Some(observer))
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(10))?;
+        vault.lock()?;
+        assert_eq!(
+            blocked
+                .join()
+                .expect("retained background task")
+                .expect_err("old retry fenced")
+                .kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        assert!(vault.status().locked);
+        assert_eq!(select()?, VaultKeySelection::Ready);
+
+        // A successful wire response for an old Telegram connection cannot
+        // publish its key after account replacement, even before GUI cleanup.
+        let (entered, release) = remote.gate(
+            crate::telegram::test_vault_remote::GateKind::ProofDownload,
+            0,
+        );
+        let work = vault.clone();
+        let stale = std::thread::spawn(move || {
+            work.synchronize_channel_key(7, 11, VaultKeyProgress::new(), None)
+        });
+        entered.recv_timeout(std::time::Duration::from_secs(10))?;
+        telegram.lifecycle().publish(2, Some(8), None);
+        release.send(())?;
+        assert_eq!(
+            stale
+                .join()
+                .expect("retained proof task")
+                .expect_err("old account fenced")
+                .kind(),
+            ApplicationErrorKind::Cancelled
+        );
+        assert!(vault.status().locked);
+        telegram.lifecycle().publish(3, Some(7), None);
+        assert_eq!(select()?, VaultKeySelection::Ready);
+
+        // A second file's damaged envelope must not revoke the channel key or
+        // remove the original uploaded/downloaded file from the catalog.
+        let second = temp.path().join("damaged.txt");
+        std::fs::write(&second, b"synthetic second file")?;
+        let damaged = vault.upload_file(7, 11, second)?;
+        remote.corrupt_manifest(damaged.manifest_message_id);
+        library.cache_telegram_files(7, 11, &remote.summaries())?;
+        assert_eq!(select()?, VaultKeySelection::Ready);
+        let scan =
+            vault.scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?;
+        assert_eq!(scan.files.len(), 2);
+        assert!(
+            scan.files
+                .iter()
+                .any(|file| file.package_numeric_id == damaged.package_numeric_id
+                    && file.health == crate::VaultFileHealth::InvalidManifest)
+        );
+        assert!(scan.files.iter().any(|file| file.package_numeric_id
+            == uploaded.package_numeric_id
+            && file.health == crate::VaultFileHealth::Present));
+        drop(vault);
+        let restarted = DesktopVault::with_device_keys(
+            remote.connect(&temp.path().join("synthetic.session")),
+            library,
+            keys,
+        )?;
+        assert_eq!(
+            restarted
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        let scan =
+            restarted.scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?;
+        assert_eq!(scan.files.len(), 2);
+        let restored = restarted.download_file(7, 11, uploaded.package_numeric_id)?;
+        assert_eq!(std::fs::read(restored)?, plaintext);
+        assert_eq!(
+            std::fs::read(&output)?,
+            plaintext,
+            "sync and restart retain completed outputs"
+        );
+        // Deletion after a cached catalog read is file-local as well. The last
+        // authenticated envelope remains available to explain its health.
+        remote.remove_manifest(uploaded.manifest_message_id);
+        assert_eq!(
+            restarted
+                .submit_select_channel_key(7, 11, VaultKeyProgress::new())?
+                .wait()?,
+            VaultKeySelection::Ready
+        );
+        let scan =
+            restarted.scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::new())?;
+        assert_eq!(scan.files.len(), 2);
+        assert!(scan.files.iter().any(|file| file.package_numeric_id
+            == uploaded.package_numeric_id
+            && file.health == crate::VaultFileHealth::MissingManifest));
+        assert_eq!(std::fs::read(output)?, plaintext);
         Ok(())
     }
 

@@ -763,7 +763,7 @@ storage-channel-teleark-files = 文件
 storage-channel-tabs-description = Telegram 原始对象与还原后的逻辑文件
 storage-channel-managed-title = TeleArk 管理的文件
 storage-channel-managed-runtime-note = TeleArk 会在这里识别软件包清单和分片。桌面端连接加密保管库的持有服务后才会提供自动解密和还原；当前 Alpha 不会把已锁定的软件包显示成已还原。
-storage-channel-managed-empty = 还没有已认证的文件。上传第一个文件，或刷新以扫描此频道。
+storage-channel-managed-empty = 还没有已认证的文件。上传第一个文件，新文件会自动显示。
 storage-channel-managed-name-locked = 已加密的逻辑文件
 storage-channel-managed-detail-title = 文件详情
 storage-channel-managed-detail-empty = 选择一个受管理文件以查看其软件包。
@@ -2035,3 +2035,8 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+global-sync-automatic = 同步自动进行。连接失败后会在后台自动重试。
+
+channel-sync-timing = 当前阶段：{ $duration } · 上次活动：{ $activity } 前
+channel-sync-next-at = 将在 { $seconds } 秒后自动重试。

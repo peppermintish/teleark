@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.15 · Reliable managed files and automatic channel synchronization
+
+- Correct encrypted downloads at the native 1 MiB transport boundary. Streams deliver bounded 512 KiB blocks, and final files appear only after authentication and whole-file verification.
+- Select the channel key from its authenticated proof. A damaged or deleted file keeps its own health state and cannot hide unrelated files or erase completed downloads.
+- Synchronize from Telegram pushes and a seven-minute fallback for each quiet channel. Persist successful checks, including empty differences, and reuse them after restart.
+- Retry transient key-validation and catalog failures automatically in the background. Remove manual synchronization retry/cancel controls from the sync inspector.
+- Upgrade SQLite schemas 0–23 automatically to 24, preserving cursors, credentials, recovery state and downloaded-file records. Existing encrypted formats are unchanged.
+- Remove the Upload options drawer; file selection, automatic encryption and the upload queue remain available.
+
 ## 0.5.13 · Microsoft Store transport recovery
 
 - Restore the default Store HTTP request path: `.GetNewClosure()` hid the module-private transport function, causing the workflow to fail before sending the token request.

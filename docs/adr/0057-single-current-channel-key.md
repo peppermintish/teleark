@@ -1,6 +1,6 @@
 # ADR 0057: Select one current key for the managed channel
 
-Status: Accepted — 2026-09-24. Supersedes the multi-key desktop behavior in [ADR 0025](0025-fixed-channel-and-retained-key-epochs.md) and the recovery controls in [ADR 0040](0040-automatic-device-keys-and-optional-pin.md). The earlier documents remain historical records; their cryptographic format and channel ownership requirements still apply.
+Status: Partially superseded by [ADR 0064](0064-managed-channel-proof-and-durable-automatic-sync.md) — 2026-10-02. The historical all-manifest key requirement below no longer applies. Accepted originally 2026-09-24. Supersedes the multi-key desktop behavior in [ADR 0025](0025-fixed-channel-and-retained-key-epochs.md) and the recovery controls in [ADR 0040](0040-automatic-device-keys-and-optional-pin.md). The earlier documents remain historical records; their cryptographic format and channel ownership requirements still apply.
 
 ## Decision
 

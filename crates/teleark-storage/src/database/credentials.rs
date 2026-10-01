@@ -370,7 +370,10 @@ mod tests {
             [],
         )?;
         let mut db = Database::initialize(connection, |_| {})?;
-        assert_eq!(db.schema_version()?, 23);
+        assert_eq!(
+            db.schema_version()?,
+            crate::migration::LATEST_SCHEMA_VERSION
+        );
         assert_eq!(
             db.setting("legacy.fixture")?.map(|row| row.value),
             Some("synthetic persisted value".into())

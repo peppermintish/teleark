@@ -172,15 +172,26 @@ impl TelegramConnection {
             receipts.completed(part.part_index);
             ready.insert(part.part_index, part.bytes);
             while let Some(bytes) = ready.remove(&emitted) {
-                output
-                    .send(bytes)
-                    .await
-                    .map_err(|_| TelegramError::new(TelegramErrorKind::Cancelled))?;
+                // Native download scheduling uses 1 MiB segments. The crypto
+                // stream has its own 512 KiB delivery contract, independent of
+                // scheduling, frame boundaries and the final short segment.
+                for block in download_stream_blocks(&bytes) {
+                    output
+                        .send(block.to_vec())
+                        .await
+                        .map_err(|_| TelegramError::new(TelegramErrorKind::Cancelled))?;
+                }
                 emitted += 1;
             }
         }
         Ok(())
     }
+}
+
+/// Split a completed native download segment into bounded crypto-stream blocks.
+/// This boundary is shared by the connected adapter and synthetic wire tests.
+pub fn download_stream_blocks(segment: &[u8]) -> impl Iterator<Item = &[u8]> {
+    segment.chunks(UPLOAD_PART_BYTES)
 }
 
 #[derive(Default)]
@@ -667,5 +678,28 @@ mod tests {
             Some((DOWNLOAD_PART_SIZE_BYTES * 2, 17))
         );
         assert_eq!(stream_download_part_range(3, expected), None);
+    }
+
+    #[test]
+    fn native_segments_deliver_ordered_half_mib_blocks_and_short_tails() {
+        for length in [
+            1,
+            UPLOAD_PART_BYTES,
+            UPLOAD_PART_BYTES + 1,
+            DOWNLOAD_PART_SIZE_BYTES as usize,
+            DOWNLOAD_PART_SIZE_BYTES as usize + 17,
+        ] {
+            let bytes: Vec<_> = (0..length).map(|offset| (offset % 251) as u8).collect();
+            let blocks: Vec<_> = bytes
+                .chunks(DOWNLOAD_PART_SIZE_BYTES as usize)
+                .flat_map(download_stream_blocks)
+                .collect();
+            assert!(
+                blocks
+                    .iter()
+                    .all(|block| !block.is_empty() && block.len() <= UPLOAD_PART_BYTES)
+            );
+            assert_eq!(blocks.concat(), bytes);
+        }
     }
 }

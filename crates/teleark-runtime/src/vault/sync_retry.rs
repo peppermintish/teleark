@@ -3,6 +3,96 @@ use super::*;
 use std::time::{Duration, Instant};
 
 impl DesktopVault {
+    /// Retained background key validation. Backoff releases the key owner;
+    /// locking, backend changes and account replacement fence every retry.
+    pub fn synchronize_channel_key(
+        &self,
+        account: i64,
+        chat: i64,
+        progress: VaultKeyProgress,
+        observer: Option<crate::ManagedScanObserver>,
+    ) -> Result<VaultKeySelection, ApplicationError> {
+        let result =
+            self.synchronize_channel_key_inner(account, chat, &progress, observer.as_ref());
+        progress.finish(result.as_ref().err().map(ApplicationError::kind));
+        if let Some(observer) = observer {
+            observer.finish(result.as_ref().err().map(ApplicationError::kind));
+        }
+        result
+    }
+
+    fn synchronize_channel_key_inner(
+        &self,
+        account: i64,
+        chat: i64,
+        progress: &VaultKeyProgress,
+        observer: Option<&crate::ManagedScanObserver>,
+    ) -> Result<VaultKeySelection, ApplicationError> {
+        if chat <= 0 {
+            return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
+        }
+        let scope = self.channel_setup_scope(account)?;
+        let mut revision = scope.session_revision;
+        let current =
+            |expected| {
+                progress.check_cancelled().is_ok()
+                    && {
+                        let (generation, active, _) = self.inner.lifecycle.snapshot();
+                        generation == scope.telegram_revision && active == Some(account)
+                    }
+                    && self.inner.session.lock().is_ok_and(|session| {
+                        !session.closing && session.scan_revision() == expected
+                    })
+            };
+        let mut attempt = 0_u32;
+        loop {
+            if !current(revision) {
+                return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+            }
+            if let Some(observer) = observer {
+                observer.restart();
+                observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
+            }
+            let job =
+                self.submit_in_session(Some(revision), |reply| VaultCommand::SelectChannelKey {
+                    account,
+                    chat,
+                    initialize_empty: Some(scope),
+                    finish_progress: false,
+                    progress: progress.clone(),
+                    reply,
+                });
+            // Admission revokes new scan leases once. Any other key mutation
+            // during a failed attempt invalidates this exact retry generation.
+            revision.1 = revision.1.wrapping_add(1);
+            let result = match job {
+                Ok(job) => job.wait(),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    let Some(delay) = retry_delay(attempt, &error) else {
+                        return Err(error);
+                    };
+                    progress.waiting(error.kind(), delay)?;
+                    if let Some(observer) = observer {
+                        observer.retry(&error, delay);
+                    }
+                    let start = Instant::now();
+                    while current(revision) && start.elapsed() < delay {
+                        std::thread::sleep(
+                            delay
+                                .saturating_sub(start.elapsed())
+                                .min(Duration::from_millis(50)),
+                        );
+                    }
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        }
+    }
+
     /// Run on a retained background task. Each attempt has its own admitted key
     /// lease; a lock, key change or account replacement prevents further attempts.
     /// Successful authenticated entries remain cached across transient failures.

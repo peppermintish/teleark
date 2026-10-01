@@ -789,3 +789,9 @@ download-pipeline-transport = Telegram stream chunks: { $active } receiving · {
 download-chart-empty = Waiting for encrypted bytes from Telegram. Download rate is unknown.
 download-part-group = Containers { $first }–{ $last } · { $confirmed } verified · { $state }
 download-part-map-grouping = { $count } containers · Up to { $size } per cell. Hover for exact ranges.
+
+storage-channel-managed-empty = 아직 인증된 파일이 없습니다. 첫 파일을 업로드하세요. 새 파일은 자동으로 표시됩니다.
+global-sync-automatic = 동기화는 자동으로 진행됩니다. 연결에 실패하면 백그라운드에서 다시 시도합니다.
+
+channel-sync-timing = 현재 단계: { $duration } · 마지막 활동: { $activity } 전
+channel-sync-next-at = { $seconds }초 후 자동으로 다시 시도합니다.

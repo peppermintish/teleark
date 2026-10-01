@@ -150,20 +150,23 @@ impl TeleArkApp {
         self.cancel_managed_scan();
         self.vault_key_progress = Some(progress.clone());
         self.vault_activity = VaultActivity::Working;
-        self.managed_vault_files = Default::default();
-        self.selected_telegram_message_id = None;
-        self.show_channel_detail = false;
+        // Keep the current account/channel projection during revalidation.
+        // Only an authenticated result or an explicit lock may replace it.
+        if self.managed_projection_scope != Some((account, chat)) {
+            self.managed_vault_files = Default::default();
+            self.selected_telegram_message_id = None;
+            self.show_channel_detail = false;
+        }
         cx.notify();
         // Paint the phase before Keychain, database, network or crypto work starts.
-        let job =
-            match vault.submit_select_or_initialize_channel_key(account, chat, progress.clone()) {
-                Ok(job) => job,
-                Err(error) => {
-                    self.vault_activity = VaultActivity::Failed(error.kind());
-                    cx.notify();
-                    return;
-                }
-            };
+        let observer = self
+            .channel_sync
+            .as_ref()
+            .map(|sync| sync.observe_managed_scan(chat));
+        let work_progress = progress.clone();
+        let work = cx.background_spawn(async move {
+            vault.synchronize_channel_key(account, chat, work_progress, observer)
+        });
         self.sync_vault_status();
         let mut events = progress.subscribe();
         self.vault_key_presentation = Some(cx.spawn(async move |this, cx| {
@@ -184,7 +187,6 @@ impl TeleArkApp {
             }
         }));
         let generation = self.telegram_login_generation;
-        let work = cx.background_spawn(async move { job.wait() });
         self.vault_key_selection_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let Some(entity) = this.upgrade() else { return };

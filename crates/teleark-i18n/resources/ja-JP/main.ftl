@@ -763,7 +763,7 @@ storage-channel-teleark-files = ファイル
 storage-channel-tabs-description = Telegram の生オブジェクトと復元された論理ファイル
 storage-channel-managed-title = TeleArk 管理ファイル
 storage-channel-managed-runtime-note = TeleArk はここでパッケージのマニフェストとパートを識別します。自動復号と復元はデスクトップの Vault 所有サービス接続後に利用可能になります。このアルファ版は、ロック中のパッケージを復元済みとは表示しません。
-storage-channel-managed-empty = 認証済みファイルはまだありません。最初のファイルをアップロードするか、更新してチャンネルを確認してください。
+storage-channel-managed-empty = 認証済みファイルはまだありません。最初のファイルをアップロードしてください。新しいファイルは自動で表示されます。
 storage-channel-managed-name-locked = 暗号化された論理ファイル
 storage-channel-managed-detail-title = ファイル詳細
 storage-channel-managed-detail-empty = 管理対象ファイルを選択してパッケージを確認してください。
@@ -2035,3 +2035,8 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+
+global-sync-automatic = 同期は自動で行われます。接続に失敗すると、バックグラウンドで再試行します。
+
+channel-sync-timing = 現在の段階：{ $duration } · 最後のアクティビティ：{ $activity } 前
+channel-sync-next-at = { $seconds } 秒後に自動で再試行します。

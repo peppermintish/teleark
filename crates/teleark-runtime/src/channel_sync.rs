@@ -568,6 +568,7 @@ impl From<ApplicationError> for ChannelSyncFailure {
 
 #[derive(Clone)]
 struct Job {
+    quiet_deadline: Option<Instant>,
     pushes: VecDeque<teleark_telegram::ChannelPush>,
     catalog_ready: Option<bool>,
     watch_loaded: bool,
@@ -745,6 +746,34 @@ struct Scheduler {
 }
 
 impl Scheduler {
+    fn recover_quiet_channels(&mut self, now: Instant) {
+        let due: Vec<_> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, job)| {
+                (!job.paused
+                    && !self.in_flight.contains(id)
+                    && job.quiet_deadline.is_some_and(|at| at <= now))
+                .then_some(*id)
+            })
+            .collect();
+        for id in due {
+            if let Some(job) = self.jobs.get_mut(&id) {
+                job.force = true;
+                job.quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
+            }
+            self.enqueue(id);
+        }
+    }
+
+    fn quiet_deadline(&self) -> Option<Instant> {
+        self.jobs
+            .iter()
+            .filter(|(id, job)| !job.paused && !self.in_flight.contains(id))
+            .filter_map(|(_, job)| job.quiet_deadline)
+            .min()
+    }
+
     fn new(chats: Vec<TelegramChatSummary>) -> Self {
         let jobs: BTreeMap<_, _> = chats
             .into_iter()
@@ -753,6 +782,7 @@ impl Scheduler {
                 (
                     c.id,
                     Job {
+                        quiet_deadline: None,
                         pushes: VecDeque::new(),
                         catalog_ready: None,
                         watch_loaded: false,
@@ -816,6 +846,7 @@ impl Scheduler {
                 self.jobs.insert(
                     chat.id,
                     Job {
+                        quiet_deadline: None,
                         pushes: VecDeque::new(),
                         catalog_ready: None,
                         watch_loaded: false,
@@ -1090,6 +1121,7 @@ fn handle_command(
                 }
             }
             let job = scheduler.jobs.entry(chat).or_insert_with(|| Job {
+                quiet_deadline: None,
                 head: None,
                 state: None,
                 force: true,
@@ -1352,6 +1384,17 @@ fn source_reconciliation_deadline(
     }
 }
 
+fn restored_quiet_deadline(saved: Option<i64>, wall_now: i64, now: Instant) -> Instant {
+    // A future checkpoint indicates clock rollback; recheck immediately rather
+    // than postponing recovery indefinitely. Missing/old checkpoints are due.
+    let age = saved
+        .filter(|at| *at <= wall_now)
+        .map(|at| Duration::from_millis(wall_now.saturating_sub(at) as u64));
+    now + age.map_or(Duration::ZERO, |age| {
+        UPDATE_SILENCE_RECOVERY.saturating_sub(age)
+    })
+}
+
 fn publish_sources(shared: &Shared, chats: &[TelegramChatSummary]) {
     let changed = if let Ok(mut sources) = shared.sources.lock() {
         if sources.0 != 0 && same_source_metadata(sources.1.as_slice(), chats) {
@@ -1600,6 +1643,8 @@ fn run<T: AccountSource>(
                                     scheduler.overflow_count.saturating_add(1);
                             }
                             completed.head = completed.head.max(pending.head);
+                            completed.quiet_deadline =
+                                completed.quiet_deadline.max(pending.quiet_deadline);
                             completed.force |= pending.force;
                             completed.history |= pending.history;
                             if pending.catalog_ready.is_some() && completed.catalog_ready.is_none()
@@ -1834,6 +1879,11 @@ fn run<T: AccountSource>(
             last_delivery = clock();
         }
         for (id, pts) in hints.channels {
+            if pts > 0
+                && let Some(job) = scheduler.jobs.get_mut(&id)
+            {
+                job.quiet_deadline = Some(clock() + UPDATE_SILENCE_RECOVERY);
+            }
             source_refresh_pending |= !scheduler.jobs.contains_key(&id);
             scheduler.hint(id, pts);
         }
@@ -1965,6 +2015,7 @@ fn run<T: AccountSource>(
         }
         publish_pending_retry_count(&shared, scheduler.pending_retry_count);
         let now = clock();
+        scheduler.recover_quiet_channels(now);
         if let Ok(mut journal) = shared.deltas.lock() {
             journal.retain_sources(&scheduler.jobs);
         }
@@ -2103,6 +2154,7 @@ fn run<T: AccountSource>(
             });
             let deadline = retry_at
                 .into_iter()
+                .chain(scheduler.quiet_deadline())
                 .chain(metadata_deadline)
                 .chain(source_probe_started.map(|at| at + Duration::from_secs(1)))
                 .min()
@@ -2216,6 +2268,17 @@ fn step(
                 reply,
             }
         })?);
+        let now = Instant::now();
+        let saved = job
+            .state
+            .as_ref()
+            .and_then(|state| state.last_synced_at_unix_ms);
+        job.quiet_deadline = Some(restored_quiet_deadline(
+            saved,
+            crate::system_time_unix_ms(std::time::SystemTime::now()).unwrap_or(0),
+            now,
+        ));
+        job.force |= job.quiet_deadline.is_some_and(|deadline| deadline <= now);
     }
     if job.history
         && job
@@ -2423,6 +2486,24 @@ fn step(
         && page.edited.is_empty()
         && !matches!(read, ChannelRead::ManagedManifests)
     {
+        // Even an empty successful difference is durable synchronization
+        // evidence. Keep the row revision stable while persisting that fact.
+        let at = crate::system_time_unix_ms(std::time::SystemTime::now()).unwrap_or(0);
+        publish(shared, ChannelSyncPhase::Persisting, Some(chat), None, None);
+        library
+            .worker
+            .request("record_channel_sync_observation", |reply| {
+                StorageRequest::RecordChannelSyncObservation {
+                    account: AccountId::new(account),
+                    chat: ChatId::new(chat),
+                    revision: state.revision,
+                    at,
+                    reply,
+                }
+            })?;
+        state.last_synced_at_unix_ms = Some(at.max(state.last_synced_at_unix_ms.unwrap_or(0)));
+        job.state = Some(state.clone());
+        job.quiet_deadline = Some(Instant::now() + UPDATE_SILENCE_RECOVERY);
         job.force = next_force;
         if let Some(id) = history_id {
             job.history = false;
@@ -2445,6 +2526,8 @@ fn step(
         return Ok(());
     }
     let expected_revision = state.revision;
+    state.last_synced_at_unix_ms =
+        Some(crate::system_time_unix_ms(std::time::SystemTime::now()).unwrap_or(0));
     state.revision = state
         .revision
         .checked_add(1)
@@ -2508,6 +2591,7 @@ fn step(
     }
     let caught_up = !next_force && job.head.is_none_or(|head| head <= state.pts);
     job.state = Some(state);
+    job.quiet_deadline = Some(Instant::now() + UPDATE_SILENCE_RECOVERY);
     job.force = next_force;
     if !bootstrap && matches!(read, ChannelRead::History(_)) {
         job.history = false;

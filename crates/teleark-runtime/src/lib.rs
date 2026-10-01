@@ -1140,6 +1140,13 @@ enum StorageRequest {
         batch: teleark_storage::ChannelSyncCommit,
         reply: SyncSender<Result<teleark_storage::ChannelSyncCommitOutcome, ApplicationError>>,
     },
+    RecordChannelSyncObservation {
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        revision: i64,
+        at: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     ChannelCachedIds {
         account: teleark_core::AccountId,
         chat: teleark_core::ChatId,
@@ -1907,6 +1914,19 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let _ = reply.send(
                     database
                         .commit_channel_sync(&batch)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::RecordChannelSyncObservation {
+                account,
+                chat,
+                revision,
+                at,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .record_channel_sync_observation(account, chat, revision, at)
                         .map_err(map_storage_error),
                 );
             }

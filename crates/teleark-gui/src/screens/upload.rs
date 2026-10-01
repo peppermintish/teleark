@@ -298,56 +298,6 @@ pub fn render_upload_overlay(
                         .text_color(theme::text_secondary())
                         .child(app.tr("upload-simple-description")),
                 )
-                .child(
-                    components::button(
-                        "upload-options",
-                        app.tr("upload-options-title"),
-                        Some(if app.upload_advanced_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        }),
-                        false,
-                    )
-                    .ghost()
-                    .mt_4()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.upload_advanced_expanded = !this.upload_advanced_expanded;
-                        cx.notify();
-                    })),
-                )
-                .when(app.upload_advanced_expanded, |popup| {
-                    popup.child(
-                        div()
-                            .mt_3()
-                            .p_4()
-                            .rounded(theme::RADIUS_SMALL)
-                            .bg(theme::canvas())
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(app.tr_with(
-                                "upload-current-part-size-description",
-                                teleark_i18n::MessageArgs::new().with(
-                                    "size",
-                                    teleark_i18n::format::format_bytes(
-                                        app.locale(),
-                                        teleark_runtime::encrypted_part_plaintext_limit(),
-                                    ),
-                                ),
-                            ))
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .child(app.tr("upload-hide-filename-description")),
-                            )
-                            .child(
-                                div()
-                                    .mt_2()
-                                    .child(app.tr("upload-encrypt-metadata-description")),
-                            )
-                            .child(div().mt_2().child(app.tr("upload-source-checked"))),
-                    )
-                })
                 .when(app.vault_activity == VaultActivity::Working && app.vault_key_progress.is_some(), |body| body.child(app.render_vault_key_progress(cx)))
                 .when_some(
                     super::settings::vault_activity_message(app).filter(|_| !folder_rejected),

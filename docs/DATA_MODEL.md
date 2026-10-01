@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current schema is version **22**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **24**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -254,10 +254,18 @@ checks that no temporary sorting tree appears in the filtered query plan.
 
 ## Credential storage (schema 23)
 
-Current SQLite read/write version is **23**. Supported automatic upgrades are **0–22 → 23**, including skipped releases, through the existing visible transactional migration owner. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
+Credential tables were added in schema **23**. Current SQLite read/write version is **24**. Supported automatic upgrades are **0–23 → 24**, including skipped releases, through the existing visible transactional migration owner. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
 
 macOS defaults on; Windows/Linux default off and reject enabling. A copied macOS library on other platforms retains unavailable Keychain references while switching to local mode, with explicit reentry/recovery guidance. No missing secret is guessed or overwritten. See [ADR 0053](adr/0053-selectable-system-credentials.md) for bounds, cleanup, cancellation and recovery semantics.
 
 The API credential codec is exactly 37 bytes: version byte 1, a positive four-byte little-endian API ID, and 32 ASCII hexadecimal API Hash bytes. Proxy policy readers retain version 1; version 2 has exactly `version`, `mode: credential`, and a 64-hex `credential_id`. Credential payloads retain the explicit version-1 proxy JSON codec. Each new proxy configuration gets a fresh opaque identity; the policy reference commits only if the original record still matches, so delayed migration cannot restore an old route after a newer change. Direct mode remains version 1 with no credentials. Future/damaged values fail closed and are preserved.
 
 Filtered channel batches use existing download schema/codec versions. [ADR 0054](adr/0054-filter-driven-channel-downloads.md) describes bounded filtered discovery and unique per-batch directories.
+
+## Durable quiet-channel recovery (schema 24)
+
+Version 24 adds nullable `channel_sync_state.last_synced_at`, an epoch timestamp in milliseconds for a successful committed observation. Ordered transactional upgrades from schemas 0–23 retain PTS, independent history/gap/repair cursors, keys, authenticated inventory and transfer state. Existing rows start with NULL and receive an automatic difference check. No payload, manifest, recovery or checkpoint codecs change.
+
+An empty successful difference updates this timestamp with account/chat/revision compare-and-swap, without advancing the projection revision or rebuilding unchanged rows. The timestamp never moves backwards. Failed, cancelled or stale requests do not advance it. Each quiet channel receives its own seven-minute recovery deadline; another channel's pushes cannot postpone it. Restart restores the remaining interval from disk; expired, absent or future timestamps require a fresh check. The retained account owner schedules the deadlines independently of navigation. No manual synchronization action is required.
+
+The migration uses the existing visible detection/preparation/conversion/verification transaction. Verification failure rolls back the new column and marker together. Fixtures cover supported/skipped upgrades, preserved cursor/key bytes, restart after failure, account isolation and stale observations. Unsupported newer schemas remain untouched.

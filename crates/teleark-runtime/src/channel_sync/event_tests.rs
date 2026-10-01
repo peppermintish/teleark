@@ -240,6 +240,20 @@ fn completed_differences_do_not_create_polling_or_write_unchanged_rows() {
         TelegramScanCancellation::new(),
     )
     .expect("gap recovery");
+    assert!(
+        library
+            .worker
+            .request("channel_sync_state", |reply| {
+                StorageRequest::ChannelSyncState {
+                    account: AccountId::new(1),
+                    chat: ChatId::new(2),
+                    reply,
+                }
+            })
+            .expect("durable empty difference")
+            .last_synced_at_unix_ms
+            .is_some()
+    );
     assert_eq!(source.calls.borrow().len(), 1);
     assert_eq!(
         library
@@ -1310,6 +1324,47 @@ fn silence_recovery_is_postponed_by_delivery_and_metadata_hints_are_coalesced() 
     assert_eq!(
         source_reconciliation_deadline(now, delivered, true),
         now + Duration::from_secs(1)
+    );
+}
+
+#[test]
+fn quiet_channels_recover_independently_and_restart_uses_durable_observations() {
+    let (_temp, _library, mut scheduler) = setup();
+    let now = Instant::now();
+    scheduler
+        .jobs
+        .get_mut(&2)
+        .expect("quiet channel")
+        .quiet_deadline = Some(now);
+    scheduler
+        .jobs
+        .get_mut(&3)
+        .expect("busy channel")
+        .quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
+    scheduler.recover_quiet_channels(now);
+    assert_eq!(scheduler.pop(now), Some(2));
+    assert!(scheduler.jobs[&2].force);
+    assert!(!scheduler.jobs[&3].force);
+    assert_eq!(scheduler.pop(now), None);
+    for (saved, expected) in [
+        (None, Duration::ZERO),
+        (Some(0), Duration::ZERO),
+        (Some(599_000), Duration::from_secs(419)),
+        (Some(600_000), UPDATE_SILENCE_RECOVERY),
+        (Some(600_001), Duration::ZERO),
+    ] {
+        assert_eq!(restored_quiet_deadline(saved, 600_000, now), now + expected);
+    }
+    // A blocked dependency is not polled repeatedly by the fallback timer.
+    scheduler.in_flight.insert(2);
+    scheduler
+        .jobs
+        .get_mut(&2)
+        .expect("blocked channel")
+        .quiet_deadline = Some(now);
+    assert_eq!(
+        scheduler.quiet_deadline(),
+        Some(now + UPDATE_SILENCE_RECOVERY)
     );
 }
 
