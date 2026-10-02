@@ -1,6 +1,6 @@
 [package]
 name = "teleark-i18n"
-version = "0.5.15"
+version.workspace = true
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Project Fluent resources, locale negotiation, and UI formatting for TeleArk"

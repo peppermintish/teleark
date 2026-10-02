@@ -1,6 +1,6 @@
 [package]
 name = "teleark-transfer"
-version = "0.5.15"
+version.workspace = true
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
