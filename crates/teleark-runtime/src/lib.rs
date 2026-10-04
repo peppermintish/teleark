@@ -122,11 +122,12 @@ pub use transfer::{
     encrypted_part_plaintext_limit, encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultChannelSetupScope,
-    VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySelection, VaultKeySnapshot,
-    VaultRecoverySecret, VaultStatus, VaultTransferControl, VaultTransferDirection,
-    VaultTransferSnapshot, VaultTransferState, VaultUploadControl, VaultUploadFailure,
-    VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
+    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VAULT_DOWNLOAD_BATCH_LIMIT,
+    VaultChannelSetupScope, VaultDownloadBatchPhase, VaultDownloadBatchProgress,
+    VaultDownloadBatchSnapshot, VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySelection,
+    VaultKeySnapshot, VaultRecoverySecret, VaultStatus, VaultTransferControl,
+    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadControl,
+    VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
     VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
     inspect_upload_sources, inspect_upload_sources_observed,
 };

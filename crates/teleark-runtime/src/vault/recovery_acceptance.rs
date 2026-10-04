@@ -11,6 +11,102 @@ fn open(path: &std::path::Path, remote: &Arc<TestVaultRemote>) -> (DesktopVault,
     (vault, library)
 }
 
+#[test]
+fn managed_batch_restores_verified_files_and_stops_remaining_without_losing_current_output() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, _) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    let mut packages = Vec::new();
+    let mut expected = std::collections::BTreeMap::new();
+    for index in 0..3 {
+        let source = dir.path().join(format!("batch-{index}.bin"));
+        let bytes = vec![index as u8 + 1; 512 * 1024 + 17];
+        std::fs::write(&source, &bytes).expect("source");
+        let file = vault.upload_file(7, 11, source).expect("published file");
+        packages.push(file.package_numeric_id);
+        expected.insert(file.logical_name, bytes);
+    }
+    let progress = VaultDownloadBatchProgress::new(3);
+    vault
+        .submit_download_batch(7, 11, packages.clone(), progress.clone())
+        .expect("batch admitted")
+        .wait()
+        .expect("batch restored");
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.phase, VaultDownloadBatchPhase::Completed);
+    assert_eq!(
+        (snapshot.completed, snapshot.failed, snapshot.skipped),
+        (3, 0, 0)
+    );
+    let downloads = vault
+        .transfers()
+        .into_iter()
+        .filter(|row| row.direction == VaultTransferDirection::Download)
+        .collect::<Vec<_>>();
+    assert_eq!(downloads.len(), 3);
+    assert!(
+        downloads
+            .iter()
+            .all(|row| row.batch_id == downloads[0].batch_id && row.batch_id.is_some())
+    );
+    for row in &downloads {
+        assert_eq!(row.state, VaultTransferState::Completed);
+        assert_eq!(
+            std::fs::read(row.destination.as_ref().expect("verified destination")).expect("bytes"),
+            expected[&row.file_name]
+        );
+        assert_terminal_event(row, VaultUploadOutcome::Completed);
+    }
+    let stopped = VaultDownloadBatchProgress::new(3);
+    let (entered, release) = remote.gate(GateKind::DownloadPart, 0);
+    let work = vault
+        .submit_download_batch(7, 11, packages.clone(), stopped.clone())
+        .expect("second batch");
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("current restore blocked");
+    stopped.stop_remaining();
+    assert_eq!(stopped.snapshot().phase, VaultDownloadBatchPhase::Stopping);
+    release.send(()).expect("release current");
+    assert_eq!(
+        work.wait().expect_err("remaining stopped").kind(),
+        ApplicationErrorKind::Cancelled
+    );
+    let snapshot = stopped.snapshot();
+    assert_eq!(
+        (snapshot.completed, snapshot.failed, snapshot.skipped),
+        (1, 0, 2)
+    );
+    assert_eq!(snapshot.phase, VaultDownloadBatchPhase::Cancelled);
+    assert!(
+        downloads
+            .iter()
+            .all(|row| row.destination.as_ref().expect("original output").is_file())
+    );
+
+    remote.fail_once(GateKind::ManifestDownload);
+    let failed = VaultDownloadBatchProgress::new(3);
+    vault
+        .submit_download_batch(7, 11, packages, failed.clone())
+        .expect("retry batch")
+        .wait()
+        .expect("other files continue");
+    assert_eq!(
+        (failed.snapshot().completed, failed.snapshot().failed),
+        (2, 1)
+    );
+    let retry_packages = failed.failed_packages();
+    assert_eq!(retry_packages.len(), 1);
+    let retry = VaultDownloadBatchProgress::new(1);
+    vault
+        .submit_download_batch(7, 11, retry_packages, retry.clone())
+        .expect("failed-only retry")
+        .wait()
+        .expect("retry restored");
+    assert_eq!(retry.snapshot().completed, 1);
+}
+
 fn assert_terminal_event(snapshot: &VaultTransferSnapshot, expected: VaultUploadOutcome) {
     let activity = snapshot
         .upload_activity

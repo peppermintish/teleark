@@ -195,6 +195,7 @@ impl TeleArkApp {
                     }
                     app.apply_channel_changes(cx);
                     app.apply_managed_channel_changes(cx);
+                    app.start_managed_status_clock(cx);
                     cx.notify();
                     true
                 });
@@ -499,6 +500,144 @@ impl TeleArkApp {
             || self.tr("channel-sync-local-only"),
             |snapshot| self.tr(sync_phase_id(snapshot.phase)),
         )
+    }
+
+    /// Inventory readiness includes remote discovery, manifest projection and
+    /// application of the result. An unrelated Vault success is not readiness.
+    pub(crate) fn managed_files_status(&self) -> Vec<(SharedString, Tone)> {
+        let mut messages = Vec::new();
+        let chat = self.storage_channel_id();
+        let account = self.telegram_account.as_ref().map(|a| a.id);
+        let snapshot = self.channel_sync_snapshot.as_ref().filter(|snapshot| {
+            Some(snapshot.account_id) == account && snapshot.managed_chat_id == chat
+        });
+        let catalog_pending = self.managed_catalog_pending
+            || snapshot.is_some_and(|snapshot| {
+                snapshot
+                    .managed_watch
+                    .as_ref()
+                    .is_none_or(|watch| !watch.catalog_ready)
+            });
+        let timed = |phase, started: std::time::Instant, last: std::time::Instant| {
+            self.tr_with(
+                "managed-files-background",
+                MessageArgs::new()
+                    .with("phase", self.tr(sync_phase_id(phase)).to_string())
+                    .with(
+                        "seconds",
+                        format_integer(self.locale(), started.elapsed().as_secs()),
+                    )
+                    .with(
+                        "idle",
+                        format_integer(self.locale(), last.elapsed().as_secs()),
+                    ),
+            )
+        };
+        if let Some(snapshot) = snapshot {
+            if let Some(event) = snapshot.active.iter().find(|event| event.chat_id == chat) {
+                messages.push((timed(event.phase, event.at, event.at), Tone::Blue));
+            } else if let Some(event) = snapshot
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.chat_id == chat)
+                && matches!(
+                    event.phase,
+                    ChannelSyncPhase::Queued
+                        | ChannelSyncPhase::Waiting
+                        | ChannelSyncPhase::RateLimited
+                        | ChannelSyncPhase::Failed
+                        | ChannelSyncPhase::Cancelled
+                )
+            {
+                messages.push((
+                    timed(event.phase, event.at, event.at),
+                    sync_tone(event.phase),
+                ));
+            }
+            if let Some(scan) = snapshot.managed_scan.as_ref().filter(|scan| {
+                Some(scan.chat_id) == chat && (scan.active() || scan.failure.is_some())
+            }) {
+                messages.push((
+                    timed(scan.phase, scan.phase_started, scan.last_activity),
+                    sync_tone(scan.phase),
+                ));
+            }
+        }
+        if self.vault_key_selection_task.is_some() {
+            messages.push((self.tr("managed-key-checking"), Tone::Blue));
+        } else if self.managed_scan_loading && messages.is_empty() {
+            messages.push((self.tr("managed-files-applying"), Tone::Blue));
+        } else if catalog_pending && messages.is_empty() {
+            messages.push((self.tr("managed-catalog-syncing"), Tone::Blue));
+        }
+        if messages.is_empty() {
+            if let VaultActivity::Failed(_) = self.vault_activity {
+                messages.extend(crate::screens::settings::vault_activity_message(self));
+            } else if !self.vault_locked
+                && !self.managed_scan_loading
+                && !catalog_pending
+                && (self.managed_projection_scope == account.zip(chat) || self.visual_preview)
+            {
+                messages.push((self.tr("managed-files-ready"), Tone::Green));
+            }
+        }
+        messages
+    }
+
+    pub(crate) fn start_managed_status_clock(&mut self, cx: &mut Context<Self>) {
+        if self.managed_status_clock.is_some() || !self.managed_status_needs_clock() {
+            return;
+        }
+        // Presentation only: update elapsed/last-activity text while a real
+        // operation waits. This timer performs no service or database reads.
+        self.managed_status_clock = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let Some(entity) = this.upgrade() else {
+                    return;
+                };
+                if !entity.update(cx, |app, cx| {
+                    if app.managed_status_needs_clock() {
+                        cx.notify();
+                        true
+                    } else {
+                        app.managed_status_clock = None;
+                        false
+                    }
+                }) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn managed_status_needs_clock(&self) -> bool {
+        matches!(self.page, Page::Channel | Page::Storage)
+            && self.storage_view == StorageView::Files
+            && (self.managed_scan_loading
+                || self.vault_key_selection_task.is_some()
+                || self.channel_sync_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .active
+                        .iter()
+                        .any(|event| event.chat_id == self.storage_channel_id())
+                        || snapshot
+                            .managed_scan
+                            .as_ref()
+                            .is_some_and(|scan| scan.active())
+                        || snapshot
+                            .events
+                            .iter()
+                            .rev()
+                            .find(|event| event.chat_id == self.storage_channel_id())
+                            .is_some_and(|event| {
+                                matches!(
+                                    event.phase,
+                                    ChannelSyncPhase::Waiting | ChannelSyncPhase::RateLimited
+                                )
+                            })
+                }))
     }
 
     pub(crate) fn sync_event_time(&self, at: std::time::Instant) -> SharedString {
@@ -1148,6 +1287,8 @@ fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
         ChannelSyncPhase::Queued => "channel-sync-queued",
         ChannelSyncPhase::Seeding => "channel-sync-seeding",
         ChannelSyncPhase::History => "channel-sync-history-loading",
+        ChannelSyncPhase::CheckingPts => "channel-sync-checking-pts",
+        ChannelSyncPhase::PollingDifferences => "channel-sync-polling-differences",
         ChannelSyncPhase::ReadingLocal => "channel-sync-reading",
         ChannelSyncPhase::Receiving => "channel-sync-receiving",
         ChannelSyncPhase::Persisting => "channel-sync-persisting",
@@ -1165,6 +1306,54 @@ pub(super) mod tests {
     use super::*;
     use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, component::table::TableDelegate as _};
+
+    #[gpui::test]
+    fn managed_files_completion_waits_for_sync_manifest_and_display_application(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, _| {
+            app.vault_activity = VaultActivity::Succeeded;
+            app.managed_catalog_pending = false;
+            let mut snapshot = fixture_snapshot();
+            snapshot.managed_chat_id = Some(9000);
+            snapshot.account_id = 1;
+            snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                phase: ChannelSyncPhase::PollingDifferences,
+                chat_id: Some(9000),
+                at: std::time::Instant::now(),
+                failure: None,
+            }];
+            snapshot.managed_scan = None;
+            app.channel_sync_snapshot = Some(snapshot);
+            let statuses = app.managed_files_status();
+            assert!(
+                statuses
+                    .iter()
+                    .any(|(text, _)| text.contains("Polling differences"))
+            );
+            assert!(!statuses.iter().any(
+                |(text, _)| text.contains("up to date") || text.contains("operation completed")
+            ));
+            let snapshot = app.channel_sync_snapshot.as_mut().expect("snapshot");
+            snapshot.active.clear();
+            snapshot.events.clear();
+            snapshot.managed_watch = None;
+            assert!(
+                app.managed_files_status()
+                    .iter()
+                    .any(|(text, _)| text.as_ref() == app.tr("managed-catalog-syncing").as_ref())
+            );
+            app.channel_sync_snapshot = None;
+            app.managed_scan_loading = true;
+            assert_eq!(
+                app.managed_files_status()[0].0.as_ref(),
+                "Updating the file list"
+            );
+            app.managed_scan_loading = false;
+            assert_eq!(app.managed_files_status()[0].0.as_ref(), "Files up to date");
+        });
+    }
 
     #[gpui::test]
     fn retired_channel_history_keeps_source_attribution_and_resolves_retry(

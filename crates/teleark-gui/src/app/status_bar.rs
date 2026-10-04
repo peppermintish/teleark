@@ -141,6 +141,8 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
             | Phase::Discovering
             | Phase::Seeding
             | Phase::History
+            | Phase::CheckingPts
+            | Phase::PollingDifferences
             | Phase::Receiving
             | Phase::Persisting
             | Phase::Verifying

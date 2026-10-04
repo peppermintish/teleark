@@ -15,7 +15,7 @@ default = []
 test-support = []
 
 [dependencies]
-teleark-core = { version = "=0.5.15", path = "../teleark-core" }
+teleark-core = { version = "=0.5.16", path = "../teleark-core" }
 blake3 = "=1.8.7"
 
 [dev-dependencies]

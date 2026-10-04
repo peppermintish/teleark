@@ -562,6 +562,35 @@ impl TeleArkApp {
                                 })),
                         )
                     })
+                    .when_some(
+                        self.managed_batch_status()
+                            .filter(|_| self.managed_batch_active()),
+                        |left, (label, tone)| {
+                            left.child(
+                                components::compact_button(
+                                    "shell-managed-download-batch",
+                                    "",
+                                    None,
+                                    false,
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_color(tone.foreground())
+                                        .child(label.clone()),
+                                )
+                                .ghost()
+                                .min_w_0()
+                                .max_w(gpui_kit::rems(15.0))
+                                .accessibility_label(label.clone())
+                                .tooltip(label)
+                                .debug_selector(|| "shell-managed-download-batch".into())
+                                .on_click(cx.listener(
+                                    |app, _, _, cx| app.select_storage(StorageView::Files, cx),
+                                )),
+                            )
+                        },
+                    )
                     .when_some(self.filtered_batch_status(), |left, (label, tone)| {
                         let active = self.filtered_batch_active();
                         left.child(

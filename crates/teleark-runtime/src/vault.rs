@@ -64,7 +64,12 @@ mod shutdown;
 use control::UploadControls;
 pub use control::VaultUploadControl;
 pub use control::VaultUploadControl as VaultTransferControl;
+mod download_batch;
 mod download_history;
+pub use download_batch::{
+    VAULT_DOWNLOAD_BATCH_LIMIT, VaultDownloadBatchPhase, VaultDownloadBatchProgress,
+    VaultDownloadBatchSnapshot,
+};
 mod manifest_resume;
 mod pending_upload;
 #[cfg(test)]
@@ -651,6 +656,13 @@ enum VaultCommand {
         chat_id: i64,
         package_id: u64,
         reply: mpsc::SyncSender<Result<PathBuf, ApplicationError>>,
+    },
+    DownloadBatch {
+        account_id: i64,
+        chat_id: i64,
+        packages: Vec<u64>,
+        progress: VaultDownloadBatchProgress,
+        reply: mpsc::SyncSender<Result<(), ApplicationError>>,
     },
     Shutdown,
 }
@@ -1447,7 +1459,9 @@ impl DesktopVault {
             &self.inner.control_sender
         } else if matches!(
             envelope.command,
-            VaultCommand::Download { .. } | VaultCommand::ResumeDownload { .. }
+            VaultCommand::Download { .. }
+                | VaultCommand::ResumeDownload { .. }
+                | VaultCommand::DownloadBatch { .. }
         ) {
             &self.inner.download_sender
         } else if envelope.command.is_transfer() {
@@ -1878,6 +1892,17 @@ impl VaultOwner {
             } => {
                 let _ = reply.send(self.resume_download(account_id, task_id));
             }
+            VaultCommand::DownloadBatch {
+                account_id,
+                chat_id,
+                packages,
+                progress,
+                reply,
+            } => {
+                let result = self.download_batch(account_id, chat_id, &packages, &progress);
+                progress.finish(result.as_ref().err().map(ApplicationError::kind));
+                let _ = reply.send(result);
+            }
             VaultCommand::Download {
                 account_id,
                 chat_id,
@@ -1888,6 +1913,7 @@ impl VaultOwner {
                     account_id,
                     chat_id,
                     PackageId::new(package_id),
+                    None,
                     None,
                 ));
             }
@@ -3928,7 +3954,7 @@ impl VaultOwner {
             row.state = VaultTransferState::Queued;
             row.recovery_state = Some(VaultJobState::Queued);
         });
-        let result = self.download(account_id, context.chat_id, package_id, Some(record));
+        let result = self.download(account_id, context.chat_id, package_id, Some(record), None);
         if let Err(error) = &result {
             // Manifest fetch/key validation can fail before claiming the job.
             // Preserve explicit stop intent and make other failures durable.
@@ -3973,6 +3999,7 @@ impl VaultOwner {
         chat_id: i64,
         package_id: PackageId,
         resumed: Option<teleark_storage::VaultJobRecord>,
+        batch_id: Option<u64>,
     ) -> Result<PathBuf, ApplicationError> {
         let saved_context = resumed
             .as_ref()
@@ -4177,7 +4204,7 @@ impl VaultOwner {
             id: transfer_id,
             account_id: expected_account_id,
             chat_id,
-            batch_id: None,
+            batch_id,
             queued_at_unix_ms: started_at,
             direction: VaultTransferDirection::Download,
             file_name: logical_name,

@@ -10,7 +10,9 @@ mod keychain;
 mod library;
 pub(crate) mod lifecycle;
 mod local_files;
+mod managed_downloads;
 mod managed_projection;
+pub(crate) use managed_downloads::downloadable as managed_downloadable;
 mod navigation;
 mod preferences;
 mod preview;
@@ -384,6 +386,10 @@ pub struct TeleArkApp {
     pub(crate) vault_recovery_key: Entity<InputState>,
     pub(crate) managed_vault_files: std::sync::Arc<Vec<ManagedVaultFile>>,
     pub(crate) managed_projection: std::cell::RefCell<managed_projection::ManagedProjection>,
+    pub(crate) selected_managed_package_ids: BTreeSet<u64>,
+    pub(crate) managed_download_batch: Option<managed_downloads::ManagedDownloadBatchUi>,
+    managed_download_batch_task: Option<Task<()>>,
+    managed_status_clock: Option<Task<()>>,
     pub(crate) managed_vault_rejected: usize,
     pub(crate) upload_sources: Vec<teleark_runtime::VaultUploadSource>,
     pub(crate) upload_preparing: bool,
@@ -534,7 +540,7 @@ pub struct TeleArkApp {
     pub(crate) vault_transfer_jobs: std::collections::BTreeMap<(i64, u64, bool), Task<()>>,
     vault_recovery_scope: Option<(u64, u64)>,
     vault_session_generation: u64,
-    vault_download_in_flight: bool,
+    pub(crate) vault_download_in_flight: bool,
     pub(crate) managed_scan_loading: bool,
     managed_scan_generation: u64,
     managed_projection_scope: Option<(i64, i64)>,
@@ -805,6 +811,10 @@ impl TeleArkApp {
             vault_recovery_secret: None,
             vault_recovery_key,
             managed_vault_files: Default::default(),
+            selected_managed_package_ids: Default::default(),
+            managed_download_batch: None,
+            managed_download_batch_task: None,
+            managed_status_clock: None,
             managed_projection: Default::default(),
             managed_vault_rejected: 0,
             upload_sources: Vec::new(),
@@ -1038,6 +1048,7 @@ impl TeleArkApp {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
         }
         self.page = page;
+        self.start_managed_status_clock(cx);
         self.show_upload = false;
         if page == Page::Account {
             self.ensure_telegram_qr_login(cx);

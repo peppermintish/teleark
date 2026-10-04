@@ -1893,6 +1893,8 @@ fn run_download(
     let Ok(admission) = state.scheduled.lock() else {
         return;
     };
+    // Keep the Rust 1.88 API; newer compilers renamed this operation.
+    #[allow(deprecated)]
     let initial_control = match control.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         matches!(value, CONTROL_RESUME_PENDING | CONTROL_RETRY_PENDING).then_some(CONTROL_RUNNING)
     }) {

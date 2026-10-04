@@ -2040,3 +2040,25 @@ global-sync-automatic = 同期は自動で行われます。接続に失敗す�
 
 channel-sync-timing = 現在の段階：{ $duration } · 最後のアクティビティ：{ $activity } 前
 channel-sync-next-at = { $seconds } 秒後に自動で再試行します。
+
+# Managed inventory and batch restore
+channel-sync-checking-pts = Checking pts status
+channel-sync-polling-differences = Polling differences from Telegram
+managed-files-background = { $phase } · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-files-applying = Updating the file list
+managed-files-ready = Files up to date
+managed-file-select = Select { $name } for download
+managed-download-matching-action = Download matching
+managed-download-matching-help = Restore downloadable files in the displayed inventory that match the search, date and file-type filters. Files outside this inventory are not included. Selections are kept when filters change.
+managed-download-select-all-help = Select all downloadable files matching the current filters.
+managed-download-stop = Stop remaining
+managed-download-queued = Restore queued: { $total } files · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-restoring = Restoring files: { $completed } of { $total } complete · { $failed } failed · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-stopping = Stopping after the current file finishes safely · { $completed } of { $total } complete · Last activity: { $idle } s ago
+managed-download-completed = Restore complete: { $completed } files
+managed-download-cancelled = Restore stopped: { $completed } complete · { $failed } failed · { $skipped } not restored
+managed-download-failed = Restore finished with errors: { $completed } complete · { $failed } failed · { $skipped } not restored. Retry failed files or review individual downloads in Transfers.
+managed-download-history-truncated = { $count } earlier activity events omitted
+managed-download-event = { $time } · { $phase } { $error }
+
+managed-download-retry = Retry failed files

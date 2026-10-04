@@ -34,6 +34,7 @@ impl TeleArkApp {
         self.selected_telegram_message_id = None;
         self.show_channel_detail = false;
         self.selected_channel_message_ids.clear();
+        self.selected_managed_package_ids.clear();
         self.channel_batch_period = ChannelBatchPeriod::AnyTime;
         self.channel_batch_kinds.clear();
         self.channel_batch_activity = ChannelBatchActivity::Idle;
@@ -67,6 +68,7 @@ impl TeleArkApp {
             self.remember_channel_view();
         }
         self.storage_view = view;
+        self.start_managed_status_clock(cx);
         self.nav_selection = "nav-storage";
         self.set_page(Page::Storage, cx);
         let Some(chat_id) = self.active_storage_chat_id() else {

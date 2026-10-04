@@ -58,6 +58,8 @@ pub enum ChannelSyncPhase {
     Discovering,
     Seeding,
     History,
+    CheckingPts,
+    PollingDifferences,
     Receiving,
     Persisting,
     Verifying,
@@ -1053,9 +1055,15 @@ impl Scheduler {
             }
         }
     }
+    #[cfg(test)]
     fn pop(&mut self, now: Instant) -> Option<i64> {
+        self.pop_available(now, |_| true)
+    }
+
+    fn pop_available(&mut self, now: Instant, available: impl Fn(i64) -> bool) -> Option<i64> {
         let ready = |id: &i64| {
-            !self.in_flight.contains(id)
+            available(*id)
+                && !self.in_flight.contains(id)
                 && self
                     .jobs
                     .get(id)
@@ -1278,6 +1286,8 @@ fn publish(
                 | ChannelSyncPhase::Discovering
                 | ChannelSyncPhase::Seeding
                 | ChannelSyncPhase::History
+                | ChannelSyncPhase::CheckingPts
+                | ChannelSyncPhase::PollingDifferences
                 | ChannelSyncPhase::Receiving
                 | ChannelSyncPhase::Persisting
                 | ChannelSyncPhase::Verifying
@@ -1290,7 +1300,7 @@ fn publish(
                 .active
                 .iter()
                 .any(|activity| activity.chat_id == chat)
-            && snapshot.active.len() < 5
+            && snapshot.active.len() < 6
         {
             snapshot.active.push(ChannelSyncEvent {
                 phase,
@@ -2019,13 +2029,11 @@ fn run<T: AccountSource>(
         if let Ok(mut journal) = shared.deltas.lock() {
             journal.retain_sources(&scheduler.jobs);
         }
-        let next = if !metadata_ready
-            || !executions.channel_slot_available()
-            || flood_until.is_some_and(|at| at > now)
-        {
+        executions.reserve_managed(shared.managed_id.load(Ordering::Acquire));
+        let next = if !metadata_ready || flood_until.is_some_and(|at| at > now) {
             None
         } else {
-            scheduler.pop(now)
+            scheduler.pop_available(now, |id| executions.available(id))
         };
         publish_pending_retry_count(&shared, scheduler.pending_retry_count);
         if let Some(id) = next {
@@ -2214,6 +2222,15 @@ trait ChannelSource {
         request: ChannelRead,
         cancellation: TelegramScanCancellation,
     ) -> Result<ChannelReadPage, ChannelSyncFailure>;
+    fn read_managed(
+        &self,
+        account: i64,
+        chat: i64,
+        request: ChannelRead,
+        cancellation: TelegramScanCancellation,
+    ) -> Result<ChannelReadPage, ChannelSyncFailure> {
+        self.read(account, chat, request, cancellation)
+    }
 }
 
 impl ChannelSource for DesktopTelegram {
@@ -2224,7 +2241,16 @@ impl ChannelSource for DesktopTelegram {
         request: ChannelRead,
         cancellation: TelegramScanCancellation,
     ) -> Result<ChannelReadPage, ChannelSyncFailure> {
-        self.sync_channel(account, chat, request, cancellation)
+        self.sync_channel(account, chat, request, cancellation, false)
+    }
+    fn read_managed(
+        &self,
+        account: i64,
+        chat: i64,
+        request: ChannelRead,
+        cancellation: TelegramScanCancellation,
+    ) -> Result<ChannelReadPage, ChannelSyncFailure> {
+        self.sync_channel(account, chat, request, cancellation, true)
     }
 }
 
@@ -2325,6 +2351,13 @@ fn step(
     } else {
         false
     };
+    publish(
+        shared,
+        ChannelSyncPhase::CheckingPts,
+        Some(chat),
+        None,
+        None,
+    );
     let read = if bootstrap {
         // Capture the dialog PTS before seeding one bounded recent-history page;
         // always run a difference afterwards to cover edits during that read.
@@ -2380,6 +2413,8 @@ fn step(
             ChannelSyncPhase::Verifying
         } else if matches!(read, ChannelRead::History(_) | ChannelRead::GapHistory(_)) {
             ChannelSyncPhase::History
+        } else if matches!(read, ChannelRead::Difference(_)) {
+            ChannelSyncPhase::PollingDifferences
         } else {
             ChannelSyncPhase::Receiving
         },
@@ -2413,7 +2448,11 @@ fn step(
             edited: Vec::new(),
         }
     } else {
-        telegram.read(account, chat, read.clone(), cancellation.clone())?
+        if shared.managed_id.load(Ordering::Acquire) == chat {
+            telegram.read_managed(account, chat, read.clone(), cancellation.clone())?
+        } else {
+            telegram.read(account, chat, read.clone(), cancellation.clone())?
+        }
     };
     if cancellation.is_cancelled() || shared.stop.load(Ordering::Acquire) {
         return Err(ApplicationError::new(ApplicationErrorKind::Cancelled).into());

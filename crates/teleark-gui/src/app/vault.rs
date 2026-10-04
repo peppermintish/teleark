@@ -510,6 +510,10 @@ impl TeleArkApp {
     }
 
     pub(crate) fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(batch) = &self.managed_download_batch {
+            batch.progress.stop_remaining();
+        }
+        self.selected_managed_package_ids.clear();
         self.vault_session_generation = self.vault_session_generation.wrapping_add(1);
         if let Some(progress) = &self.vault_key_progress {
             progress.cancel();
@@ -638,6 +642,7 @@ impl TeleArkApp {
         };
         self.cancel_managed_scan();
         self.managed_scan_loading = true;
+        self.start_managed_status_clock(cx);
         let generation = self.managed_scan_generation;
         let cancellation = TelegramScanCancellation::new();
         self.managed_scan_cancellation = Some(cancellation.clone());
@@ -718,6 +723,7 @@ impl TeleArkApp {
                                 .insert(0, file.clone());
                         }
                         this.managed_vault_rejected = scan.rejected_manifests;
+                        this.prune_managed_download_selection();
                         this.managed_catalog_pending = scan.catalog_pending;
                         this.managed_catalog_limited = scan.catalog_limited;
                         this.managed_health_checked =
@@ -1658,6 +1664,57 @@ mod tests {
                     .is_empty()
             );
             assert!(cache.selected(Some(message)).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn managed_filters_use_dates_kinds_search_and_preserve_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, _| {
+            let now = 10 * 86_400_000;
+            let files = std::sync::Arc::make_mut(&mut app.managed_vault_files);
+            files[0].created_at_unix_ms = now - 86_400_000;
+            files[0].logical_name = "boundary.bin".into();
+            files[0].media_kind = teleark_core::FileKind::Document;
+            files[1].created_at_unix_ms = now - 86_400_001;
+            for file in &mut files[2..] {
+                file.created_at_unix_ms = now;
+                file.media_kind = teleark_core::FileKind::Video;
+            }
+            let mut cache = super::super::managed_projection::ManagedProjection::default();
+            let kinds = std::collections::HashSet::from([teleark_core::FileKind::Document]);
+            let rows = cache.filtered_rows_at(
+                &app.managed_vault_files,
+                "boundary",
+                ChannelBatchPeriod::Past24Hours,
+                &kinds,
+                now,
+            );
+            assert_eq!(*rows, vec![0]);
+            assert_eq!(cache.downloadable_count(), 1);
+            assert!(std::sync::Arc::ptr_eq(
+                &rows,
+                &cache.filtered_rows_at(
+                    &app.managed_vault_files,
+                    "boundary",
+                    ChannelBatchPeriod::Past24Hours,
+                    &kinds,
+                    now
+                )
+            ));
+            app.selected_managed_package_ids
+                .insert(app.managed_vault_files[0].package_numeric_id);
+            let videos = cache.filtered_rows_at(
+                &app.managed_vault_files,
+                "",
+                ChannelBatchPeriod::Past24Hours,
+                &std::collections::HashSet::from([teleark_core::FileKind::Video]),
+                now,
+            );
+            assert_eq!(videos.len(), 4);
+            assert_eq!(app.selected_managed_package_ids.len(), 1);
         });
     }
 

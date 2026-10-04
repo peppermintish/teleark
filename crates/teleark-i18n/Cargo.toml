@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 fluent-bundle = "0.16.0"
-teleark-core = { version = "=0.5.15", path = "../teleark-core" }
+teleark-core = { version = "=0.5.16", path = "../teleark-core" }
 unic-langid = { version = "0.9.6", features = ["macros"] }
 
 [lints.rust]

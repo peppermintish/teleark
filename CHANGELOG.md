@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.16 · Managed file progress and batch downloads
+
+- Show the current managed-channel phase while checking PTS, polling differences, downloading/authenticating manifests and updating the file list. Files become up to date only after the catalog and displayed projection are ready.
+- Select files with checkboxes, filter by date/type/search, and download selected or matching files through the verified streaming restore path. Stop remaining files safely and retry failed files without redoing successful outputs.
+- Reserve independent managed-channel synchronization and Telegram request slots so blocked normal channels cannot postpone managed-channel updates.
+- Retain SQLite schema 24, encrypted part/manifest readers 1.0 and 2.0, desktop writes 2.0, key/recovery formats 1.0 and all existing automatic upgrade paths.
+
 ## 0.5.15 · Reliable managed files and automatic channel synchronization
 
 - Correct encrypted downloads at the native 1 MiB transport boundary. Streams deliver bounded 512 KiB blocks, and final files appear only after authentication and whole-file verification.

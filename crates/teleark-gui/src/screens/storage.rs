@@ -8,8 +8,9 @@ use crate::{
     theme,
 };
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName,
+    Disableable as _, Icon, IconName, Sizable as _,
     button::ButtonVariants as _,
+    checkbox::Checkbox,
     scroll::ScrollableElement as _,
     tab::{Tab, TabBar},
 };
@@ -18,6 +19,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use teleark_runtime::{StorageMaintenancePhase, StorageSetupPhase};
+mod managed_downloads;
 
 impl TeleArkApp {
     pub(crate) fn storage_is_quiet(&self) -> bool {
@@ -1040,10 +1042,12 @@ impl TeleArkApp {
                 .into_any_element();
         }
         let query = self.search_input.read(cx).value().to_lowercase();
-        let rows = self
-            .managed_projection
-            .borrow_mut()
-            .rows(&self.managed_vault_files, &query);
+        let rows = self.managed_projection.borrow_mut().filtered_rows(
+            &self.managed_vault_files,
+            &query,
+            self.channel_batch_period,
+            &self.channel_batch_kinds,
+        );
         let source = self.managed_vault_files.clone();
         let selected = self
             .managed_projection
@@ -1086,6 +1090,28 @@ impl TeleArkApp {
                             .when(
                                 this.selected_telegram_message_id == Some(message_id),
                                 |row| row.bg(theme::blue_pale()),
+                            )
+                            .child(
+                                Checkbox::new(("managed-file-select", package_id))
+                                    .small()
+                                    .checked(
+                                        this.selected_managed_package_ids.contains(&package_id),
+                                    )
+                                    .accessibility_label(
+                                        this.tr_with(
+                                            "managed-file-select",
+                                            teleark_i18n::MessageArgs::new()
+                                                .with("name", file.logical_name.clone()),
+                                        ),
+                                    )
+                                    .disabled(!crate::app::managed_downloadable(file))
+                                    .debug_selector(move || {
+                                        format!("managed-file-select-{package_id}")
+                                    })
+                                    .on_click(cx.listener(move |this, checked, _, cx| {
+                                        cx.stop_propagation();
+                                        this.set_managed_file_selected(package_id, *checked, cx);
+                                    })),
                             )
                             .child(
                                 Icon::new(IconName::File)
@@ -1168,13 +1194,16 @@ impl TeleArkApp {
                                 )
                                 .ghost()
                                 .debug_selector(move || format!("managed-file-action-{package_id}"))
-                                .disabled(matches!(
-                                    file.health,
-                                    teleark_runtime::VaultFileHealth::KeyUnavailable
-                                        | teleark_runtime::VaultFileHealth::MissingParts
-                                        | teleark_runtime::VaultFileHealth::MissingManifest
-                                        | teleark_runtime::VaultFileHealth::InvalidManifest
-                                ))
+                                .disabled(
+                                    this.vault_download_in_flight
+                                        || matches!(
+                                            file.health,
+                                            teleark_runtime::VaultFileHealth::KeyUnavailable
+                                                | teleark_runtime::VaultFileHealth::MissingParts
+                                                | teleark_runtime::VaultFileHealth::MissingManifest
+                                                | teleark_runtime::VaultFileHealth::InvalidManifest
+                                        ),
+                                )
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         cx.stop_propagation();
@@ -1189,6 +1218,7 @@ impl TeleArkApp {
                                 }
                                 this.selected_telegram_message_id = Some(message_id);
                                 this.show_channel_detail = true;
+                                this.channel_batch_expanded = false;
                                 cx.notify();
                             }))
                             .into_any_element()
@@ -1224,6 +1254,7 @@ impl TeleArkApp {
                             .child(self.tr("storage-channel-managed-title")),
                     ),
             )
+            .child(self.render_managed_download_controls(count, cx))
             .when_some(self.managed_health_checked, |body, count| {
                 body.child(div().p_3().text_xs().child(self.tr_with(
                     "vault-health-check-summary",
@@ -1272,18 +1303,19 @@ impl TeleArkApp {
                         ),
                 )
             })
-            .when_some(
-                super::settings::vault_activity_message(self),
-                |body, (message, tone)| {
-                    body.child(
+            .children(
+                self.managed_files_status()
+                    .into_iter()
+                    .map(|(message, tone)| {
                         div()
+                            .debug_selector(|| "managed-files-status".into())
+                            .flex_none()
                             .px_4()
-                            .py_2()
+                            .py_1()
                             .text_xs()
                             .text_color(tone.foreground())
-                            .child(message),
-                    )
-                },
+                            .child(message)
+                    }),
             )
             .child(
                 components::list_footer("storage-list-footer")
@@ -1315,29 +1347,33 @@ impl TeleArkApp {
                 selected.filter(|_| self.show_channel_detail),
                 |body, selected| {
                     body.child(
-                        components::inspector_panel("managed-file-inspector", 340.0)
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .bottom_0()
-                            .shadow_lg()
-                            .child(
-                                div().px_3().py_2().flex().justify_end().child(
-                                    components::icon_button(
-                                        "managed-close-detail",
-                                        IconName::Close,
-                                        self.tr("action-close-details"),
-                                    )
-                                    .ghost()
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.show_channel_detail = false;
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
-                            )
-                            .child(self.render_managed_package_detail(Some(&selected), layout, cx)),
+                        components::inspector_panel(
+                            "managed-file-inspector",
+                            theme::MANAGED_FILE_INSPECTOR_WIDTH,
+                        )
+                        .debug_selector(|| "managed-file-inspector".into())
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        .bottom_0()
+                        .shadow_lg()
+                        .child(
+                            div().px_3().py_2().flex().justify_end().child(
+                                components::icon_button(
+                                    "managed-close-detail",
+                                    IconName::Close,
+                                    self.tr("action-close-details"),
+                                )
+                                .ghost()
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_channel_detail = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                        )
+                        .child(self.render_managed_package_detail(Some(&selected), layout, cx)),
                     )
                 },
             )
@@ -1391,6 +1427,93 @@ mod tests {
     use super::*;
     use teleark_i18n::{Localizer, SupportedLocale};
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
+
+    #[gpui_kit::test]
+    fn managed_file_checkboxes_and_batch_controls_work_at_minimum_and_fullscreen(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            app.update(cx, |app, cx| {
+                app.storage_view = StorageView::Files;
+                app.channel_batch_expanded = false;
+                app.selected_managed_package_ids.clear();
+                std::sync::Arc::make_mut(&mut app.managed_vault_files)[0].health =
+                    teleark_runtime::VaultFileHealth::MissingParts;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let disabled = cx
+                .debug_bounds("managed-file-select-1")
+                .expect("unavailable checkbox");
+            cx.simulate_click(disabled.center(), gpui_kit::Modifiers::default());
+            app.read_with(cx, |app, _| {
+                assert!(app.selected_managed_package_ids.is_empty())
+            });
+            app.update(cx, |app, cx| {
+                app.show_channel_detail = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let checkbox = cx
+                .debug_bounds("managed-file-select-2")
+                .expect("file checkbox");
+            cx.simulate_click(checkbox.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert_eq!(
+                    app.selected_managed_package_ids,
+                    std::collections::BTreeSet::from([2])
+                );
+                assert!(
+                    !app.show_channel_detail,
+                    "checking does not open the inspector"
+                );
+            });
+            let select_all = cx.debug_bounds("managed-select-all").expect("select all");
+            cx.simulate_click(select_all.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.selected_managed_package_ids.len(), 5)
+            });
+            for name in [
+                "managed-download-selected",
+                "managed-download-matching",
+                "managed-filter-toggle",
+            ] {
+                let control = cx.debug_bounds(name).expect("batch command");
+                cx.update(|window, _| {
+                    assert!(control.right() <= window.viewport_size().width);
+                    assert!(control.bottom() <= window.viewport_size().height);
+                });
+            }
+            let filter = cx.debug_bounds("managed-filter-toggle").expect("filters");
+            cx.simulate_click(filter.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("managed-download-matching").is_some());
+            let row = cx.debug_bounds("managed-file-name-2").expect("file name");
+            cx.simulate_click(row.center(), gpui_kit::Modifiers::default());
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                assert!(app.show_channel_detail);
+                assert!(!app.channel_batch_expanded);
+            });
+            let download = cx
+                .debug_bounds("managed-download-selected")
+                .expect("selected action remains reachable");
+            let inspector = cx
+                .debug_bounds("managed-file-inspector")
+                .expect("inspector");
+            assert!(download.right() <= inspector.left());
+            cx.update(|window, _| assert!(download.bottom() <= window.viewport_size().height));
+        }
+    }
 
     #[gpui_kit::test]
     fn files_show_only_key_helper_while_raw_files_remain_visible(

@@ -322,7 +322,7 @@ fn private_mutation_wakes_ui_while_remote_read_is_blocked_and_rejects_stale_owne
         .expect("remote started");
     assert_eq!(
         shared.snapshot.lock().expect("phase before wait").phase,
-        ChannelSyncPhase::Receiving
+        ChannelSyncPhase::PollingDifferences
     );
     let mut subscription = shared.changes.subscribe();
     wake(Some(3), true);

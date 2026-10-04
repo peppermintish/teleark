@@ -1,4 +1,16 @@
-# Implementation status — v0.5.15
+# Implementation status — v0.5.16
+
+## Version 0.5.16 · Managed progress, batch restore and independent synchronization (2026-10-05)
+
+The managed Files footer derives its state from account/channel-scoped synchronization, manifest work, key selection and application of the displayed inventory. PTS checks and difference RPCs publish their phase before transport; manifest downloading and authentication remain visible. A generic key-operation success cannot mark a still-pending file inventory complete. Retained presentation timers update elapsed/last-activity text only while real work is active and never drive service queues or database reads.
+
+Files have package-scoped checkboxes with health-based eligibility, selected/matching restore actions and date/type/search filters. Selection survives filtering and is pruned after inventory changes. Runtime owns bounded batch IDs, counters, a bounded timeline and failed-only retry; individual files reuse authenticated streaming, whole-file verification, non-overwriting destinations, transfer controls and durable recovery metadata. Stop remaining allows the current file to finish safely. Batch selections and group summaries are session-owned; started files retain ordinary durable recovery, and completed files remain intact. Active batches stay visible across navigation.
+
+Managed synchronization has one reserved retained execution slot beside four normal channel calls and the directory slot. Telegram reserves a separate managed read slot and pending admission independently of eight ordinary reads. Account barriers cancel both sets and fence stale callbacks. [ADR 0065](adr/0065-managed-progress-batch-restore-and-reserved-sync.md) records the bounds and presentation contract, superseding ADR 0031's shared four-channel execution limit.
+
+SQLite remains read/write 24 with automatic upgrades from 0–23, including skipped versions. Part/manifest readers remain 1.0/2.0 with desktop writes 2.0; key wraps, recovery bundles, pending envelopes and persisted transfer codecs retain their existing versions. No dependency or license changes. New semantic catalog entries are synchronized in all nine catalogs with English fallback.
+
+Local Windows release checks pass: formatting, locked workspace/all-target checking, strict Clippy, 928 passing full-workspace tests (10 existing ignored tests), explicit Core/i18n tests, warning-denied rustdoc and cargo-deny. After the final minimum-window inspector adjustment and batch-result presentation test, all 203 GUI tests pass (3 existing ignored tests). Focused channel-sync tests recheck the reserved execution bound after managed-binding replacement. The service test restores three files through real crypto/temporary SQLite and a synthetic remote, compares final bytes, stops remaining files behind blocked transport without losing the current output, and retries only a failed file. Distribution/Store configuration, all 29 synthetic Store tests, workflow graph, MSIX/release artifacts, macOS libraries, Linux payloads and LF fixtures pass. English/light native previews verify checkboxes, selected/all actions, filters and independent inspector scrolling at 900×600 and actual full-screen; the inspector no longer covers Download selected. No personal credentials, documents or live Telegram session are used. Metadata is synchronized to 0.5.16. Hosted platform packaging and Microsoft Store ingestion remain pending the tagged release workflow.
 
 ## Version 0.5.15 · Managed channel reliability (2026-10-02)
 

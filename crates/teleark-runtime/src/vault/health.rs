@@ -330,6 +330,7 @@ pub(super) fn verify(
                 scope.1,
                 crate::channel_sync::ChannelRead::Verify(ids.to_vec()),
                 cancellation.clone(),
+                true,
             )
             .map_err(|error| ApplicationError::new(error.kind))?;
         let present: std::collections::BTreeSet<_> =

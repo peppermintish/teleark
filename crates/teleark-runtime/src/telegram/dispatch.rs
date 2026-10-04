@@ -11,6 +11,7 @@ const TRANSFER_CAPACITY: usize = 16;
 pub(super) enum Lane {
     Probe,
     Read,
+    ManagedRead,
     Transfer,
     Control,
     Barrier,
@@ -35,6 +36,7 @@ pub(super) async fn run<S, R, F, Fut>(
     let mut controls = JoinSet::new();
     let mut probes = JoinSet::new();
     let mut reads = JoinSet::new();
+    let mut managed_reads = JoinSet::new();
     let mut transfers = JoinSet::new();
     let mut pending = VecDeque::new();
     let mut control_cancel = ScanCancellation::default();
@@ -47,6 +49,7 @@ pub(super) async fn run<S, R, F, Fut>(
             let ready = match lane {
                 Lane::Probe => !barrier_active && probes.is_empty(),
                 Lane::Read => !barrier_active && reads.len() < READ_CAPACITY,
+                Lane::ManagedRead => !barrier_active && managed_reads.is_empty(),
                 Lane::Transfer => !barrier_active && transfers.len() < TRANSFER_CAPACITY,
                 Lane::Control | Lane::Barrier => available.is_some(),
                 Lane::Shutdown => unreachable!("shutdown is handled on receipt"),
@@ -66,6 +69,13 @@ pub(super) async fn run<S, R, F, Fut>(
                 }
                 Lane::Read => {
                     reads.spawn(execute(
+                        snapshot(&view),
+                        request,
+                        ScanCancellation::default(),
+                    ));
+                }
+                Lane::ManagedRead => {
+                    managed_reads.spawn(execute(
                         snapshot(&view),
                         request,
                         ScanCancellation::default(),
@@ -100,6 +110,7 @@ pub(super) async fn run<S, R, F, Fut>(
             }
             _ = probes.join_next(), if !probes.is_empty() => {}
             _ = reads.join_next(), if !reads.is_empty() => {}
+            _ = managed_reads.join_next(), if !managed_reads.is_empty() => {}
             _ = transfers.join_next(), if !transfers.is_empty() => {}
             request = receiver.recv() => {
                 let Some(request) = request else { break };
@@ -112,13 +123,18 @@ pub(super) async fn run<S, R, F, Fut>(
                     control_cancel.cancel();
                     probes.abort_all();
                     reads.abort_all();
+                    managed_reads.abort_all();
                     transfers.abort_all();
                     while probes.join_next().await.is_some() {}
                     while reads.join_next().await.is_some() {}
+                    while managed_reads.join_next().await.is_some() {}
                     while transfers.join_next().await.is_some() {}
                     pending.clear();
                 }
-                if pending.len() == PENDING_CAPACITY {
+                // A separate bounded admission slot keeps ordinary read
+                // saturation from refusing managed-channel synchronization.
+                if (lane == Lane::ManagedRead && pending.iter().filter(|(lane, _)| *lane == Lane::ManagedRead).count() >= 1)
+                    || (lane != Lane::ManagedRead && pending.iter().filter(|(lane, _)| *lane != Lane::ManagedRead).count() >= PENDING_CAPACITY) {
                     reject(request);
                 } else {
                     pending.push_back((lane, request));
@@ -129,9 +145,11 @@ pub(super) async fn run<S, R, F, Fut>(
     control_cancel.cancel();
     probes.abort_all();
     reads.abort_all();
+    managed_reads.abort_all();
     transfers.abort_all();
     while probes.join_next().await.is_some() {}
     while reads.join_next().await.is_some() {}
+    while managed_reads.join_next().await.is_some() {}
     while transfers.join_next().await.is_some() {}
     while controls.join_next().await.is_some() {}
 }
@@ -144,6 +162,39 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::sync::{Notify, oneshot};
+
+    #[tokio::test]
+    async fn managed_reads_bypass_saturated_normal_reads_and_are_fenced_by_account_barriers() {
+        let (tx, task) = start(Arc::default());
+        let block = Arc::new(Notify::new());
+        let mut held = Vec::new();
+        for _ in 0..READ_CAPACITY {
+            let (entered, reply) = send(&tx, Lane::Read, Some(block.clone())).await;
+            entered.await.expect("normal lane blocked");
+            held.push(reply);
+        }
+        let (_, result) = send(&tx, Lane::ManagedRead, None).await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), result)
+                .await
+                .expect("managed lane does not wait for normal RPCs")
+                .expect("managed reply"),
+            1
+        );
+        let (entered, managed) = send(&tx, Lane::ManagedRead, Some(block)).await;
+        entered.await.expect("managed read blocked");
+        let (_, barrier) = send(&tx, Lane::Barrier, None).await;
+        barrier.await.expect("account barrier");
+        assert!(
+            managed.await.is_err(),
+            "old managed callbacks cannot survive an account barrier"
+        );
+        for reply in held {
+            assert!(reply.await.is_err());
+        }
+        drop(tx);
+        task.await.expect("dispatcher stopped");
+    }
 
     struct Request {
         lane: Lane,
