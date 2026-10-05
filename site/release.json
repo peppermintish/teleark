@@ -1,0 +1,52 @@
+{
+  "tag_name": "v0.5.16",
+  "html_url": "https://github.com/peppermintish/teleark/releases/tag/v0.5.16",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "LICENSE-APACHE",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/LICENSE-APACHE"
+    },
+    {
+      "name": "LICENSE-MIT",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/LICENSE-MIT"
+    },
+    {
+      "name": "SHA256SUMS",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/SHA256SUMS"
+    },
+    {
+      "name": "teleark-0.5.16-linux-x86_64.AppImage",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/teleark-0.5.16-linux-x86_64.AppImage"
+    },
+    {
+      "name": "teleark-0.5.16-linux-x86_64.tar.gz",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/teleark-0.5.16-linux-x86_64.tar.gz"
+    },
+    {
+      "name": "teleark-0.5.16-macos-universal.bin",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/teleark-0.5.16-macos-universal.bin"
+    },
+    {
+      "name": "TeleArk-0.5.16-macos-universal.pkg",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/TeleArk-0.5.16-macos-universal.pkg"
+    },
+    {
+      "name": "teleark-0.5.16-macos-universal.tar.gz",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/teleark-0.5.16-macos-universal.tar.gz"
+    },
+    {
+      "name": "TeleArk-0.5.16-windows-x86_64.msix",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/TeleArk-0.5.16-windows-x86_64.msix"
+    },
+    {
+      "name": "teleark_0.5.16_amd64.deb",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/teleark_0.5.16_amd64.deb"
+    },
+    {
+      "name": "THIRD_PARTY_NOTICES.md",
+      "browser_download_url": "https://github.com/peppermintish/teleark/releases/download/v0.5.16/THIRD_PARTY_NOTICES.md"
+    }
+  ]
+}

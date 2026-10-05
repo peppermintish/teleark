@@ -1,5 +1,11 @@
 # Implementation status — v0.5.16
 
+## Public website and README presentation (2026-10-05)
+
+The README now leads with platform/Microsoft Store labels, a real synthetic-data app preview, features and platform downloads. The matching dependency-free [GitHub Pages website](https://peppermintish.github.io/teleark/) provides Windows Store access, direct Linux/macOS artifacts, checksums and a host-native macOS build tutorial that needs no paid Apple Developer account. It documents the existing self-signed/not-notarized macOS distribution boundary and connects back to the README and source guides.
+
+Eight deterministic website tests pass: version changes update downloads/build commands; incomplete, duplicate, untrusted, draft and prerelease metadata cannot replace the prior page; remote reads have explicit timeout/size limits; failures report no deployment; template escaping, source protection, public artifact contents and local links are checked. The Pages workflow passes actionlint. All six current Linux/macOS artifacts and SHA256SUMS return HTTP 200. English/light browser review covers 900×600, actual full-screen desktop, 375-pixel mobile, landscape and double-size text without horizontal overflow; native disclosures work from the keyboard and focus is visible. Source-build instructions follow the existing build contract; no macOS host was available for a new local compile. No runtime, dependency, persistent-schema or encrypted-format changes are introduced. [Website maintenance](WEBSITE.md) documents offline previews, bounded release lookup and automatic publication after tagged CI completion.
+
 ## Version 0.5.16 · Managed progress, batch restore and independent synchronization (2026-10-05)
 
 The managed Files footer derives its state from account/channel-scoped synchronization, manifest work, key selection and application of the displayed inventory. PTS checks and difference RPCs publish their phase before transport; manifest downloading and authentication remain visible. A generic key-operation success cannot mark a still-pending file inventory complete. Retained presentation timers update elapsed/last-activity text only while real work is active and never drive service queues or database reads.

@@ -16,6 +16,7 @@ Choose local validation by the changed behavior; CI remains the full workspace g
 | Change | Local validation |
 | --- | --- |
 | Documentation only | Review the diff, local links/anchors and stale references; `git diff --check`. No Rust rebuild unless executable examples or build instructions changed. |
+| Public website / README presentation | Run the [website checks and local preview](WEBSITE.md#preview-and-validate), validate the Pages workflow and current release links, and review responsive English/light layouts. No desktop release or schema change is required. |
 | One module | `cargo fmt --all --check`; affected crate tests and strict Clippy with `--all-targets --locked`. Include callers when the API changes. |
 | UI / messages | Affected GUI tests and non-visual i18n/catalog checks. Interface testing and layout reviews use English (`en-US`) only, covering both 900×600 and actual full-screen mode. Visual previews and layout reviews use light mode only; existing automated dark-theme coverage may remain. Default-size or large-window previews do not replace full-screen checks. For long operations, include slow/blocked, phase-change and terminal feedback. |
 | Storage / crypto / manifests | Supported-version and skipped-upgrade fixtures; preserved data/keys, restart/rollback, insufficient-space and visible migration-phase tests; affected canonical-vector, tamper and recovery tests. See [migration safety](SECURITY.md#validation-and-migration-safety). |

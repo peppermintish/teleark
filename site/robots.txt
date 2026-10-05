@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://peppermintish.github.io/teleark/sitemap.xml
