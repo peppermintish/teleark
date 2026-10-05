@@ -4,7 +4,7 @@
 
 # TeleArk
 
-### Your files. Your Telegram. One workspace.
+**Your files. Your Telegram. One workspace.**
 
 A native desktop app for browsing Telegram files, managing transfers,<br>
 and keeping encrypted files in your own private channel.
