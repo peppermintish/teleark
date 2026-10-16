@@ -6,6 +6,8 @@
 
 /dist/
 
+__pycache__/
+
 # Local development environment files; commit only the public example template.
 /.env
 /.env.local

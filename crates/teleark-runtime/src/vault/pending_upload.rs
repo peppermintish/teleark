@@ -128,7 +128,12 @@ impl VaultOwner {
         }
         let mut row = pending_snapshot(&saved)?;
         row.restored = false;
-        row.upload_activity = Some(VaultUploadActivity::new(VaultUploadPhase::CheckingStorage));
+        row.upload_activity = Some(
+            self.transfers
+                .get(id)
+                .and_then(|existing| existing.upload_activity)
+                .unwrap_or_else(|| VaultUploadActivity::new(VaultUploadPhase::CheckingStorage)),
+        );
         if self.transfers.get(id).is_some() {
             self.update_transfer(id, |existing| *existing = row);
         } else {
@@ -203,7 +208,11 @@ impl VaultOwner {
             if let Some(current) = db.pending_vault_upload(account, id).map_err(persistence)?
                 && current.state != S::Promoted
             {
-                let row = pending_snapshot(&current)?;
+                let mut row = pending_snapshot(&current)?;
+                row.upload_activity = self
+                    .transfers
+                    .get(id)
+                    .and_then(|existing| existing.upload_activity);
                 self.update_transfer(id, |existing| *existing = row);
                 self.persist_upload_id(id)?;
             }
@@ -399,6 +408,8 @@ mod tests {
             transfers: Arc::new(TransferSnapshots::new(Vec::new()).expect("snapshots")),
             active_upload_batch: Arc::new(Mutex::new(None)),
             upload_controls: UploadControls::default(),
+            #[cfg(test)]
+            test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
     fn pending(path: &std::path::Path, id: u64) -> crate::VaultPendingUploadContext {
@@ -491,6 +502,27 @@ mod tests {
                     .generation,
                 1
             );
+            if action == control::VaultUploadControl::Pause {
+                owner
+                    .control_upload(7, 1, control::VaultUploadControl::Cancel)
+                    .expect("cancel paused pending task");
+                let activity = owner
+                    .transfers
+                    .get(1)
+                    .expect("cancelled projection")
+                    .upload_activity
+                    .expect("terminal history");
+                let outcomes = activity
+                    .events
+                    .iter()
+                    .filter_map(|event| event.outcome)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    outcomes,
+                    [VaultUploadOutcome::Paused, VaultUploadOutcome::Cancelled],
+                    "a later terminal cancellation must retain the earlier pause"
+                );
+            }
         }
     }
 

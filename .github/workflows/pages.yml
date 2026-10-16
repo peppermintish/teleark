@@ -1,0 +1,68 @@
+name: Publish TeleArk website
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'scripts/build-site.py', 'scripts/tests/test_site.py', '.github/workflows/pages.yml']
+  pull_request:
+    paths: ['site/**', 'scripts/build-site.py', 'scripts/tests/test_site.py', '.github/workflows/pages.yml']
+  release:
+    types: [published]
+  # CI publishes using GITHUB_TOKEN, which does not emit another workflow's
+  # release event. Observe completion of tagged CI, then fetch the public release.
+  workflow_run:
+    workflows: ['TeleArk CI/CD']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ (github.event_name == 'release' || github.event_name == 'workflow_run') && 'main' || github.ref }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Test release links and static site
+        run: python -m unittest discover -s scripts/tests -p test_site.py -v
+      - name: Build offline preview for pull requests
+        if: github.event_name == 'pull_request'
+        run: python scripts/build-site.py --output target/site
+      - name: Build current stable downloads
+        if: github.event_name != 'pull_request'
+        run: python scripts/build-site.py --refresh-release --output target/site
+      - name: Configure GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - name: Upload public site only
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/site
+
+  deploy:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'release')
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4

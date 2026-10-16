@@ -574,6 +574,10 @@ channel-sync-history = Histórico anterior
 channel-sync-seeding = Preparando cache local inicial
 channel-sync-history-loading = Recebendo histórico anterior solicitado
 channel-sync-details-title = Sincronização do canal
+global-sync-cancel-directory = Cancelar a sincronização do diretório de canais
+global-sync-cancel-channel = Cancelar a sincronização de { $source } ({ $chat_id })
+global-sync-channel-id = Canal do Telegram { $chat_id }
+global-sync-cancel-pending-channel-retries = Cancelar todas as novas tentativas de canais pendentes ({ $count })
 channel-sync-rate-limited = Aguardando limite do Telegram
 activity-state-queued = Na fila
 activity-state-complete = Completo
@@ -811,3 +815,36 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+download-pipeline-queue = Containers remaining: { $queued } · Active containers: { $active } · Last activity: { $idle } ago · Retry wait: { $wait }
+download-pipeline-transport = Telegram stream chunks: { $active } receiving · { $waiting } waiting · next retry in { $wait }
+download-chart-empty = Waiting for encrypted bytes from Telegram. Download rate is unknown.
+download-part-group = Containers { $first }–{ $last } · { $confirmed } verified · { $state }
+download-part-map-grouping = { $count } containers · Up to { $size } per cell. Hover for exact ranges.
+
+storage-channel-managed-empty = Ainda não há arquivos autenticados. Envie seu primeiro arquivo. Novos arquivos aparecem automaticamente.
+global-sync-automatic = A sincronização é automática. Falhas de conexão são repetidas em segundo plano.
+
+channel-sync-timing = Fase: { $duration } · Última atividade: há { $activity }
+channel-sync-next-at = Nova tentativa automática em { $seconds } s.
+
+# Managed inventory and batch restore
+channel-sync-checking-pts = Checking pts status
+channel-sync-polling-differences = Polling differences from Telegram
+managed-files-background = { $phase } · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-files-applying = Updating the file list
+managed-files-ready = Files up to date
+managed-file-select = Select { $name } for download
+managed-download-matching-action = Download matching
+managed-download-matching-help = Restore downloadable files in the displayed inventory that match the search, date and file-type filters. Files outside this inventory are not included. Selections are kept when filters change.
+managed-download-select-all-help = Select all downloadable files matching the current filters.
+managed-download-stop = Stop remaining
+managed-download-queued = Restore queued: { $total } files · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-restoring = Restoring files: { $completed } of { $total } complete · { $failed } failed · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-stopping = Stopping after the current file finishes safely · { $completed } of { $total } complete · Last activity: { $idle } s ago
+managed-download-completed = Restore complete: { $completed } files
+managed-download-cancelled = Restore stopped: { $completed } complete · { $failed } failed · { $skipped } not restored
+managed-download-failed = Restore finished with errors: { $completed } complete · { $failed } failed · { $skipped } not restored. Retry failed files or review individual downloads in Transfers.
+managed-download-history-truncated = { $count } earlier activity events omitted
+managed-download-event = { $time } · { $phase } { $error }
+
+managed-download-retry = Retry failed files

@@ -10,6 +10,9 @@ use crate::{
 /// Versioned by SQLite schema 11. PTS is an update sequence, never a message ID.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChannelSyncState {
+    /// Durable successful observation, including an unchanged final difference.
+    /// Failed requests never advance this checkpoint.
+    pub last_synced_at_unix_ms: Option<i64>,
     pub pts: i32,
     pub history_before: Option<i64>,
     pub history_exhausted: bool,
@@ -86,6 +89,24 @@ impl Database {
         chat: ChatId,
     ) -> StorageResult<ChannelSyncState> {
         read_state(&self.connection, account, chat)
+    }
+
+    /// Record an unchanged authoritative response without invalidating rows or
+    /// their projection revision. Optimistic fencing rejects stale callbacks.
+    pub fn record_channel_sync_observation(
+        &mut self,
+        account: AccountId,
+        chat: ChatId,
+        revision: i64,
+        at: i64,
+    ) -> StorageResult<()> {
+        if at < 0 || self.connection.execute(
+            "UPDATE channel_sync_state SET last_synced_at=MAX(COALESCE(last_synced_at,0),?4) WHERE account_id=?1 AND chat_id=?2 AND revision=?3",
+            params![account.get(), chat.get(), revision, at],
+        )? != 1 {
+            return Err(StorageError::Invariant(InvariantViolation::RemoteRevisionConflict));
+        }
+        Ok(())
     }
 
     /// Metadata, deletion evidence and cursor move in one transaction. A
@@ -236,7 +257,7 @@ impl Database {
             )?);
         }
         let state = &batch.state;
-        tx.execute("INSERT INTO channel_sync_state(account_id,chat_id,pts,history_before,history_exhausted,repair_pending,repair_before,gap_pending,gap_before,gap_until,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(account_id,chat_id) DO UPDATE SET pts=excluded.pts,history_before=excluded.history_before,history_exhausted=excluded.history_exhausted,repair_pending=excluded.repair_pending,repair_before=excluded.repair_before,gap_pending=excluded.gap_pending,gap_before=excluded.gap_before,gap_until=excluded.gap_until,revision=excluded.revision", params![scope.0, scope.1, state.pts, state.history_before, state.history_exhausted, state.repair_pending, state.repair_before, state.gap_pending, state.gap_before, state.gap_until, state.revision])?;
+        tx.execute("INSERT INTO channel_sync_state(account_id,chat_id,pts,history_before,history_exhausted,repair_pending,repair_before,gap_pending,gap_before,gap_until,revision,last_synced_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(account_id,chat_id) DO UPDATE SET pts=excluded.pts,history_before=excluded.history_before,history_exhausted=excluded.history_exhausted,repair_pending=excluded.repair_pending,repair_before=excluded.repair_before,gap_pending=excluded.gap_pending,gap_before=excluded.gap_before,gap_until=excluded.gap_until,revision=excluded.revision,last_synced_at=excluded.last_synced_at", params![scope.0, scope.1, state.pts, state.history_before, state.history_exhausted, state.repair_pending, state.repair_before, state.gap_pending, state.gap_before, state.gap_until, state.revision, state.last_synced_at_unix_ms])?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -272,8 +293,8 @@ fn read_state(
     account: AccountId,
     chat: ChatId,
 ) -> StorageResult<ChannelSyncState> {
-    Ok(connection.query_row("SELECT pts,history_before,history_exhausted,repair_pending,repair_before,gap_pending,gap_before,gap_until,revision FROM channel_sync_state WHERE account_id=?1 AND chat_id=?2", params![account.get(), chat.get()], |row| Ok(ChannelSyncState {
-        pts: row.get(0)?, history_before: row.get(1)?, history_exhausted: row.get(2)?, repair_pending: row.get(3)?, repair_before: row.get(4)?, gap_pending: row.get(5)?, gap_before: row.get(6)?, gap_until: row.get(7)?, revision: row.get(8)?,
+    Ok(connection.query_row("SELECT pts,history_before,history_exhausted,repair_pending,repair_before,gap_pending,gap_before,gap_until,revision,last_synced_at FROM channel_sync_state WHERE account_id=?1 AND chat_id=?2", params![account.get(), chat.get()], |row| Ok(ChannelSyncState {
+        pts: row.get(0)?, history_before: row.get(1)?, history_exhausted: row.get(2)?, repair_pending: row.get(3)?, repair_before: row.get(4)?, gap_pending: row.get(5)?, gap_before: row.get(6)?, gap_until: row.get(7)?, revision: row.get(8)?, last_synced_at_unix_ms: row.get(9)?,
     })).optional()?.unwrap_or_default())
 }
 

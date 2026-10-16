@@ -3,22 +3,30 @@ $ErrorActionPreference = 'Stop'
 Set-PSDebug -Off
 $dryRun = $false
 $run = $false
+$msix = $false
+
 foreach ($argument in $args) {
     switch ($argument) {
         { $_ -in '--dry-run', '-DryRun', '-dry-run' } { $dryRun = $true }
         { $_ -in '--run', '-Run', '-run' } { $run = $true }
+        { $_ -in '--msix', '-Msix', '-msix' } { $msix = $true }
         default {
-            [Console]::Error.WriteLine('Usage: scripts/build-local.ps1 [--run] [--dry-run]')
+            [Console]::Error.WriteLine("Usage: scripts/build-local.ps1 [--msix] [--run] [--dry-run]")
             exit 2
         }
     }
 }
 
-$action = if ($run) { 'run' } else { 'build' }
-$cargoArguments = @($action, '--release', '-p', 'teleark-gui', '--bin', 'teleark', '--locked')
-if ($dryRun) {
-    Write-Output 'Would load and validate repository .env.local (without displaying values).'
-    Write-Output "Would execute: cargo $($cargoArguments -join ' ')"
+$command = @('cargo', 'build', '--release', '-p', 'teleark-gui', '--bin', 'teleark', '--locked')
+if ($run) {
+    $command = @('cargo', 'run', '--release', '-p', 'teleark-gui', '--bin', 'teleark', '--locked')
+}
+if ($msix) { $command += @('--features', 'msix') }
+
+if ($dry_run) {
+    Write-Output "Would load and validate repository .env.local (without displaying values)."
+    if ($msix) { Write-Output 'Would enable the Windows Store MSIX data layout and statically link the Microsoft C runtime.' }
+    Write-Output ("Would execute: " + ($command -join ' '))
     exit 0
 }
 
@@ -65,17 +73,20 @@ try {
         $localEnvironment[$name] = $value
     }
 
-    # Required values must come from this file; inherited values cannot fill gaps.
-    $apiId = 0
-    $valid = $localEnvironment['TELEARK_DISTRIBUTION_TELEGRAM_API_ID'] -cmatch '^[1-9][0-9]*\z' -and
-        [int]::TryParse($localEnvironment['TELEARK_DISTRIBUTION_TELEGRAM_API_ID'], [ref]$apiId) -and
-        $apiId -gt 0 -and $localEnvironment['TELEARK_DISTRIBUTION_TELEGRAM_API_HASH'] -cmatch '^[0-9a-fA-F]{32}\z'
-    if (-not $valid) {
-        throw '.env.local must define a valid Telegram API ID and Hash; values were not logged.'
+if ($msix) {
+    if ($env:OS -cne 'Windows_NT') { throw 'The local MSIX build requires Windows.' }
+    $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-msvc'
+    if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+        $env:RUSTFLAGS = '-C target-feature=+crt-static'
+    } elseif ($env:RUSTFLAGS -notmatch '(?i)(^|\s)\+crt-static(?:,|\s|$)') {
+        $env:RUSTFLAGS = "$($env:RUSTFLAGS) -C target-feature=+crt-static"
     }
-    if ($apiId -eq 17349) {
-        throw 'Replace the public TEST ONLY sample in .env.local with your own application credentials.'
-    }
+}
+
+if ($api_id -eq '17349') {
+    [Console]::Error.WriteLine("Replace the public TEST ONLY sample in .env.local with your own application credentials.")
+    exit 1
+}
 
     foreach ($name in $localEnvironment.Keys) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')

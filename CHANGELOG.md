@@ -1,17 +1,54 @@
 # Changelog
 
-## 0.5.9 · Desktop interaction fixes
+## 0.5.16 · Managed file progress and batch downloads
 
-- Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
-- Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
-- Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
-- Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
-- Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
-- Rewrite public development and status guides, remove superseded notes, and harden local build, credential, checksum and packaging validation. Native Windows/macOS tests now gate release packaging.
-- Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata is 0.5.9. SQLite read/write schema 23, automatic upgrades from 0–22, and all supported encrypted-file, manifest, credential, transfer and recovery codecs are unchanged.
+- Show the current managed-channel phase while checking PTS, polling differences, downloading/authenticating manifests and updating the file list. Files become up to date only after the catalog and displayed projection are ready.
+- Select files with checkboxes, filter by date/type/search, and download selected or matching files through the verified streaming restore path. Stop remaining files safely and retry failed files without redoing successful outputs.
+- Reserve independent managed-channel synchronization and Telegram request slots so blocked normal channels cannot postpone managed-channel updates.
+- Retain SQLite schema 24, encrypted part/manifest readers 1.0 and 2.0, desktop writes 2.0, key/recovery formats 1.0 and all existing automatic upgrade paths.
+
+## 0.5.15 · Reliable managed files and automatic channel synchronization
+
+- Correct encrypted downloads at the native 1 MiB transport boundary. Streams deliver bounded 512 KiB blocks, and final files appear only after authentication and whole-file verification.
+- Select the channel key from its authenticated proof. A damaged or deleted file keeps its own health state and cannot hide unrelated files or erase completed downloads.
+- Synchronize from Telegram pushes and a seven-minute fallback for each quiet channel. Persist successful checks, including empty differences, and reuse them after restart.
+- Retry transient key-validation and catalog failures automatically in the background. Remove manual synchronization retry/cancel controls from the sync inspector.
+- Upgrade SQLite schemas 0–23 automatically to 24, preserving cursors, credentials, recovery state and downloaded-file records. Existing encrypted formats are unchanged.
+- Remove the Upload options drawer; file selection, automatic encryption and the upload queue remain available.
+
+## 0.5.13 · Microsoft Store transport recovery
+
+- Restore the default Store HTTP request path: `.GetNewClosure()` hid the module-private transport function, causing the workflow to fail before sending the token request.
+- Add redacted diagnostics for Store API request-setup, send and response-read failures. Errors report the phase, normalized DNS/socket/TLS/timeout/other category, allow-listed exception type and HRESULT.
+- Keep raw exception text, credentials, request bodies, access tokens, SAS URLs and upload URLs out of failure messages. No live Store submission was performed for this change.
+- Application metadata is 0.5.13. Runtime behavior, persistent schemas and encrypted formats are unchanged.
+
+## 0.5.12 · Cross-platform release validation
+
+- Improve cross-platform release validation for Windows Store packages.
+
+## 0.5.11 · Parallel release checks and Microsoft Store API submission
+
+- Start quality checks, Linux/Windows/macOS tests and all three package jobs in parallel after lightweight release/version validation. Store submission waits for quality checks, tests and the verified Windows MSIX; GitHub Release assembly waits for all package outputs and successful Store submission.
+- Submit later MSIX updates through Microsoft's legacy Store Submission API. The first submission remains manual, and Microsoft controls certification and publication.
+- Add deterministic mocked HTTP and workflow dependency-graph coverage. No live Store API call was performed. Application metadata is 0.5.11; runtime behavior, persistent schemas and encrypted formats are unchanged.
+
+## 0.5.10 · Reliable channel and encrypted download recovery
+
+- Channel directory synchronization retries transient network, server and conflict failures with bounded backoff and honors Telegram FloodWait deadlines. Directory refresh and cancellation target the directory request even while an individual channel sync is active.
+- Encrypted downloads retry incomplete remote part streams from the start of the current part, with at most two bounded retries. Integrity failures remain terminal, incomplete parts receive no receipt, and final files stay unpublished until whole-file verification succeeds.
+- The Transfers inspector now shows measured download activity, retry timing and per-part state in its chart, timeline and bounded part map. Maps with more than 4,096 parts disclose the omitted detail.
+- Release CI verifies the Windows MSIX checksum before Store submission and verifies the exact downloaded platform artifacts and their checksums before assembling the GitHub release assets.
+- Application metadata is 0.5.10. SQLite schema 23, Vault recovery records and encrypted file formats are unchanged.
+
+## 0.5.9 · Remove Hindi interface language
+
+- Hindi is no longer an available interface language. Windows systems configured for Hindi use the English fallback unless another supported language is selected, and the Windows Store package declares the nine remaining supported interface languages.
+- Application metadata is 0.5.9. Persistent schemas and encrypted formats are unchanged.
 
 ## 0.5.8 · Authenticated channel key proof
 
+- Windows Store MSIX declares all ten bundled interface languages so the package's language metadata matches TeleArk's localized UI.
 - New managed channels publish a versioned proof tied to their account, channel and encryption key. Sign-in checks that proof to select the current key even before any file exists. A verified older empty channel with only its identity message receives a new key and proof after remote emptiness checks; channels with files are never automatically rekeyed.
 - Completing channel setup rechecks the key even when the file catalog has not changed. Switching credential storage while a key check is running also schedules a fresh check. Files shows its key warning only until a fitting key is confirmed; Raw Files continues to show the actual Telegram objects.
 - Application metadata is 0.5.8. SQLite schema 23 and encrypted file, manifest and recovery-bundle codecs are unchanged. Channel-key proof codec 1 and pending channel-key marker codec 2 are added; older marker records remain readable.

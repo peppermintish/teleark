@@ -59,7 +59,6 @@ supported_locales! {
     PtBr => ("pt-BR", "Português (Brasil)", "PT", false),
     RuRu => ("ru-RU", "Русский", "РУ", false),
     KoKr => ("ko-KR", "한국어", "한", false),
-    HiIn => ("hi-IN", "हिन्दी", "हि", false),
 }
 
 impl SupportedLocale {

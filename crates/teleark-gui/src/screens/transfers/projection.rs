@@ -403,7 +403,7 @@ impl TransferItem {
                 .unwrap_or(row)
                 .upload_activity
                 .as_ref()
-                .map(|activity| app.upload_activity_detail(activity)),
+                .map(|activity| app.upload_activity_detail(activity, row.direction)),
             Self::VaultBatch(_, _, rows) => rows
                 .iter()
                 .map(|row| app.vault_transfer_view.updates.get(&row.id).unwrap_or(row))
@@ -413,8 +413,11 @@ impl TransferItem {
                         row.state == VaultTransferState::Queued && row.upload_activity.is_some()
                     })
                 })
-                .and_then(|row| row.upload_activity.as_ref())
-                .map(|activity| app.upload_activity_detail(activity)),
+                .and_then(|row| {
+                    row.upload_activity
+                        .as_ref()
+                        .map(|activity| app.upload_activity_detail(activity, row.direction))
+                }),
             _ => None,
         }
     }

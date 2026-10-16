@@ -42,6 +42,19 @@ impl TeleArkApp {
                     ),
                 ),
             )
+            .when_some(state.retry_at, |body, at| {
+                body.child(
+                    self.tr_with(
+                        "managed-sync-retry",
+                        teleark_i18n::MessageArgs::new().with(
+                            "seconds",
+                            at.saturating_duration_since(std::time::Instant::now())
+                                .as_secs()
+                                .to_string(),
+                        ),
+                    ),
+                )
+            })
             .child(
                 div()
                     .mt_2()
@@ -68,7 +81,16 @@ impl TeleArkApp {
                                     ),
                             ),
                         )
-                    })),
+                    }))
+                    .when(state.dropped_events > 0, |body| {
+                        body.child(
+                            self.tr_with(
+                                "proxy-timeline-truncated",
+                                teleark_i18n::MessageArgs::new()
+                                    .with("count", state.dropped_events.to_string()),
+                            ),
+                        )
+                    }),
             )
             .when_some(state.error, |body, error| {
                 body.child(
@@ -84,6 +106,13 @@ impl TeleArkApp {
                             }
                             teleark_core::ApplicationErrorKind::Cancelled => {
                                 "vault-error-cancelled"
+                            }
+                            teleark_core::ApplicationErrorKind::Network
+                            | teleark_core::ApplicationErrorKind::Server
+                            | teleark_core::ApplicationErrorKind::Conflict
+                                if !state.finished =>
+                            {
+                                "global-sync-automatic"
                             }
                             _ => "vault-error-persistence",
                         })),
@@ -248,6 +277,7 @@ pub(crate) fn key_phase_id(phase: teleark_runtime::VaultKeyPhase) -> &'static st
         VaultKeyPhase::Queued => "vault-key-phase-queued",
         VaultKeyPhase::Loading => "managed-key-phase-loading",
         VaultKeyPhase::CheckingChannel => "managed-key-phase-checking-channel",
+        VaultKeyPhase::Waiting => "channel-sync-waiting",
         VaultKeyPhase::Securing => "managed-key-phase-securing",
         VaultKeyPhase::Generating => "vault-key-phase-generating",
         VaultKeyPhase::WrappingPassword => "vault-key-phase-password",

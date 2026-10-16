@@ -154,6 +154,7 @@ enum TelegramRequest {
     SyncChannel {
         account_id: i64,
         chat_id: i64,
+        managed: bool,
         request: crate::channel_sync::ChannelRead,
         cancellation: TelegramScanCancellation,
         reply: mpsc::SyncSender<
@@ -366,10 +367,12 @@ impl DesktopTelegram {
         chat_id: i64,
         request: crate::channel_sync::ChannelRead,
         cancellation: TelegramScanCancellation,
+        managed: bool,
     ) -> Result<crate::channel_sync::ChannelReadPage, crate::channel_sync::ChannelSyncFailure> {
         self.request("sync_channel", |reply| TelegramRequest::SyncChannel {
             account_id,
             chat_id,
+            managed,
             request,
             cancellation,
             reply,
@@ -1382,6 +1385,7 @@ impl TelegramRequest {
             | Self::DownloadStream { .. }
             | Self::UploadBytes { .. }
             | Self::UploadStream { .. } => Lane::Transfer,
+            Self::SyncChannel { managed: true, .. } => Lane::ManagedRead,
             Self::SyncChannel { .. }
             | Self::AccountAvatar { .. }
             | Self::ScanPage { .. }
@@ -1476,6 +1480,7 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
         TelegramRequest::SyncChannel {
             account_id,
             chat_id,
+            managed: _,
             request,
             cancellation,
             reply,

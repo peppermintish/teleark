@@ -1,14 +1,49 @@
-//! Bounded upload presentation from Runtime's acknowledgement events.
+//! Bounded upload and download presentation from Runtime's transfer events.
 use super::*;
+
+pub(super) const fn pipeline_queue_message_id(download: bool) -> &'static str {
+    if download {
+        "download-pipeline-queue"
+    } else {
+        "upload-pipeline-queue"
+    }
+}
+
+pub(super) const fn pipeline_group_message_id(download: bool) -> &'static str {
+    if download {
+        "download-part-group"
+    } else {
+        "upload-part-group"
+    }
+}
+
+pub(super) const fn pipeline_grouping_message_id(download: bool) -> &'static str {
+    if download {
+        "download-part-map-grouping"
+    } else {
+        "upload-part-map-grouping"
+    }
+}
+
+pub(super) const fn pipeline_empty_chart_message_id(download: bool) -> &'static str {
+    if download {
+        "download-chart-empty"
+    } else {
+        "upload-chart-empty"
+    }
+}
 use teleark_runtime::VaultUploadPartState;
 
 impl TeleArkApp {
     pub(super) fn render_upload_activity(
         &self,
         activity: &VaultUploadActivity,
+        direction: VaultTransferDirection,
+        part_count: u32,
         active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let download = direction == VaultTransferDirection::Download;
         let replay = self.transfer_inspector_replay || !active;
         let count = activity.events.len();
         let cursor = self.transfer_replay_cursor.min(count.saturating_sub(1));
@@ -45,7 +80,11 @@ impl TeleArkApp {
             .max(1);
         let bars = samples.iter().enumerate().map(|(index, sample)| {
             let label = self.tr_with(
-                "upload-chart-sample",
+                if download {
+                    "download-chart-sample"
+                } else {
+                    "upload-chart-sample"
+                },
                 MessageArgs::new()
                     .with(
                         "time",
@@ -97,14 +136,22 @@ impl TeleArkApp {
                 } else {
                     VaultUploadPartState::Queued
                 };
-                let (tone, label) = match state {
-                    VaultUploadPartState::Queued => (Tone::Neutral, "upload-part-queued"),
-                    VaultUploadPartState::Uploading => (Tone::Blue, "upload-part-active"),
-                    VaultUploadPartState::Waiting => (Tone::Amber, "upload-part-waiting"),
-                    VaultUploadPartState::Acknowledged => (Tone::Green, "upload-part-confirmed"),
+                let (tone, label) = match (download, state) {
+                    (false, VaultUploadPartState::Queued) => (Tone::Neutral, "upload-part-queued"),
+                    (false, VaultUploadPartState::Uploading) => (Tone::Blue, "upload-part-active"),
+                    (false, VaultUploadPartState::Waiting) => (Tone::Amber, "upload-part-waiting"),
+                    (false, VaultUploadPartState::Acknowledged) => {
+                        (Tone::Green, "upload-part-confirmed")
+                    }
+                    (true, VaultUploadPartState::Queued) => (Tone::Neutral, "download-part-queued"),
+                    (true, VaultUploadPartState::Uploading) => (Tone::Blue, "download-part-active"),
+                    (true, VaultUploadPartState::Waiting) => (Tone::Amber, "download-part-waiting"),
+                    (true, VaultUploadPartState::Acknowledged) => {
+                        (Tone::Green, "download-part-confirmed")
+                    }
                 };
                 let text = self.tr_with(
-                    "upload-part-group",
+                    pipeline_group_message_id(download),
                     MessageArgs::new()
                         .with(
                             "first",
@@ -152,35 +199,48 @@ impl TeleArkApp {
             activity.events.iter().rev().take(12).collect()
         };
         let events = selected.into_iter().enumerate().map(|(index, event)| {
-            let phase = self.tr(if event.acknowledged {
-                "upload-part-confirmed"
-            } else {
-                upload_phase_message_id(event.phase)
-            });
-            let label = self.tr_with(
-                "upload-timeline-event",
-                MessageArgs::new()
-                    .with(
-                        "time",
-                        format_duration_millis(self.locale(), elapsed(event.at)),
-                    )
-                    .with("phase", phase.to_string())
-                    .with(
-                        "part",
-                        event.part.map_or_else(
-                            || self.tr("transfer-value-unavailable").to_string(),
-                            |index| format_integer(self.locale(), u64::from(index) + 1),
-                        ),
-                    )
-                    .with(
-                        "attempt",
-                        format_integer(self.locale(), u64::from(event.attempt)),
-                    )
-                    .with(
-                        "wait",
-                        format_duration_millis(self.locale(), event.wait_millis),
+            let time = format_duration_millis(self.locale(), elapsed(event.at));
+            let label = if let Some(outcome) = event.outcome {
+                self.tr_with(
+                    "upload-timeline-terminal-event",
+                    MessageArgs::new().with("time", time).with(
+                        "outcome",
+                        self.tr(vault_activity_outcome_message_id(outcome))
+                            .to_string(),
                     ),
-            );
+                )
+            } else {
+                let phase = self.tr(if event.acknowledged {
+                    if download {
+                        "download-part-confirmed"
+                    } else {
+                        "upload-part-confirmed"
+                    }
+                } else {
+                    vault_activity_phase_message_id(event.phase, direction)
+                });
+                self.tr_with(
+                    "upload-timeline-event",
+                    MessageArgs::new()
+                        .with("time", time)
+                        .with("phase", phase.to_string())
+                        .with(
+                            "part",
+                            event.part.map_or_else(
+                                || self.tr("transfer-value-unavailable").to_string(),
+                                |index| format_integer(self.locale(), u64::from(index) + 1),
+                            ),
+                        )
+                        .with(
+                            "attempt",
+                            format_integer(self.locale(), u64::from(event.attempt)),
+                        )
+                        .with(
+                            "wait",
+                            format_duration_millis(self.locale(), event.wait_millis),
+                        ),
+                )
+            };
             components::list_summary(SharedString::from(format!("upload-event-{index}")), label)
         });
         let live = components::button(
@@ -234,16 +294,20 @@ impl TeleArkApp {
             .flex_col()
             .gap_3()
             .text_xs()
-            .debug_selector(|| "upload-pipeline-inspector".to_owned())
+            .debug_selector(|| "vault-transfer-pipeline-inspector".to_owned())
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.tr("upload-pipeline-title")),
+                    .child(self.tr(if download {
+                        "download-pipeline-title"
+                    } else {
+                        "upload-pipeline-title"
+                    })),
             )
             .child(div().flex().gap_2().child(live).child(replay_button))
             .child(
                 self.tr_with(
-                    "upload-pipeline-queue",
+                    pipeline_queue_message_id(download),
                     MessageArgs::new()
                         .with(
                             "queued",
@@ -284,13 +348,52 @@ impl TeleArkApp {
                         ),
                 ),
             )
+            .when(download, |card| {
+                card.child(
+                    self.tr_with(
+                        "download-pipeline-transport",
+                        MessageArgs::new()
+                            .with(
+                                "active",
+                                format_integer(
+                                    self.locale(),
+                                    u64::from(activity.transport_chunks_active),
+                                ),
+                            )
+                            .with(
+                                "waiting",
+                                format_integer(
+                                    self.locale(),
+                                    u64::from(activity.transport_chunks_waiting),
+                                ),
+                            )
+                            .with(
+                                "wait",
+                                format_duration_millis(
+                                    self.locale(),
+                                    activity.wait_until.map_or(0, |until| {
+                                        until
+                                            .saturating_duration_since(std::time::Instant::now())
+                                            .as_millis()
+                                            .min(u64::MAX as u128)
+                                            as u64
+                                    }),
+                                ),
+                            ),
+                    ),
+                )
+            })
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.tr("upload-chart-title")),
+                    .child(self.tr(if download {
+                        "download-chart-title"
+                    } else {
+                        "upload-chart-title"
+                    })),
             )
             .when(samples.is_empty(), |card| {
-                card.child(self.tr("upload-chart-empty"))
+                card.child(self.tr(pipeline_empty_chart_message_id(download)))
             })
             .when(!samples.is_empty(), |card| {
                 card.child(format_speed(self.locale(), peak))
@@ -320,17 +423,48 @@ impl TeleArkApp {
                         ),
                     )
             })
-            .child(self.tr("upload-chart-explanation"))
+            .child(self.tr(if download {
+                "download-chart-explanation"
+            } else {
+                "upload-chart-explanation"
+            }))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.tr("upload-part-map-title")),
+                    .child(self.tr(if download {
+                        "download-part-map-title"
+                    } else {
+                        "upload-part-map-title"
+                    })),
             )
-            .child(self.tr("upload-part-map-legend"))
+            .child(self.tr(if download {
+                "download-part-map-legend"
+            } else {
+                "upload-part-map-legend"
+            }))
+            .when_some(
+                vault_activity_part_map_truncation_message_id(part_count),
+                |card, message_id| {
+                    card.child(
+                        self.tr_with(
+                            message_id,
+                            MessageArgs::new()
+                                .with(
+                                    "shown",
+                                    format_integer(self.locale(), activity.parts.len() as u64),
+                                )
+                                .with(
+                                    "total",
+                                    format_integer(self.locale(), u64::from(part_count)),
+                                ),
+                        ),
+                    )
+                },
+            )
             .when(group_size > 1, |card| {
                 card.child(
                     self.tr_with(
-                        "upload-part-map-grouping",
+                        pipeline_grouping_message_id(download),
                         MessageArgs::new()
                             .with(
                                 "count",
@@ -372,7 +506,9 @@ impl TeleArkApp {
             .when(replay, |card| {
                 card.child(div().flex().gap_2().child(previous).child(next))
             })
-            .child(self.tr("settings-upload-resume-window"))
+            .when(!download, |card| {
+                card.child(self.tr("settings-upload-resume-window"))
+            })
             .into_any_element()
     }
 }

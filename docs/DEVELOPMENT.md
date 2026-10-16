@@ -16,7 +16,7 @@ Choose local validation by the changed behavior; CI remains the full workspace g
 | Change | Local validation |
 | --- | --- |
 | Documentation only | Review the diff, local links/anchors and stale references; `git diff --check`. No Rust rebuild unless executable examples or build instructions changed. |
-| Build/package scripts or workflows | Syntax checks and the affected synthetic script regressions; `actionlint` for workflow edits. Native installer/signing tests require the matching host and a disposable environment. See [script guide](../scripts/README.md). |
+| Public website / README presentation | Run the [website checks and local preview](WEBSITE.md#preview-and-validate), validate the Pages workflow and current release links, and review responsive English/light layouts. No desktop release or schema change is required. |
 | One module | `cargo fmt --all --check`; affected crate tests and strict Clippy with `--all-targets --locked`. Include callers when the API changes. |
 | UI / messages | Affected GUI tests and non-visual i18n/catalog checks. Interface testing and layout reviews use English (`en-US`) only, covering both 900×600 and actual full-screen mode. Visual previews and layout reviews use light mode only; existing automated dark-theme coverage may remain. Default-size or large-window previews do not replace full-screen checks. For long operations, include slow/blocked, phase-change and terminal feedback. |
 | Storage / crypto / manifests | Supported-version and skipped-upgrade fixtures; preserved data/keys, restart/rollback, insufficient-space and visible migration-phase tests; affected canonical-vector, tamper and recovery tests. See [migration safety](SECURITY.md#validation-and-migration-safety). |
@@ -29,9 +29,11 @@ Full source gates (explicit Core/i18n checks also run in CI):
 pwsh ./scripts/check-line-endings.ps1
 pwsh ./scripts/test-line-endings.ps1
 pwsh ./scripts/test-distribution-credentials.ps1
-pwsh ./scripts/test-release-checksums.ps1
-pwsh ./scripts/test-release-version.ps1
-python3 scripts/test-build-local.py
+pwsh ./scripts/test-msstore-submit-config.ps1
+python -m unittest discover -s scripts/tests -p 'test_msstore*.py' -v
+pwsh ./scripts/test-ci-workflow-graph.ps1
+pwsh ./scripts/test-msix-artifact.ps1
+bash scripts/test-release-artifacts.sh
 bash scripts/test-macos-libraries.sh
 bash scripts/test-linux-payloads.sh
 cargo fmt --all --check
@@ -45,6 +47,8 @@ cargo deny check
 ```
 
 Scheduled parser fuzzing runs in `fuzz.yml`. Million-row benchmarks and credentialed Telegram qualification are manual work; the repository does not provide automated workflows for those checks. GPUI dependency provenance is recorded in [ADR 0012](adr/0012-gpui-kit-and-private-storage-channel.md).
+
+Store delivery is a separate workflow after verified GitHub Release publication. CI uses Python 3.13 with no third-party Python packages for the Store client; Python 3.11 or later can run its local synthetic tests. Those tests exercise the default HTTP transport over loopback and controlled submission states without credentials or live Store calls. Store configuration tests also use synthetic values. Retry a published version from **Submit published MSIX to Microsoft Store** on `main`; see [delivery and recovery](PACKAGING.md#retry-store-delivery-without-rebuilding). The PowerShell HTTP module and its closure-bound test script are retired; the optional `submit-msix-to-store.ps1` entry point delegates to Python and does not implement HTTP itself.
 
 GPUI Kit's development-only `test-support` feature provides real event/focus regression tests. Its reviewed test-only graph adds `convert_case 0.11.0` (MIT), plus `proptest 1.11.0`, `proptest-macro 0.5.0`, `quick-error 1.2.3`, `rand_xorshift 0.4.0`, `rusty-fork 0.3.1`, `unarray 0.1.4` and `wait-timeout 0.2.1` (MIT OR Apache-2.0). These helpers are excluded from release features.
 
@@ -180,7 +184,22 @@ must not open an inspector. Previews never save a PIN to real application state.
 
 ## CI and releases
 
-[`ci.yml`](../.github/workflows/ci.yml) is the only CI/CD workflow. Its first job runs script regressions, LF checks, the legal baseline and the full locked Linux source gates. Every trigger then runs Windows and macOS tests. A matching `vX.Y.Z` tag also resolves the Cargo version and, after native tests pass, builds Windows x64, universal macOS and Linux x64 packages, and publishes one exact nine-file release manifest after every package verifies. Branch pushes do not trigger a run: pushing a branch and its version tag together starts only the tag run, which validates the published commit before packaging. Direct pushes to `main` require a pull request or manual dispatch to receive CI checks.
+[`ci.yml`](../.github/workflows/ci.yml) runs preflight, repository quality checks, native Linux/Windows/macOS tests and the reusable platform packager. A matching `vX.Y.Z` tag must point to a commit on `main` and match Cargo metadata. Preflight validates package identity, Telegram distribution credentials and macOS signing configuration; quality/tests/packages then run concurrently when applicable. GitHub Release assembly waits for every quality/test/package gate and verifies the exact assets and checksums. After publication, it calls [`store-submission.yml`](../.github/workflows/store-submission.yml). Store failures remain visible and leave the verified release available. Pull requests run quality/tests without publication; package previews build without the Rust test matrix or publication. Branch pushes do not trigger CI. Direct pushes to `main` require a pull request or manual dispatch for CI checks.
+
+### Microsoft Store MSIX submission
+
+Tagged releases submit MSIX updates using Microsoft's documented [MSIX Store submission API](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services). The Python client verifies the published MSIX, creates/resumes a matching draft, preserves listing/publication metadata, uploads a ZIP to Azure Blob Storage, commits once and polls ingestion status. It sends the client secret only in the OAuth form body, removes it from the process environment before requesting the token and never prints tokens, SAS URLs or raw service responses. Errors identify the failed operation plus a normalized transport category or HTTP status, recognized static validation code/field names and safe guidance. Phase output and bounded receipt schema 1 remain available when a request fails. Optional receipt recovery verifies the completed run's workflow, trusted ancestry, exact package bytes and active uncommitted submission before adopting a draft whose marker update failed.
+
+Configure these existing GitHub values for version-tag releases:
+
+| GitHub setting | Value used by the workflow |
+| --- | --- |
+| Secret `AZURE_AD_TENANT_ID` | Microsoft Entra tenant ID associated with Partner Center |
+| Secret `AZURE_AD_APPLICATION_CLIENT_ID` | Client ID of the Entra application |
+| Secret `AZURE_AD_APPLICATION_SECRET` | Client secret of that Entra application |
+| Variable `TELEARK_MSSTORE_PRODUCT_ID` | TeleArk Store Product ID |
+
+An existing `SELLER_ID` secret can remain configured; the MSIX API does not document it as an input and the workflow does not read it. Associate the Entra app with Partner Center and give it the Manager role. Preserve the existing `store-submission` Environment protection; allow version tags for automatic delivery and trusted `main` for manual retries. Credentials are validated only there, after release-package verification. The API requires an earlier completed Partner Center submission and age ratings. Microsoft's documented unsupported-feature restrictions still apply. Retry **Submit published MSIX to Microsoft Store** on `main` with an existing published tag to reuse its bytes; matching committed drafts are monitored without another commit. See [Packaging](PACKAGING.md#retry-store-delivery-without-rebuilding) for the recovery procedure and official references. Local tests use synthetic values and loopback only.
 
 Optional manual dispatch can preview packages with a commit-suffixed filename; it never publishes. The stage summary reports job results, and the individual job summaries show LF counts, exact Rust cache hits and SHA256 checksums. CI installs pinned `cargo-deny 0.20.2` as a native tool. `fuzz.yml` remains a separate scheduled parser campaign and produces no desktop package. The macOS app and standalone executable use the persistent self-signed identity; the installer remains unsigned, and Apple notarization is not provided. A tag alone is not evidence of successful signing, a security audit or credentialed testing. See [packaging](PACKAGING.md), [ADR 0043](adr/0043-release-artifact-and-installer-version-contract.md), [ADR 0044](adr/0044-single-workflow-native-release-matrix.md) and [ADR 0045](adr/0045-focused-release-targets.md).
 

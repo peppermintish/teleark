@@ -47,6 +47,140 @@ fn sync_file(id: i64) -> RemoteFileUpsert {
 }
 
 #[test]
+fn successful_empty_sync_observations_survive_restart_and_reject_stale_scopes()
+-> Result<(), Box<dyn Error>> {
+    use crate::{ChannelSyncCommit, ChannelSyncState};
+    let directory = tempdir()?;
+    let path = directory.path().join("observation.sqlite3");
+    let mut database = Database::open(&path)?;
+    seed_account_chat(&mut database)?;
+    let batch = ChannelSyncCommit {
+        account_id: AccountId::new(1),
+        chat_id: ChatId::new(2),
+        expected_revision: 0,
+        state: ChannelSyncState {
+            pts: 50,
+            revision: 1,
+            ..Default::default()
+        },
+        files: vec![sync_file(77)],
+        removed: vec![],
+        edited: vec![],
+        invalidate: vec![],
+        authoritative: true,
+        managed_catalog_seed: false,
+        gap_detected: false,
+        observed_at_unix_ms: 0,
+    };
+    database.commit_channel_sync(&batch)?;
+    database.record_channel_sync_observation(batch.account_id, batch.chat_id, 1, 1000)?;
+    database.record_channel_sync_observation(batch.account_id, batch.chat_id, 1, 900)?;
+    let plan: String = database.connection.query_row("EXPLAIN QUERY PLAN UPDATE channel_sync_state SET last_synced_at=MAX(COALESCE(last_synced_at,0),?4) WHERE account_id=?1 AND chat_id=?2 AND revision=?3", [1,2,1,1000], |row| row.get(3))?;
+    assert!(
+        plan.contains("SEARCH channel_sync_state USING PRIMARY KEY"),
+        "{plan}"
+    );
+    for (account, chat, revision, at) in [
+        (1, 2, 0, 2000),
+        (99, 2, 1, 2000),
+        (1, 99, 1, 2000),
+        (1, 2, 1, -1),
+    ] {
+        assert!(
+            database
+                .record_channel_sync_observation(
+                    AccountId::new(account),
+                    ChatId::new(chat),
+                    revision,
+                    at
+                )
+                .is_err()
+        );
+    }
+    drop(database);
+    let database = Database::open(path)?;
+    let state = database.channel_sync_state(batch.account_id, batch.chat_id)?;
+    assert_eq!(state.last_synced_at_unix_ms, Some(1000));
+    assert_eq!(state.pts, 50);
+    assert_eq!(
+        state.revision, 1,
+        "empty observations do not invalidate projections"
+    );
+    assert_eq!(
+        database
+            .cached_telegram_files(batch.account_id, batch.chat_id, 100)?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_twenty_four_preserves_cursors_keys_and_failed_migration_restart()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("v23.sqlite3");
+    let mut connection = Connection::open(&path)?;
+    connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= 23)
+    {
+        connection.execute_batch(migration.sql)?;
+    }
+    connection.pragma_update(None, "user_version", 23)?;
+    connection.execute("INSERT INTO settings(key,value,updated_at_unix_ms) VALUES('fixture.key.v1','unchanged-key-bytes',1)", [])?;
+    connection.execute("INSERT INTO accounts(id,display_name,created_at_unix_ms,updated_at_unix_ms) VALUES(1,'Fixture',1,1)", [])?;
+    connection.execute(
+        "INSERT INTO chats(account_id,id,title,updated_at_unix_ms) VALUES(1,2,'Fixture',1)",
+        [],
+    )?;
+    connection.execute("INSERT INTO channel_sync_state(account_id,chat_id,pts,history_before,history_exhausted,repair_pending,gap_pending,revision) VALUES(1,2,50,77,0,1,0,9)", [])?;
+    // Force a deterministic verification failure after ALTER TABLE. Its schema
+    // change and version marker must roll back together, keeping the old bytes.
+    connection.pragma_update(None, "foreign_keys", false)?;
+    connection.execute_batch("CREATE TABLE broken_fixture(id INTEGER REFERENCES accounts(id)); INSERT INTO broken_fixture VALUES(999);")?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    assert!(crate::migration::migrate(&mut connection, &|_| {}).is_err());
+    assert_eq!(
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?,
+        23
+    );
+    let columns: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('channel_sync_state') WHERE name='last_synced_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(columns, 0);
+    connection.execute_batch("DROP TABLE broken_fixture")?;
+    drop(connection);
+    let database = Database::open(path)?;
+    let state = database.channel_sync_state(AccountId::new(1), ChatId::new(2))?;
+    assert_eq!(
+        (
+            state.pts,
+            state.history_before,
+            state.repair_pending,
+            state.revision
+        ),
+        (50, Some(77), true, 9)
+    );
+    assert_eq!(
+        state.last_synced_at_unix_ms, None,
+        "old channels require an automatic freshness check"
+    );
+    assert_eq!(
+        database
+            .setting("fixture.key.v1")?
+            .expect("preserved key")
+            .value,
+        "unchanged-key-bytes"
+    );
+    assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
+    Ok(())
+}
+
+#[test]
 fn channel_changes_and_cursors_commit_together_and_preserve_local_evidence()
 -> Result<(), Box<dyn Error>> {
     use crate::{ChannelSyncCommit, ChannelSyncState};

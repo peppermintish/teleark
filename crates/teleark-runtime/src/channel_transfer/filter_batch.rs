@@ -365,6 +365,7 @@ struct FilesystemReservations {
 impl FilesystemReservations {
     fn new(directory: &Path) -> Result<Self, ApplicationError> {
         let directory = directory.join(".teleark-batch-reservations");
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -465,6 +466,7 @@ fn create_batch_directory(root: &Path) -> Result<PathBuf, ApplicationError> {
     let timestamp = unix_time_millis()?;
     for suffix in 0..10_000 {
         let directory = root.join(format!("batch-{timestamp}-{suffix}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

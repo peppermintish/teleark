@@ -62,13 +62,14 @@ fn download_snapshot(
         },
     );
     let size = valid.map_or(0, |context| context.size_bytes);
+    let upload_activity = transfer_terminal_outcome(state).map(VaultUploadActivity::terminal_only);
     Ok(VaultTransferSnapshot {
         id,
         account_id: account,
         chat_id: record.map_or(0, |record| record.chat_id),
         recovery_state: saved.map(|record| record.state),
         restored: true,
-        upload_activity: None,
+        upload_activity,
         batch_id: None,
         queued_at_unix_ms: record.map_or(0, |record| record.created_at_unix_ms),
         direction: VaultTransferDirection::Download,

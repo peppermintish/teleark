@@ -574,6 +574,10 @@ channel-sync-history = 이전 기록
 channel-sync-seeding = 초기 로컬 캐시 준비 중
 channel-sync-history-loading = 요청한 이전 기록 받는 중
 channel-sync-details-title = 채널 동기화
+global-sync-cancel-directory = 채널 목록 동기화 취소
+global-sync-cancel-channel = { $source } 동기화 취소 ({ $chat_id })
+global-sync-channel-id = 텔레그램 채널 { $chat_id }
+global-sync-cancel-pending-channel-retries = 대기 중인 모든 채널 재시도 취소 ({ $count })
 channel-sync-rate-limited = Telegram 요청 제한 대기 중
 activity-state-queued = 대기열에 있음
 activity-state-complete = 완전함
@@ -779,3 +783,36 @@ managed-key-channel-undecryptable = This TeleArk channel cannot be decrypted wit
 managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
+download-pipeline-queue = Containers remaining: { $queued } · Active containers: { $active } · Last activity: { $idle } ago · Retry wait: { $wait }
+download-pipeline-transport = Telegram stream chunks: { $active } receiving · { $waiting } waiting · next retry in { $wait }
+download-chart-empty = Waiting for encrypted bytes from Telegram. Download rate is unknown.
+download-part-group = Containers { $first }–{ $last } · { $confirmed } verified · { $state }
+download-part-map-grouping = { $count } containers · Up to { $size } per cell. Hover for exact ranges.
+
+storage-channel-managed-empty = 아직 인증된 파일이 없습니다. 첫 파일을 업로드하세요. 새 파일은 자동으로 표시됩니다.
+global-sync-automatic = 동기화는 자동으로 진행됩니다. 연결에 실패하면 백그라운드에서 다시 시도합니다.
+
+channel-sync-timing = 현재 단계: { $duration } · 마지막 활동: { $activity } 전
+channel-sync-next-at = { $seconds }초 후 자동으로 다시 시도합니다.
+
+# Managed inventory and batch restore
+channel-sync-checking-pts = Checking pts status
+channel-sync-polling-differences = Polling differences from Telegram
+managed-files-background = { $phase } · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-files-applying = Updating the file list
+managed-files-ready = Files up to date
+managed-file-select = Select { $name } for download
+managed-download-matching-action = Download matching
+managed-download-matching-help = Restore downloadable files in the displayed inventory that match the search, date and file-type filters. Files outside this inventory are not included. Selections are kept when filters change.
+managed-download-select-all-help = Select all downloadable files matching the current filters.
+managed-download-stop = Stop remaining
+managed-download-queued = Restore queued: { $total } files · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-restoring = Restoring files: { $completed } of { $total } complete · { $failed } failed · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-stopping = Stopping after the current file finishes safely · { $completed } of { $total } complete · Last activity: { $idle } s ago
+managed-download-completed = Restore complete: { $completed } files
+managed-download-cancelled = Restore stopped: { $completed } complete · { $failed } failed · { $skipped } not restored
+managed-download-failed = Restore finished with errors: { $completed } complete · { $failed } failed · { $skipped } not restored. Retry failed files or review individual downloads in Transfers.
+managed-download-history-truncated = { $count } earlier activity events omitted
+managed-download-event = { $time } · { $phase } { $error }
+
+managed-download-retry = Retry failed files

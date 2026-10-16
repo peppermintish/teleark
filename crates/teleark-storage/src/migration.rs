@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 23;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -704,6 +704,10 @@ CREATE TABLE credential_cleanup (
     PRIMARY KEY (namespace,keychain_account)
 ) STRICT, WITHOUT ROWID;
 "#,
+    },
+    Migration {
+        version: 24,
+        sql: "ALTER TABLE channel_sync_state ADD COLUMN last_synced_at INTEGER CHECK (last_synced_at >= 0);",
     },
 ];
 

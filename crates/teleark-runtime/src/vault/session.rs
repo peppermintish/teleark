@@ -126,6 +126,7 @@ impl VaultSession {
             && !matches!(
                 command,
                 VaultCommand::Download { .. }
+                    | VaultCommand::DownloadBatch { .. }
                     | VaultCommand::ResumeDownload { .. }
                     | VaultCommand::ResumeQueuedTransfers { .. }
                     | VaultCommand::DeleteTransfer { .. }
@@ -141,6 +142,7 @@ impl VaultSession {
             || matches!(
                 command,
                 VaultCommand::Download { .. }
+                    | VaultCommand::DownloadBatch { .. }
                     | VaultCommand::ResumeDownload { .. }
                     | VaultCommand::ResumeQueuedTransfers { .. }
             );
@@ -222,6 +224,7 @@ impl VaultCommand {
                 | Self::ResumeQueuedTransfers { .. }
                 | Self::UploadBatch { .. }
                 | Self::Download { .. }
+                | Self::DownloadBatch { .. }
                 | Self::ResumeDownload { .. }
                 | Self::DeleteTransfer { .. }
         )

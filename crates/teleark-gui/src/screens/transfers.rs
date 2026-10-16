@@ -23,7 +23,7 @@ use teleark_runtime::{
     ControllerDecisionOutcome, ControllerDecisionReason, ControllerPhase, DownloadPartFailureKind,
     DownloadPartState, TransferBottleneck, TransferControlParameters, TransferTelemetrySnapshot,
     TunableParameter, VaultTransferDirection, VaultTransferSnapshot, VaultTransferState,
-    VaultUploadActivity, VaultUploadPhase,
+    VaultUploadActivity, VaultUploadOutcome, VaultUploadPhase,
 };
 
 use crate::{
@@ -293,6 +293,7 @@ impl TeleArkApp {
                 acknowledged: index % 2 == 1,
                 attempt: 1,
                 wait_millis: 0,
+                outcome: None,
             })
             .collect();
         activity.samples = (1..=8)
@@ -567,7 +568,12 @@ impl TeleArkApp {
                     VaultTransferState::Interrupted => Some(self.tr("transfer-upload-interrupted")),
                     VaultTransferState::Pausing => Some(self.tr("transfer-upload-pausing")),
                     VaultTransferState::Cancelling => Some(self.tr("transfer-upload-cancelling")),
-                    _ => activity.map(|activity| self.tr(upload_phase_message_id(activity.phase))),
+                    _ => activity.map(|activity| {
+                        self.tr(vault_activity_phase_message_id(
+                            activity.phase,
+                            snapshot.direction,
+                        ))
+                    }),
                 }
             },
             activity_detail: if let Some(status) = server_status {
@@ -586,7 +592,8 @@ impl TeleArkApp {
             } else {
                 self.receipt_activity_detail(
                     self.vault_transfer_view.rates.get(&snapshot.id),
-                    activity.map(|activity| self.upload_activity_detail(activity)),
+                    activity
+                        .map(|activity| self.upload_activity_detail(activity, snapshot.direction)),
                 )
             },
             runtime_task_id: None,
@@ -711,11 +718,16 @@ impl TeleArkApp {
         ))
     }
 
-    fn upload_activity_detail(&self, activity: &VaultUploadActivity) -> SharedString {
+    fn upload_activity_detail(
+        &self,
+        activity: &VaultUploadActivity,
+        direction: VaultTransferDirection,
+    ) -> SharedString {
         let args = MessageArgs::new()
             .with(
                 "phase",
-                self.tr(upload_phase_message_id(activity.phase)).to_string(),
+                self.tr(vault_activity_phase_message_id(activity.phase, direction))
+                    .to_string(),
             )
             .with(
                 "elapsed",
@@ -725,17 +737,36 @@ impl TeleArkApp {
                 ),
             );
         let detail = if activity.total > 0 {
+            let key = match direction {
+                VaultTransferDirection::Upload => {
+                    if activity.phase == VaultUploadPhase::Uploading {
+                        "transfer-upload-activity-container-bytes"
+                    } else {
+                        "transfer-upload-activity-bytes"
+                    }
+                }
+                VaultTransferDirection::Download => {
+                    if activity.phase == VaultUploadPhase::Downloading {
+                        "transfer-download-activity-container-bytes"
+                    } else {
+                        "transfer-download-activity-bytes"
+                    }
+                }
+            };
             self.tr_with(
-                if activity.phase == VaultUploadPhase::Uploading {
-                    "transfer-upload-activity-container-bytes"
-                } else {
-                    "transfer-upload-activity-bytes"
-                },
+                key,
                 args.with("done", format_bytes(self.locale(), activity.bytes))
                     .with("total", format_bytes(self.locale(), activity.total)),
             )
         } else {
-            self.tr_with("transfer-upload-activity-elapsed", args)
+            self.tr_with(
+                if direction == VaultTransferDirection::Download {
+                    "transfer-download-activity-elapsed"
+                } else {
+                    "transfer-upload-activity-elapsed"
+                },
+                args,
+            )
         };
         if activity.persistence_since.is_some() {
             self.tr_with(
@@ -3680,7 +3711,10 @@ impl TeleArkApp {
         {
             details.push((
                 self.tr("detail-failure-last-phase"),
-                self.tr(upload_phase_message_id(activity.phase)),
+                self.tr(vault_activity_phase_message_id(
+                    activity.phase,
+                    snapshot.direction,
+                )),
             ));
         }
 
@@ -3794,6 +3828,7 @@ impl TeleArkApp {
                                     .upload_activity
                                     .as_ref()
                                     .map(|activity| activity.phase),
+                                snapshot.direction,
                             )),
                             self.tr(vault_recovery_guidance_message_id(snapshot, kind)),
                             None,
@@ -3895,7 +3930,7 @@ impl TeleArkApp {
                         div()
                             .text_size(theme::LIST_TEXT_SIZE)
                             .text_color(theme::text_muted())
-                            .child(self.tr("transfer-rate-basis")),
+                            .child(self.tr(transfer_rate_basis_message_id(transfer.direction))),
                     )
                     .when_some(transfer.activity_detail.clone(), |header, activity| {
                         header.child(
@@ -3999,11 +4034,16 @@ impl TeleArkApp {
                         },
                     )
                     .when_some(
-                        vault_snapshot
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.upload_activity.as_ref()),
-                        |details, activity| {
-                            details.child(self.render_upload_activity(activity, active, cx))
+                        vault_snapshot.as_ref().and_then(|snapshot| {
+                            snapshot
+                                .upload_activity
+                                .as_ref()
+                                .map(|activity| (snapshot.direction, snapshot.part_count, activity))
+                        }),
+                        |details, (direction, part_count, activity)| {
+                            details.child(self.render_upload_activity(
+                                activity, direction, part_count, active, cx,
+                            ))
                         },
                     )
                     .children(
@@ -4589,6 +4629,44 @@ fn upload_phase_message_id(phase: VaultUploadPhase) -> &'static str {
     }
 }
 
+const VAULT_ACTIVITY_PART_DISPLAY_LIMIT: u32 = 4096;
+
+fn vault_activity_part_map_truncation_message_id(part_count: u32) -> Option<&'static str> {
+    (part_count > VAULT_ACTIVITY_PART_DISPLAY_LIMIT).then_some("transfer-part-map-truncated")
+}
+
+fn vault_activity_phase_message_id(
+    phase: VaultUploadPhase,
+    direction: VaultTransferDirection,
+) -> &'static str {
+    if direction == VaultTransferDirection::Download {
+        match phase {
+            VaultUploadPhase::Downloading => "transfer-download-receiving-blocks",
+            VaultUploadPhase::WaitingForTelegram => "transfer-download-waiting-retry",
+            VaultUploadPhase::Verifying => "transfer-download-verifying",
+            _ => upload_phase_message_id(phase),
+        }
+    } else {
+        upload_phase_message_id(phase)
+    }
+}
+
+fn vault_activity_outcome_message_id(outcome: VaultUploadOutcome) -> &'static str {
+    match outcome {
+        VaultUploadOutcome::Completed => "trace-event-completed",
+        VaultUploadOutcome::Failed => "trace-event-failed",
+        VaultUploadOutcome::Paused => "trace-event-paused",
+        VaultUploadOutcome::Cancelled => "trace-event-cancelled",
+    }
+}
+
+fn transfer_rate_basis_message_id(direction: TransferDirection) -> &'static str {
+    match direction {
+        TransferDirection::Upload => "transfer-rate-basis",
+        TransferDirection::Download => "transfer-download-rate-basis",
+    }
+}
+
 fn vault_display_bytes(snapshot: &VaultTransferSnapshot) -> u64 {
     snapshot
         .upload_activity
@@ -4651,9 +4729,22 @@ fn vault_recovery_guidance_message_id(
     use teleark_core::ApplicationErrorKind as Error;
     use teleark_runtime::VaultRecoveryState as Recovery;
     match snapshot.recovery_state {
+        Some(Recovery::Retryable) if snapshot.direction == VaultTransferDirection::Download => {
+            "transfer-recovery-download-guidance"
+        }
         Some(Recovery::Retryable) => "transfer-recovery-retry-guidance",
         Some(Recovery::Blocked) => match kind {
-            Error::SourceMissing | Error::SourceChanged | Error::SourcePermissionDenied => {
+            Error::SourceChanged if snapshot.direction == VaultTransferDirection::Download => {
+                "transfer-recovery-integrity-guidance"
+            }
+            Error::SourceMissing | Error::SourcePermissionDenied
+                if snapshot.direction == VaultTransferDirection::Download =>
+            {
+                "transfer-recovery-download-blocked-guidance"
+            }
+            Error::SourceMissing | Error::SourceChanged | Error::SourcePermissionDenied
+                if snapshot.direction == VaultTransferDirection::Upload =>
+            {
                 "transfer-recovery-source-guidance"
             }
             Error::Authorization | Error::VaultKeyUnavailable => "transfer-recovery-key-guidance",
@@ -4667,6 +4758,7 @@ fn vault_recovery_guidance_message_id(
 fn vault_transfer_error_message_id(
     kind: teleark_core::ApplicationErrorKind,
     phase: Option<VaultUploadPhase>,
+    direction: VaultTransferDirection,
 ) -> &'static str {
     use teleark_core::ApplicationErrorKind;
     match kind {
@@ -4687,6 +4779,9 @@ fn vault_transfer_error_message_id(
         ApplicationErrorKind::PermissionDenied => "vault-transfer-error-permission",
         ApplicationErrorKind::InvalidRequest => "vault-transfer-error-invalid-request",
         ApplicationErrorKind::Conflict => "vault-transfer-error-conflict",
+        ApplicationErrorKind::SourceChanged if direction == VaultTransferDirection::Download => {
+            "vault-transfer-error-download-integrity"
+        }
         ApplicationErrorKind::SourceChanged => "vault-transfer-error-source-changed",
         ApplicationErrorKind::NotFound | ApplicationErrorKind::SourceMissing => {
             "vault-error-source-missing"
@@ -4859,6 +4954,127 @@ mod tests {
     #[path = "completed_batch_retry.rs"]
     mod completed_batch_retry;
     use super::*;
+
+    #[test]
+    fn vault_terminal_activity_maps_each_outcome_to_a_semantic_event_label() {
+        for (outcome, message_id) in [
+            (VaultUploadOutcome::Completed, "trace-event-completed"),
+            (VaultUploadOutcome::Failed, "trace-event-failed"),
+            (VaultUploadOutcome::Paused, "trace-event-paused"),
+            (VaultUploadOutcome::Cancelled, "trace-event-cancelled"),
+        ] {
+            assert_eq!(vault_activity_outcome_message_id(outcome), message_id);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn download_inspector_labels_measured_encrypted_rate_basis(cx: &mut gpui_kit::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
+        app.update(cx, |app, _| {
+            app.localizer
+                .set_locale(teleark_i18n::SupportedLocale::EnUs);
+            let label = app
+                .tr(transfer_rate_basis_message_id(TransferDirection::Download))
+                .to_string();
+            assert!(label.contains("encrypted container bytes received per second"));
+            assert!(label.contains("not whole-file verification"));
+            assert!(!label.contains("Confirmed application payload"));
+            assert_eq!(
+                transfer_rate_basis_message_id(TransferDirection::Upload),
+                "transfer-rate-basis"
+            );
+            assert_eq!(
+                upload_activity::pipeline_queue_message_id(true),
+                "download-pipeline-queue"
+            );
+            assert_eq!(
+                upload_activity::pipeline_queue_message_id(false),
+                "upload-pipeline-queue"
+            );
+            assert_eq!(
+                upload_activity::pipeline_group_message_id(true),
+                "download-part-group"
+            );
+            assert_eq!(
+                upload_activity::pipeline_group_message_id(false),
+                "upload-part-group"
+            );
+            assert_eq!(
+                upload_activity::pipeline_grouping_message_id(true),
+                "download-part-map-grouping"
+            );
+            assert_eq!(
+                upload_activity::pipeline_grouping_message_id(false),
+                "upload-part-map-grouping"
+            );
+            assert_eq!(
+                upload_activity::pipeline_empty_chart_message_id(true),
+                "download-chart-empty"
+            );
+            assert_eq!(
+                upload_activity::pipeline_empty_chart_message_id(false),
+                "upload-chart-empty"
+            );
+            let download_queue = app
+                .tr_with(
+                    upload_activity::pipeline_queue_message_id(true),
+                    MessageArgs::new()
+                        .with("queued", "3")
+                        .with("active", "1")
+                        .with("idle", "1 s")
+                        .with("wait", "0 s"),
+                )
+                .to_string();
+            let download_queue = download_queue.to_lowercase();
+            assert!(download_queue.contains("container"));
+            assert!(download_queue.contains("remaining"));
+            assert!(download_queue.contains("active"));
+            assert!(!download_queue.contains("buffer"));
+            let download_group = app
+                .tr_with(
+                    upload_activity::pipeline_group_message_id(true),
+                    MessageArgs::new()
+                        .with("first", "1")
+                        .with("last", "2")
+                        .with("confirmed", "1")
+                        .with("state", "Verified"),
+                )
+                .to_string()
+                .to_lowercase();
+            assert!(download_group.contains("container"));
+            assert!(download_group.contains("verified"));
+            assert!(!download_group.contains("block"));
+            let download_map_grouping = app
+                .tr_with(
+                    upload_activity::pipeline_grouping_message_id(true),
+                    MessageArgs::new().with("count", "2").with("size", "1"),
+                )
+                .to_string()
+                .to_lowercase();
+            assert!(download_map_grouping.contains("containers"));
+            assert!(!download_map_grouping.contains("block"));
+            let empty_chart = app
+                .tr(upload_activity::pipeline_empty_chart_message_id(true))
+                .to_string()
+                .to_lowercase();
+            assert!(empty_chart.contains("encrypted bytes"));
+            assert!(empty_chart.contains("download rate is unknown"));
+            assert!(!empty_chart.contains("acknowledgement"));
+            let download_transport = app
+                .tr_with(
+                    "download-pipeline-transport",
+                    MessageArgs::new()
+                        .with("active", "1")
+                        .with("waiting", "1")
+                        .with("wait", "1 s"),
+                )
+                .to_string();
+            assert!(download_transport.contains("Telegram stream chunks"));
+            assert!(download_transport.contains("receiving"));
+            assert!(download_transport.contains("waiting"));
+            assert!(download_transport.contains("next retry in"));
+        });
+    }
 
     #[gpui_kit::test]
     fn row_action_wait_is_visible_when_manage_is_collapsed(cx: &mut gpui_kit::TestAppContext) {
@@ -5049,69 +5265,49 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn native_inspector_shows_only_recorded_and_applicable_telemetry(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
+    fn blocked_download_guidance_matches_recovery_actions(cx: &mut gpui_kit::TestAppContext) {
+        use teleark_core::ApplicationErrorKind as Error;
+        use teleark_runtime::VaultRecoveryState as Recovery;
+
         let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Transfers);
-        for fullscreen in [false, true] {
-            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
-            cx.update(|window, _| {
-                if window.is_fullscreen() != fullscreen {
-                    window.toggle_fullscreen();
-                }
+        for (kind, expected_message) in [
+            (Error::SourceChanged, "transfer-recovery-integrity-guidance"),
+            (
+                Error::SourceMissing,
+                "transfer-recovery-download-blocked-guidance",
+            ),
+            (
+                Error::SourcePermissionDenied,
+                "transfer-recovery-download-blocked-guidance",
+            ),
+        ] {
+            let mut snapshot = vault_snapshot_fixture();
+            snapshot.direction = VaultTransferDirection::Download;
+            snapshot.recovery_state = Some(Recovery::Blocked);
+            snapshot.state = VaultTransferState::Failed(kind);
+            assert_eq!(
+                vault_recovery_guidance_message_id(&snapshot, kind),
+                expected_message
+            );
+            assert!(!vault_action_supported(TransferAction::Retry, &snapshot));
+            assert!(vault_action_supported(TransferAction::Delete, &snapshot));
+
+            let mut guidance = String::new();
+            app.update(cx, |app, _| {
+                guidance = app.tr(expected_message).to_string();
             });
-            for sample in 0..3 {
-                app.update(cx, |app, cx| {
-                    app.preview_native_failure();
-                    let mut snapshot = (*app.native_transfer_view.items[0]).clone();
-                    if sample > 0 {
-                        let telemetry = &mut snapshot.telemetry;
-                        telemetry.goodput_bytes_per_second = 1024 * 1024;
-                        telemetry.parts.completed_parts = 36;
-                        telemetry.parts.completed_parts_per_second_milli = 1500;
-                        telemetry.memory.network_inflight_bytes = 4 * 1024 * 1024;
-                        telemetry.memory.writer_queue_bytes =
-                            if sample == 1 { 512 * 1024 } else { 0 };
-                        telemetry.decisions.push(ControllerDecision {
-                            sequence: 1,
-                            observed_at_millis: 24_000,
-                            phase: ControllerPhase::Stable,
-                            parameter: None,
-                            before: telemetry.parameters,
-                            after: telemetry.parameters,
-                            baseline_goodput_bytes_per_second: telemetry.goodput_bytes_per_second,
-                            observed_goodput_bytes_per_second: telemetry.goodput_bytes_per_second,
-                            goodput_change_basis_points: 0,
-                            outcome: ControllerDecisionOutcome::Confirm,
-                            reason: ControllerDecisionReason::UserSettings,
-                            affected_lane: None,
-                            flood_wait_seconds: None,
-                        });
-                    }
-                    app.native_transfer_view.items = vec![std::sync::Arc::new(snapshot)].into();
-                    cx.notify();
-                });
-                cx.run_until_parked();
-                assert!(cx.debug_bounds("transfer-inspector").is_some());
-                assert!(
-                    cx.debug_bounds("transfer-encryption-sample").is_none(),
-                    "native downloads have no encryption queue or encryption buffers"
-                );
-                assert_eq!(
-                    cx.debug_bounds("transfer-native-sample").is_some(),
-                    sample > 0
-                );
-                assert_eq!(
-                    cx.debug_bounds("transfer-native-buffer").is_some(),
-                    sample > 0
-                );
-                assert_eq!(
-                    cx.debug_bounds("transfer-native-writer").is_some(),
-                    sample == 1
-                );
-                cx.update(|window, _| assert_eq!(window.is_fullscreen(), fullscreen));
-            }
+            assert!(!guidance.to_lowercase().contains("retry"));
+            assert!(guidance.contains("Start a new download from the Vault file list"));
         }
+
+        let mut integrity_error = String::new();
+        app.update(cx, |app, _| {
+            integrity_error = app
+                .tr("vault-transfer-error-download-integrity")
+                .to_string();
+        });
+        assert!(integrity_error.contains("Start a new download from the Vault file list"));
+        assert!(!integrity_error.to_lowercase().contains("retry"));
     }
 
     #[gpui_kit::test]
@@ -6134,7 +6330,8 @@ mod tests {
                 Some(VaultUploadPhase::Preparing),
                 Some(VaultUploadPhase::Uploading),
             ] {
-                let id = vault_transfer_error_message_id(kind, phase);
+                let id =
+                    vault_transfer_error_message_id(kind, phase, VaultTransferDirection::Upload);
                 assert!(!id.starts_with("native-download-"));
                 for locale in SupportedLocale::ALL {
                     assert!(
@@ -6148,16 +6345,56 @@ mod tests {
         assert_eq!(
             vault_transfer_error_message_id(
                 Kind::PermissionDenied,
-                Some(VaultUploadPhase::CheckingTarget)
+                Some(VaultUploadPhase::CheckingTarget),
+                VaultTransferDirection::Upload,
             ),
             "vault-transfer-error-target-permission"
         );
         assert_eq!(
             vault_transfer_error_message_id(
                 Kind::PermissionDenied,
-                Some(VaultUploadPhase::Uploading)
+                Some(VaultUploadPhase::Uploading),
+                VaultTransferDirection::Upload,
             ),
             "vault-transfer-error-permission"
+        );
+        assert_eq!(
+            vault_transfer_error_message_id(
+                Kind::SourceChanged,
+                Some(VaultUploadPhase::Downloading),
+                VaultTransferDirection::Upload,
+            ),
+            "vault-transfer-error-source-changed"
+        );
+        assert_eq!(
+            vault_transfer_error_message_id(
+                Kind::SourceChanged,
+                Some(VaultUploadPhase::Downloading),
+                VaultTransferDirection::Download,
+            ),
+            "vault-transfer-error-download-integrity"
+        );
+    }
+
+    #[test]
+    fn large_vault_part_map_uses_localized_truncation_disclosure() {
+        use teleark_i18n::{Localizer, MessageId, SupportedLocale};
+
+        assert_eq!(
+            vault_activity_part_map_truncation_message_id(VAULT_ACTIVITY_PART_DISPLAY_LIMIT),
+            None
+        );
+        assert_eq!(
+            vault_activity_part_map_truncation_message_id(VAULT_ACTIVITY_PART_DISPLAY_LIMIT + 1),
+            Some("transfer-part-map-truncated")
+        );
+        assert!(
+            Localizer::new(SupportedLocale::EnUs)
+                .expect("English localizer")
+                .contains(
+                    SupportedLocale::EnUs,
+                    MessageId::new("transfer-part-map-truncated")
+                )
         );
     }
 

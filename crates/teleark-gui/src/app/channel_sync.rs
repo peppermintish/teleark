@@ -2,7 +2,7 @@
 //! is owned by a selected view; navigating away only cancels its local read.
 use super::*;
 use gpui_kit::component::button::ButtonVariants as _;
-use teleark_i18n::format::format_integer;
+use teleark_i18n::format::{format_integer, format_signed_integer};
 use teleark_runtime::ChannelSyncPhase;
 
 const VIEW_CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -101,7 +101,11 @@ impl TeleArkApp {
         ) {
             Ok(sync) => {
                 let subscription = sync.subscribe();
+                self.channel_sync_source_names.clear();
                 self.channel_sync_snapshot = sync.snapshot().ok();
+                if let Some(snapshot) = self.channel_sync_snapshot.clone() {
+                    self.remember_channel_sync_source_names(&snapshot);
+                }
                 self.channel_sync = Some(sync);
                 subscription
             }
@@ -118,12 +122,13 @@ impl TeleArkApp {
                     if app.telegram_account.as_ref().map(|a| a.id) != Some(account_id) {
                         return false;
                     }
-                    let Some(sync) = &app.channel_sync else {
+                    let Some(sync) = app.channel_sync.clone() else {
                         return false;
                     };
                     let mut library_changed = false;
                     match sync.snapshot() {
                         Ok(snapshot) => {
+                            app.remember_channel_sync_source_names(&snapshot);
                             library_changed = app
                                 .channel_sync_snapshot
                                 .as_ref()
@@ -138,6 +143,9 @@ impl TeleArkApp {
                         sync.sources_since(app.channel_sources_revision)
                     {
                         library_changed = true;
+                        if let Some(snapshot) = app.channel_sync_snapshot.clone() {
+                            app.remember_channel_sync_source_names(&snapshot);
+                        }
                         let managed_changed = app.storage_channel_id().is_some_and(|id| {
                             app.telegram_chats.iter().find(|chat| chat.id == id)
                                 != chats.iter().find(|chat| chat.id == id)
@@ -187,6 +195,7 @@ impl TeleArkApp {
                     }
                     app.apply_channel_changes(cx);
                     app.apply_managed_channel_changes(cx);
+                    app.start_managed_status_clock(cx);
                     cx.notify();
                     true
                 });
@@ -493,6 +502,144 @@ impl TeleArkApp {
         )
     }
 
+    /// Inventory readiness includes remote discovery, manifest projection and
+    /// application of the result. An unrelated Vault success is not readiness.
+    pub(crate) fn managed_files_status(&self) -> Vec<(SharedString, Tone)> {
+        let mut messages = Vec::new();
+        let chat = self.storage_channel_id();
+        let account = self.telegram_account.as_ref().map(|a| a.id);
+        let snapshot = self.channel_sync_snapshot.as_ref().filter(|snapshot| {
+            Some(snapshot.account_id) == account && snapshot.managed_chat_id == chat
+        });
+        let catalog_pending = self.managed_catalog_pending
+            || snapshot.is_some_and(|snapshot| {
+                snapshot
+                    .managed_watch
+                    .as_ref()
+                    .is_none_or(|watch| !watch.catalog_ready)
+            });
+        let timed = |phase, started: std::time::Instant, last: std::time::Instant| {
+            self.tr_with(
+                "managed-files-background",
+                MessageArgs::new()
+                    .with("phase", self.tr(sync_phase_id(phase)).to_string())
+                    .with(
+                        "seconds",
+                        format_integer(self.locale(), started.elapsed().as_secs()),
+                    )
+                    .with(
+                        "idle",
+                        format_integer(self.locale(), last.elapsed().as_secs()),
+                    ),
+            )
+        };
+        if let Some(snapshot) = snapshot {
+            if let Some(event) = snapshot.active.iter().find(|event| event.chat_id == chat) {
+                messages.push((timed(event.phase, event.at, event.at), Tone::Blue));
+            } else if let Some(event) = snapshot
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.chat_id == chat)
+                && matches!(
+                    event.phase,
+                    ChannelSyncPhase::Queued
+                        | ChannelSyncPhase::Waiting
+                        | ChannelSyncPhase::RateLimited
+                        | ChannelSyncPhase::Failed
+                        | ChannelSyncPhase::Cancelled
+                )
+            {
+                messages.push((
+                    timed(event.phase, event.at, event.at),
+                    sync_tone(event.phase),
+                ));
+            }
+            if let Some(scan) = snapshot.managed_scan.as_ref().filter(|scan| {
+                Some(scan.chat_id) == chat && (scan.active() || scan.failure.is_some())
+            }) {
+                messages.push((
+                    timed(scan.phase, scan.phase_started, scan.last_activity),
+                    sync_tone(scan.phase),
+                ));
+            }
+        }
+        if self.vault_key_selection_task.is_some() {
+            messages.push((self.tr("managed-key-checking"), Tone::Blue));
+        } else if self.managed_scan_loading && messages.is_empty() {
+            messages.push((self.tr("managed-files-applying"), Tone::Blue));
+        } else if catalog_pending && messages.is_empty() {
+            messages.push((self.tr("managed-catalog-syncing"), Tone::Blue));
+        }
+        if messages.is_empty() {
+            if let VaultActivity::Failed(_) = self.vault_activity {
+                messages.extend(crate::screens::settings::vault_activity_message(self));
+            } else if !self.vault_locked
+                && !self.managed_scan_loading
+                && !catalog_pending
+                && (self.managed_projection_scope == account.zip(chat) || self.visual_preview)
+            {
+                messages.push((self.tr("managed-files-ready"), Tone::Green));
+            }
+        }
+        messages
+    }
+
+    pub(crate) fn start_managed_status_clock(&mut self, cx: &mut Context<Self>) {
+        if self.managed_status_clock.is_some() || !self.managed_status_needs_clock() {
+            return;
+        }
+        // Presentation only: update elapsed/last-activity text while a real
+        // operation waits. This timer performs no service or database reads.
+        self.managed_status_clock = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let Some(entity) = this.upgrade() else {
+                    return;
+                };
+                if !entity.update(cx, |app, cx| {
+                    if app.managed_status_needs_clock() {
+                        cx.notify();
+                        true
+                    } else {
+                        app.managed_status_clock = None;
+                        false
+                    }
+                }) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn managed_status_needs_clock(&self) -> bool {
+        matches!(self.page, Page::Channel | Page::Storage)
+            && self.storage_view == StorageView::Files
+            && (self.managed_scan_loading
+                || self.vault_key_selection_task.is_some()
+                || self.channel_sync_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .active
+                        .iter()
+                        .any(|event| event.chat_id == self.storage_channel_id())
+                        || snapshot
+                            .managed_scan
+                            .as_ref()
+                            .is_some_and(|scan| scan.active())
+                        || snapshot
+                            .events
+                            .iter()
+                            .rev()
+                            .find(|event| event.chat_id == self.storage_channel_id())
+                            .is_some_and(|event| {
+                                matches!(
+                                    event.phase,
+                                    ChannelSyncPhase::Waiting | ChannelSyncPhase::RateLimited
+                                )
+                            })
+                }))
+    }
+
     pub(crate) fn sync_event_time(&self, at: std::time::Instant) -> SharedString {
         teleark_i18n::format::format_unix_millis(
             self.locale(),
@@ -511,6 +658,29 @@ impl TeleArkApp {
             )
     }
 
+    fn remember_channel_sync_source_names(
+        &mut self,
+        snapshot: &teleark_runtime::ChannelSyncSnapshot,
+    ) {
+        let retained_ids = snapshot
+            .events
+            .iter()
+            .filter_map(|event| event.chat_id)
+            .chain(snapshot.active.iter().filter_map(|event| event.chat_id))
+            .collect::<BTreeSet<_>>();
+        self.channel_sync_source_names
+            .retain(|chat_id, _| retained_ids.contains(chat_id));
+        for chat_id in retained_ids {
+            if self.channel_sync_source_names.contains_key(&chat_id) {
+                continue;
+            }
+            if let Some(chat) = self.telegram_chats.iter().find(|chat| chat.id == chat_id) {
+                self.channel_sync_source_names
+                    .insert(chat_id, chat.name.clone());
+            }
+        }
+    }
+
     pub(super) fn sync_history_rows(&self) -> Vec<sync_history::HistoryRow> {
         let mut rows = Vec::new();
         let source = |id: Option<i64>| -> SharedString {
@@ -521,9 +691,32 @@ impl TeleArkApp {
                     .map(|c| c.name.clone().into())
                     .unwrap_or_else(|| self.tr("managed-watch-title"));
             }
-            id.and_then(|id| self.telegram_chats.iter().find(|c| c.id == id))
-                .map(|c| c.name.clone().into())
-                .unwrap_or_else(|| self.tr("global-sync-account"))
+            id.map_or_else(
+                || self.tr("global-sync-account"),
+                |chat_id| {
+                    self.channel_sync_source_names
+                        .get(&chat_id)
+                        .map(String::as_str)
+                        .or_else(|| {
+                            self.telegram_chats
+                                .iter()
+                                .find(|chat| chat.id == chat_id)
+                                .map(|chat| chat.name.as_str())
+                        })
+                        .map_or_else(
+                            || {
+                                self.tr_with(
+                                    "global-sync-channel-id",
+                                    MessageArgs::new().with(
+                                        "chat_id",
+                                        format_signed_integer(self.locale(), chat_id),
+                                    ),
+                                )
+                            },
+                            |name| name.to_owned().into(),
+                        )
+                },
+            )
         };
         if let Some(snapshot) = &self.channel_sync_snapshot {
             for event in &snapshot.events {
@@ -692,6 +885,52 @@ impl TeleArkApp {
                 ),
             ));
         }
+        if let Some(snapshot) = self.channel_sync_snapshot.as_ref()
+            && (snapshot.phase != ChannelSyncPhase::Idle
+                || snapshot
+                    .managed_scan
+                    .as_ref()
+                    .is_some_and(|scan| scan.active()))
+        {
+            let (phase, activity) = snapshot
+                .managed_scan
+                .as_ref()
+                .filter(|scan| scan.active())
+                .map_or((snapshot.phase_started, snapshot.last_activity), |scan| {
+                    (scan.phase_started, scan.last_activity)
+                });
+            let elapsed = |at: std::time::Instant| {
+                teleark_i18n::format::format_duration_millis(
+                    self.locale(),
+                    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                )
+            };
+            summary = summary.child(
+                div().debug_selector(|| "sync-phase-duration".into()).child(
+                    self.tr_with(
+                        "channel-sync-timing",
+                        MessageArgs::new()
+                            .with("duration", elapsed(phase))
+                            .with("activity", elapsed(activity)),
+                    ),
+                ),
+            );
+            if let Some(at) = snapshot.retry_at {
+                summary = summary.child(
+                    self.tr_with(
+                        "channel-sync-next-at",
+                        MessageArgs::new().with(
+                            "seconds",
+                            format_integer(
+                                self.locale(),
+                                at.saturating_duration_since(std::time::Instant::now())
+                                    .as_secs(),
+                            ),
+                        ),
+                    ),
+                );
+            }
+        }
         summary
             .child(
                 div()
@@ -790,10 +1029,7 @@ impl TeleArkApp {
             body = body.child(self.application_error_message(error));
         }
         if let Some(error) = self.library_sync_error {
-            body = body.child(self.application_error_message(error)).child(
-                components::button("global-library-retry", self.tr("common-retry"), None, false)
-                    .on_click(cx.listener(|app, _, _, cx| app.invalidate_library_from_sync(cx))),
-            );
+            body = body.child(self.application_error_message(error));
         }
         if self.dialogs.has_activity() && !self.dialogs.ready {
             body = body.child(self.render_dialog_sync_activity(cx));
@@ -816,83 +1052,11 @@ impl TeleArkApp {
                 } else if let Some(failure) = scan.failure {
                     body = body.child(self.application_error_message(failure));
                 }
-                if scan.phase == ChannelSyncPhase::ManifestFailed {
-                    body = body.child(
-                        components::button(
-                            "managed-scan-retry",
-                            self.tr("common-retry"),
-                            None,
-                            false,
-                        )
-                        .on_click(cx.listener(|app, _, _, cx| app.scan_managed_vault_files(cx))),
-                    );
-                }
-                if scan.active() {
-                    body = body.child(
-                        components::button(
-                            "managed-scan-cancel",
-                            self.tr("telegram-files-cancel-action"),
-                            None,
-                            false,
-                        )
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.cancel_managed_scan();
-                            cx.notify();
-                        })),
-                    );
-                }
             }
             if let Some(failure) = snapshot.failure {
                 body = body.child(self.application_error_message(failure));
             }
-            if snapshot.failure.is_some() || !snapshot.active.is_empty() {
-                let chat = snapshot.chat_id.unwrap_or(0);
-                body = body.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            components::button(
-                                "global-sync-retry",
-                                self.tr("telegram-files-retry-action"),
-                                None,
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |app, _, _, cx| {
-                                    app.channel_history_failed = false;
-                                    app.refresh_channel_file_table(cx);
-                                    if let Some(sync) = &app.channel_sync
-                                        && let Err(error) = sync.refresh(chat)
-                                    {
-                                        app.telegram_activity =
-                                            TelegramActivity::Failed(error.kind());
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                        .child(
-                            components::button(
-                                "global-sync-cancel",
-                                self.tr("telegram-files-cancel-action"),
-                                None,
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |app, _, _, cx| {
-                                    if let Some(sync) = &app.channel_sync
-                                        && let Err(error) = sync.cancel(chat)
-                                    {
-                                        app.telegram_activity =
-                                            TelegramActivity::Failed(error.kind());
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        ),
-                );
-            }
+            body = body.child(self.tr("global-sync-automatic"));
             if let Some(chat) = snapshot
                 .managed_chat_id
                 .filter(|id| Some(*id) == self.storage_channel_id())
@@ -1123,6 +1287,8 @@ fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
         ChannelSyncPhase::Queued => "channel-sync-queued",
         ChannelSyncPhase::Seeding => "channel-sync-seeding",
         ChannelSyncPhase::History => "channel-sync-history-loading",
+        ChannelSyncPhase::CheckingPts => "channel-sync-checking-pts",
+        ChannelSyncPhase::PollingDifferences => "channel-sync-polling-differences",
         ChannelSyncPhase::ReadingLocal => "channel-sync-reading",
         ChannelSyncPhase::Receiving => "channel-sync-receiving",
         ChannelSyncPhase::Persisting => "channel-sync-persisting",
@@ -1140,6 +1306,376 @@ pub(super) mod tests {
     use super::*;
     use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, component::table::TableDelegate as _};
+
+    #[gpui::test]
+    fn managed_files_completion_waits_for_sync_manifest_and_display_application(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        app.update(cx, |app, _| {
+            app.vault_activity = VaultActivity::Succeeded;
+            app.managed_catalog_pending = false;
+            let mut snapshot = fixture_snapshot();
+            snapshot.managed_chat_id = Some(9000);
+            snapshot.account_id = 1;
+            snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                phase: ChannelSyncPhase::PollingDifferences,
+                chat_id: Some(9000),
+                at: std::time::Instant::now(),
+                failure: None,
+            }];
+            snapshot.managed_scan = None;
+            app.channel_sync_snapshot = Some(snapshot);
+            let statuses = app.managed_files_status();
+            assert!(
+                statuses
+                    .iter()
+                    .any(|(text, _)| text.contains("Polling differences"))
+            );
+            assert!(!statuses.iter().any(
+                |(text, _)| text.contains("up to date") || text.contains("operation completed")
+            ));
+            let snapshot = app.channel_sync_snapshot.as_mut().expect("snapshot");
+            snapshot.active.clear();
+            snapshot.events.clear();
+            snapshot.managed_watch = None;
+            assert!(
+                app.managed_files_status()
+                    .iter()
+                    .any(|(text, _)| text.as_ref() == app.tr("managed-catalog-syncing").as_ref())
+            );
+            app.channel_sync_snapshot = None;
+            app.managed_scan_loading = true;
+            assert_eq!(
+                app.managed_files_status()[0].0.as_ref(),
+                "Updating the file list"
+            );
+            app.managed_scan_loading = false;
+            assert_eq!(app.managed_files_status()[0].0.as_ref(), "Files up to date");
+        });
+    }
+
+    #[gpui::test]
+    fn retired_channel_history_keeps_source_attribution_and_resolves_retry(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        app.update(cx, |app, _| {
+            app.localizer = Localizer::new(SupportedLocale::EnUs).expect("catalog");
+            let now = std::time::Instant::now();
+            let retired_chat = TelegramChatSummary {
+                id: 74,
+                name: "Former channel".into(),
+                username: None,
+                kind: TelegramChatKind::Channel,
+                sync_pts: None,
+            };
+            app.telegram_chats = vec![retired_chat];
+
+            let mut snapshot = fixture_snapshot();
+            snapshot.events.clear();
+            snapshot.managed_watch = None;
+            snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                phase: ChannelSyncPhase::Receiving,
+                chat_id: Some(74),
+                at: now,
+                failure: None,
+            }];
+            app.remember_channel_sync_source_names(&snapshot);
+
+            app.telegram_chats.clear();
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Failed,
+                    chat_id: Some(74),
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::Network),
+                });
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Cancelled,
+                    chat_id: Some(74),
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::SourceMissing),
+                });
+            snapshot.active.clear();
+            snapshot.phase = ChannelSyncPhase::Cancelled;
+            snapshot.chat_id = None;
+            snapshot.failure = Some(teleark_core::ApplicationErrorKind::SourceMissing);
+            app.remember_channel_sync_source_names(&snapshot);
+
+            assert!(snapshot.retry_target().is_none());
+            assert!(app.channel_sync_source_names.len() <= snapshot.events.len());
+            app.channel_sync_snapshot = Some(snapshot);
+            let rows = app.sync_history_rows();
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.source.as_ref() == "Former channel")
+                    .count(),
+                2,
+                "retained failure and retirement events keep the channel title"
+            );
+
+            let mut uncached = fixture_snapshot();
+            uncached.events.clear();
+            uncached.managed_watch = None;
+            uncached
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Cancelled,
+                    chat_id: Some(73),
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::SourceMissing),
+                });
+            app.channel_sync_source_names.clear();
+            app.channel_sync_snapshot = Some(uncached);
+            let fallback = app
+                .sync_history_rows()
+                .into_iter()
+                .next()
+                .expect("retired channel history row");
+            assert_eq!(fallback.source.as_ref(), "Telegram channel 73");
+        });
+    }
+
+    #[gpui::test]
+    fn unresolved_sync_failure_keeps_diagnostics_without_manual_retry(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.events.clear();
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Failed,
+                    chat_id: Some(7),
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::Network),
+                });
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Receiving,
+                    chat_id: Some(3),
+                    at: now,
+                    failure: None,
+                });
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Idle,
+                    chat_id: Some(3),
+                    at: now,
+                    failure: None,
+                });
+            snapshot.phase = ChannelSyncPhase::Idle;
+            snapshot.chat_id = None;
+            snapshot.failure = None;
+            snapshot.active.clear();
+            snapshot.retry_at = None;
+            assert_eq!(
+                snapshot.retry_target().and_then(|event| event.chat_id),
+                Some(7)
+            );
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("global-sync-retry").is_none(),
+            "the sync inspector never asks users to retry synchronization"
+        );
+    }
+
+    #[gpui::test]
+    fn automatic_directory_recovery_remains_visible_without_manual_controls(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.phase = ChannelSyncPhase::Receiving;
+            snapshot.chat_id = Some(3);
+            snapshot.failure = Some(teleark_core::ApplicationErrorKind::Network);
+            snapshot.retry_at = Some(now + Duration::from_secs(2));
+            snapshot.events.clear();
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Waiting,
+                    chat_id: None,
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::Network),
+                });
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Receiving,
+                    chat_id: Some(3),
+                    at: now,
+                    failure: None,
+                });
+            snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                phase: ChannelSyncPhase::Receiving,
+                chat_id: Some(3),
+                at: now,
+                failure: None,
+            }];
+            assert!(snapshot.directory_retry_waiting());
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("global-sync-cancel-directory-retry")
+                .is_none(),
+            "the pending directory recovery stays automatic"
+        );
+        assert!(
+            cx.debug_bounds("global-sync-cancel-chat-3").is_none(),
+            "active channel recovery stays automatic"
+        );
+    }
+
+    #[gpui::test]
+    fn rate_limited_directory_recovery_has_no_manual_sync_controls(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.phase = ChannelSyncPhase::RateLimited;
+            snapshot.chat_id = None;
+            snapshot.failure = None;
+            snapshot.retry_at = Some(now + Duration::from_secs(120));
+            snapshot.active.clear();
+            snapshot.events.clear();
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::RateLimited,
+                    chat_id: None,
+                    at: now,
+                    failure: None,
+                });
+            assert!(snapshot.directory_retry_waiting());
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("global-sync-cancel-directory-retry")
+                .is_none(),
+            "automatic recovery honors FloodWait without exposing manual sync controls"
+        );
+    }
+
+    #[gpui::test]
+    fn concurrent_sync_work_remains_automatic(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.phase = ChannelSyncPhase::Discovering;
+            snapshot.chat_id = None;
+            snapshot.failure = None;
+            snapshot.active = vec![
+                teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Discovering,
+                    chat_id: None,
+                    at: now,
+                    failure: None,
+                },
+                teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Receiving,
+                    chat_id: Some(3),
+                    at: now,
+                    failure: None,
+                },
+                teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Receiving,
+                    chat_id: Some(4),
+                    at: now,
+                    failure: None,
+                },
+            ];
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("global-sync-cancel-directory-active")
+                .is_none()
+        );
+        assert!(cx.debug_bounds("global-sync-cancel-chat-3").is_none());
+        assert!(cx.debug_bounds("global-sync-cancel-chat-4").is_none());
+    }
+
+    #[gpui::test]
+    fn pending_channel_recovery_has_no_manual_sync_controls(cx: &mut TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let now = std::time::Instant::now();
+            let mut snapshot = fixture_snapshot();
+            snapshot.phase = ChannelSyncPhase::Receiving;
+            snapshot.chat_id = Some(3);
+            snapshot.failure = None;
+            snapshot.retry_at = None;
+            snapshot.events.clear();
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Waiting,
+                    chat_id: Some(7),
+                    at: now,
+                    failure: Some(teleark_core::ApplicationErrorKind::Network),
+                });
+            snapshot
+                .events
+                .push_back(teleark_runtime::ChannelSyncEvent {
+                    phase: ChannelSyncPhase::Receiving,
+                    chat_id: Some(3),
+                    at: now,
+                    failure: None,
+                });
+            snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                phase: ChannelSyncPhase::Receiving,
+                chat_id: Some(3),
+                at: now,
+                failure: None,
+            }];
+            let retry_target = snapshot.retry_target().expect("retained channel retry");
+            assert_eq!(retry_target.chat_id, Some(7));
+            assert_eq!(retry_target.phase, ChannelSyncPhase::Waiting);
+            app.channel_sync_snapshot = Some(snapshot);
+            app.channel_sync_details = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("global-sync-cancel-chat-retry-7").is_none());
+        assert!(
+            cx.debug_bounds("global-sync-cancel-pending-channel-retries")
+                .is_none()
+        );
+        assert!(cx.debug_bounds("global-sync-cancel-chat-3").is_none());
+    }
 
     #[gpui::test]
     fn vault_retry_remains_visible_and_cancellable_after_unlock(cx: &mut TestAppContext) {
@@ -1171,6 +1707,17 @@ pub(super) mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("managed-sync-retry").is_some());
+        for selector in [
+            "global-sync-retry",
+            "managed-scan-retry",
+            "managed-scan-cancel",
+            "global-library-retry",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "sync recovery stays automatic: {selector}"
+            );
+        }
         app.update(cx, |app, cx| {
             assert_eq!(app.vault_activity, VaultActivity::Succeeded);
             assert!(!app.vault_locked);
@@ -1394,7 +1941,7 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn compact_sync_controls_and_independent_timeline_work_in_every_locale(
+    fn english_compact_sync_summary_and_independent_timeline_remain_reachable(
         cx: &mut TestAppContext,
     ) {
         use teleark_runtime::{ChannelSyncEvent, ChannelSyncSnapshot};
@@ -1405,15 +1952,7 @@ pub(super) mod tests {
             cx.update(|window, cx| {
                 app.update(cx, |app, cx| {
                     app.localizer = Localizer::new(locale).expect("catalog");
-                    theme::apply_appearance(
-                        if locale == SupportedLocale::JaJp {
-                            AppearancePreference::Dark
-                        } else {
-                            AppearancePreference::Light
-                        },
-                        window,
-                        cx,
-                    );
+                    theme::apply_appearance(AppearancePreference::Light, window, cx);
                     app.page = Page::Channel;
                     app.storage_view = StorageView::RawFiles;
                     app.selected_chat_id = Some(1001);

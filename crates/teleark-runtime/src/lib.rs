@@ -82,8 +82,8 @@ pub use app_pin::AppPinRecord;
 mod download_slots;
 mod vault_progress;
 pub use vault_progress::{
-    VaultUploadActivity, VaultUploadEvent, VaultUploadPart, VaultUploadPartState, VaultUploadPhase,
-    VaultUploadSample,
+    VaultUploadActivity, VaultUploadEvent, VaultUploadOutcome, VaultUploadPart,
+    VaultUploadPartState, VaultUploadPhase, VaultUploadSample,
 };
 
 pub use channel_transfer::{
@@ -122,11 +122,12 @@ pub use transfer::{
     encrypted_part_plaintext_limit, encrypted_part_sizes, recover_remote_manifests,
 };
 pub use vault::{
-    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VaultChannelSetupScope,
-    VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySelection, VaultKeySnapshot,
-    VaultRecoverySecret, VaultStatus, VaultTransferControl, VaultTransferDirection,
-    VaultTransferSnapshot, VaultTransferState, VaultUploadControl, VaultUploadFailure,
-    VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
+    DesktopVault, ManagedScanMode, ManagedVaultFile, ManagedVaultScan, VAULT_DOWNLOAD_BATCH_LIMIT,
+    VaultChannelSetupScope, VaultDownloadBatchPhase, VaultDownloadBatchProgress,
+    VaultDownloadBatchSnapshot, VaultJob, VaultKeyPhase, VaultKeyProgress, VaultKeySelection,
+    VaultKeySnapshot, VaultRecoverySecret, VaultStatus, VaultTransferControl,
+    VaultTransferDirection, VaultTransferSnapshot, VaultTransferState, VaultUploadControl,
+    VaultUploadFailure, VaultUploadRecoveryReport, VaultUploadReport, VaultUploadSelectionPhase,
     VaultUploadSelectionProgress, VaultUploadSelectionSnapshot, VaultUploadSource,
     inspect_upload_sources, inspect_upload_sources_observed,
 };
@@ -237,9 +238,11 @@ pub fn default_database_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|root| root.join("TeleArk/library.sqlite3"))
+        windows_data_root(
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("USERPROFILE"),
+        )
+        .map(|root| root.join("library.sqlite3"))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -253,6 +256,22 @@ pub fn default_database_path() -> Option<PathBuf> {
             })
             .map(|root| root.join("teleark/library.sqlite3"))
     }
+}
+
+#[cfg(all(feature = "msix", any(target_os = "windows", test)))]
+fn windows_data_root(
+    _local_app_data: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    user_profile.map(|profile| PathBuf::from(profile).join("TeleArk"))
+}
+
+#[cfg(all(not(feature = "msix"), any(target_os = "windows", test)))]
+fn windows_data_root(
+    local_app_data: Option<std::ffi::OsString>,
+    _user_profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    local_app_data.map(|local_app_data| PathBuf::from(local_app_data).join("TeleArk"))
 }
 
 /// Resolves the default desktop managed-file layout without touching disk.
@@ -1122,6 +1141,13 @@ enum StorageRequest {
         batch: teleark_storage::ChannelSyncCommit,
         reply: SyncSender<Result<teleark_storage::ChannelSyncCommitOutcome, ApplicationError>>,
     },
+    RecordChannelSyncObservation {
+        account: teleark_core::AccountId,
+        chat: teleark_core::ChatId,
+        revision: i64,
+        at: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     ChannelCachedIds {
         account: teleark_core::AccountId,
         chat: teleark_core::ChatId,
@@ -1889,6 +1915,19 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                 let _ = reply.send(
                     database
                         .commit_channel_sync(&batch)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::RecordChannelSyncObservation {
+                account,
+                chat,
+                revision,
+                at,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .record_channel_sync_observation(account, chat, revision, at)
                         .map_err(map_storage_error),
                 );
             }
@@ -2941,6 +2980,24 @@ fn map_storage_error(error: StorageError) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_data_root_uses_distribution_specific_location() {
+        let local_app_data = Some(std::ffi::OsString::from("local-app-data"));
+        let user_profile = Some(std::ffi::OsString::from("user-profile"));
+        let root = windows_data_root(local_app_data, user_profile).expect("data root");
+
+        #[cfg(feature = "msix")]
+        assert_eq!(root, PathBuf::from("user-profile").join("TeleArk"));
+        #[cfg(not(feature = "msix"))]
+        assert_eq!(root, PathBuf::from("local-app-data").join("TeleArk"));
+    }
+
+    #[cfg(feature = "msix")]
+    #[test]
+    fn msix_data_root_requires_a_user_profile() {
+        assert!(windows_data_root(Some("local-app-data".into()), None).is_none());
+    }
 
     #[test]
     fn dropping_storage_owner_does_not_wait_for_a_full_queue_or_blocked_worker() {

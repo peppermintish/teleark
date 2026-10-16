@@ -212,7 +212,6 @@ impl VaultOwner {
                 self.update_transfer(id, |row| {
                     row.state = VaultTransferState::Cancelled;
                     row.recovery_state = Some(VaultJobState::Cancelled);
-                    row.upload_activity = None;
                 });
                 self.persist_upload_id(id)?;
             }
@@ -283,7 +282,6 @@ impl VaultOwner {
                 } else {
                     VaultJobState::Cancelled
                 });
-                row.upload_activity = None;
             });
             self.upload_controls.cancel(lease)?;
         }
@@ -361,7 +359,6 @@ impl VaultOwner {
                     } else {
                         VaultTransferState::Cancelled
                     };
-                    row.upload_activity = None;
                 });
                 if self
                     .transfers
@@ -391,7 +388,6 @@ impl VaultOwner {
         self.update_transfer(id, |row| {
             row.recovery_state = Some(durable_state);
             row.state = target;
-            row.upload_activity = None;
         });
         if let Some(state) = self.upload_controls.signal_or_acknowledge(&mut db, lease)? {
             self.update_transfer(id, |row| {

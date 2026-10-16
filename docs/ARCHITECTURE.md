@@ -36,11 +36,11 @@ pushes and history/difference recovery. Raw Files exposes physical objects; File
 authenticates managed manifests and presents complete logical files. Local and
 Remote Library views have distinct sources and filters.
 
-The frontend consumes revisioned snapshots and deltas, materializing visible rows.
-Idle renders do not rebuild full collections or query unchanged database pages.
-Bounded histories disclose omissions, while recoverable work retains durable state.
-[ADR 0023](adr/0023-native-history-and-recovery-budgets.md) defines native history and
-replay budgets; [Transfer](TRANSFER_ENGINE.md) defines progress and diagnostics.
+After the managed channel catalog is ready, the retained key owner loads readable credentials from the selected backend and authenticates the newest channel-key proof. That proof selects the current session/upload key; individual corrupt, missing or unknown-key manifests never veto it. Legacy channels without a proof select the newest matching authenticated envelope; when remote evidence is damaged or missing, bounded retained inventory may authenticate the key for that exact account/channel. Durable authenticated inventory retains missing/invalid entries with file-local health. Selection and catalog reads retry transient failures on retained background tasks; backoff releases their owners, honors server deadlines and stops after lock/backend/account replacement. Key import reruns selection; export requires a matching selected key. No stored credential or completed destination is discarded. [ADR 0064](adr/0064-managed-channel-proof-and-durable-automatic-sync.md) supersedes ADR 0057's channel-wide manifest unanimity rule; the existing single upload key and authenticated recovery formats remain.
+
+Channel pushes reconcile from durable account/channel PTS, and each quiet channel has an independent seven-minute fallback. Successful empty differences persist observation time without revising unchanged projections. Restart restores the remaining deadline from disk. Sync feedback includes phases, last activity, retry deadlines and bounded event history across navigation; the sync inspector has no manual retry/cancel controls.
+
+The managed Files view reports scoped PTS checks, difference polling, manifest downloading/authentication and list application before readiness. Package-scoped checkbox selections use cached date/type/search projections. Runtime restores bounded batches through the existing authenticated download path, retains counters and a bounded event timeline, supports failed-only retry, and stops remaining files while the current restore finishes safely. The batch selection is session-owned; started files retain durable transfer recovery and verified outputs.
 
 ## Account and storage identity
 
@@ -72,32 +72,17 @@ See [Security](SECURITY.md) and [ADR 0053](adr/0053-selectable-system-credential
 
 ## Ownership and cancellation
 
-Filesystem, database, network, crypto and credential work run off the UI thread.
-Long operations have bounded queues, retained handles, cancellation and visible
-phase transitions. Short snapshot locks never span network calls or long waits.
-Callbacks validate account, connection and request generations before publishing.
+Storage, Telegram and Vault operations run off the UI thread behind bounded request queues and retained lifecycle handles. The Vault owner alone holds the unlocked Master Key. GUI callbacks use account/source generations to reject stale results. Long network operations do not hold snapshot/state locks.
 
-Telegram has independent bounded read, transfer and mutable-control lanes.
-Runtime owns channel synchronization, directory discovery, retries and recovery;
-UI presentation clocks do not drive service queues. Four retained channel calls
-and a separate directory slot isolate slow sources. Transient channel failures use
-jittered backoff up to 60 seconds; server FloodWait deadlines remain authoritative.
-Managed catalog-change signals survive bounded delta eviction.
+Native download Stop applies to the entire selected set before waiting for storage or filesystem cleanup. Admission and worker retirement share a short barrier; one transaction persists all stop intents and cleanup leases. The UI releases its command owner after that commit and follows per-task cleanup separately. Slot waiters and metadata lookups observe Stop, and drained tasks can clean up while another writer is blocked. Final downloads remain intact. [ADR 0049](adr/0049-batch-download-stop-and-selection.md) defines the batch, selection and partial-file contract.
 
-Native Stop records the selected set's durable intent before waiting for writers
-or filesystem cleanup. Independent cleanup ownership prevents a blocked path from
-stalling unrelated downloads. Encrypted controls likewise persist generation-fenced
-intent before signalling execution. Destructors do not join slow workers on UI or
-network reactors. [Recovery](VAULT_TRANSFER_RECOVERY.md) specifies restart and
-partial-file ownership; [ADR 0049](adr/0049-batch-download-stop-and-selection.md)
-defines native batch stopping.
+Channel and managed private-channel synchronization share one retained account owner in Runtime. Telegram contributes bounded metadata pushes and official difference/history APIs; contiguous PTS updates commit directly and gaps recover from durable PTS. Storage returns actual deltas plus coherent local baselines. GUI awaits events and patches only the relevant rows; neither a global revision nor a fixed UI poll drives database reads. Selected/private subscription deadlines, retries and passive metadata reconciliation retain their protocol roles. Private edit/delete pushes immediately publish a pending warning; confirmed observations/acknowledgements persist through schema 12. Private Raw Files uses the shared projection; Files authenticates only new/invalidated local manifest candidates and reuses bounded derived metadata. Manifest queues, reads, authentication and terminal outcomes report through the same event feed and retain cancellation/account/generation guards. Runtime transient channel and metadata failures use jittered exponential backoff with a 60-second ceiling and no attempt limit; server FloodWait remains authoritative. Persistence/authorization/permission failures retain committed state for explicit handling. Runtime also owns initial directory discovery, connection-revision supervision and an independently versioned directory restart cache. Four retained normal-channel calls, one reserved managed-channel call and a separate directory slot prevent blocked normal reads from starving managed synchronization. Telegram also reserves one managed RPC lane beside eight normal reads, with separate bounded pending admission and the same account barriers. [ADR 0065](adr/0065-managed-progress-batch-restore-and-reserved-sync.md) supersedes the shared four-channel execution limit. Scrolling creates one cancellable viewport history demand, while live pushes can preempt that read. Committed metadata updates the sidebar and material changes invalidate the Remote Library projection automatically. The window has one sync status entry; routine refresh controls and Cmd-R are removed. [ADR 0031](adr/0031-automatic-account-synchronization.md) specifies ownership, bounds and cache compatibility. [ADR 0019](adr/0019-event-driven-channel-projections.md) supersedes the earlier polling/private-reader behavior in [ADR 0018](adr/0018-local-first-channel-sync.md).
 
-Account switching, proxy changes and Quit/Close share a visible transfer-drain
-gate. Application locking leaves background owners and cached projections running.
-Cryptographic session revocation still rejects new admissions and stale callbacks;
-existing task leases retain their explicitly granted authority. See
-[ADR 0026](adr/0026-session-unlock-and-task-key-leases.md) and
-[ADR 0037](adr/0037-application-pin-and-transfer-drain.md).
+Automatic managed-manifest synchronization retains a background caller outside the Vault workers. Each attempt acquires a session-fenced key lease; transient failures retry after 2–60 seconds without requiring a new channel event. Server-requested waits are ephemeral typed error metadata and survive the Telegram/object/Vault adapters without shortening. The account event feed reports retries and terminal outcomes. A scan result cannot replace the key-operation result shown after unlock. Cancellation, account replacement and key/session changes stop retries and reject late projections; backoff never occupies the key, transfer or scan worker. Existing on-disk formats are unchanged.
+
+File-key setup and recovery keep their requested intent and only resume after successful key access. Application access is separately gated by an optional PIN across the whole window. Locking leaves all service owners, key sessions and cached projections running. Account switching, application Quit/Close and proxy application use one event-driven transfer drain gate. See [ADR 0037](adr/0037-application-pin-and-transfer-drain.md), which supersedes the earlier application-facing lock behavior.
+
+The primary sidebar collapses to a 64-point icon rail or expands to 184 points. Channels have their own contextual list; inspectors own bounded, occluding scroll viewports. A retained local-output observer reads account-scoped pages and performs filesystem metadata work through Runtime off the UI thread. The status bar spans the bottom of the entire window and displays synchronization activity without click actions. Network settings opens the bounded, independently scrolling activity inspector without changing the current workspace. It also queries download-volume space independently of directory usage scans.
 
 ## Files, durability and recovery
 
@@ -161,10 +146,9 @@ interaction checks; [access design](ACCESS_UI_DESIGN.md) records layout rational
 
 ## Localization service
 
-`teleark-i18n` owns the locale registry, semantic messages and display formatting.
-English, Simplified Chinese and Japanese have complete key parity; seven other
-catalogs use explicit English fallback. User content remains literal and stored
-values remain locale-neutral. Native OS locale discovery is unfinished.
+`teleark-i18n` owns Fluent resources at `crates/teleark-i18n/resources/<locale>/main.ftl`, locale negotiation, formatting and structured-error mappings. One registry supplies the nine supported locales to both runtime lookup and Settings. English, Simplified Chinese and Japanese catalogs have full key parity; Spanish, French, German, Brazilian Portuguese, Russian and Korean cover common flows and explicitly fall back to English for remaining messages. Every translated message must preserve its named variable set. See [Localization](I18N.md) for coverage and adding a language. Messages use semantic kebab-case IDs, complete grammatical units and Fluent selectors/plurals; legacy dotted/underscore aliases remain supported. The wrapper resolves top-level message values; terms/attributes require added lookup and validation support. User content is passed as literal parameters.
+
+Negotiation accepts registered tags and maps regional variants to the registered catalog for that language, such as `es-MX` to `es-ES` and `pt-PT` to `pt-BR`. Simplified Chinese maps to `zh-CN`; Traditional Chinese is not substituted with Simplified Chinese. It tries later preferences before falling back to English for unsupported or invalid tags. Tags use the locale parser. Settings changes apply live; explicit overrides persist, System Default removes the override, and a command-line locale wins for that launch. System discovery currently reads locale environment variables; native platform discovery is unfinished. Changing locale never rewrites remote channel descriptions or titles.
 
 Use centralized formatters for dates, counts, percentages, durations and byte
 quantities. All sizes/rates use IEC units from B through EiB and their `/s` forms.

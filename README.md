@@ -1,131 +1,78 @@
+<div align="center">
+
+<img src="site/assets/teleark.png" width="88" height="88" alt="TeleArk logo">
+
 # TeleArk
 
-**A native desktop workspace for your files on Telegram.**
+**Your files. Your Telegram. One workspace.**
 
-Browse channel files, store encrypted files in your own private Telegram channel,
-and manage uploads and downloads in one place. TeleArk combines a searchable
-local library with authenticated encrypted storage and recovery tools.
+A native desktop app for browsing Telegram files, managing transfers,<br>
+and keeping encrypted files in your own private channel.
 
-[Build and run](#build-and-run) · [Documentation](docs/README.md) ·
-[Packaging](docs/PACKAGING.md) · [Changelog](CHANGELOG.md)
+<p>
+  <a href="https://apps.microsoft.com/detail/9NJD0FKQVR9B"><img src="site/assets/badge-store.svg" alt="Get TeleArk on Microsoft Store" height="32"></a>
+  <a href="https://peppermintish.github.io/teleark/#downloads"><img src="site/assets/badge-windows.svg" alt="Windows 10 / 11 · x64" height="32"></a>
+  <a href="https://peppermintish.github.io/teleark/#macos-build"><img src="site/assets/badge-macos.svg" alt="macOS 11+ · Apple Silicon and Intel" height="32"></a>
+  <a href="https://peppermintish.github.io/teleark/#downloads"><img src="site/assets/badge-linux.svg" alt="Linux · x64" height="32"></a>
+</p>
 
-## Features
+**[Explore the website](https://peppermintish.github.io/teleark/)** · **[Download TeleArk](https://peppermintish.github.io/teleark/#downloads)** · **[Releases](https://github.com/peppermintish/teleark/releases)**
 
-- **Channel browsing:** search and filter indexed files, select individual files,
-  or download a filtered batch into its own directory.
-- **Encrypted storage:** upload files to a dedicated private channel. Authenticated
-  manifests describe each complete logical file, even when it spans multiple
-  Telegram objects.
-- **Transfers:** follow queues, phases, retries, speed limits and diagnostic
-  timelines. Native and encrypted transfers have durable controls and supported
-  restart recovery; older upload summaries without recovery records cannot resume.
-- **Library:** browse local and remote files separately. Background filesystem
-  observations distinguish available, missing, changed and inaccessible downloads.
-- **Keys:** select one stored key that authenticates the managed channel, import a
-  missing key, and export the selected key for recovery on another device.
-- **Desktop controls:** light/dark themes, keyboard shortcuts, configurable paths,
-  SOCKS5/HTTP CONNECT proxies, an optional application PIN and ten interface
-  languages, with English fallback for incomplete translations.
+<img src="site/assets/app-preview.jpg" width="900" alt="TeleArk's light interface showing encrypted channel files, selection checkboxes and batch download controls">
 
-The **Files** view presents authenticated logical files; **Raw Files** exposes the
-underlying Telegram documents, encrypted parts and manifests. See
-[current capabilities and limits](docs/IMPLEMENTATION_STATUS.md) before relying on
-recovery or platform support.
+<sub>Real desktop interface, with synthetic sample files.</sub>
 
-## Build and run
+</div>
 
-Install Rust through rustup. The repository selects its toolchain in
-[`rust-toolchain.toml`](rust-toolchain.toml) and dependencies in `Cargo.lock`.
-Platform prerequisites and package output formats are in the
-[build guide](docs/PACKAGING.md).
+## A calmer home for your files
 
-From the repository root, build and launch without embedding any API credentials:
+| | What you can do |
+| --- | --- |
+| **Browse & find** | Search channel files and filter by type or date. Keep local downloads and remote files in separate library views. |
+| **Store encrypted files** | Upload to a dedicated private Telegram channel. TeleArk encrypts locally and authenticates file manifests and restored contents. |
+| **Download in batches** | Select individual files or download matching files together, including files in your TeleArk-managed channel. |
+| **See work happening** | Follow synchronization phases, queues, retries, transfer charts and event timelines. Managed-channel sync runs alongside normal channels. |
+| **Keep control** | Pause, resume, cancel or retry transfers where supported. Export your encryption key for recovery and import it on another device. |
+| **Make it yours** | Light and dark themes, keyboard shortcuts, configurable storage paths, proxy settings and nine interface languages. |
 
-```sh
-cargo run --release -p teleark-gui --bin teleark --locked
-```
+## Get TeleArk
 
-On first launch, enter your own API ID and API Hash from
-[Telegram's API development panel](https://my.telegram.org/apps) through the
-login/settings interface. Sign in with QR or phone/code and complete any two-step
-verification. TeleArk discovers or creates your managed private channel. Once it
-confirms the channel key, export that key from Settings → Encryption keys and keep
-it separately from your Telegram files.
+| Platform | Download | Details |
+| --- | --- | --- |
+| **Windows** | **[Get it from Microsoft Store](https://apps.microsoft.com/detail/9NJD0FKQVR9B)** | Windows 10 version 1809 or later / Windows 11, x64. |
+| **Linux** | **[AppImage, Debian package & portable archive](https://peppermintish.github.io/teleark/#downloads)** | x64; packaged against an Ubuntu 22.04 baseline. |
+| **macOS** | **[Universal downloads & local build guide](https://peppermintish.github.io/teleark/#macos-build)** | macOS 11+, Apple Silicon and Intel. Releases are not Apple-notarized. |
 
-### Optional build-time configuration
+The [website](https://peppermintish.github.io/teleark/) provides direct Linux and macOS asset links, installation notes and a macOS source-build tutorial. Download links refresh when a GitHub release is published. Release assets include `SHA256SUMS` for integrity checks.
 
-Local build helpers embed application identifiers from a private `.env.local`.
-They require your own pair and reject the public test ID in
-[`.env.example`](.env.example). Neither Cargo nor TeleArk loads environment files
-automatically, and the helpers never fall back to the example. Follow the
-[scoped configuration instructions](docs/DEVELOPMENT.md#local-development-environment)
-to create and protect the local file without overwriting existing values.
+## Your channel, your encryption key
+
+TeleArk connects to Telegram from your desktop and stores encrypted files in your own private channel. The **Files** tab presents each logical file once; **Raw Files** shows its underlying Telegram documents, encrypted parts and manifests.
+
+File content is encrypted locally with AES-256-GCM and verified before a restored file is published to its destination. Telegram can still observe channel membership, object sizes and timing. The local catalog is not encrypted. Keep a safe copy of your exported key: access to the Telegram channel alone cannot decrypt your files. Read the [security model](docs/SECURITY.md) and [encrypted format](docs/CRYPTO_FORMAT.md) for the exact guarantees.
+
+## Build from source
+
+Install [Rust](https://rustup.rs/) and your platform's native build tools. On macOS, install Apple Command Line Tools with `xcode-select --install`; a paid Apple Developer account is not required for a local build. Linux dependencies and Windows build tools are listed in [Development](docs/DEVELOPMENT.md).
 
 ```sh
-# macOS, Linux or Windows Git Bash
-scripts/build-local.sh
-scripts/run.sh
+git clone https://github.com/peppermintish/teleark.git
+cd teleark
+cargo build --release -p teleark-gui --bin teleark --locked
 ```
 
-```powershell
-# Windows PowerShell; PowerShell 7 users can substitute pwsh
-powershell -NoProfile -File .\scripts\build-local.ps1
-powershell -NoProfile -File .\scripts\run.ps1
-```
+Run `./target/release/teleark` on macOS/Linux, or `.\target\release\teleark.exe` on Windows. Source builds without distribution credentials ask for your own Telegram API ID and hash in the app; obtain them from [Telegram's application panel](https://my.telegram.org/apps).
 
-For a single Windows invocation blocked by execution policy, add
-`-ExecutionPolicy Bypass` before `-File`. Do not change machine-wide policy.
-Personal credentials saved in the app override the embedded pair. Embedded
-identifiers are extractable from executables; they do not authorize a Telegram
-user. Rebuild after changing them.
+For repeatable developer builds with private local configuration, follow [the local environment guide](docs/DEVELOPMENT.md#local-development-environment). Keep credentials in the Git-ignored `.env.local`; never commit them. Installer creation and release signing have separate requirements in [Packaging](docs/PACKAGING.md).
 
-The local build/run helpers and macOS packager support `--dry-run` to describe
-operations without loading credentials or building. Other scripts have their own
-arguments; see the [script guide](scripts/README.md).
+## Built in the open
 
-### Isolated UI preview
+TeleArk is written in **Rust**, with **GPUI Kit** for the native interface, **grammers / MTProto** for Telegram, and **SQLite / FTS5** for the local catalog. Core services are independent of the GUI; retained background workers handle network, filesystem, database and encryption work.
 
-Preview synthetic data without signing in or opening real application state:
+- [Architecture & decisions](docs/ARCHITECTURE.md) — service boundaries and ownership.
+- [Development](docs/DEVELOPMENT.md) — setup, previews and quality checks.
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md) — delivered behavior and qualification limits.
+- [Website maintenance](docs/WEBSITE.md) — preview, test and publish the GitHub Pages site.
+- [Report a bug or request a feature](https://github.com/peppermintish/teleark/issues) — include reproducible steps; keep credentials and private files out of reports.
 
-```sh
-cargo run -p teleark-gui --bin teleark --locked -- --preview-ui --screen=transfers --locale=en-US --window-size=900x600
-```
-
-Visual reviews use English and light mode at 900×600 and actual native full-screen.
-The [development guide](docs/DEVELOPMENT.md#isolated-ui-review) lists preview routes,
-interaction checks and test commands.
-
-## Data and recovery
-
-Encrypted storage protects remote content and original filenames. Telegram can
-still observe account/channel relationships, ciphertext sizes and timing. The
-local SQLite catalog is unencrypted and reveals metadata. macOS uses system
-Keychain credentials by default; disabling it stores credentials and recovery
-secrets in the private SQLite database. Windows and Linux currently use SQLite.
-The optional PIN gates the interface and does not encrypt local storage. Telegram
-sessions live in a separate adapter cache.
-
-Recovery after database loss requires the matching key bundle, account access,
-and retained manifests and encrypted parts. Keep the key separately. Files that
-require different keys in one managed channel are not supported by the current
-single-key desktop view; stored credentials and ciphertext remain intact.
-
-Encrypted transfers stream through bounded memory with a 1.9 GiB encoded-container
-ceiling. Native Telegram downloads verify byte length, without cryptographic
-content authentication. macOS app binaries are self-signed, without Apple
-notarization or Gatekeeper trust. Live-account, crash and platform qualification
-limits are recorded in [implementation status](docs/IMPLEMENTATION_STATUS.md).
-Read the [security contract](docs/SECURITY.md) for threat boundaries and private
-vulnerability reporting guidance.
-
-## Contributing
-
-Start with [Development](docs/DEVELOPMENT.md) for checks and local setup,
-[Architecture](docs/ARCHITECTURE.md) for module boundaries, and
-[AGENTS.md](AGENTS.md) for contribution requirements. Ordinary tests and previews
-use synthetic data; never include credentials, sessions, keys or personal files in
-issues, fixtures or commits.
-
-TeleArk is dual-licensed under [MIT](LICENSE-MIT) or
-[Apache-2.0](LICENSE-APACHE), at your option. Distributions include
-[third-party notices](THIRD_PARTY_NOTICES.md).
+Licensed under **[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)**. Dependency acknowledgments are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

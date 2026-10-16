@@ -761,7 +761,7 @@ storage-channel-teleark-files = 文件
 storage-channel-tabs-description = Telegram 原始对象与还原后的逻辑文件
 storage-channel-managed-title = TeleArk 管理的文件
 storage-channel-managed-runtime-note = TeleArk 会在这里识别软件包清单和分片。桌面端连接加密保管库的持有服务后才会提供自动解密和还原；当前 Alpha 不会把已锁定的软件包显示成已还原。
-storage-channel-managed-empty = 还没有已认证的文件。上传第一个文件，或刷新以扫描此频道。
+storage-channel-managed-empty = 还没有已认证的文件。上传第一个文件，新文件会自动显示。
 storage-channel-managed-name-locked = 已加密的逻辑文件
 storage-channel-managed-detail-title = 文件详情
 storage-channel-managed-detail-empty = 选择一个受管理文件以查看其软件包。
@@ -969,7 +969,7 @@ account-restoring = 正在恢复 Telegram 会话…
 
 account-change-method = 使用其他登录方式
 
-account-private-note = Telegram 会话仅保存在这台 Mac 上。
+account-private-note = Telegram 会话保存在此设备上。
 
 account-switch-description = 切换会退出当前 Telegram 账户并暂停下载。文件与下载进度会保留。
 
@@ -1120,15 +1120,35 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
-    ## 0.5.9 · Desktop interaction fixes
+    ## 0.5.13 · Microsoft Store 传输恢复与诊断
 
-    - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
-    - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
-    - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
-    - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
-    - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
-    - Rewrite public development and status guides, remove superseded notes, and harden local build, credential, checksum and packaging validation. Native Windows/macOS tests now gate release packaging.
-    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata is 0.5.9. SQLite read/write schema 23, automatic upgrades from 0–22, and all supported encrypted-file, manifest, credential, transfer and recovery codecs are unchanged.
+    - 恢复默认 Store HTTP 请求路径。`.GetNewClosure()`` 会导致模块私有的传输函数无法解析，因此工作流在发送令牌请求前就失败了。
+    - 为 Store API 请求准备、发送和读取响应阶段的失败添加脱敏传输诊断。错误会显示阶段、标准化类别（DNS、套接字、TLS、超时或其他）、允许列表中的异常类型以及 HRESULT。
+    - 错误消息不包含原始异常文本、凭据、请求正文、访问令牌、SAS URL 或上传 URL。本次更改未进行真实 Store 提交。
+    - 应用元数据为 0.5.13。应用运行行为、持久化架构和加密格式均未更改。
+
+    ## 0.5.12 · 跨平台发布验证
+
+    - 改进 Windows Store 包的跨平台发布验证。
+
+    ## 0.5.11 · 并行发布检查与 Microsoft Store API 提交
+
+    - 轻量级版本与配置验证后，质量检查、Linux/Windows/macOS 测试和三个平台的打包任务会并行运行。Store 提交等待质量检查、各操作系统测试以及经过验证的 Windows MSIX 完成。GitHub Release 组装等待所有平台包和 Store 提交成功。
+    - 后续 MSIX 更新通过 Microsoft 的传统 Store Submission API 提交。首次提交仍需手动完成，认证和发布由 Microsoft 控制。
+    - 添加确定性的模拟 HTTP 和工作流依赖关系回归测试。未调用真实 Store API。应用元数据为 0.5.11；运行时行为、持久化架构和加密格式均未更改。
+
+    ## 0.5.10 · 提升频道同步与加密下载的可靠性
+
+    - 频道目录同步会对暂时性的网络、服务器和冲突错误进行有界退避重试，并遵从 Telegram 提供的 FloodWait 等待期限。即使某个频道正在同步，目录刷新和取消操作仍会针对目录请求。
+    - 加密下载会从当前分块的起点重试不完整的远程数据流，最多进行两次有界重试。完整性错误不会重试；不完整的分块不会生成收据；只有整个文件通过验证后，最终文件才会发布。
+    - Transfers 检查器现在会通过图表、时间线和有界分块图显示实测下载活动、重试等待时间和各分块状态。超过 4,096 个分块时，会说明图中省略了后续分块。
+    - 发布 CI 会在提交到 Microsoft Store 前验证 Windows MSIX 的校验和，并在组装 GitHub Release 资产前验证下载的全部平台文件及其校验和。
+    - 应用元数据为 0.5.10。SQLite 架构 23、Vault 恢复记录和加密文件格式均未更改。
+
+    ## 0.5.9 · Remove Hindi interface language
+
+    - Hindi is no longer an available interface language. The Windows Store package declares the nine remaining supported interface languages.
+    - Application metadata is 0.5.9. Persistent schemas and encrypted formats are unchanged.
 
     ## 0.5.8 · Authenticated channel key proof
 
@@ -1387,6 +1407,9 @@ channel-sync-empty = 本地尚无文件缓存，后台同步会更新此列表�
 channel-sync-seeding = 正在准备首次本地缓存
 channel-sync-history-loading = 正在接收请求的更早历史
 channel-sync-details-title = 频道同步
+global-sync-cancel-directory = 取消频道列表同步
+global-sync-cancel-channel = 取消 { $source } 的同步（{ $chat_id }）
+global-sync-cancel-pending-channel-retries = 取消所有待处理的频道重试（{ $count }）
 channel-sync-rate-limited = 等待 Telegram 限流结束
 
 startup-title = 正在打开本地文件库
@@ -1513,6 +1536,27 @@ vault-transfer-error-permission = 此加密传输所需的访问被拒绝。请�
 vault-transfer-error-invalid-request = 加密传输请求或文件包无效。
 vault-transfer-error-conflict = 加密传输与当前账号、存储频道或本地状态冲突。
 vault-transfer-error-source-changed = 源文件或加密内容发生变化，或未通过完整性校验。
+
+transfer-download-activity-elapsed = { $phase } · 已用时 { $elapsed }
+transfer-download-activity-bytes = { $phase } · { $done } / { $total } · 已用时 { $elapsed }
+transfer-download-activity-container-bytes = { $phase } · 当前加密容器：{ $done } / { $total } · 已用时 { $elapsed }
+transfer-download-waiting-retry = 正在等待重试下载
+transfer-download-verifying = 正在验证下载内容
+transfer-recovery-download-guidance = 下载在验证完成前停止。重试即可继续。完整性验证成功前，部分文件会保持私有状态。
+transfer-recovery-download-blocked-guidance = 此下载在当前状态下无法继续。请确认可以访问加密的 Vault 内容和保存位置。如果内容不可用，请从其他副本恢复。内容可用后，请从 Vault 文件列表开始新的下载。
+transfer-recovery-integrity-guidance = 下载的加密内容未通过完整性验证。尚未发布最终文件。请从 Vault 文件列表开始新的下载。如果再次出现相同的失败，保存的加密内容可能已损坏。
+vault-transfer-error-download-integrity = 下载的加密内容已更改或未通过完整性验证。尚未发布最终文件。请从 Vault 文件列表开始新的下载。如果再次出现相同的失败，请从其他副本恢复或联系支持人员。
+download-pipeline-title = 下载流程
+download-chart-title = 下载速率随时间变化
+download-chart-sample = { $time } · { $speed } · 间隔 { $interval }
+download-chart-explanation = 每秒接收的加密容器数据量。空白表示该时段没有测量样本。
+download-part-map-title = 已下载容器
+download-part-map-legend = 每个单元格表示一个或多个容器。蓝色表示正在接收，琥珀色表示等待重试，绿色表示已验证，灰色表示排队中。
+download-part-queued = 排队中
+download-part-active = 正在接收
+download-part-waiting = 等待重试
+download-part-confirmed = 已验证
+transfer-part-map-truncated = 此受限地图显示 { $total } 个容器中的 { $shown } 个；大型传输最多显示 4,096 项。
 detail-failure-last-phase = 最后记录的阶段
 
 # Bound channel resilience
@@ -1664,6 +1708,7 @@ speed-limits-close = 关闭
 global-sync-connecting = 等待账号连接
 global-sync-discovering = 正在更新频道列表
 global-sync-account = 账号
+global-sync-channel-id = Telegram 频道 { $chat_id }
 
 global-sync-library = 正在更新文件库
 global-sync-library-failed = 文件库更新需要处理
@@ -1756,6 +1801,9 @@ transfer-upload-upgrading = 正在使用新的加密标识升级上传格式
 transfer-upload-sealing = 验证加密容器
 upload-pipeline-title = 上传活动
 upload-pipeline-queue = 缓冲队列：{ $queued } · 活跃 part：{ $active } · 距上次活动：{ $idle } · 重试等待：{ $wait }
+download-pipeline-queue = 剩余容器：{ $queued } · 活跃容器：{ $active } · 距上次活动：{ $idle } · 重试等待：{ $wait }
+download-pipeline-transport = Telegram 流分块：接收中 { $active } · 等待中 { $waiting } · 下次重试：{ $wait }
+download-chart-empty = 正在等待从 Telegram 接收加密字节。下载速率未知。
 upload-chart-title = 已确认数据 / 秒
 upload-chart-empty = 等待实际确认回执，速度尚未知。
 upload-chart-sample = { $time } · { $interval } 内为 { $speed }
@@ -1770,6 +1818,7 @@ upload-part-waiting = 等待重试
 upload-part-confirmed = 已确认
 upload-timeline-title = 活动时间线
 upload-timeline-event = { $time } · { $phase } · Part { $part } · 尝试 { $attempt } · 等待 { $wait }
+upload-timeline-terminal-event = { $time } · { $outcome }
 upload-history-omitted = 已省略更早历史：{ $events } 个事件，{ $samples } 个样本。
 upload-timeline-recent = 显示最近 12 个事件；回放可查看保留的较早事件。
 
@@ -1881,6 +1930,7 @@ detail-server-status = Telegram 服务端状态
 transfer-persistence-parallel = { $activity } · 正在保存恢复信息
 transfer-eta-compact = 剩余 { $eta }
 transfer-rate-basis = 已确认的应用数据 · 最近 3 秒窗口 · 每秒更新
+transfer-download-rate-basis = 实际接收的加密容器字节/秒 · 应用等效进度不代表整个文件已验证 · 最近 3 秒窗口 · 每秒更新
 transfer-rate-awaiting = 等待确认 · 上次确认在 { $elapsed } 前
 
 vault-health-pending-upload = 尚未上传完成
@@ -1892,9 +1942,11 @@ transfer-download-receiving-blocks = 正在接收并解密数据块
 transfer-rate-awaiting-first = 等待首次确认
 transfer-bytes-heading = 已处理 / 总大小
 transfer-eta-heading = 预计剩余
+download-part-group = 容器 { $first }–{ $last } · 已验证 { $confirmed } · { $state }
 upload-part-group = 块 { $first }–{ $last } · 已确认 { $confirmed } · { $state }
 storage-channel-pending-explanation = 此上传尚未完成。恢复对应密钥并选择相同的原文件后可继续；仅复用已发布且验证通过的容器。
 upload-part-map-grouping = 共 { $count } 个块 · 每格最多 { $size } 个。悬停可查看具体范围。
+download-part-map-grouping = 共 { $count } 个容器 · 每格最多 { $size } 个。悬停可查看准确范围。
 
 ## Windows setup wizard
 installer-preparing = 正在安装 TeleArk。安装窗口会显示进度，您可以安全地停止安装。
@@ -1984,10 +2036,29 @@ managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
 
-storage-download-requests = { $count } 个下载请求正在进行 · 最早的请求已持续 { $seconds } 秒。前往“传输”查看进度、暂停或停止。
-storage-download-capacity = 下载请求队列已满。请等待一个请求完成后再添加文件。
-storage-download-request-active = 已请求下载；请前往“传输”查看进度。
+global-sync-automatic = 同步自动进行。连接失败后会在后台自动重试。
 
-transfer-controller-native-throughput = { $parts } 分片/秒 · 有效吞吐量 { $speed }
-transfer-controller-native-buffers = 预计网络缓冲容量 { $network }
-transfer-controller-native-writer = 最近采样的写入大小 { $size }
+channel-sync-timing = 当前阶段：{ $duration } · 上次活动：{ $activity } 前
+channel-sync-next-at = 将在 { $seconds } 秒后自动重试。
+
+# Managed inventory and batch restore
+channel-sync-checking-pts = Checking pts status
+channel-sync-polling-differences = Polling differences from Telegram
+managed-files-background = { $phase } · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-files-applying = Updating the file list
+managed-files-ready = Files up to date
+managed-file-select = Select { $name } for download
+managed-download-matching-action = Download matching
+managed-download-matching-help = Restore downloadable files in the displayed inventory that match the search, date and file-type filters. Files outside this inventory are not included. Selections are kept when filters change.
+managed-download-select-all-help = Select all downloadable files matching the current filters.
+managed-download-stop = Stop remaining
+managed-download-queued = Restore queued: { $total } files · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-restoring = Restoring files: { $completed } of { $total } complete · { $failed } failed · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-stopping = Stopping after the current file finishes safely · { $completed } of { $total } complete · Last activity: { $idle } s ago
+managed-download-completed = Restore complete: { $completed } files
+managed-download-cancelled = Restore stopped: { $completed } complete · { $failed } failed · { $skipped } not restored
+managed-download-failed = Restore finished with errors: { $completed } complete · { $failed } failed · { $skipped } not restored. Retry failed files or review individual downloads in Transfers.
+managed-download-history-truncated = { $count } earlier activity events omitted
+managed-download-event = { $time } · { $phase } { $error }
+
+managed-download-retry = Retry failed files

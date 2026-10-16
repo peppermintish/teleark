@@ -180,6 +180,7 @@ mod tests {
     fn queue_feedback_precedes_work_and_stale_terminal_events_do_not_replace_newer_activity() {
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
+            pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,
             deltas: Mutex::new(feed::DeltaJournal::default()),
             sources: Mutex::new((0, Arc::new(Vec::new()))),

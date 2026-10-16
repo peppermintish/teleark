@@ -84,6 +84,9 @@ impl VaultOwner {
         if row.state == VaultTransferState::Running {
             row.state = VaultTransferState::Completed;
         }
+        if let Some(outcome) = super::transfer_terminal_outcome(row.state) {
+            super::append_terminal_activity(&mut row, outcome);
+        }
         self.persist_upload(&row)?;
         self.update_transfer(id, |current| *current = row);
         Ok(())
@@ -442,6 +445,8 @@ mod tests {
             transfers: Arc::new(TransferSnapshots::new(Vec::new())?),
             active_upload_batch: Arc::new(Mutex::new(None)),
             upload_controls: UploadControls::default(),
+            #[cfg(test)]
+            test_container_part_limit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
     #[test]

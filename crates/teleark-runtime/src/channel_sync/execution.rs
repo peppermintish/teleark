@@ -15,6 +15,7 @@ pub(super) struct Completion {
 }
 
 pub(super) struct Executions {
+    managed_id: i64,
     joins: BTreeMap<i64, JoinHandle<()>>,
     sender: mpsc::SyncSender<Completion>,
     receiver: mpsc::Receiver<Completion>,
@@ -22,8 +23,9 @@ pub(super) struct Executions {
 
 impl Executions {
     pub fn new() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(5);
+        let (sender, receiver) = mpsc::sync_channel(6);
         Self {
+            managed_id: 0,
             joins: BTreeMap::new(),
             sender,
             receiver,
@@ -31,11 +33,22 @@ impl Executions {
     }
 
     pub fn channel_slot_available(&self) -> bool {
-        self.joins.keys().filter(|id| **id != 0).count() < 4
+        self.joins
+            .keys()
+            .filter(|id| **id != 0 && **id != self.managed_id)
+            .count()
+            < 4
+    }
+
+    pub fn reserve_managed(&mut self, id: i64) {
+        self.managed_id = id;
     }
 
     pub fn available(&self, id: i64) -> bool {
-        !self.joins.contains_key(&id) && (id == 0 || self.channel_slot_available())
+        !self.joins.contains_key(&id)
+            && (id == 0
+                || (self.joins.keys().filter(|id| **id != 0).count() < 5
+                    && (id == self.managed_id || self.channel_slot_available())))
     }
 
     pub fn any(&self) -> bool {
@@ -91,6 +104,49 @@ impl Drop for Executions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_channel_keeps_a_reserved_lane_when_all_normal_lanes_block() {
+        let mut work = Executions::new();
+        work.reserve_managed(99);
+        let mut releases = Vec::new();
+        for id in [0, 2, 3, 4, 5] {
+            let (release, blocked) = mpsc::channel();
+            releases.push(release);
+            work.spawn(id, 1, move || {
+                blocked.recv().expect("release normal lane");
+                Outcome::Sources(Ok(vec![]))
+            })
+            .expect("normal lane");
+        }
+        assert!(!work.available(6));
+        assert!(work.available(99));
+        work.spawn(99, 1, || Outcome::Sources(Ok(vec![])))
+            .expect("reserved managed lane");
+        work.reserve_managed(100);
+        assert!(
+            !work.available(100),
+            "replacing a managed binding cannot exceed five retained channel calls"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let completed = loop {
+            if let Some(completed) = work.take() {
+                break completed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "managed inventory must not wait for normal lanes"
+            );
+            thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+        };
+        assert_eq!(completed.id, 99);
+        assert!(
+            work.available(100),
+            "replacement uses the retired managed slot"
+        );
+        for release in releases {
+            release.send(()).expect("release");
+        }
+    }
     #[test]
     fn blocked_channel_and_discovery_do_not_stop_another_channel() {
         let mut work = Executions::new();

@@ -761,7 +761,7 @@ storage-channel-teleark-files = ファイル
 storage-channel-tabs-description = Telegram の生オブジェクトと復元された論理ファイル
 storage-channel-managed-title = TeleArk 管理ファイル
 storage-channel-managed-runtime-note = TeleArk はここでパッケージのマニフェストとパートを識別します。自動復号と復元はデスクトップの Vault 所有サービス接続後に利用可能になります。このアルファ版は、ロック中のパッケージを復元済みとは表示しません。
-storage-channel-managed-empty = 認証済みファイルはまだありません。最初のファイルをアップロードするか、更新してチャンネルを確認してください。
+storage-channel-managed-empty = 認証済みファイルはまだありません。最初のファイルをアップロードしてください。新しいファイルは自動で表示されます。
 storage-channel-managed-name-locked = 暗号化された論理ファイル
 storage-channel-managed-detail-title = ファイル詳細
 storage-channel-managed-detail-empty = 管理対象ファイルを選択してパッケージを確認してください。
@@ -969,7 +969,7 @@ account-restoring = Telegram セッションを復元中…
 
 account-change-method = 別の方法でログイン
 
-account-private-note = Telegram セッションはこの Mac に保存されます。
+account-private-note = Telegram セッションはこのデバイスに保存されます。
 
 account-switch-description = 切り替えると Telegram からログアウトし、ダウンロードを一時停止します。ファイルと進行状況は保持されます。
 
@@ -1120,15 +1120,35 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
-    ## 0.5.9 · Desktop interaction fixes
+    ## 0.5.13 · Microsoft Store 通信経路の修正と診断
 
-    - Support Enter in visible authentication/API forms and Enter/Space on settings controls. Keep pending drafts and text composition safe. Escape cancels account/key-storage confirmations, and dialogs retain navigation focus.
-    - Preserve new file selections when older downloads finish; clear unrelated details when moving between Storage modes and Channels. Distinguish no search matches from empty storage, and keep Upload reachable during key preparation.
-    - Reveal new tasks after Download again and retain transfer-action feedback with collapsed controls. Vault bulk actions use a bounded queue with visible progress, pause/stop takeover, cancellation and account/shutdown fences.
-    - Allow independent managed-file download requests with bounded capacity, duplicate protection and persistent progress navigation. Keep proxy failures visible after navigation.
-    - Escape closes details before leaving fullscreen. Account and proxy transitions wait for retained transfer commands, including after a bulk queue is cancelled. Remove the redundant upload-options disclosure and clarify file counts.
-    - Rewrite public development and status guides, remove superseded notes, and harden local build, credential, checksum and packaging validation. Native Windows/macOS tests now gate release packaging.
-    - Native download inspectors omit unsupported encryption and CPU statistics and distinguish measured values from estimated buffer capacity. Synchronize About release notes and correct installer help links. Application metadata is 0.5.9. SQLite read/write schema 23, automatic upgrades from 0–22, and all supported encrypted-file, manifest, credential, transfer and recovery codecs are unchanged.
+    - 既定のStore HTTPリクエスト経路を復旧します。`.GetNewClosure()` によってモジュール内の非公開HTTP関数を解決できず、ワークフローはトークン要求を送信する前に失敗していました。
+    - Store API のリクエスト準備、送信、応答読み取りで失敗した場合に、秘密情報を含まない通信診断を追加します。エラーには、処理段階、分類済みの DNS/ソケット/TLS/タイムアウト/その他の種別、許可リストに基づく例外型、HRESULT が表示されます。
+    - 例外の生メッセージ、認証情報、リクエスト本文、アクセストークン、SAS URL、アップロード URL はエラーメッセージに含めません。この変更で実際のStore提出は行っていません。
+    - アプリケーションのメタデータは0.5.13です。アプリの実行動作、永続スキーマ、暗号化形式に変更はありません。
+
+    ## 0.5.12 · クロスプラットフォームのリリース検証
+
+    - Windows Store パッケージのクロスプラットフォーム リリース検証を改善しました。
+
+    ## 0.5.11 · リリース検証の並列化とMicrosoft Store APIへの提出
+
+    - 軽量なリリースとバージョンの検証後、品質チェック、Linux/Windows/macOSのテスト、3つのパッケージ作成を並行して実行します。Storeへの提出は品質チェック、各OSのテスト、検証済みWindows MSIXの完了後に行われます。GitHub Releaseの組み立ては、すべてのパッケージとStore提出の成功を待ちます。
+    - Microsoftの従来型Store Submission APIを使い、以後のMSIX更新を提出します。最初の提出は手動で行い、認定と公開はMicrosoftが管理します。
+    - モックHTTPとワークフロー依存関係の決定的な回帰テストを追加しました。実際のStore API呼び出しは行っていません。アプリのメタデータは0.5.11です。実行時の動作、永続スキーマ、暗号化形式に変更はありません。
+
+    ## 0.5.10 · チャネル同期と暗号化ダウンロードの信頼性向上
+
+    - チャネルディレクトリ同期では、一時的なネットワーク障害、サーバー障害、競合を、待機時間に上限を設けて再試行し、Telegram が指定する FloodWait の待機時間に従います。個別チャネルの同期中でも、ディレクトリの更新とキャンセルはディレクトリ要求を対象にします。
+    - 暗号化ダウンロードでは、途中で切れたリモートパートのストリームを、現在のパートの先頭から最大2回再試行します。整合性エラーは再試行せず、不完全なパートには受領記録を作成しません。ファイル全体の検証に成功するまで、最終ファイルは公開されません。
+    - Transfers インスペクターに、実測ダウンロードの動作、再試行の待ち時間、各パートの状態を、チャート、タイムライン、上限付きパートマップで表示します。4,096パートを超えるマップは、省略された内容を明示します。
+    - リリースCIは、Storeへの提出前にWindows MSIXのチェックサムを検証し、GitHubリリースを組み立てる前に、ダウンロード済みのプラットフォーム成果物とそのチェックサムを検証します。
+    - アプリケーションのメタデータは0.5.10です。SQLiteスキーマ23、Vaultの復旧記録、暗号化ファイル形式に変更はありません。
+
+    ## 0.5.9 · Remove Hindi interface language
+
+    - Hindi is no longer an available interface language. The Windows Store package declares the nine remaining supported interface languages.
+    - Application metadata is 0.5.9. Persistent schemas and encrypted formats are unchanged.
 
     ## 0.5.8 · Authenticated channel key proof
 
@@ -1387,6 +1407,9 @@ channel-sync-empty = ローカルにファイルのキャッシュがありま�
 channel-sync-seeding = 初回のローカルキャッシュを準備中
 channel-sync-history-loading = リクエストした過去の履歴を受信中
 channel-sync-details-title = チャンネルの同期
+global-sync-cancel-directory = チャンネル一覧の同期をキャンセル
+global-sync-cancel-channel = { $source } の同期をキャンセル（{ $chat_id }）
+global-sync-cancel-pending-channel-retries = 保留中のすべてのチャンネル再試行をキャンセル（{ $count }）
 channel-sync-rate-limited = Telegram のレート制限を待機中
 
 startup-title = ローカルライブラリを開いています
@@ -1513,6 +1536,27 @@ vault-transfer-error-permission = 暗号化転送に必要なアクセスが拒�
 vault-transfer-error-invalid-request = 暗号化転送リクエストまたはパッケージが無効です。
 vault-transfer-error-conflict = 暗号化転送が現在のアカウント、ストレージチャンネル、またはローカル状態と競合しています。
 vault-transfer-error-source-changed = 元ファイルまたは暗号化された内容が変更されたか、整合性検証に失敗しました。
+
+transfer-download-activity-elapsed = { $phase } · 経過 { $elapsed }
+transfer-download-activity-bytes = { $phase } · { $done } / { $total } · 経過 { $elapsed }
+transfer-download-activity-container-bytes = { $phase } · 現在の暗号化コンテナ：{ $done } / { $total } · 経過 { $elapsed }
+transfer-download-waiting-retry = ダウンロードの再試行を待機中
+transfer-download-verifying = ダウンロードした内容を検証中
+transfer-recovery-download-guidance = 検証前にダウンロードが停止しました。再試行すると続きから再開できます。整合性検証が成功するまで部分ファイルは非公開です。
+transfer-recovery-download-blocked-guidance = このダウンロードは現在の状態では続行できません。暗号化された Vault の内容と保存先にアクセスできることを確認してください。内容が利用できない場合は別のコピーから復元してください。内容が利用可能になったら Vault のファイル一覧から新しいダウンロードを開始してください。
+transfer-recovery-integrity-guidance = ダウンロードした暗号化データの整合性を確認できませんでした。最終ファイルは公開されていません。Vault のファイル一覧から新しいダウンロードを開始してください。同じ失敗が再び発生する場合、保存された暗号化データが破損している可能性があります。
+vault-transfer-error-download-integrity = ダウンロードした暗号化データが変更されたか、整合性検証に失敗しました。最終ファイルは公開されていません。Vault のファイル一覧から新しいダウンロードを開始してください。同じ失敗が再び発生する場合は、別のコピーから復元するかサポートにお問い合わせください。
+download-pipeline-title = ダウンロード処理
+download-chart-title = 時間ごとのダウンロード速度
+download-chart-sample = { $time } · { $speed } · 計測間隔 { $interval }
+download-chart-explanation = 1 秒あたりに受信した暗号化コンテナのデータ量です。空白は計測サンプルがない時間を示します。
+download-part-map-title = ダウンロードしたコンテナ
+download-part-map-legend = 各セルは 1 個以上のコンテナを示します。青は受信中、琥珀色は再試行待ち、緑は検証済み、灰色はキュー内です。
+download-part-queued = キュー内
+download-part-active = 受信中
+download-part-waiting = 再試行待ち
+download-part-confirmed = 検証済み
+transfer-part-map-truncated = このマップはコンテナ { $total } 個中 { $shown } 個を表示しています。大きな転送では 4,096 件まで表示します。
 detail-failure-last-phase = 最後に記録された段階
 
 # Bound channel resilience
@@ -1664,6 +1708,7 @@ speed-limits-close = 閉じる
 global-sync-connecting = アカウントの接続を待機中
 global-sync-discovering = チャンネル一覧を更新中
 global-sync-account = アカウント
+global-sync-channel-id = Telegram チャンネル { $chat_id }
 
 global-sync-library = ファイルライブラリを更新中
 global-sync-library-failed = ファイルライブラリの更新を確認してください
@@ -1756,6 +1801,9 @@ transfer-upload-upgrading = 新しい暗号化識別子でアップロード形�
 transfer-upload-sealing = 暗号化コンテナを検証中
 upload-pipeline-title = アップロード状況
 upload-pipeline-queue = 待機バッファ：{ $queued } · 実行中 part：{ $active } · 最終更新：{ $idle } 前 · 再試行待ち：{ $wait }
+download-pipeline-queue = 残りのコンテナ：{ $queued } · アクティブなコンテナ：{ $active } · 最終更新：{ $idle } 前 · 再試行待ち：{ $wait }
+download-pipeline-transport = Telegram ストリームチャンク：受信中 { $active } · 待機中 { $waiting } · 次の再試行まで：{ $wait }
+download-chart-empty = Telegram からの暗号化バイト受信を待っています。ダウンロード速度は不明です。
 upload-chart-title = 確認済みデータ / 秒
 upload-chart-empty = 確認応答を待っています。速度はまだ不明です。
 upload-chart-sample = { $time } · { $interval } 間で { $speed }
@@ -1770,6 +1818,7 @@ upload-part-waiting = 再試行待ち
 upload-part-confirmed = 確認済み
 upload-timeline-title = アクティビティ履歴
 upload-timeline-event = { $time } · { $phase } · Part { $part } · 試行 { $attempt } · 待機 { $wait }
+upload-timeline-terminal-event = { $time } · { $outcome }
 upload-history-omitted = 以前の履歴を省略：イベント { $events } 件、サンプル { $samples } 件。
 upload-timeline-recent = 直近 12 件を表示。リプレイで保持されている以前のイベントを確認できます。
 
@@ -1881,6 +1930,7 @@ detail-server-status = Telegram サーバー応答状態
 transfer-persistence-parallel = { $activity } · 復旧情報を保存中
 transfer-eta-compact = 残り { $eta }
 transfer-rate-basis = 確認済みアプリデータ · 直近 3 秒 · 1 秒ごとに更新
+transfer-download-rate-basis = 暗号化コンテナで受信した実測バイト/秒 · アプリケーション換算の進捗はファイル全体の検証を意味しません · 直近 3 秒 · 1 秒ごとに更新
 transfer-rate-awaiting = 確認待ち · 最終確認は { $elapsed } 前
 
 vault-health-pending-upload = アップロード未完了
@@ -1892,9 +1942,11 @@ transfer-download-receiving-blocks = ブロックを受信・復号中
 transfer-rate-awaiting-first = 最初の確認を待機中
 transfer-bytes-heading = 処理済み / 合計
 transfer-eta-heading = 残り時間
+download-part-group = コンテナ { $first }–{ $last } · 検証済み { $confirmed } · { $state }
 upload-part-group = ブロック { $first }–{ $last } · 確認済み { $confirmed } · { $state }
 storage-channel-pending-explanation = アップロードは未完了です。復旧キーを復元し、同じ元ファイルを選んで続行できます。公開済みで検証できたコンテナのみ再利用します。
 upload-part-map-grouping = { $count } ブロック · 1 セル最大 { $size } 個。範囲はホバーで確認できます。
+download-part-map-grouping = { $count } 個のコンテナ · 1 セル最大 { $size } 個。正確な範囲はホバーで確認できます。
 
 ## Windows setup wizard
 installer-preparing = TeleArk をインストールしています。インストール画面で進行状況を確認し、安全に停止できます。
@@ -1984,10 +2036,29 @@ managed-key-checking = Checking stored keys against the TeleArk channel…
 
 managed-key-phase-checking-channel = Authenticating managed-channel files
 
-storage-download-requests = { $count } 件のダウンロードリクエストが実行中 · 最も古いリクエストは { $seconds } 秒経過。「転送」で進行状況を確認し、一時停止または停止できます。
-storage-download-capacity = ダウンロードリクエストのキューがいっぱいです。リクエストが完了してから別のファイルを追加してください。
-storage-download-request-active = ダウンロードをリクエストしました。「転送」で進行状況を確認できます。
+global-sync-automatic = 同期は自動で行われます。接続に失敗すると、バックグラウンドで再試行します。
 
-transfer-controller-native-throughput = { $parts } パート/秒 · 有効転送速度 { $speed }
-transfer-controller-native-buffers = 推定ネットワークバッファ容量 { $network }
-transfer-controller-native-writer = 最後に測定した書き込みサイズ { $size }
+channel-sync-timing = 現在の段階：{ $duration } · 最後のアクティビティ：{ $activity } 前
+channel-sync-next-at = { $seconds } 秒後に自動で再試行します。
+
+# Managed inventory and batch restore
+channel-sync-checking-pts = Checking pts status
+channel-sync-polling-differences = Polling differences from Telegram
+managed-files-background = { $phase } · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-files-applying = Updating the file list
+managed-files-ready = Files up to date
+managed-file-select = Select { $name } for download
+managed-download-matching-action = Download matching
+managed-download-matching-help = Restore downloadable files in the displayed inventory that match the search, date and file-type filters. Files outside this inventory are not included. Selections are kept when filters change.
+managed-download-select-all-help = Select all downloadable files matching the current filters.
+managed-download-stop = Stop remaining
+managed-download-queued = Restore queued: { $total } files · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-restoring = Restoring files: { $completed } of { $total } complete · { $failed } failed · Phase: { $seconds } s · Last activity: { $idle } s ago
+managed-download-stopping = Stopping after the current file finishes safely · { $completed } of { $total } complete · Last activity: { $idle } s ago
+managed-download-completed = Restore complete: { $completed } files
+managed-download-cancelled = Restore stopped: { $completed } complete · { $failed } failed · { $skipped } not restored
+managed-download-failed = Restore finished with errors: { $completed } complete · { $failed } failed · { $skipped } not restored. Retry failed files or review individual downloads in Transfers.
+managed-download-history-truncated = { $count } earlier activity events omitted
+managed-download-event = { $time } · { $phase } { $error }
+
+managed-download-retry = Retry failed files
