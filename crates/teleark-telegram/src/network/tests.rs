@@ -470,13 +470,18 @@ async fn production_pool_routes_all_datacenters_and_reconnections_through_gatewa
             .await
             .expect("controlled proxy fixture");
     }
-    let pool = crate::sender_pool(session, 12345, gateway.proxy_url);
+    let pool = crate::sender_pool(
+        session,
+        12345,
+        gateway.proxy_url,
+        Box::new(grammers_client::sender::NoRetries),
+    );
     let task = tokio::spawn(pool.runner.run());
     for _ in 0..2 {
         for dc in 1..=5 {
             // The real pool must attempt auth/bootstrap over the same gateway
             // before it can service any API, media or sync RPC in this DC.
-            assert!(pool.handle.invoke_in_dc(dc, vec![0; 4]).await.is_err());
+            assert!(pool.handle.raw_invoke_in_dc(dc, vec![0; 4]).await.is_err());
             pool.handle.disconnect_from_dc(dc);
         }
     }
@@ -545,9 +550,14 @@ async fn real_plaintext_and_authenticated_mtproto_bootstrap_bytes_reach_only_pro
             .set_dc_option(&option)
             .await
             .expect("controlled proxy fixture");
-        let pool = crate::sender_pool(session, 12345, gateway.proxy_url);
+        let pool = crate::sender_pool(
+        session,
+        12345,
+        gateway.proxy_url,
+        Box::new(grammers_client::sender::NoRetries),
+    );
         let task = tokio::spawn(pool.runner.run());
-        assert!(pool.handle.invoke_in_dc(dc, vec![0; 4]).await.is_err());
+        assert!(pool.handle.raw_invoke_in_dc(dc, vec![0; 4]).await.is_err());
         let packet = bytes_seen.await.expect("controlled proxy fixture");
         // seqno occupies four bytes; the next eight are MTProto auth_key_id.
         assert_eq!(packet[4..12] == [0; 8], !authenticated);

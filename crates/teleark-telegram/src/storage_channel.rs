@@ -113,6 +113,7 @@ pub(super) fn is_private_storage_candidate(channel: &tl::types::Channel) -> bool
         && !channel.left
         && !channel.min
         && !channel.gigagroup
+        && channel.linked_community_id.is_none()
         && channel.username.is_none()
         && channel
             .usernames
@@ -507,6 +508,7 @@ mod tests {
             bot_verification_icon: None,
             send_paid_messages_stars: None,
             linked_monoforum_id: None,
+            linked_community_id: None,
         }
     }
 
@@ -610,6 +612,7 @@ mod tests {
             |c: &mut tl::types::Channel| c.broadcast = false,
             |c: &mut tl::types::Channel| c.megagroup = true,
             |c: &mut tl::types::Channel| c.gigagroup = true,
+            |c: &mut tl::types::Channel| c.linked_community_id = Some(7),
             |c: &mut tl::types::Channel| c.left = true,
             |c: &mut tl::types::Channel| c.min = true,
             |c: &mut tl::types::Channel| c.username = Some("public_channel".into()),
@@ -618,6 +621,8 @@ mod tests {
                     tl::types::Username {
                         editable: false,
                         active: true,
+                        deletable: false,
+                        expired: false,
                         username: "public_alias".into(),
                     }
                     .into(),

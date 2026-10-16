@@ -7,11 +7,16 @@ use std::{
 
 use grammers_session::{
     BoxFuture, Session, SessionData,
-    types::{ChannelState, DcOption, PeerId, PeerInfo, UpdateState, UpdatesState},
+    types::{ChannelKind, ChannelState, DcOption, PeerId, PeerInfo, UpdateState, UpdatesState},
 };
 use serde::{Deserialize, Serialize};
 
-const SESSION_FORMAT_VERSION: u32 = 1;
+/// Peer kinds known to grammers 0.10 (TeleArk 0.5.16 and earlier).
+const SESSION_FORMAT_V1: u32 = 1;
+/// Version 1 plus `ChannelKind::Community` (Telegram layer 230, grammers 0.11).
+/// Written only while such a peer is cached, so every other file stays readable
+/// by version-1 readers; existing version-1 bytes keep their meaning.
+const SESSION_FORMAT_V2: u32 = 2;
 const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -55,10 +60,27 @@ struct EncodedSession {
     updates_state: UpdatesState,
 }
 
+fn encoded_version<'a>(peers: impl IntoIterator<Item = &'a PeerInfo>) -> u32 {
+    let community = peers.into_iter().any(|peer| {
+        matches!(
+            peer,
+            PeerInfo::Channel {
+                kind: Some(ChannelKind::Community),
+                ..
+            }
+        )
+    });
+    if community {
+        SESSION_FORMAT_V2
+    } else {
+        SESSION_FORMAT_V1
+    }
+}
+
 impl From<SessionData> for EncodedSession {
     fn from(value: SessionData) -> Self {
         Self {
-            version: SESSION_FORMAT_VERSION,
+            version: encoded_version(value.peer_infos.values()),
             home_dc: value.home_dc,
             dc_options: value.dc_options.into_values().collect(),
             peer_infos: value.peer_infos.into_values().collect(),
@@ -71,7 +93,7 @@ impl TryFrom<EncodedSession> for SessionData {
     type Error = FileSessionError;
 
     fn try_from(value: EncodedSession) -> Result<Self, Self::Error> {
-        if value.version != SESSION_FORMAT_VERSION {
+        if !matches!(value.version, SESSION_FORMAT_V1 | SESSION_FORMAT_V2) {
             return Err(FileSessionError::Format);
         }
         Ok(Self {
@@ -130,7 +152,7 @@ impl FileSession {
     fn persist(&self) -> Result<(), FileSessionError> {
         let data = self.data()?;
         let encoded = EncodedSession {
-            version: SESSION_FORMAT_VERSION,
+            version: encoded_version(data.peer_infos.values()),
             home_dc: data.home_dc,
             dc_options: data.dc_options.values().cloned().collect(),
             peer_infos: data.peer_infos.values().cloned().collect(),
@@ -185,16 +207,22 @@ impl Session for FileSession {
         Box::pin(async move { Ok(self.data()?.peer_infos.get(&peer).cloned()) })
     }
 
-    fn cache_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, Result<(), Self::Error>> {
-        let peer = peer.clone();
+    fn cache_peer(&self, peer: PeerInfo) -> BoxFuture<'_, Result<(), Self::Error>> {
+        self.cache_peers(vec![peer])
+    }
+
+    /// One atomic file replacement per batch instead of one per peer.
+    fn cache_peers(&self, peers: Vec<PeerInfo>) -> BoxFuture<'_, Result<(), Self::Error>> {
         Box::pin(async move {
             self.mutate(|data| {
-                data.peer_infos
-                    .entry(peer.id())
-                    .and_modify(|stored| {
-                        stored.extend_info(&peer);
-                    })
-                    .or_insert(peer);
+                for peer in peers {
+                    data.peer_infos
+                        .entry(peer.id())
+                        .and_modify(|stored| {
+                            stored.extend_info(&peer);
+                        })
+                        .or_insert(peer);
+                }
             })
         })
     }
@@ -238,7 +266,118 @@ fn restrict_permissions(path: &Path) -> Result<(), FileSessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grammers_session::types::PeerAuth;
 
+    /// Synthetic session written by the version-1 codec (TeleArk 0.5.16 shape).
+    const V1_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/telegram-session-v1.json");
+
+    fn stored_version(path: &Path) -> Result<u64, Box<dyn Error>> {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+        value["version"].as_u64().ok_or_else(|| "missing version".into())
+    }
+
+    fn channel_kind(session: &FileSession, id: i64) -> Option<ChannelKind> {
+        session.data().ok()?.peer_infos.values().find_map(|peer| match peer {
+            PeerInfo::Channel { id: found, kind, .. } if *found == id => *kind,
+            _ => None,
+        })
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Box<dyn Error>> {
+        Ok(tokio::runtime::Builder::new_current_thread()
+            .build()?
+            .block_on(future))
+    }
+
+    #[test]
+    fn version_one_fixture_opens_and_stays_readable_by_version_one_readers()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("account.session");
+        fs::write(&path, V1_FIXTURE)?;
+        let session = FileSession::open(&path)?;
+        assert_eq!(session.home_dc_id()?, 4);
+        {
+            let data = session.data()?;
+            assert_eq!(data.peer_infos.len(), 4);
+            assert_eq!(data.dc_options.get(&4).and_then(|dc| dc.auth_key), Some([7; 256]));
+            assert_eq!(data.updates_state.pts, 10);
+            assert_eq!(
+                data.updates_state.channels,
+                vec![ChannelState { id: 3003, pts: 42 }]
+            );
+        }
+        assert_eq!(channel_kind(&session, 3003), Some(ChannelKind::Broadcast));
+        // Opening re-persists; without a Community peer the bytes stay version 1.
+        assert_eq!(stored_version(&path)?, 1);
+        block_on(session.cache_peers(vec![PeerInfo::Channel {
+            id: 3005,
+            auth: None,
+            kind: Some(ChannelKind::Gigagroup),
+        }]))??;
+        assert_eq!(stored_version(&path)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn community_peer_is_written_as_version_two_and_round_trips() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("account.session");
+        let session = FileSession::open(&path)?;
+        assert_eq!(stored_version(&path)?, 1);
+        block_on(session.cache_peer(PeerInfo::Channel {
+            id: 4004,
+            auth: Some(PeerAuth::from_hash(44)),
+            kind: Some(ChannelKind::Community),
+        }))??;
+        assert_eq!(stored_version(&path)?, 2);
+        drop(session);
+        let reopened = FileSession::open(&path)?;
+        assert_eq!(channel_kind(&reopened, 4004), Some(ChannelKind::Community));
+        assert_eq!(stored_version(&path)?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_batch_merges_newer_information_in_one_save() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("account.session");
+        let session = FileSession::open(&path)?;
+        block_on(session.cache_peer(PeerInfo::Channel {
+            id: 5005,
+            auth: Some(PeerAuth::from_hash(1)),
+            kind: None,
+        }))??;
+        // A batch that cannot be saved leaves the previous file untouched.
+        let before = fs::read(&path)?;
+        let temporary = path.with_extension("session.tmp");
+        fs::create_dir(&temporary)?;
+        let batch = vec![
+            PeerInfo::Channel {
+                id: 5005,
+                auth: Some(PeerAuth::from_hash(2)),
+                kind: Some(ChannelKind::Broadcast),
+            },
+            PeerInfo::Chat { id: 6006 },
+        ];
+        assert!(block_on(session.cache_peers(batch.clone()))?.is_err());
+        assert_eq!(fs::read(&path)?, before);
+        fs::remove_dir(&temporary)?;
+        block_on(session.cache_peers(batch))??;
+        drop(session);
+        let reopened = FileSession::open(&path)?;
+        let data = reopened.data()?;
+        assert_eq!(data.peer_infos.len(), 2);
+        assert!(data.peer_infos.values().any(|peer| matches!(
+            peer,
+            PeerInfo::Channel {
+                id: 5005,
+                auth: Some(auth),
+                kind: Some(ChannelKind::Broadcast),
+            } if *auth == PeerAuth::from_hash(2)
+        )));
+        Ok(())
+    }
     #[test]
     fn session_round_trip_and_permissions() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -326,3 +465,4 @@ mod tests {
         Ok(())
     }
 }
+

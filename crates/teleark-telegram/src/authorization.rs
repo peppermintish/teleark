@@ -1,6 +1,6 @@
 //! Event-driven session loss. Connection events and RPC failures request one
 //! home-DC confirmation; silence never causes polling or implies revocation.
-use grammers_client::client::{RetryContext, RetryPolicy};
+use grammers_client::sender::{RetryContext, RetryPolicy};
 use grammers_mtsender::InvocationError;
 use std::{
     ops::ControlFlow,
@@ -242,7 +242,7 @@ mod tests {
             rpc(403, "CHANNEL_PRIVATE"),
             rpc(420, "FLOOD_WAIT"),
             rpc(500, "INTERNAL"),
-            InvocationError::Dropped,
+            InvocationError::Dropped("synthetic"),
             InvocationError::Io(std::io::ErrorKind::ConnectionReset.into()),
             InvocationError::Transport(grammers_mtproto::transport::Error::BadStatus {
                 status: 429,

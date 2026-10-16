@@ -551,6 +551,7 @@ pub struct TelegramConnection {
     upload_flood_gate: Arc<DownloadFloodGate>,
     bandwidth: TransferBandwidth,
     runner: Option<JoinHandle<()>>,
+    sync_runner: Option<JoinHandle<()>>,
     gateway: Option<JoinHandle<()>>,
     update_drain: Option<JoinHandle<()>>,
     channel_updates: ChannelUpdateSignals,
@@ -587,6 +588,9 @@ impl TelegramConnection {
         )
         .await
         .map_err(|_| TelegramError::new(TelegramErrorKind::Network))?;
+        // grammers 0.11 applies retry policy per sender pool, not per client.
+        // The main pool keeps automatic short flood/I-O sleeps; synchronization
+        // gets its own pool without retries so its scheduler reports every wait.
         let SenderPool {
             runner,
             handle,
@@ -595,39 +599,49 @@ impl TelegramConnection {
             Arc::clone(&session),
             config.api_id,
             gateway.proxy_url.clone(),
+            Box::new(authorization::ObservedRetryPolicy {
+                monitor: config.authorization_monitor.clone(),
+                network_generation: config.network_generation,
+                inner: Box::new(grammers_client::sender::AutoSleep::default()),
+            }),
         );
-
-        let sync_client = Client::with_configuration(
-            handle.clone(),
-            grammers_client::client::ClientConfiguration {
-                retry_policy: Box::new(authorization::ObservedRetryPolicy {
-                    monitor: config.authorization_monitor.clone(),
-                    network_generation: config.network_generation,
-                    inner: Box::new(grammers_client::client::NoRetries),
-                }),
-                ..Default::default()
-            },
+        let SenderPool {
+            runner: sync_runner,
+            handle: sync_handle,
+            updates: mut sync_updates,
+        } = sender_pool(
+            Arc::clone(&session),
+            config.api_id,
+            gateway.proxy_url.clone(),
+            Box::new(authorization::ObservedRetryPolicy {
+                monitor: config.authorization_monitor.clone(),
+                network_generation: config.network_generation,
+                inner: Box::new(grammers_client::sender::NoRetries),
+            }),
         );
-        // This client deliberately does not feed its own failures back into the
-        // event source: one failed confirmation cannot start a request loop.
-        let check_client = Client::with_configuration(
-            handle.clone(),
-            grammers_client::client::ClientConfiguration {
-                retry_policy: Box::new(grammers_client::client::NoRetries),
-                ..Default::default()
-            },
-        );
+        let sync_client = Client::new(sync_handle);
+        // Confirmation bypasses every retry policy and deliberately does not feed
+        // its own failures back into the event source: one failed confirmation
+        // cannot start a request loop.
+        let check_handle = handle.thin.clone();
+        let check_session = Arc::clone(&session);
         let disconnected = Arc::new(AtomicBool::new(false));
         let checked_connection = disconnected.clone();
         let authorization_task = tokio::spawn(authorization::confirm_events(
             config.authorization_monitor.clone(),
             config.network_generation,
             move || {
-                let client = check_client.clone();
+                let handle = check_handle.clone();
+                let session = Arc::clone(&check_session);
                 let connected = checked_connection.clone();
                 async move {
-                    let result = client
-                        .invoke(&tl::functions::updates::GetState {})
+                    let home_dc = grammers_session::Session::home_dc_id(session.as_ref())
+                        .map_err(|_| InvocationError::Dropped("session unavailable"))?;
+                    let result = handle
+                        .raw_invoke_in_dc(
+                            home_dc,
+                            tl::Serializable::to_bytes(&tl::functions::updates::GetState {}),
+                        )
                         .await
                         .map(drop);
                     if result.is_ok() {
@@ -637,15 +651,10 @@ impl TelegramConnection {
                 }
             },
         ));
-        let mut client_config = grammers_client::client::ClientConfiguration::default();
-        client_config.retry_policy = Box::new(authorization::ObservedRetryPolicy {
-            monitor: config.authorization_monitor.clone(),
-            network_generation: config.network_generation,
-            inner: client_config.retry_policy,
-        });
-        let client = Client::with_configuration(handle, client_config);
+        let client = Client::new(handle);
         let runner = tokio::spawn(runner.run());
-        // Drain the transport continuously into bounded/coalesced channel PTS
+        let sync_runner = tokio::spawn(sync_runner.run());
+        // Drain both transports continuously into bounded/coalesced channel PTS
         // hints. Durable differences, not these hints, advance the catalog.
         let channel_updates = ChannelUpdateSignals::default();
         let channel_signal = channel_updates.clone();
@@ -654,7 +663,21 @@ impl TelegramConnection {
         let authorization_monitor = config.authorization_monitor.clone();
         let shared_flood_gate = Arc::new(DownloadFloodGate::default());
         let update_drain = tokio::spawn(async move {
-            while let Some(update) = updates.recv().await {
+            let mut sync_open = true;
+            loop {
+                let update = tokio::select! {
+                    update = updates.recv() => match update {
+                        Some(update) => update,
+                        None => break,
+                    },
+                    update = sync_updates.recv(), if sync_open => match update {
+                        Some(update) => update,
+                        None => {
+                            sync_open = false;
+                            continue;
+                        }
+                    },
+                };
                 if matches!(&update, UpdatesLike::ConnectionClosed) {
                     if !disconnected.swap(true, Ordering::AcqRel) {
                         authorization_monitor.request_check(config.network_generation);
@@ -684,6 +707,7 @@ impl TelegramConnection {
             upload_flood_gate: shared_flood_gate,
             bandwidth: TransferBandwidth::default(),
             runner: Some(runner),
+            sync_runner: Some(sync_runner),
             gateway: Some(gateway.task),
             update_drain: Some(update_drain),
             channel_updates,
@@ -1486,17 +1510,21 @@ impl TelegramConnection {
             .map_err(map_invocation)
     }
 
-    /// Gracefully stops both retained background tasks.
+    /// Gracefully stops all retained background tasks.
     pub async fn shutdown(mut self) {
         if let Some(task) = self.authorization_task.take() {
             task.abort();
         }
         self.client.disconnect();
+        self.sync_client.disconnect();
         if let Some(task) = self.gateway.take() {
             task.abort();
             let _ = task.await;
         }
         if let Some(task) = self.runner.take() {
+            let _ = task.await;
+        }
+        if let Some(task) = self.sync_runner.take() {
             let _ = task.await;
         }
         if let Some(task) = self.update_drain.take() {
@@ -2089,10 +2117,14 @@ impl Drop for TelegramConnection {
             task.abort();
         }
         self.client.disconnect();
+        self.sync_client.disconnect();
         if let Some(task) = self.gateway.take() {
             task.abort();
         }
         if let Some(task) = self.runner.take() {
+            task.abort();
+        }
+        if let Some(task) = self.sync_runner.take() {
             task.abort();
         }
         if let Some(task) = self.update_drain.take() {
@@ -2103,7 +2135,12 @@ impl Drop for TelegramConnection {
 
 // One factory for every API, sync, avatar and transfer client. The gateway URL
 // is mandatory, including in direct mode; no caller can omit proxy routing.
-fn sender_pool<S>(session: Arc<S>, api_id: i32, gateway_url: String) -> SenderPool
+fn sender_pool<S>(
+    session: Arc<S>,
+    api_id: i32,
+    gateway_url: String,
+    retry_policy: Box<dyn grammers_client::sender::RetryPolicy>,
+) -> SenderPool
 where
     S: grammers_session::Session + Sized,
     S::Error: std::error::Error + Send + Sync + 'static,
@@ -2113,6 +2150,7 @@ where
         api_id,
         grammers_mtsender::ConnectionParams {
             proxy_url: Some(gateway_url),
+            retry_policy,
             ..connection::params()
         },
     )
@@ -2327,10 +2365,10 @@ fn file_from_message(
     let modified_at_unix_ms = message
         .edit_date()
         .unwrap_or_else(|| message.date())
-        .timestamp_millis();
+        .as_millisecond();
     Ok(Some(TelegramFile {
         message_id: i64::from(message.id()),
-        sent_at_unix_ms: message.date().timestamp_millis(),
+        sent_at_unix_ms: message.date().as_millisecond(),
         modified_at_unix_ms,
         file_name: document.name().unwrap_or_default().to_owned(),
         caption: message.text().to_owned(),
@@ -2371,7 +2409,7 @@ fn map_invocation(error: InvocationError) -> TelegramError {
             TelegramError::new(TelegramErrorKind::Network).with_server_detail(rpc.code, &rpc.name)
         }
         InvocationError::Session(_) => TelegramError::new(TelegramErrorKind::Session),
-        InvocationError::Dropped => TelegramError::new(TelegramErrorKind::Cancelled),
+        InvocationError::Dropped(_) => TelegramError::new(TelegramErrorKind::Cancelled),
         InvocationError::Io(_)
         | InvocationError::Deserialize(_)
         | InvocationError::Transport(_)
@@ -2527,18 +2565,13 @@ impl TelegramConnection {
                 Arc::clone(&self.session),
                 self.api_id,
                 self.gateway_url.clone(),
+                Box::new(authorization::ObservedRetryPolicy {
+                    monitor: self.authorization_monitor.clone(),
+                    network_generation: self.network_generation,
+                    inner: Box::new(grammers_client::sender::NoRetries),
+                }),
             );
-            let client = Client::with_configuration(
-                handle,
-                grammers_client::client::ClientConfiguration {
-                    retry_policy: Box::new(authorization::ObservedRetryPolicy {
-                        monitor: self.authorization_monitor.clone(),
-                        network_generation: self.network_generation,
-                        inner: Box::new(grammers_client::client::NoRetries),
-                    }),
-                    ..Default::default()
-                },
-            );
+            let client = Client::new(handle);
             pools.push(TransferPool {
                 upload,
                 client,
