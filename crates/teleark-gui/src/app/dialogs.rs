@@ -307,7 +307,7 @@ impl TeleArkApp {
         )
     }
 
-    pub(super) fn render_dialog_sync_activity(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_dialog_sync_activity(&self) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -322,26 +322,6 @@ impl TeleArkApp {
             .when_some(self.dialogs.error, |body, error| {
                 body.child(self.application_error_message(error))
             })
-            .child(
-                components::button(
-                    "sync-dialogs-action",
-                    self.tr(if self.dialogs.active() {
-                        "common-cancel"
-                    } else {
-                        "common-retry"
-                    }),
-                    None,
-                    false,
-                )
-                .debug_selector(|| "sync-dialogs-action".into())
-                .on_click(cx.listener(|app, _, _, cx| {
-                    if app.dialogs.active() {
-                        app.cancel_dialog_load(cx);
-                    } else {
-                        app.load_telegram_dialogs(cx);
-                    }
-                })),
-            )
             .into_any_element()
     }
     pub(crate) fn render_dialog_details(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -679,7 +659,7 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn catalog_status_and_cancel_are_reachable_in_compact_locales(cx: &mut gpui::TestAppContext) {
+    fn catalog_status_is_informational_in_compact_sync_inspector(cx: &mut gpui::TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
         {
@@ -703,15 +683,10 @@ mod tests {
                 cx.debug_bounds("channel-sync-inspector").is_some(),
                 "unlocked status opens the merged inspector"
             );
-            let action = cx
-                .debug_bounds("sync-dialogs-action")
-                .expect("visible cancel")
-                .center();
-            assert!(action.x < px(900.0) && action.y < px(600.0));
-            cx.simulate_click(action, gpui::Modifiers::default());
-            cx.run_until_parked();
+            assert!(cx.debug_bounds("sync-dialogs-action").is_none());
             app.update(cx, |app, _| {
-                assert_eq!(app.dialogs.phase, Phase::Cancelled);
+                assert_eq!(app.dialogs.phase, Phase::Waiting);
+                assert!(!app.dialogs.cancellation.is_cancelled());
                 assert_eq!(app.page, Page::Transfers);
                 app.dialogs.history.clear();
             });

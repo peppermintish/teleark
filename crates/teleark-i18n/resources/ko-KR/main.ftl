@@ -831,3 +831,11 @@ transfer-upload-media-limited = 미디어 메타데이터 읽기 제한에 도�
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = 동기화 확인 예약됨
+sync-queue-count = 진행 중 { $active }개 · 대기 중 { $queued }개
+sync-server-wait = Telegram이 대기를 요청했습니다. 캐시된 파일은 계속 사용할 수 있습니다. 동기화는 자동으로 재개되며 앱을 다시 열어도 대기 기한은 유지됩니다.
+sync-pacing-reason = Telegram 요청 제한을 줄이기 위해 확인 간격을 조절합니다. 실시간 업데이트는 자동으로 계속됩니다.
+sync-resume-at = 다음 확인: { $time }
+sync-local-state-help = 저장된 동기화 상태는 유지됩니다. 디스크 공간과 접근 권한을 확인한 후 TeleArk을 다시 여세요. 더 최신 앱으로 연 라이브러리라면 먼저 TeleArk을 업데이트하세요.

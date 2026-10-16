@@ -915,20 +915,37 @@ impl TeleArkApp {
                     ),
                 ),
             );
-            if let Some(at) = snapshot.retry_at {
-                summary = summary.child(
+            summary = summary.child(
+                div().debug_selector(|| "sync-queue-count".into()).child(
                     self.tr_with(
-                        "channel-sync-next-at",
-                        MessageArgs::new().with(
-                            "seconds",
-                            format_integer(
-                                self.locale(),
-                                at.saturating_duration_since(std::time::Instant::now())
-                                    .as_secs(),
+                        "sync-queue-count",
+                        MessageArgs::new()
+                            .with(
+                                "active",
+                                format_integer(self.locale(), snapshot.active.len() as u64),
+                            )
+                            .with(
+                                "queued",
+                                format_integer(self.locale(), snapshot.queued as u64),
                             ),
-                        ),
                     ),
+                ),
+            );
+            if snapshot.phase == ChannelSyncPhase::RateLimited {
+                summary = summary.child(
+                    div()
+                        .debug_selector(|| "sync-wait-reason".into())
+                        .text_color(theme::text_secondary())
+                        .child(self.tr("sync-server-wait")),
                 );
+            } else if snapshot.phase == ChannelSyncPhase::Pacing {
+                summary = summary.child(self.tr("sync-pacing-reason"));
+            }
+            if let Some(at) = snapshot.retry_at {
+                summary = summary.child(self.tr_with(
+                    "sync-resume-at",
+                    MessageArgs::new().with("time", self.sync_event_time(at).to_string()),
+                ));
             }
         }
         summary
@@ -1032,7 +1049,7 @@ impl TeleArkApp {
             body = body.child(self.application_error_message(error));
         }
         if self.dialogs.has_activity() && !self.dialogs.ready {
-            body = body.child(self.render_dialog_sync_activity(cx));
+            body = body.child(self.render_dialog_sync_activity());
         }
         if let Some(snapshot) = &self.channel_sync_snapshot {
             if let Some(scan) = &snapshot.managed_scan {
@@ -1053,43 +1070,19 @@ impl TeleArkApp {
                     body = body.child(self.application_error_message(failure));
                 }
             }
-            if let Some(failure) = snapshot.failure {
+            if let Some(failure) = snapshot.failure
+                && snapshot.phase != ChannelSyncPhase::RateLimited
+            {
                 body = body.child(self.application_error_message(failure));
+                if failure == teleark_core::ApplicationErrorKind::Persistence {
+                    body = body.child(self.tr("sync-local-state-help"));
+                }
             }
             body = body.child(self.tr("global-sync-automatic"));
-            if let Some(chat) = snapshot
-                .managed_chat_id
-                .filter(|id| Some(*id) == self.storage_channel_id())
+            if snapshot.managed_chat_id == self.storage_channel_id()
+                && snapshot.managed_review_pending
             {
-                if snapshot.managed_review_pending {
-                    body = body.child(self.tr("managed-watch-pending"));
-                }
-                if let Some(watch) = &snapshot.managed_watch {
-                    let through = watch.change_count;
-                    if watch.unacknowledged() > 0 {
-                        body = body.child(
-                            components::button(
-                                "managed-watch-acknowledge",
-                                self.tr("managed-watch-acknowledge"),
-                                None,
-                                false,
-                            )
-                            .debug_selector(|| "managed-watch-acknowledge".into())
-                            .on_click(cx.listener(
-                                move |app, _, _, cx| {
-                                    if let Some(sync) = &app.channel_sync
-                                        && let Err(error) =
-                                            sync.acknowledge_managed_changes(chat, through)
-                                    {
-                                        app.telegram_activity =
-                                            TelegramActivity::Failed(error.kind());
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        );
-                    }
-                }
+                body = body.child(self.tr("managed-watch-pending"));
             }
             if snapshot.dropped_events > 0
                 || snapshot.overflow_signals > 0
@@ -1285,6 +1278,7 @@ fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
         ChannelSyncPhase::Connecting => "global-sync-connecting",
         ChannelSyncPhase::Discovering => "global-sync-discovering",
         ChannelSyncPhase::Queued => "channel-sync-queued",
+        ChannelSyncPhase::Pacing => "sync-pacing",
         ChannelSyncPhase::Seeding => "channel-sync-seeding",
         ChannelSyncPhase::History => "channel-sync-history-loading",
         ChannelSyncPhase::CheckingPts => "channel-sync-checking-pts",
@@ -1306,6 +1300,65 @@ pub(super) mod tests {
     use super::*;
     use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, component::table::TableDelegate as _};
+
+    #[gpui::test]
+    fn scheduled_checks_and_server_waits_have_distinct_progress_at_both_sizes(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Storage);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), full);
+            });
+            for phase in [ChannelSyncPhase::Pacing, ChannelSyncPhase::RateLimited] {
+                app.update(cx, |app, cx| {
+                    let mut snapshot = fixture_snapshot();
+                    snapshot.phase = phase;
+                    app.channel_sync_snapshot = Some(snapshot);
+                    app.channel_sync_details = true;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("channel-sync-close-details").is_some());
+                for control in [
+                    "sync-dialogs-action",
+                    "managed-watch-acknowledge",
+                    "global-sync-cancel-directory",
+                    "global-sync-cancel-channel",
+                    "global-sync-cancel-pending-channel-retries",
+                ] {
+                    assert!(
+                        cx.debug_bounds(control).is_none(),
+                        "sync is automatic: {control}"
+                    );
+                }
+                assert!(cx.debug_bounds("sync-queue-count").is_some());
+                assert_eq!(
+                    cx.debug_bounds("sync-wait-reason").is_some(),
+                    phase == ChannelSyncPhase::RateLimited
+                );
+                app.read_with(cx, |app, _| {
+                    assert_eq!(
+                        app.channel_sync_label(),
+                        app.tr(if phase == ChannelSyncPhase::Pacing {
+                            "sync-pacing"
+                        } else {
+                            "channel-sync-rate-limited"
+                        })
+                    );
+                    assert!(app.tr("sync-server-wait").contains("reopening"));
+                    assert!(
+                        app.channel_sync.is_none(),
+                        "presentation starts no remote work"
+                    );
+                });
+            }
+        }
+    }
 
     #[gpui::test]
     fn managed_files_completion_waits_for_sync_manifest_and_display_application(
@@ -1735,7 +1788,7 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn sync_status_has_fixed_times_and_no_idle_notifications(cx: &mut TestAppContext) {
+    fn sync_timing_keeps_app_quiet_and_retains_fixed_history(cx: &mut TestAppContext) {
         let (app, cx) = crate::app::test_support::preview_app(cx, Page::Transfers);
         app.update(cx, |app, cx| {
             app.channel_sync_snapshot = Some(fixture_snapshot());
@@ -1752,6 +1805,7 @@ pub(super) mod tests {
             (app.sync_completed_time(), app.sync_history_rows())
         });
         let built = history.update(cx, |history, _| history.materialized.get());
+        let retained = history.read_with(cx, |history, _| history.rows.clone());
         assert!(built > 0 && built < 128, "only visible rows materialize");
         assert_eq!(
             cx.debug_bounds("sync-history-row-0")
@@ -1772,10 +1826,12 @@ pub(super) mod tests {
             0,
             "waiting never schedules app refreshes"
         );
-        assert_eq!(
-            history.update(cx, |history, _| history.materialized.get()),
-            built
-        );
+        history.read_with(cx, |history, _| {
+            assert!(
+                std::sync::Arc::ptr_eq(&retained, &history.rows),
+                "presentation ticks retain the same immutable timeline projection"
+            );
+        });
         app.update(cx, |app, cx| {
             assert_eq!(app.sync_completed_time(), before.0);
             assert!(app.sync_history_rows() == before.1);
@@ -2226,7 +2282,7 @@ pub(super) mod tests {
             cx.run_until_parked();
             assert!(cx.debug_bounds("sync-private-disclosure").is_none());
             assert!(cx.debug_bounds("sync-history-empty").is_none());
-            assert!(cx.debug_bounds("managed-watch-acknowledge").is_some());
+            assert!(cx.debug_bounds("managed-watch-acknowledge").is_none());
             let inspector = cx
                 .debug_bounds("channel-sync-inspector")
                 .expect("inspector");
@@ -2259,7 +2315,7 @@ pub(super) mod tests {
             cx.run_until_parked();
             assert!(cx.debug_bounds("sync-history-empty").is_none());
             assert!(cx.debug_bounds("sync-history-row-0").is_some());
-            assert!(cx.debug_bounds("managed-watch-acknowledge").is_some());
+            assert!(cx.debug_bounds("managed-watch-acknowledge").is_none());
             app.read_with(cx, |app, _| {
                 assert!(
                     app.channel_sync_details,
@@ -2341,7 +2397,7 @@ pub(super) mod tests {
                         .debug_bounds("channel-sync-inspector")
                         .expect("global details");
                     assert!(inspector.bottom() <= bar.top());
-                    assert!(cx.debug_bounds("managed-watch-acknowledge").is_some());
+                    assert!(cx.debug_bounds("managed-watch-acknowledge").is_none());
                 }
             }
         }

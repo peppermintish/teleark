@@ -1475,7 +1475,9 @@ async fn handle_request(state: &mut WorkerState, request: TelegramRequest) {
             };
             let result = tokio::select! {
                 _ = cancellation.cancelled() => Err(crate::channel_sync::ChannelSyncFailure::from(ApplicationError::new(ApplicationErrorKind::Cancelled))),
-                result = tokio::time::timeout(Duration::from_secs(60), operation) => result.unwrap_or_else(|_| Err(crate::channel_sync::ChannelSyncFailure::from(ApplicationError::new(ApplicationErrorKind::Network)))),
+                // Up to 10,000 dialogs include deliberate page spacing; allow
+                // that bounded preparation instead of timing out large accounts.
+                result = tokio::time::timeout(Duration::from_secs(180), operation) => result.unwrap_or_else(|_| Err(crate::channel_sync::ChannelSyncFailure::from(ApplicationError::new(ApplicationErrorKind::Network)))),
             };
             let _ = reply.send(Ok(result));
         }

@@ -151,7 +151,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 
 The default content size is 1120×680. Startup centers the native frame inside the primary display’s OS-reported work area, excluding the menu bar and Dock/taskbar, with a 16-point margin and separate 36-point native-titlebar allowance. Oversized requests shrink to fit; on unusually small work areas the window minimum also shrinks instead of forcing overlap. Record actual size separately. The legacy `--skip-telegram-api-id-prompt` flag remains accepted, but API setup is now opt-in. Non-preview startup opens real local state and can resume eligible downloads after account entry.
 
-Channel sync fixtures show an active difference or a server wait with queue/timing and an independently scrolling timeline; they never create the real synchronization owner. Startup now shows database opening/migration before initializing runtime owners in the background.
+Channel sync fixtures show an active difference or a server wait with queue/timing and an independently scrolling timeline. The synchronization inspector is informational, with Close as its only control; they never create the real synchronization owner. Startup now shows database opening/migration before initializing runtime owners in the background.
 
 `--preview-state=upload-folder` shows the explicit folder/application-bundle rejection above the upload composer’s scroll area. Check the message and wrapping in English only.
 

@@ -1431,7 +1431,7 @@ startup-truncated = 履歴の上限に達したため、古い起動イベント
 
 managed-watch-title = プライベートチャンネルの変更
 managed-watch-pending = プライベートチャンネルに変更 · 検証中
-managed-watch-changed = プライベートチャンネル：未確認の変更 { $count } 件
+managed-watch-changed = プライベートチャンネル：変更 { $count } 件を記録済み
 managed-watch-acknowledge = 表示された変更を確認済みにする
 managed-watch-retention = 最近の変更を表示 · 古い記録 { $omitted } 件を省略
 managed-watch-edited = メッセージが編集されました
@@ -2084,3 +2084,11 @@ transfer-upload-media-limited = メディア情報の読み取り上限に達し
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = 同期確認を予約済み
+sync-queue-count = 実行中 { $active } 件 · 待機中 { $queued } 件
+sync-server-wait = Telegram から待機が要求されました。キャッシュ済みファイルは引き続き利用できます。同期は自動で再開し、アプリを開き直しても待機期限は保持されます。
+sync-pacing-reason = Telegram の制限を減らすため、確認の間隔を空けています。リアルタイム更新は自動で続行します。
+sync-resume-at = 次回の確認：{ $time }
+sync-local-state-help = 保存済みの同期状態は保持されています。ディスクの空き容量とアクセス権を確認してから TeleArk を開き直してください。新しいバージョンで開いたライブラリの場合は、先に TeleArk を更新してください。

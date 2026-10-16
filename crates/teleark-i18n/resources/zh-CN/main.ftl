@@ -1431,7 +1431,7 @@ startup-truncated = 时间线容量有限，较早的启动事件已移除。
 
 managed-watch-title = 私有频道变更
 managed-watch-pending = 私有频道有变更 · 正在核验
-managed-watch-changed = 私有频道：{ $count } 项变更待确认
+managed-watch-changed = 私有频道：已记录 { $count } 项变更
 managed-watch-acknowledge = 将已显示的变更标记为已阅
 managed-watch-retention = 显示近期变更 · 已省略 { $omitted } 条较早记录
 managed-watch-edited = 消息被编辑
@@ -2084,3 +2084,11 @@ transfer-upload-media-limited = 媒体元数据读取达到限制；继续上传
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = 已安排同步检查
+sync-queue-count = { $active } 项进行中 · { $queued } 项排队中
+sync-server-wait = Telegram 要求暂时等待。缓存文件仍可使用。同步将自动恢复，重新打开应用不会重置等待期限。
+sync-pacing-reason = 检查会分散执行，以减少 Telegram 限流。实时更新仍会自动接收。
+sync-resume-at = 下次检查：{ $time }
+sync-local-state-help = 已保留保存的同步状态。请检查磁盘空间和访问权限，然后重新打开 TeleArk。如果此资料库曾由较新版本打开，请先更新 TeleArk。

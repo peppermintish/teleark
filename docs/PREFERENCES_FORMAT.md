@@ -216,3 +216,15 @@ preserved and keep the access gate closed. Settings saves do not rewrite the PIN
 PIN changes use a separate serialized compare-and-replace operation.
 
 Credential-reference proxy codec 2 is documented in [Data model](DATA_MODEL.md#credential-storage-schema-23). The Keychain preference is owned separately from ordinary desktop preferences so unrelated settings saves cannot change credential storage.
+
+## Automatic synchronization cooldown
+
+Synchronization owns the optional `channel-sync-cooldown.<account-id>` settings
+namespace separately from desktop preferences. Its JSON codec version 1 stores
+`version` (exactly `1`) and `until_unix_ms` (signed UTC Unix milliseconds).
+Only this account's sync owner reads or writes its deadline; later waits cannot
+be shortened. Missing records, including upgrades that skip older releases,
+need no migration; expired records permit synchronization. Malformed/newer
+records are preserved and reported with compatible-version/storage guidance.
+SQLite remains schema 23, and existing preferences, encrypted files and recovery
+bundles retain their versions. See [ADR 0067](adr/0067-paced-automatic-startup-sync.md).

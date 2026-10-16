@@ -49,7 +49,7 @@ impl HistoryRevision {
 }
 pub(super) struct SyncHistory {
     revision: Option<HistoryRevision>,
-    rows: Arc<Vec<HistoryRow>>,
+    pub(super) rows: Arc<Vec<HistoryRow>>,
     _changes: Subscription,
     scroll: gpui_kit::UniformListScrollHandle,
     #[cfg(test)]

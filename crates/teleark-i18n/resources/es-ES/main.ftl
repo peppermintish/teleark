@@ -863,3 +863,11 @@ transfer-upload-media-limited = Límite de lectura de metadatos alcanzado; conti
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = Comprobación de sincronización programada
+sync-queue-count = { $active } activas · { $queued } en cola
+sync-server-wait = Telegram solicitó una pausa. Los archivos en caché siguen disponibles. La sincronización se reanuda automáticamente; al reabrir la aplicación se conserva el plazo.
+sync-pacing-reason = Las comprobaciones se espacian para reducir los límites de Telegram. Las actualizaciones en directo continúan automáticamente.
+sync-resume-at = Próxima comprobación: { $time }
+sync-local-state-help = El estado de sincronización guardado se conserva. Comprueba el espacio y los permisos y vuelve a abrir TeleArk. Si una aplicación más reciente abrió esta biblioteca, actualiza TeleArk primero.

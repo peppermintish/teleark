@@ -879,3 +879,11 @@ transfer-upload-media-limited = Достигнут предел чтения м�
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = Проверка синхронизации запланирована
+sync-queue-count = { $active } активных · { $queued } в очереди
+sync-server-wait = Telegram запросил паузу. Кэшированные файлы остаются доступны. Синхронизация возобновится автоматически; повторное открытие приложения сохраняет срок ожидания.
+sync-pacing-reason = Проверки выполняются с интервалами для уменьшения ограничений Telegram. Обновления в реальном времени продолжаются автоматически.
+sync-resume-at = Следующая проверка: { $time }
+sync-local-state-help = Сохранённое состояние синхронизации не удалено. Проверьте место на диске и права доступа, затем снова откройте TeleArk. Если библиотека открывалась в более новой версии, сначала обновите TeleArk.

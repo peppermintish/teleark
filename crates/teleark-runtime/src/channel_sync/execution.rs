@@ -15,6 +15,7 @@ pub(super) struct Completion {
 }
 
 pub(super) struct Executions {
+    ready: Arc<std::sync::atomic::AtomicUsize>,
     managed_id: i64,
     joins: BTreeMap<i64, JoinHandle<()>>,
     sender: mpsc::SyncSender<Completion>,
@@ -25,6 +26,7 @@ impl Executions {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(6);
         Self {
+            ready: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             managed_id: 0,
             joins: BTreeMap::new(),
             sender,
@@ -55,6 +57,10 @@ impl Executions {
         !self.joins.is_empty()
     }
 
+    pub fn has_completed(&self) -> bool {
+        self.ready.load(Ordering::Acquire) > 0
+    }
+
     pub fn spawn(
         &mut self,
         id: i64,
@@ -65,17 +71,24 @@ impl Executions {
             return Err(ApplicationError::new(ApplicationErrorKind::Capacity));
         }
         let sender = self.sender.clone();
+        let ready = self.ready.clone();
         let coordinator = thread::current();
         let join = thread::Builder::new()
             .name("teleark-sync-page".into())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                     .unwrap_or(Outcome::Failed(ApplicationErrorKind::Conflict));
-                let _ = sender.send(Completion {
-                    id,
-                    revision,
-                    outcome,
-                });
+                ready.fetch_add(1, Ordering::Release);
+                if sender
+                    .send(Completion {
+                        id,
+                        revision,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    ready.fetch_sub(1, Ordering::AcqRel);
+                }
                 coordinator.unpark();
             })
             .map_err(|_| ApplicationError::new(ApplicationErrorKind::Capacity))?;
@@ -85,6 +98,7 @@ impl Executions {
 
     pub fn take(&mut self) -> Option<Completion> {
         let completion = self.receiver.try_recv().ok()?;
+        self.ready.fetch_sub(1, Ordering::AcqRel);
         if let Some(join) = self.joins.remove(&completion.id) {
             let _ = join.join();
         }
@@ -104,6 +118,33 @@ impl Drop for Executions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_work_remains_ready_after_an_unpark_token_is_consumed() {
+        let mut executions = Executions::new();
+        executions
+            .spawn(0, 1, || Outcome::Failed(ApplicationErrorKind::Network))
+            .expect("worker");
+        while !executions.has_completed() {
+            thread::park();
+        }
+        // Model another acknowledged operation consuming an earlier wake edge.
+        thread::park_timeout(Duration::ZERO);
+        assert!(
+            executions.has_completed(),
+            "readiness is retained state, not just an edge"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(completion) = executions.take() {
+                assert_eq!(completion.id, 0);
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(!executions.has_completed());
+    }
     #[test]
     fn managed_channel_keeps_a_reserved_lane_when_all_normal_lanes_block() {
         let mut work = Executions::new();

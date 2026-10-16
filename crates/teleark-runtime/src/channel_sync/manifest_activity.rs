@@ -179,6 +179,7 @@ mod tests {
     #[test]
     fn queue_feedback_precedes_work_and_stale_terminal_events_do_not_replace_newer_activity() {
         let shared = Arc::new(Shared {
+            pacing: Mutex::new(Default::default()),
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
             pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,

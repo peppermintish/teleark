@@ -1475,7 +1475,7 @@ startup-truncated = Earlier startup events were removed from this bounded timeli
 
 managed-watch-title = Private channel changes
 managed-watch-pending = Private channel changed · verifying
-managed-watch-changed = Private channel: { $count } changes to review
+managed-watch-changed = Private channel: { $count } changes recorded
 managed-watch-acknowledge = Mark displayed changes as reviewed
 managed-watch-retention = Recent changes shown · { $omitted } older records omitted
 managed-watch-edited = Message edited
@@ -2129,3 +2129,11 @@ transfer-upload-media-limited = Media metadata read limit reached; continuing up
 media-pixel-value = { $value } px
 media-hertz-value = { $value } Hz
 media-bit-value = { $value } bit
+
+# Scheduled background sync and server cooldown
+sync-pacing = Scheduled sync check
+sync-queue-count = { $active } active · { $queued } queued
+sync-server-wait = Telegram requested a cooldown. Cached files remain available. Sync resumes automatically; reopening the app keeps this deadline.
+sync-pacing-reason = Checks are spaced out to reduce Telegram rate limits. Live updates continue automatically.
+sync-resume-at = Next check at { $time }
+sync-local-state-help = Saved sync state is retained. Check disk space and access, then reopen TeleArk. If this library was opened by a newer app, update TeleArk first.

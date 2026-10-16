@@ -891,7 +891,7 @@ impl TelegramConnection {
     }
 
     pub async fn list_dialogs(&self, limit: usize) -> Result<Vec<TelegramChat>, TelegramError> {
-        list_dialogs_with_client(&self.client, limit).await
+        list_dialogs_with_client(&self.client, limit, Duration::ZERO).await
     }
 
     pub async fn list_sync_dialogs(
@@ -900,7 +900,7 @@ impl TelegramConnection {
     ) -> Result<Vec<TelegramChat>, TelegramError> {
         tokio::select! {
             _ = cancellation.cancelled() => Err(TelegramError::new(TelegramErrorKind::Cancelled)),
-            result = list_dialogs_with_client(&self.sync_client, MAX_DIALOGS_PER_REQUEST) => result,
+            result = list_dialogs_with_client(&self.sync_client, MAX_DIALOGS_PER_REQUEST, Duration::from_secs(1)) => result,
         }
     }
 
@@ -2527,16 +2527,25 @@ async fn scan_page_with_client(
 async fn list_dialogs_with_client(
     client: &Client,
     limit: usize,
+    page_interval: Duration,
 ) -> Result<Vec<TelegramChat>, TelegramError> {
     validate_limit(limit, MAX_DIALOGS_PER_REQUEST)?;
     require_authorized(client).await?;
 
     let mut dialogs = client.iter_dialogs();
     let mut chats = Vec::with_capacity(limit.min(128));
+    let mut read = 0;
     while chats.len() < limit {
+        // grammers 0.11's public dialog iterator buffers up to 100 entries.
+        // Yield between those pages, rather than turning a large account's
+        // startup directory into a burst. The enclosing select cancels sleep.
+        if let Some(delay) = sync_dialog_page_delay(read, page_interval) {
+            tokio::time::sleep(delay).await;
+        }
         let Some(dialog) = dialogs.next().await.map_err(map_invocation)? else {
             break;
         };
+        read += 1;
         let peer = dialog.peer();
         let peer_id = peer.id();
         let Some(id) = peer_id.bare_id() else {
@@ -2562,6 +2571,27 @@ async fn list_dialogs_with_client(
         });
     }
     Ok(chats)
+}
+
+fn sync_dialog_page_delay(read: usize, interval: Duration) -> Option<Duration> {
+    (read > 0 && read.is_multiple_of(100) && !interval.is_zero()).then_some(interval)
+}
+
+#[cfg(test)]
+#[test]
+fn sync_directory_yields_at_page_boundaries_and_not_for_buffered_entries() {
+    let interval = Duration::from_secs(1);
+    let waits: Vec<_> = (0..10_000)
+        .filter_map(|read| sync_dialog_page_delay(read, interval))
+        .collect();
+    assert_eq!(waits.len(), 99, "10,000 entries have 99 inter-page waits");
+    assert!(waits.iter().all(|wait| *wait == interval));
+    assert!(sync_dialog_page_delay(0, interval).is_none());
+    assert!(sync_dialog_page_delay(99, interval).is_none());
+    assert!(
+        sync_dialog_page_delay(100, Duration::ZERO).is_none(),
+        "other callers retain their policy"
+    );
 }
 
 struct TransferPool {

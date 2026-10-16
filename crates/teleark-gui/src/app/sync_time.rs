@@ -1,4 +1,4 @@
-//! Fixed event timestamps. No presentation clock or periodic invalidation.
+//! Fixed historical timestamps, independent of inspector presentation ticks.
 #[cfg(test)]
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

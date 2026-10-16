@@ -24,6 +24,7 @@ fn file(id: i64) -> TelegramFileSummary {
 }
 pub(super) fn shared() -> Arc<Shared> {
     Arc::new(Shared {
+        pacing: Mutex::new(Default::default()),
         snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 0)),
         pending_channel_retries: AtomicU64::new(0),
         changes: tokio::sync::watch::channel(()).0,

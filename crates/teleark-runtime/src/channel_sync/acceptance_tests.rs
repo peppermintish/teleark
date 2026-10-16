@@ -1,6 +1,227 @@
 use super::*;
 use std::sync::{Condvar, atomic::AtomicUsize};
 
+#[derive(Clone)]
+struct RestartRemote {
+    lifecycle: crate::telegram::lifecycle::Lifecycle,
+    discoveries: Arc<AtomicUsize>,
+    reads: Arc<Mutex<Vec<(i64, ChannelRead)>>>,
+    changed: Arc<AtomicBool>,
+}
+impl AccountSource for RestartRemote {
+    fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle {
+        self.lifecycle.clone()
+    }
+    fn sync_sources(
+        &self,
+        _: i64,
+        _: TelegramScanCancellation,
+    ) -> Result<Vec<TelegramChatSummary>, ChannelSyncFailure> {
+        self.discoveries.fetch_add(1, Ordering::AcqRel);
+        Ok((2..34)
+            .map(|id| TelegramChatSummary {
+                id,
+                name: format!("Fixture {id}"),
+                username: None,
+                kind: TelegramChatKind::Channel,
+                sync_pts: Some(if id == 2 && self.changed.load(Ordering::Acquire) {
+                    51
+                } else {
+                    50
+                }),
+            })
+            .collect())
+    }
+}
+impl ChannelSource for RestartRemote {
+    fn read(
+        &self,
+        _: i64,
+        chat: i64,
+        request: ChannelRead,
+        _: TelegramScanCancellation,
+    ) -> Result<ChannelReadPage, ChannelSyncFailure> {
+        self.reads.lock().expect("reads").push((chat, request));
+        Ok(ChannelReadPage {
+            files: vec![],
+            removed: vec![],
+            edited: vec![],
+            pts: Some(51),
+            complete: true,
+            history_gap: false,
+            before: None,
+        })
+    }
+}
+
+#[test]
+fn restart_and_connection_replacement_skip_unchanged_channels_but_recover_changed_heads() {
+    let temp = tempfile::tempdir().expect("temp");
+    let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3")).expect("library");
+    let remote = RestartRemote {
+        lifecycle: Default::default(),
+        discoveries: Default::default(),
+        reads: Default::default(),
+        changed: Default::default(),
+    };
+    let account = TelegramAccount {
+        id: 1,
+        display_name: "Fixture".into(),
+        username: None,
+    };
+    // Old observations model reopening after days away, not just a quick restart.
+    let sources = remote.sync_sources(1, Default::default()).expect("sources");
+    library
+        .save_telegram_sources(&account, &sources)
+        .expect("account");
+    for chat in &sources {
+        library
+            .worker
+            .request("fixture", |reply| StorageRequest::CommitChannelSync {
+                batch: ChannelSyncCommit {
+                    account_id: AccountId::new(1),
+                    chat_id: ChatId::new(chat.id),
+                    expected_revision: 0,
+                    state: ChannelSyncState {
+                        pts: 50,
+                        revision: 1,
+                        last_synced_at_unix_ms: Some(1),
+                        ..Default::default()
+                    },
+                    files: vec![],
+                    removed: vec![],
+                    edited: vec![],
+                    invalidate: vec![],
+                    authoritative: true,
+                    managed_catalog_seed: false,
+                    gap_detected: false,
+                    observed_at_unix_ms: 1,
+                },
+                reply,
+            })
+            .expect("durable cursor");
+    }
+    remote.discoveries.store(0, Ordering::Release);
+    for launch in 0..2 {
+        remote
+            .lifecycle
+            .publish(launch, Some(1), Some(Default::default()));
+        let sync =
+            ChannelSync::start_with(remote.clone(), library.clone(), account.clone(), vec![])
+                .expect("start");
+        until(&sync, || {
+            let s = sync.snapshot().expect("snapshot");
+            remote.discoveries.load(Ordering::Acquire) > launch as usize
+                && s.phase == ChannelSyncPhase::Idle
+                && s.queued == 0
+        });
+        assert!(
+            remote.reads.lock().expect("reads").is_empty(),
+            "32 unchanged channels issue no difference requests"
+        );
+        sync.stop();
+        if let Some(join) = sync.inner.join.lock().expect("owner").take() {
+            join.join().expect("shutdown");
+        }
+    }
+    remote.changed.store(true, Ordering::Release);
+    remote
+        .lifecycle
+        .publish(3, Some(1), Some(Default::default()));
+    let sync =
+        ChannelSync::start_with(remote.clone(), library, account, vec![]).expect("changed start");
+    until(&sync, || {
+        !remote.reads.lock().expect("reads").is_empty()
+            && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
+    });
+    let reads = remote.reads.lock().expect("reads");
+    assert_eq!(reads.len(), 1);
+    assert!(matches!(reads[0], (2, ChannelRead::Difference(50))));
+    drop(reads);
+    // A replacement connection also discovers before deciding which cursors lag.
+    remote
+        .lifecycle
+        .publish(4, Some(1), Some(Default::default()));
+    until(&sync, || {
+        remote.discoveries.load(Ordering::Acquire) >= 4
+            && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
+    });
+    assert_eq!(remote.reads.lock().expect("reads").len(), 1);
+    sync.stop();
+    if let Some(join) = sync.inner.join.lock().expect("owner").take() {
+        join.join().expect("shutdown");
+    }
+}
+
+#[test]
+fn saved_cooldown_blocks_startup_discovery_until_deadline_and_allows_cancellation() {
+    let temp = tempfile::tempdir().expect("temp");
+    let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3")).expect("library");
+    let wall = crate::system_time_unix_ms(std::time::SystemTime::now()).expect("clock");
+    library
+        .save_sync_cooldown(1, wall + 120_000)
+        .expect("saved wait");
+    let remote = RestartRemote {
+        lifecycle: Default::default(),
+        discoveries: Default::default(),
+        reads: Default::default(),
+        changed: Default::default(),
+    };
+    remote
+        .lifecycle
+        .publish(0, Some(1), Some(Default::default()));
+    let sync = ChannelSync::start_with(
+        remote.clone(),
+        library.clone(),
+        TelegramAccount {
+            id: 1,
+            display_name: "Fixture".into(),
+            username: None,
+        },
+        vec![],
+    )
+    .expect("restart");
+    until(&sync, || {
+        sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::RateLimited
+    });
+    assert_eq!(remote.discoveries.load(Ordering::Acquire), 0);
+    assert!(sync.snapshot().expect("deadline").retry_at.is_some());
+    sync.stop();
+    if let Some(join) = sync.inner.join.lock().expect("owner").take() {
+        join.join().expect("cancel waiting owner");
+    }
+    assert_eq!(remote.discoveries.load(Ordering::Acquire), 0);
+
+    // A subsequent launch automatically proceeds after the saved deadline;
+    // no refresh command or GUI action is involved.
+    let epoch = Instant::now();
+    let offset = Arc::new(AtomicU64::new(0));
+    let clock_offset = offset.clone();
+    let sync = ChannelSync::start_with_clock(
+        remote.clone(),
+        library,
+        TelegramAccount {
+            id: 1,
+            display_name: "Fixture".into(),
+            username: None,
+        },
+        vec![],
+        Arc::new(move || epoch + Duration::from_millis(clock_offset.load(Ordering::Acquire))),
+    )
+    .expect("another restart");
+    until(&sync, || {
+        sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::RateLimited
+    });
+    assert_eq!(remote.discoveries.load(Ordering::Acquire), 0);
+    offset.store(121_000, Ordering::Release);
+    sync.inner.worker.unpark();
+    until(&sync, || remote.discoveries.load(Ordering::Acquire) > 0);
+    sync.stop();
+    if let Some(join) = sync.inner.join.lock().expect("owner").take() {
+        join.join().expect("automatic recovery");
+    }
+}
+
 #[derive(Default)]
 struct Gate {
     released: Mutex<bool>,
@@ -113,7 +334,12 @@ fn until(sync: &ChannelSync, condition: impl Fn() -> bool) {
                 }
             })
             .await
-            .expect("observable state must advance without releasing blocked dependencies");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "observable state must advance without releasing blocked dependencies: {:?}",
+                    sync.snapshot()
+                )
+            });
         });
 }
 

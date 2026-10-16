@@ -1325,6 +1325,15 @@ enum StorageRequest {
         account: i64,
         reply: SyncSender<Result<Vec<TelegramChatSummary>, ApplicationError>>,
     },
+    SyncCooldown {
+        account: i64,
+        reply: SyncSender<Result<Option<i64>, ApplicationError>>,
+    },
+    SaveSyncCooldown {
+        account: i64,
+        until: i64,
+        reply: SyncSender<Result<(), ApplicationError>>,
+    },
     SaveChannelDirectory {
         account: TelegramAccount,
         chats: Vec<TelegramChatSummary>,
@@ -2264,6 +2273,16 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             }
             StorageRequest::ChannelDirectory { account, reply } => {
                 let _ = reply.send(channel_sync::directory::load(&database, account));
+            }
+            StorageRequest::SyncCooldown { account, reply } => {
+                let _ = reply.send(channel_sync::cooldown::load(&database, account));
+            }
+            StorageRequest::SaveSyncCooldown {
+                account,
+                until,
+                reply,
+            } => {
+                let _ = reply.send(channel_sync::cooldown::save(&mut database, account, until));
             }
             StorageRequest::SaveChannelDirectory {
                 account,

@@ -19,10 +19,12 @@ use crate::{
     TelegramChatSummary, TelegramFileSummary, TelegramScanCancellation,
 };
 
+pub(crate) mod cooldown;
 pub(crate) mod directory;
 mod execution;
 mod feed;
 mod history;
+mod pacing;
 pub use history::HistoryStatus;
 mod manifest_activity;
 pub use feed::{ChannelChanges, ChannelDelta, ChannelSyncSubscription};
@@ -53,6 +55,7 @@ pub enum ChannelSyncPhase {
     ManifestFailed,
     ManifestCancelled,
     Queued,
+    Pacing,
     ReadingLocal,
     Connecting,
     Discovering,
@@ -231,6 +234,7 @@ pub struct ChannelSync {
 }
 
 struct Shared {
+    pacing: Mutex<pacing::RequestBudget>,
     changes: tokio::sync::watch::Sender<()>,
     deltas: Mutex<feed::DeltaJournal>,
     sources: Mutex<(u64, Arc<Vec<TelegramChatSummary>>)>,
@@ -314,6 +318,9 @@ impl ChannelSync {
         }
         let scheduler = Scheduler::new(chats);
         let shared = Arc::new(Shared {
+            pacing: Mutex::new(
+                pacing::RequestBudget::new(telegram.request_interval()).with_clock(clock.clone()),
+            ),
             snapshot: Mutex::new(ChannelSyncSnapshot::new(account.id, scheduler.queue.len())),
             pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,
@@ -1283,7 +1290,8 @@ fn publish(
     if let Ok(mut snapshot) = shared.snapshot.lock() {
         let running = matches!(
             phase,
-            ChannelSyncPhase::ReadingLocal
+            ChannelSyncPhase::Pacing
+                | ChannelSyncPhase::ReadingLocal
                 | ChannelSyncPhase::Discovering
                 | ChannelSyncPhase::Seeding
                 | ChannelSyncPhase::History
@@ -1495,7 +1503,30 @@ fn run<T: AccountSource>(
     let mut source_probe = false;
     let mut source_probe_started: Option<Instant> = None;
     let mut directory_retry = DirectoryRetry::starting(clock());
-    let mut flood_until = None;
+    let mut flood_until = match library.sync_cooldown(account.id) {
+        Ok(saved) => saved.and_then(|until| {
+            let wall = crate::system_time_unix_ms(std::time::SystemTime::now())?;
+            let remaining = until.checked_sub(wall).filter(|ms| *ms > 0)?;
+            clock().checked_add(Duration::from_millis(remaining as u64))
+        }),
+        Err(error) => {
+            publish(
+                &shared,
+                ChannelSyncPhase::Failed,
+                None,
+                Some(error.kind()),
+                None,
+            );
+            shared.stop.store(true, Ordering::Release);
+            return;
+        }
+    };
+    if let Some(until) = flood_until
+        && let Ok(mut budget) = shared.pacing.lock()
+    {
+        budget.defer(until);
+    }
+    let mut saved_flood = flood_until;
     let mut source_refresh_pending = false;
     let mut executions = execution::Executions::new();
     let mut metadata_ready = false;
@@ -1731,6 +1762,25 @@ fn run<T: AccountSource>(
                 }
             }
         }
+        if flood_until != saved_flood {
+            if let Some(until) = flood_until
+                && let Some(wall) = crate::system_time_unix_ms(std::time::SystemTime::now())
+            {
+                let remaining = u64::try_from(until.saturating_duration_since(clock()).as_millis())
+                    .unwrap_or(u64::MAX);
+                let until_wall = wall.saturating_add(i64::try_from(remaining).unwrap_or(i64::MAX));
+                if let Err(error) = library.save_sync_cooldown(account.id, until_wall) {
+                    publish(
+                        &shared,
+                        ChannelSyncPhase::Failed,
+                        None,
+                        Some(error.kind()),
+                        flood_until,
+                    );
+                }
+            }
+            saved_flood = flood_until;
+        }
         if source_probe_started
             .is_some_and(|at| clock().saturating_duration_since(at) >= Duration::from_secs(1))
         {
@@ -1823,7 +1873,8 @@ fn run<T: AccountSource>(
                     if let Some(job) = scheduler.jobs.get_mut(&id) {
                         job.state = None;
                         job.pushes.clear();
-                        job.force = true;
+                        // Fresh directory PTS decides what was missed. Replacing a
+                        // connection must not force a difference for every channel.
                         if matches!(
                             job.failure,
                             Some(
@@ -1938,8 +1989,21 @@ fn run<T: AccountSource>(
             let probe = source_probe;
             let persist_baseline = !metadata_ready;
             let result = executions.spawn(0, connection_revision, move || {
-                let result = remote
-                    .sync_sources(source_account.id, cancellation.clone())
+                let result = pacing::wait(&worker_shared, None, &cancellation)
+                    .and_then(|()| {
+                        if !probe {
+                            publish(
+                                &worker_shared,
+                                ChannelSyncPhase::Discovering,
+                                None,
+                                None,
+                                None,
+                            );
+                        }
+                        let result = remote.sync_sources(source_account.id, cancellation.clone());
+                        pacing::observe(&worker_shared, &result);
+                        result
+                    })
                     .and_then(|chats| {
                         if cancellation.is_cancelled() {
                             return Err(
@@ -2174,6 +2238,12 @@ fn run<T: AccountSource>(
                 });
             // Only actual recovery/coalescing deadlines wake an otherwise idle owner.
             // Permanent failures and occupied workers wait for a command or completion.
+            // An acknowledged storage call can consume this thread's unpark
+            // token. Check retained completion state after all such calls, not
+            // just a wake edge, before sleeping for a server deadline.
+            if executions.has_completed() {
+                continue;
+            }
             if let Some(deadline) = deadline {
                 thread::park_timeout(deadline.saturating_duration_since(clock()));
             } else {
@@ -2195,6 +2265,9 @@ fn run<T: AccountSource>(
 }
 
 trait AccountSource: ChannelSource + Clone + Send + Sync + 'static {
+    fn request_interval(&self) -> Duration {
+        Duration::ZERO
+    }
     fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle;
     fn sync_sources(
         &self,
@@ -2203,6 +2276,9 @@ trait AccountSource: ChannelSource + Clone + Send + Sync + 'static {
     ) -> Result<Vec<TelegramChatSummary>, ChannelSyncFailure>;
 }
 impl AccountSource for DesktopTelegram {
+    fn request_interval(&self) -> Duration {
+        Duration::from_secs(1)
+    }
     fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle {
         self.lifecycle()
     }
@@ -2305,7 +2381,17 @@ fn step(
             crate::system_time_unix_ms(std::time::SystemTime::now()).unwrap_or(0),
             now,
         ));
-        job.force |= job.quiet_deadline.is_some_and(|deadline| deadline <= now);
+        // Discovery has just supplied a remote head. An equal/newer committed
+        // cursor needs no catch-up RPC, even after a long time with the app closed.
+        // Missing PTS still uses the durable silence-recovery deadline.
+        if job
+            .head
+            .is_some_and(|head| head <= job.state.as_ref().map_or(0, |s| s.pts))
+        {
+            job.quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
+        } else {
+            job.force |= job.quiet_deadline.is_some_and(|deadline| deadline <= now);
+        }
     }
     if job.history
         && job
@@ -2406,6 +2492,11 @@ fn step(
     } else {
         None
     };
+    if !matches!(read, ChannelRead::Push)
+        && !matches!(&read, ChannelRead::Verify(ids) if ids.is_empty())
+    {
+        pacing::wait(shared, Some(chat), &cancellation)?;
+    }
     publish(
         shared,
         if bootstrap {
@@ -2449,11 +2540,13 @@ fn step(
             edited: Vec::new(),
         }
     } else {
-        if shared.managed_id.load(Ordering::Acquire) == chat {
-            telegram.read_managed(account, chat, read.clone(), cancellation.clone())?
+        let result = if shared.managed_id.load(Ordering::Acquire) == chat {
+            telegram.read_managed(account, chat, read.clone(), cancellation.clone())
         } else {
-            telegram.read(account, chat, read.clone(), cancellation.clone())?
-        }
+            telegram.read(account, chat, read.clone(), cancellation.clone())
+        };
+        pacing::observe(shared, &result);
+        result?
     };
     if cancellation.is_cancelled() || shared.stop.load(Ordering::Acquire) {
         return Err(ApplicationError::new(ApplicationErrorKind::Cancelled).into());
@@ -2689,6 +2782,7 @@ mod tests {
     }
     fn shared() -> Shared {
         Shared {
+            pacing: Mutex::new(Default::default()),
             snapshot: Mutex::new(ChannelSyncSnapshot::new(1, 1)),
             pending_channel_retries: AtomicU64::new(0),
             changes: tokio::sync::watch::channel(()).0,
