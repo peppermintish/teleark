@@ -168,6 +168,7 @@ impl Database {
                 caption: file.caption.clone(),
                 mime_type: file.mime_type.clone(),
                 size_bytes: file.size_bytes,
+                duration_ms: file.duration_ms,
                 sent_at_unix_ms: file.sent_at_unix_ms,
                 modified_at_unix_ms: file.modified_at_unix_ms,
             };
@@ -186,6 +187,7 @@ impl Database {
                 caption: stored.caption,
                 mime_type: stored.mime_type,
                 size_bytes: stored.size_bytes,
+                duration_ms: stored.duration_ms,
                 sent_at_unix_ms: stored.created_at_unix_ms.unwrap_or(0),
                 modified_at_unix_ms: stored.modified_at_unix_ms.unwrap_or(0),
             };
@@ -283,9 +285,22 @@ fn read_cached_file(
     chat: ChatId,
     message: i64,
 ) -> StorageResult<Option<CachedTelegramFileRecord>> {
-    Ok(connection.query_row("SELECT f.name,f.caption,f.mime_type,f.size_bytes,COALESCE(f.created_at_unix_ms,f.modified_at_unix_ms,0),COALESCE(f.modified_at_unix_ms,f.created_at_unix_ms,0) FROM remote_objects ro JOIN logical_files f ON f.id=ro.logical_file_id WHERE ro.account_id=?1 AND ro.chat_id=?2 AND ro.message_id=?3 AND f.remote_state='uploaded' AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=ro.account_id AND t.chat_id=ro.chat_id AND t.message_id=ro.message_id)", params![account.get(),chat.get(),message], |row| Ok(CachedTelegramFileRecord {
-        message_id: teleark_core::MessageId::new(message), file_name: row.get(0)?, caption: row.get(1)?, mime_type: row.get(2)?, size_bytes: super::managed_watch::row_u64(row, 3)?, sent_at_unix_ms: row.get(4)?, modified_at_unix_ms: row.get(5)?,
-    })).optional()?)
+    let row = connection.query_row("SELECT f.name,f.caption,f.mime_type,f.size_bytes,COALESCE(f.created_at_unix_ms,f.modified_at_unix_ms,0),COALESCE(f.modified_at_unix_ms,f.created_at_unix_ms,0),f.duration_ms FROM remote_objects ro JOIN logical_files f ON f.id=ro.logical_file_id WHERE ro.account_id=?1 AND ro.chat_id=?2 AND ro.message_id=?3 AND f.remote_state='uploaded' AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=ro.account_id AND t.chat_id=ro.chat_id AND t.message_id=ro.message_id)", params![account.get(),chat.get(),message], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, Option<i64>>(6)?,
+    ))).optional()?;
+    let Some((file_name, caption, mime_type, size, sent_at, modified_at, duration)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(CachedTelegramFileRecord {
+        message_id: teleark_core::MessageId::new(message),
+        file_name,
+        caption,
+        mime_type,
+        size_bytes: super::nonnegative_from_sql("logical_files", "size_bytes", size)?,
+        duration_ms: super::remote::stored_duration(duration)?,
+        sent_at_unix_ms: sent_at,
+        modified_at_unix_ms: modified_at,
+    }))
 }
 
 fn read_state(

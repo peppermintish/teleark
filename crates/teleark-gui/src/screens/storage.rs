@@ -1205,12 +1205,15 @@ impl TeleArkApp {
                                     )
                                     .child(
                                         div()
-                                            .max_w(px(200.0))
+                                            .max_w(px(260.0))
                                             .truncate()
                                             .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
                                             .text_color(theme::text_muted())
+                                            .debug_selector(move || {
+                                                format!("managed-file-meta-{package_id}")
+                                            })
                                             .child(format!(
-                                            "{} · {}",
+                                            "{} · {}{}",
                                             if file.health
                                                 == teleark_runtime::VaultFileHealth::KeyUnavailable
                                             {
@@ -1222,6 +1225,16 @@ impl TeleArkApp {
                                                 )
                                             },
                                             this.tr(vault_health_id(file.health)),
+                                            match file.media_kind {
+                                                teleark_core::FileKind::Video | teleark_core::FileKind::Audio => format!(
+                                                    " · {}",
+                                                    file.duration_ms.map_or_else(
+                                                        || this.tr("common-not-applicable").to_string(),
+                                                        teleark_i18n::format::format_media_duration,
+                                                    ),
+                                                ),
+                                                _ => String::new(),
+                                            },
                                         )),
                                     ),
                             )

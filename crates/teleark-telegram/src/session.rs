@@ -273,14 +273,23 @@ mod tests {
 
     fn stored_version(path: &Path) -> Result<u64, Box<dyn Error>> {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-        value["version"].as_u64().ok_or_else(|| "missing version".into())
+        value["version"]
+            .as_u64()
+            .ok_or_else(|| "missing version".into())
     }
 
     fn channel_kind(session: &FileSession, id: i64) -> Option<ChannelKind> {
-        session.data().ok()?.peer_infos.values().find_map(|peer| match peer {
-            PeerInfo::Channel { id: found, kind, .. } if *found == id => *kind,
-            _ => None,
-        })
+        session
+            .data()
+            .ok()?
+            .peer_infos
+            .values()
+            .find_map(|peer| match peer {
+                PeerInfo::Channel {
+                    id: found, kind, ..
+                } if *found == id => *kind,
+                _ => None,
+            })
     }
 
     fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Box<dyn Error>> {
@@ -300,7 +309,10 @@ mod tests {
         {
             let data = session.data()?;
             assert_eq!(data.peer_infos.len(), 4);
-            assert_eq!(data.dc_options.get(&4).and_then(|dc| dc.auth_key), Some([7; 256]));
+            assert_eq!(
+                data.dc_options.get(&4).and_then(|dc| dc.auth_key),
+                Some([7; 256])
+            );
             assert_eq!(data.updates_state.pts, 10);
             assert_eq!(
                 data.updates_state.channels,
@@ -465,4 +477,3 @@ mod tests {
         Ok(())
     }
 }
-

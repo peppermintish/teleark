@@ -207,6 +207,7 @@ mod tests {
                     file_name: "fixture".into(),
                     caption: None,
                     mime_type: None,
+                    media_duration_ms: None,
                     size_bytes: 1,
                     destination: directory.path().join("fixture"),
                     created_at_unix_ms: 1,

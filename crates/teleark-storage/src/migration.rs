@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 24;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 25;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -708,6 +708,13 @@ CREATE TABLE credential_cleanup (
     Migration {
         version: 24,
         sql: "ALTER TABLE channel_sync_state ADD COLUMN last_synced_at INTEGER CHECK (last_synced_at >= 0);",
+    },
+    // Media duration reported by the source message. Existing rows keep NULL,
+    // which reads as "duration unknown" rather than zero.
+    Migration {
+        version: 25,
+        sql: "ALTER TABLE logical_files ADD COLUMN duration_ms INTEGER CHECK (duration_ms >= 0); \
+              ALTER TABLE native_download_tasks ADD COLUMN media_duration_ms INTEGER CHECK (media_duration_ms >= 0);",
     },
 ];
 

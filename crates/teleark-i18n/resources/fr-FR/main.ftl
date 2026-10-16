@@ -229,6 +229,7 @@ filter-video = Vidéo
 filter-all-statuses = Tous les états
 table-name = Nom
 table-size = Taille
+media-duration = Durée
 table-type = Type
 table-source = Source
 table-modified = Modifié

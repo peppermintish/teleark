@@ -59,6 +59,7 @@ impl DesktopTransfers {
                     caption: snapshot.caption,
                     mime_type: snapshot.mime_type,
                     size_bytes: snapshot.size_bytes,
+                    media_duration_ms: snapshot.media_duration_ms,
                     destination: snapshot.destination,
                 });
         }

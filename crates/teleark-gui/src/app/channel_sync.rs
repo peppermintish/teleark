@@ -2100,6 +2100,7 @@ pub(super) mod tests {
             caption: String::new(),
             mime_type: None,
             size_bytes: 42,
+            duration_ms: None,
         };
         library
             .cache_telegram_files(1, 10, &[file(7)])
@@ -2360,6 +2361,7 @@ pub(super) mod tests {
                 caption: String::new(),
                 mime_type: None,
                 size_bytes: 42,
+                duration_ms: None,
             };
             app.telegram_files = vec![f(2), f(1)];
             app.telegram_files_loading = false;

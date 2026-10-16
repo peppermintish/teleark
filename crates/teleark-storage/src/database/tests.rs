@@ -40,6 +40,7 @@ fn sync_file(id: i64) -> RemoteFileUpsert {
         size_bytes: 42,
         kind: FileKind::Document,
         mime_type: None,
+        duration_ms: None,
         caption: None,
         sent_at_unix_ms: 1_000,
         modified_at_unix_ms: 1_000,
@@ -116,7 +117,7 @@ fn successful_empty_sync_observations_survive_restart_and_reject_stale_scopes()
 }
 
 #[test]
-fn schema_twenty_four_preserves_cursors_keys_and_failed_migration_restart()
+fn schema_twenty_five_preserves_cursors_keys_and_failed_migration_restart()
 -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("v23.sqlite3");
@@ -136,22 +137,34 @@ fn schema_twenty_four_preserves_cursors_keys_and_failed_migration_restart()
         [],
     )?;
     connection.execute("INSERT INTO channel_sync_state(account_id,chat_id,pts,history_before,history_exhausted,repair_pending,gap_pending,revision) VALUES(1,2,50,77,0,1,0,9)", [])?;
-    // Force a deterministic verification failure after ALTER TABLE. Its schema
-    // change and version marker must roll back together, keeping the old bytes.
+    // Force a deterministic verification failure after migration 25. Its schema
+    // change and version marker roll back together, retaining supported schema 24.
     connection.pragma_update(None, "foreign_keys", false)?;
     connection.execute_batch("CREATE TABLE broken_fixture(id INTEGER REFERENCES accounts(id)); INSERT INTO broken_fixture VALUES(999);")?;
     connection.pragma_update(None, "foreign_keys", true)?;
     assert!(crate::migration::migrate(&mut connection, &|_| {}).is_err());
     assert_eq!(
         connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?,
-        23
+        24
     );
-    let columns: i64 = connection.query_row(
+    let last_synced_column: i64 = connection.query_row(
         "SELECT count(*) FROM pragma_table_info('channel_sync_state') WHERE name='last_synced_at'",
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(columns, 0);
+    assert_eq!(last_synced_column, 1);
+    let duration_column: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('logical_files') WHERE name='duration_ms'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(duration_column, 0, "failed migration 25 is rolled back");
+    let native_duration_column: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('native_download_tasks') WHERE name='media_duration_ms'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(native_duration_column, 0, "all migration 25 DDL rolls back");
     connection.execute_batch("DROP TABLE broken_fixture")?;
     drop(connection);
     let database = Database::open(path)?;
@@ -412,6 +425,7 @@ fn local_file(id: u64, name: impl Into<String>, modified_at: i64) -> LogicalFile
         size_bytes: 1_000 + id,
         kind: FileKind::Document,
         mime_type: None,
+        duration_ms: None,
         caption: None,
         source_account_id: None,
         source_chat_id: None,
@@ -580,11 +594,13 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
         file_name: "restored-video.mp4".to_owned(),
         caption: Some("A complete Telegram caption".to_owned()),
         mime_type: Some("video/mp4".to_owned()),
+        media_duration_ms: Some(248_000),
         size_bytes: 1_048_576,
         destination: destination.clone(),
         created_at_unix_ms: 10,
     })?;
     assert!(task.id > 0);
+    assert_eq!(task.media_duration_ms, Some(248_000));
     assert_eq!(task.state, StoredNativeDownloadState::Queued);
     assert!(database.native_download_destination_in_use(&destination)?);
     task.state = StoredNativeDownloadState::Running;
@@ -606,7 +622,16 @@ fn native_download_history_progress_and_terminal_state_round_trip() -> Result<()
     let restored = database.native_downloads()?;
     assert_eq!(restored, vec![task]);
     assert_eq!(restored[0].destination, destination);
+    assert_eq!(
+        restored[0].media_duration_ms,
+        Some(248_000),
+        "source-reported media duration survives restart"
+    );
     assert!(database.native_download_destination_in_use(&destination)?);
+    // The Local inventory inherits the stored duration; Vault outputs have none.
+    let page = database.downloaded_files_page(1, None)?;
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].media_duration_ms, Some(248_000));
     Ok(())
 }
 
@@ -621,6 +646,7 @@ fn native_download_batch_is_atomic_and_restores_message_metadata() -> Result<(),
         file_name: name.to_owned(),
         caption: Some(format!("caption-{message_id}")),
         mime_type: Some("video/mp4".to_owned()),
+        media_duration_ms: None,
         size_bytes: 100,
         destination: std::env::temp_dir().join("TeleArk").join(name),
         created_at_unix_ms: 10,
@@ -668,6 +694,7 @@ fn native_download_deletion_removes_the_last_empty_batch() -> Result<(), Box<dyn
         file_name: name.to_owned(),
         caption: None,
         mime_type: None,
+        media_duration_ms: None,
         size_bytes: 100,
         destination: std::env::temp_dir().join("TeleArk").join(name),
         created_at_unix_ms: 10,
@@ -1175,10 +1202,11 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
         message_id: MessageId::new(77),
         revision: 1,
         remote_key: 77_i64.to_be_bytes().to_vec(),
-        name: "remote.pdf".to_owned(),
+        name: "remote.mp4".to_owned(),
         size_bytes: 42,
-        kind: FileKind::Document,
-        mime_type: Some("application/pdf".to_owned()),
+        kind: FileKind::Video,
+        mime_type: Some("video/mp4".to_owned()),
+        duration_ms: Some(248_000),
         caption: Some("source caption".to_owned()),
         sent_at_unix_ms: 900,
         modified_at_unix_ms: 1_000,
@@ -1195,6 +1223,8 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
     assert_eq!(cached[0].caption, incoming.caption);
     assert_eq!(cached[0].mime_type, incoming.mime_type);
     assert_eq!(cached[0].size_bytes, incoming.size_bytes);
+    assert_eq!(cached[0].duration_ms, incoming.duration_ms);
+    assert_eq!(first_file.duration_ms, incoming.duration_ms);
     assert_eq!(cached[0].sent_at_unix_ms, incoming.sent_at_unix_ms);
     assert!(
         database
@@ -1211,12 +1241,13 @@ fn remote_file_upsert_is_atomic_idempotent_and_revision_safe() -> Result<(), Box
     );
 
     incoming.revision = 2;
-    incoming.name = "renamed.pdf".to_owned();
+    incoming.name = "renamed.mp4".to_owned();
     incoming.modified_at_unix_ms = 2_000;
     let (updated_file, updated_remote) = database.upsert_remote_file(&incoming)?;
     assert_eq!(updated_file.id, first_file.id);
     assert_eq!(updated_remote.id, first_remote.id);
-    assert_eq!(updated_file.name, "renamed.pdf");
+    assert_eq!(updated_file.name, "renamed.mp4");
+    assert_eq!(updated_file.duration_ms, Some(248_000));
 
     let mut conflicting = incoming.clone();
     conflicting.remote_key = b"different".to_vec();
@@ -1248,6 +1279,7 @@ fn search_source_identity_is_scoped_paged_and_unambiguous() -> Result<(), Box<dy
             size_bytes: 42,
             kind: FileKind::Document,
             mime_type: None,
+            duration_ms: None,
             caption: None,
             sent_at_unix_ms: 100,
             modified_at_unix_ms: 100,
@@ -1404,6 +1436,7 @@ fn completed_native_outputs_are_observed_without_rewriting_transfer_history()
         file_name: "native.bin".into(),
         caption: None,
         mime_type: None,
+        media_duration_ms: None,
         size_bytes: 14,
         destination: directory.path().join("native.bin"),
         created_at_unix_ms: 1,
@@ -1469,6 +1502,7 @@ fn mixed_output_cursor_visits_both_kinds_once_without_deep_offsets() -> Result<(
             file_name: format!("native {index}.bin"),
             caption: None,
             mime_type: None,
+            media_duration_ms: None,
             size_bytes: 14,
             destination: directory.path().join(format!("native {index}.bin")),
             created_at_unix_ms: index,
@@ -2046,6 +2080,7 @@ fn sampled_download_checkpoints_cannot_revive_retired_attempts() -> Result<(), B
         file_name: "fixture".into(),
         caption: None,
         mime_type: None,
+        media_duration_ms: None,
         size_bytes: 100,
         destination: std::env::temp_dir().join("checkpoint-fixture"),
         created_at_unix_ms: 1,

@@ -524,6 +524,7 @@ mod tests {
                 package_id: Some(format!("{:032x}", message)),
                 destination: format!("/tmp/teleark-cache-fixture-{id}").into(),
                 size_bytes: 10,
+                media_duration_ms: None,
                 completed_at_unix_ms: id as i64,
             },
             presence,

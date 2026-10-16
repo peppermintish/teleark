@@ -109,6 +109,24 @@ pub fn format_duration_millis(locale: SupportedLocale, milliseconds: u64) -> Str
     }
 }
 
+/// Formats media playback time as `M:SS` or `H:MM:SS` for compact lists.
+///
+/// Video metadata may be fractional; list labels round to the nearest second.
+/// The colon-separated clock form is locale-neutral and compact enough for
+/// fixed-width file tables.
+pub fn format_media_duration(milliseconds: u64) -> String {
+    let total_seconds = milliseconds.saturating_add(500) / 1_000;
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{total_minutes}:{seconds:02}")
+    }
+}
+
 /// Formats a Unix millisecond timestamp in the user's local time zone.
 ///
 /// Registered locales share 24-hour time but use different conventional
@@ -217,6 +235,15 @@ mod tests {
             format_duration_millis(SupportedLocale::JaJp, 125_000),
             "2分5秒"
         );
+    }
+
+    #[test]
+    fn media_durations_format_as_compact_clock_strings() {
+        assert_eq!(format_media_duration(0), "0:00");
+        assert_eq!(format_media_duration(4_200), "0:04");
+        assert_eq!(format_media_duration(65_000), "1:05");
+        assert_eq!(format_media_duration(248_000), "4:08");
+        assert_eq!(format_media_duration(3_720_000), "1:02:00");
     }
 
     #[test]

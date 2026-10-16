@@ -2470,6 +2470,7 @@ fn telegram_file_upserts(
                 size_bytes: file.size_bytes,
                 kind: classify_file(Path::new(&file.file_name)),
                 mime_type: file.mime_type.clone(),
+                duration_ms: file.duration_ms,
                 caption: (!file.caption.is_empty()).then(|| file.caption.clone()),
                 sent_at_unix_ms: file.sent_at_unix_ms,
                 modified_at_unix_ms: file.modified_at_unix_ms,
@@ -2487,6 +2488,7 @@ fn cached_file_summary(file: CachedTelegramFileRecord) -> TelegramFileSummary {
         caption: file.caption.unwrap_or_default(),
         mime_type: file.mime_type,
         size_bytes: file.size_bytes,
+        duration_ms: file.duration_ms,
     }
 }
 
@@ -2892,6 +2894,7 @@ fn record_to_logical_file(record: LogicalFileRecord) -> Result<LogicalFile, Appl
         kind: record.kind,
         source_account_id: record.source_account_id,
         source_chat_id: record.source_chat_id,
+        duration_ms: record.duration_ms,
         modified_at_unix_ms: record.modified_at_unix_ms,
         remote_state: record.remote_state,
         encryption_state: record.encryption_state,
@@ -3043,6 +3046,7 @@ mod tests {
                 file_name: "fixture".into(),
                 caption: None,
                 mime_type: None,
+                media_duration_ms: None,
                 size_bytes: 100,
                 destination: directory.path().join("fixture"),
                 created_at_unix_ms: 1,
@@ -3710,6 +3714,7 @@ mod tests {
             caption: "cached caption".to_owned(),
             mime_type: Some("application/pdf".to_owned()),
             size_bytes: 44,
+            duration_ms: None,
         };
         assert_eq!(
             library

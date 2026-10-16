@@ -130,6 +130,7 @@ impl TeleArkApp {
                     caption: None,
                     mime_type: None,
                     size_bytes: file.size_bytes,
+                    media_duration_ms: file.duration_ms,
                     destination,
                 })
         });
@@ -582,6 +583,7 @@ fn prepare_library_downloads(
             caption: None,
             mime_type: None,
             size_bytes: file.size_bytes,
+            media_duration_ms: file.duration_ms,
             destination,
         });
     }
@@ -631,6 +633,7 @@ mod tests {
             caption: String::new(),
             mime_type: None,
             size_bytes: 42,
+            duration_ms: None,
             sent_at_unix_ms: 1000,
             modified_at_unix_ms: revision,
         };

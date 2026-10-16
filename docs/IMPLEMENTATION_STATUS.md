@@ -1,4 +1,12 @@
-# Implementation status — v0.5.16
+# Implementation status — v0.5.17
+
+## Version 0.5.17 · Telegram durations and selectable inspectors (2026-10-16)
+
+The Telegram adapter reads audio/video duration attributes from grammers 0.11 and retains optional milliseconds through channel updates, cached catalog records and Library projections. SQLite schema 25 adds `logical_files.duration_ms` and `native_download_tasks.media_duration_ms`; existing rows and media with no source duration remain unavailable. Cached Telegram duration survives restart in both Library and local native-download output lists. Channel and Library rows use the compact `M:SS` / `H:MM:SS` formatter. Managed-file rows show a duration only if authenticated metadata provides one; current manifest versions do not carry playback duration, so those entries remain unavailable rather than being probed or guessed. Detail rows, captions, transfer inspector fields and shared inspector summaries use GPUI Kit selectable text and the normal copy action.
+
+Upgrade dependencies to `gpui-kit 0.7.3` and grammers `0.11.0` (Telegram API layer 230). The 0.11 client timestamps use `jiff`; retry policies moved to sender-pool configuration; peer caches accept batches. Session codec v1 fixtures verify old-session reads. Community peer metadata is written as session codec v2; other sessions remain v1. The schema migration is additive and transactional; encrypted part/manifest, key-wrap and recovery formats remain unchanged.
+
+Local verification: workspace tests, `cargo check --workspace --all-targets`, formatting, strict Clippy and `cargo deny check` pass. GUI tests include duration display and selection-to-clipboard behavior. Visual review at 900×600 and actual full-screen, native platform packaging, tagged release CI and Microsoft Store ingestion remain pending. Store submission requires the configured GitHub release workflow; no credentials or live Telegram account are used in local tests.
 
 ## Public website and README presentation (2026-10-05)
 

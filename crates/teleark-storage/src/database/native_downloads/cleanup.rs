@@ -229,6 +229,7 @@ mod tests {
                 file_name: "synthetic.bin".into(),
                 caption: None,
                 mime_type: None,
+                media_duration_ms: None,
                 size_bytes: 4096,
                 destination: path.join("synthetic.bin"),
                 created_at_unix_ms: 10,

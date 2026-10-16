@@ -29,6 +29,7 @@ pub struct LocalLibraryFile {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub kind: FileKind,
+    pub duration_ms: Option<u64>,
     pub modified_at_unix_ms: Option<i64>,
     pub account_id: Option<i64>,
     pub chat_id: Option<i64>,
@@ -135,6 +136,7 @@ impl DesktopLibrary {
                                 kind: classify_file(&record.destination),
                                 path: record.destination,
                                 size_bytes: record.size_bytes,
+                                duration_ms: record.media_duration_ms,
                                 modified_at_unix_ms: None,
                                 account_id: Some(record.account_id),
                                 chat_id: Some(record.chat_id),
@@ -170,6 +172,7 @@ impl DesktopLibrary {
                                     path,
                                     size_bytes: item.file.size_bytes,
                                     kind: item.file.kind,
+                                    duration_ms: item.file.duration_ms,
                                     modified_at_unix_ms: item.file.modified_at_unix_ms,
                                     account_id: None,
                                     chat_id: None,
@@ -242,6 +245,10 @@ mod tests {
                 message_sent_at_unix_ms: None,
                 caption: None,
                 mime_type: None,
+                media_duration_ms: path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+                    .then_some(248_000),
                 created_at_unix_ms: 1,
             })
             .expect("native history");
@@ -289,6 +296,8 @@ mod tests {
         let library = DesktopLibrary::open(root.path().join("library.sqlite3")).expect("library");
         let native_path = root.path().join("京都.pdf");
         native(&library, &native_path, 1, true);
+        let video_path = root.path().join("restored-video.mp4");
+        native(&library, &video_path, 1, true);
         native(&library, &root.path().join("other-account.pdf"), 2, true);
         native(&library, &root.path().join("queued.pdf"), 1, false);
         let removed = root.path().join("removed.pdf");
@@ -316,7 +325,16 @@ mod tests {
                 .all(|result| result.is_ok())
         );
         let files = all(&library, Some(1), "", None);
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 4);
+        assert_eq!(
+            files
+                .iter()
+                .find(|file| file.name == "restored-video.mp4")
+                .expect("downloaded video")
+                .duration_ms,
+            Some(248_000),
+            "native download retains source media duration: {files:?}",
+        );
         assert!(
             files
                 .iter()

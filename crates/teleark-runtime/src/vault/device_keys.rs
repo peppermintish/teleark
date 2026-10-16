@@ -1485,6 +1485,7 @@ mod tests {
                 caption: crate::transfer::MANIFEST_CAPTION.into(),
                 mime_type: None,
                 size_bytes: 42,
+                duration_ms: None,
             }],
         )?;
         let telegram = remote.connect(&temp.path().join("synthetic.session"));

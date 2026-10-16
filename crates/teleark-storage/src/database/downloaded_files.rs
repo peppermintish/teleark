@@ -65,14 +65,16 @@ SELECT * FROM (
  SELECT * FROM (
   SELECT 0 AS kind, id, account_id, chat_id, message_id, NULL AS package_id,
          'utf8' AS path_encoding, CAST(destination_path AS BLOB) AS destination_path,
-         size_bytes, COALESCE(finished_at_unix_ms, updated_at_unix_ms) AS completed_at
+         size_bytes, COALESCE(finished_at_unix_ms, updated_at_unix_ms) AS completed_at,
+         media_duration_ms
   FROM native_download_tasks WHERE account_id=?1 AND state='completed' AND id<=?2
   ORDER BY id DESC LIMIT 128
  )
  UNION ALL
  SELECT * FROM (
   SELECT 1 AS kind, id, account_id, chat_id, NULL AS message_id, package_id,
-         path_encoding, destination_path, size_bytes, completed_at_unix_ms
+         path_encoding, destination_path, size_bytes, completed_at_unix_ms,
+         NULL AS media_duration_ms
   FROM vault_downloaded_files WHERE account_id=?1 AND id<=?3
   ORDER BY id DESC LIMIT 128
  )
@@ -107,6 +109,12 @@ SELECT * FROM (
                 package_id: row.get(5)?,
                 destination,
                 size_bytes: nonnegative_from_sql("downloaded_files", "size_bytes", row.get(8)?)?,
+                media_duration_ms: row
+                    .get::<_, Option<i64>>(10)?
+                    .map(|value| {
+                        nonnegative_from_sql("native_download_tasks", "media_duration_ms", value)
+                    })
+                    .transpose()?,
                 completed_at_unix_ms: row.get(9)?,
             });
         }

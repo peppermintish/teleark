@@ -21,6 +21,7 @@ pub struct ChannelFileUpdate {
     pub caption: String,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +44,7 @@ impl ChannelPush {
                     64 + f.file_name.len()
                         + f.caption.len()
                         + f.mime_type.as_ref().map_or(0, String::len)
+                        + size_of::<Option<u64>>()
                 })
                 .sum::<usize>()
     }
@@ -470,6 +472,7 @@ fn record_message(
                 file_name: document.name().unwrap_or_default().to_owned(),
                 caption: message.message,
                 mime_type: document.mime_type().map(ToOwned::to_owned),
+                duration_ms: media_duration_ms(&document),
                 size_bytes: u64::try_from(size)
                     .map_err(|_| TelegramError::new(TelegramErrorKind::LimitExceeded))?,
             }),

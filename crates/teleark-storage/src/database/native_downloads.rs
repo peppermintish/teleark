@@ -21,7 +21,7 @@ const COLUMNS: &str = r#"
     finished_at_unix_ms, queue_wait_ms, duration_ms,
     average_bytes_per_second, attempts, failure_code,
     created_at_unix_ms, updated_at_unix_ms, batch_id,
-    message_sent_at_unix_ms, caption, mime_type, account_id
+    message_sent_at_unix_ms, caption, mime_type, account_id, media_duration_ms
 "#;
 
 impl Database {
@@ -185,7 +185,7 @@ impl Database {
         let mut tasks = Vec::new();
         let mut omitted = 0;
         while let Some(row) = rows.next()? {
-            omitted = nonnegative_from_sql("native_download_history", "omitted", row.get(23)?)?;
+            omitted = nonnegative_from_sql("native_download_history", "omitted", row.get(24)?)?;
             tasks.push(row_to_task(row)?);
         }
         Ok((tasks, omitted))
@@ -244,10 +244,10 @@ fn insert_task(
 INSERT INTO native_download_tasks (
     chat_id, message_id, message_sent_at_unix_ms, file_name, caption,
     mime_type, size_bytes, destination_path, batch_id, state, verification,
-    transferred_bytes, attempts, created_at_unix_ms, updated_at_unix_ms, account_id
+    transferred_bytes, attempts, created_at_unix_ms, updated_at_unix_ms, account_id, media_duration_ms
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-    'queued', 'pending', 0, 0, ?10, ?10, ?11
+    'queued', 'pending', 0, 0, ?10, ?10, ?11, ?12
 )
 "#,
         params![
@@ -262,6 +262,7 @@ INSERT INTO native_download_tasks (
             batch_id,
             task.created_at_unix_ms,
             task.account_id,
+            optional_u64("native_download.media_duration_ms", task.media_duration_ms)?,
         ],
     )?;
     Ok(connection.last_insert_rowid())
@@ -275,6 +276,7 @@ fn new_task_record(
     NativeDownloadTaskRecord {
         id,
         account_id: Some(task.account_id),
+        media_duration_ms: task.media_duration_ms,
         batch_id,
         chat_id: task.chat_id,
         message_id: task.message_id,
@@ -331,6 +333,7 @@ fn validate_new(task: &NewNativeDownloadTaskRecord) -> StorageResult<()> {
         });
     }
     unsigned_to_sql("native_download.size_bytes", task.size_bytes)?;
+    optional_u64("native_download.media_duration_ms", task.media_duration_ms)?;
     Ok(())
 }
 
@@ -408,6 +411,7 @@ fn row_to_task(row: &Row<'_>) -> StorageResult<NativeDownloadTaskRecord> {
         failure_code: row.get(15)?,
         created_at_unix_ms: row.get(16)?,
         updated_at_unix_ms: row.get(17)?,
+        media_duration_ms: optional_nonnegative("media_duration_ms", row.get(23)?)?,
     })
 }
 

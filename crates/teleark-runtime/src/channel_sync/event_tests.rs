@@ -19,6 +19,7 @@ fn file(id: i64) -> TelegramFileSummary {
         caption: crate::transfer::MANIFEST_CAPTION.into(),
         mime_type: None,
         size_bytes: 42,
+        duration_ms: None,
     }
 }
 pub(super) fn shared() -> Arc<Shared> {
@@ -101,6 +102,7 @@ fn push(pts: i32, edited: bool) -> teleark_telegram::ChannelPush {
             caption: f.caption,
             mime_type: f.mime_type,
             size_bytes: f.size_bytes,
+            duration_ms: f.duration_ms,
         }],
         removed: vec![],
         edited: if edited { vec![10] } else { vec![] },

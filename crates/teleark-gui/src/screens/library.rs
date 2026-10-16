@@ -15,7 +15,7 @@ use teleark_core::{
 };
 use teleark_i18n::{
     MessageArgs,
-    format::{format_bytes, format_integer, format_unix_millis},
+    format::{format_bytes, format_integer, format_media_duration, format_unix_millis},
 };
 
 use crate::{
@@ -601,6 +601,12 @@ impl TeleArkApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.selected_file == index;
+        let media_duration = matches!(file.kind, FileKind::Video | FileKind::Audio).then(|| {
+            file.duration_ms.map_or_else(
+                || self.tr("common-not-applicable").to_string(),
+                format_media_duration,
+            )
+        });
         let name = div()
             .flex_1()
             .min_w_0()
@@ -611,12 +617,23 @@ impl TeleArkApp {
             .child(
                 div()
                     .min_w_0()
+                    .flex_1()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::text_primary())
                     .debug_selector(move || format!("library-name-{index}"))
                     .child(file.name.clone()),
-            );
+            )
+            .when_some(media_duration.clone(), |name, duration| {
+                name.child(
+                    div()
+                        .flex_none()
+                        .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
+                        .text_color(theme::text_muted())
+                        .debug_selector(move || format!("library-duration-{index}"))
+                        .child(duration),
+                )
+            });
         let (state_id, state_tone) = file_status(file.remote_state, file.verification_state);
         let source = file.source_name.clone().map_or_else(
             || {
@@ -717,7 +734,19 @@ impl TeleArkApp {
                 90.0,
             ))
             .when(!layout.is_compact(), |row| {
-                row.child(table_value(self.tr(file_kind_message_id(file.kind)), 110.0))
+                let kind_label = if matches!(file.kind, FileKind::Video | FileKind::Audio) {
+                    format!(
+                        "{} · {}",
+                        self.tr(file_kind_message_id(file.kind)),
+                        file.duration_ms.map_or_else(
+                            || self.tr("common-not-applicable").to_string(),
+                            format_media_duration,
+                        )
+                    )
+                } else {
+                    self.tr(file_kind_message_id(file.kind)).to_string()
+                };
+                row.child(table_value(kind_label, 110.0))
                     .child(table_value(source, 140.0))
                     .child(table_value(modified, 154.0))
             })
@@ -878,6 +907,7 @@ fn table_value(value: impl Into<SharedString>, width: f32) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library_state::LibrarySnapshot;
 
     #[test]
     fn real_file_states_map_to_semantic_localized_statuses() {
@@ -897,6 +927,56 @@ mod tests {
             file_status(RemoteState::RemoteMissing, VerificationState::Unverified),
             ("file-state-remote-missing", Tone::Red)
         );
+    }
+
+    #[gpui_kit::test]
+    fn video_and_audio_rows_show_a_media_duration_and_others_do_not(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use teleark_runtime::{LocalLibraryFile, LocalLibraryKey, LocalLibraryPage};
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Library);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        let row = |id: u64, name: &str, duration: Option<u64>| LocalLibraryFile {
+            key: LocalLibraryKey::NativeDownload(id),
+            name: name.into(),
+            path: std::path::PathBuf::from(format!("/fixture/{name}")),
+            size_bytes: 1024,
+            kind: teleark_runtime::classify_file(std::path::Path::new(name)),
+            duration_ms: duration,
+            modified_at_unix_ms: None,
+            account_id: Some(1),
+            chat_id: Some(100),
+            message_id: Some(id as i64),
+        };
+        app.update(cx, |app, cx| {
+            app.visual_preview = false;
+            app.library_view = LibraryView::Local;
+            let snapshot = LibrarySnapshot::from_local(LocalLibraryPage {
+                files: vec![
+                    row(1, "clip.mp4", Some(248_000)),
+                    row(2, "episode.mp3", Some(3_720_000)),
+                    row(3, "notes.pdf", None),
+                ],
+                next: None,
+            });
+            app.library_content = LibraryContent::from_snapshot(snapshot);
+            app.selected_file = 0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Both media rows render a duration label; the plain document does not.
+        assert!(cx.debug_bounds("library-duration-0").is_some(), "video row");
+        assert!(cx.debug_bounds("library-duration-1").is_some(), "audio row");
+        assert!(
+            cx.debug_bounds("library-duration-2").is_none(),
+            "a plain document shows no duration"
+        );
+        app.read_with(cx, |app, _| {
+            let rows = app.library_content.rows();
+            assert_eq!(rows[0].duration_ms, Some(248_000));
+            assert_eq!(rows[1].duration_ms, Some(3_720_000));
+            assert_eq!(rows[2].duration_ms, None);
+        });
     }
 
     #[test]

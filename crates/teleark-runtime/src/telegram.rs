@@ -59,6 +59,8 @@ pub struct TelegramFileSummary {
     pub caption: String,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    /// Media duration reported by Telegram; absent when it reports none.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2226,6 +2228,7 @@ async fn channel_read(
         caption: file.caption().to_owned(),
         mime_type: file.mime_type().map(ToOwned::to_owned),
         size_bytes: file.size_bytes(),
+        duration_ms: file.duration_ms(),
     };
     match request {
         ChannelRead::Difference(pts) => {
@@ -2336,6 +2339,7 @@ async fn scan_page(
                 caption: file.caption().to_owned(),
                 mime_type: file.mime_type().map(str::to_owned),
                 size_bytes: file.size_bytes(),
+                duration_ms: file.duration_ms(),
             })
             .collect(),
         next_before_message_id,
@@ -2587,6 +2591,7 @@ fn file_summary(file: &teleark_telegram::TelegramFile) -> TelegramFileSummary {
         caption: file.caption().to_owned(),
         mime_type: file.mime_type().map(str::to_owned),
         size_bytes: file.size_bytes(),
+        duration_ms: file.duration_ms(),
     }
 }
 
@@ -3044,6 +3049,7 @@ mod tests {
             caption: "full caption".to_owned(),
             mime_type: Some("video/mp4".to_owned()),
             size_bytes: 10,
+            duration_ms: Some(125_000),
         };
         let filter = TelegramFileFilter {
             after_unix_ms: Some(1_700),

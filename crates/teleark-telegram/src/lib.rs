@@ -481,6 +481,7 @@ pub struct TelegramFile {
     caption: String,
     mime_type: Option<String>,
     size_bytes: u64,
+    duration_ms: Option<u64>,
     document: Document,
 }
 
@@ -526,6 +527,11 @@ impl TelegramFile {
 
     pub fn mime_type(&self) -> Option<&str> {
         self.mime_type.as_deref()
+    }
+
+    /// Media duration when Telegram reports one; absent for plain documents.
+    pub const fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
     }
 
     pub const fn size_bytes(&self) -> u64 {
@@ -2374,8 +2380,26 @@ fn file_from_message(
         caption: message.text().to_owned(),
         mime_type: document.mime_type().map(ToOwned::to_owned),
         size_bytes,
+        duration_ms: media_duration_ms(&document),
         document,
     }))
+}
+
+/// Rounds a reported media duration to whole milliseconds.
+///
+/// Telegram sends whole seconds for audio and fractional seconds for video, and
+/// omits the attribute entirely on plain documents, photos and stickers.
+fn media_duration_ms(document: &Document) -> Option<u64> {
+    media_duration_from_seconds(document.duration())
+}
+
+fn media_duration_from_seconds(seconds: Option<f64>) -> Option<u64> {
+    let seconds = seconds?;
+    let milliseconds = seconds * 1_000.0;
+    if !milliseconds.is_finite() || milliseconds <= 0.0 || milliseconds > u64::MAX as f64 {
+        return None;
+    }
+    Some(milliseconds.round() as u64)
 }
 
 fn is_flood_or_slowmode(name: &str) -> bool {
@@ -2591,6 +2615,22 @@ impl TelegramConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_duration_is_rounded_and_rejects_missing_or_invalid_metadata() {
+        for (seconds, expected) in [
+            (Some(4.125), Some(4_125)),
+            (Some(4.1256), Some(4_126)),
+            (Some(0.0), None),
+            (Some(-1.0), None),
+            (Some(f64::NAN), None),
+            (Some(f64::INFINITY), None),
+            (Some(f64::MAX), None),
+            (None, None),
+        ] {
+            assert_eq!(media_duration_from_seconds(seconds), expected);
+        }
+    }
 
     #[test]
     fn recent_history_fills_a_lagging_index_and_deduplicates_publications() {

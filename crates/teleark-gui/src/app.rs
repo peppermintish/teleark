@@ -1633,6 +1633,7 @@ mod tests {
             caption: String::new(),
             mime_type: None,
             size_bytes: 10,
+            duration_ms: None,
         };
         let mut files = vec![file(99, "stale")];
         let first = TelegramFilePage {
@@ -1708,6 +1709,55 @@ pub(crate) mod test_support {
                 },
             )
         })
+    }
+
+    /// Mounts the same `component::Root` the application uses, so tests can
+    /// exercise window-scoped text selection and clipboard copy.
+    pub(crate) fn preview_app_in_root(
+        cx: &mut gpui_kit::TestAppContext,
+        page: Page,
+    ) -> (
+        gpui_kit::Entity<TeleArkApp>,
+        &mut gpui_kit::VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::window_commands::init(cx);
+        });
+        let captured: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<TeleArkApp>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = captured.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let unavailable =
+                || ApplicationError::new(teleark_core::ApplicationErrorKind::Authorization);
+            let app = cx.new(|cx| {
+                TeleArkApp::new(
+                    window,
+                    cx,
+                    Localizer::new(SupportedLocale::EnUs).expect("catalog"),
+                    RuntimeStartup {
+                        configuration: None,
+                        library: Err(unavailable()),
+                        telegram: Err(unavailable()),
+                        transfers: Err(unavailable()),
+                        vault: Err(unavailable()),
+                    },
+                    AppStartup {
+                        page,
+                        visual_preview: true,
+                        show_upload: false,
+                        locale: LocaleStartup {
+                            system_locale: SupportedLocale::EnUs,
+                            follows_system_locale: false,
+                        },
+                    },
+                )
+            });
+            *slot.borrow_mut() = Some(app.clone());
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let app = captured.borrow().clone().expect("application entity");
+        (app, cx)
     }
 }
 

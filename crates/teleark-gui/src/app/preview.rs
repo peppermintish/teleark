@@ -36,6 +36,14 @@ impl TeleArkApp {
                     name: (*name).into(),
                     size_bytes: 1024 * 1024 * 123,
                     kind: file_kind,
+                    duration_ms: if matches!(
+                        file_kind,
+                        teleark_core::FileKind::Video | teleark_core::FileKind::Audio
+                    ) {
+                        Some(248_000)
+                    } else {
+                        None
+                    },
                     source_name: Some("Design Library".into()),
                     local_source_path: local.then(|| {
                         std::path::PathBuf::from("/tmp/teleark-preview/Downloads").join(name)
@@ -210,6 +218,7 @@ impl TeleArkApp {
                     relative_path: None,
                     mime_type: None,
                     media_kind: FileKind::Document,
+                    duration_ms: if index % 4 == 0 { Some(248_000) } else { None },
                     size_bytes: 1024 * 1024 * (index as u64 + 1) * 123,
                     encoded_size_bytes: 1024 * 1024 * (index as u64 + 1) * 123 + 512,
                     part_count: 3,
@@ -298,6 +307,11 @@ impl TeleArkApp {
                 caption: (0..24).map(|line| format!("Field note {line:02} · 京都の春 — 摄影素材与项目记录。Original source content remains unchanged.\n")).collect(),
                 mime_type: None,
                 size_bytes: 1024 * 1024 * 123,
+                duration_ms: match index % 3 {
+                    0 => Some(248_000), // 4m 8s
+                    1 => Some(3_720_000), // 1h 2m
+                    _ => None,
+                },
             })
             .collect();
         self.telegram_files_exhausted = true;
@@ -532,6 +546,7 @@ impl TeleArkApp {
                                 package_id: Some(format!("{:032x}", index + 1)),
                                 destination,
                                 size_bytes,
+                                media_duration_ms: None,
                                 completed_at_unix_ms: 1_788_624_000_000,
                             },
                             presence: match index {
@@ -644,6 +659,7 @@ impl TeleArkApp {
                                 package_id: None,
                                 destination,
                                 size_bytes: file.size_bytes,
+                                media_duration_ms: file.duration_ms,
                                 completed_at_unix_ms: 1_788_624_000_000,
                             },
                             presence,

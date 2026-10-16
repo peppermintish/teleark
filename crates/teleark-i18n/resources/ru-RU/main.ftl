@@ -229,6 +229,7 @@ filter-video = Видео
 filter-all-statuses = Все состояния
 table-name = Имя
 table-size = Размер
+media-duration = Длительность
 table-type = Тип
 table-source = Источник
 table-modified = Изменён

@@ -54,6 +54,7 @@ pub struct RemoteFileUpsert {
     pub size_bytes: u64,
     pub kind: FileKind,
     pub mime_type: Option<String>,
+    pub duration_ms: Option<u64>,
     pub caption: Option<String>,
     pub sent_at_unix_ms: i64,
     pub modified_at_unix_ms: i64,
@@ -68,6 +69,7 @@ pub struct CachedTelegramFileRecord {
     pub caption: Option<String>,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    pub duration_ms: Option<u64>,
     pub sent_at_unix_ms: i64,
     pub modified_at_unix_ms: i64,
 }
@@ -122,6 +124,8 @@ pub struct NewNativeDownloadTaskRecord {
     pub file_name: String,
     pub caption: Option<String>,
     pub mime_type: Option<String>,
+    /// Playback duration reported by the source message, when it reports one.
+    pub media_duration_ms: Option<u64>,
     pub size_bytes: u64,
     pub destination: PathBuf,
     pub created_at_unix_ms: i64,
@@ -152,6 +156,7 @@ pub struct NativeDownloadTaskRecord {
     pub file_name: String,
     pub caption: Option<String>,
     pub mime_type: Option<String>,
+    pub media_duration_ms: Option<u64>,
     pub size_bytes: u64,
     pub destination: PathBuf,
     pub state: StoredNativeDownloadState,
@@ -177,6 +182,7 @@ pub struct LogicalFileRecord {
     pub size_bytes: u64,
     pub kind: FileKind,
     pub mime_type: Option<String>,
+    pub duration_ms: Option<u64>,
     pub extension: Option<String>,
     pub caption: Option<String>,
     pub source_account_id: Option<AccountId>,
@@ -201,6 +207,7 @@ impl From<&LogicalFile> for LogicalFileRecord {
             size_bytes: value.size_bytes,
             kind: value.kind,
             mime_type: None,
+            duration_ms: value.duration_ms,
             extension: value.extension().map(str::to_owned),
             caption: None,
             source_account_id: value.source_account_id,
@@ -225,6 +232,7 @@ impl LogicalFileRecord {
         file.source_account_id = self.source_account_id;
         file.source_chat_id = self.source_chat_id;
         file.modified_at_unix_ms = self.modified_at_unix_ms;
+        file.duration_ms = self.duration_ms;
         file.remote_state = self.remote_state;
         file.encryption_state = self.encryption_state;
         file.verification_state = self.verification_state;
@@ -241,6 +249,7 @@ pub struct NewLogicalFileRecord {
     pub size_bytes: u64,
     pub kind: FileKind,
     pub mime_type: Option<String>,
+    pub duration_ms: Option<u64>,
     pub extension: Option<String>,
     pub caption: Option<String>,
     pub source_account_id: Option<AccountId>,
@@ -273,6 +282,7 @@ impl NewLogicalFileRecord {
             size_bytes,
             kind,
             mime_type: None,
+            duration_ms: None,
             extension,
             caption: None,
             source_account_id: None,
@@ -296,6 +306,7 @@ impl NewLogicalFileRecord {
             size_bytes: self.size_bytes,
             kind: self.kind,
             mime_type: self.mime_type.clone(),
+            duration_ms: self.duration_ms,
             extension: self.extension.clone(),
             caption: self.caption.clone(),
             source_account_id: self.source_account_id,
@@ -811,6 +822,8 @@ pub struct DownloadedFileRecord {
     pub package_id: Option<String>,
     pub destination: std::path::PathBuf,
     pub size_bytes: u64,
+    /// Source-reported playback duration for a native download; Vault outputs have none.
+    pub media_duration_ms: Option<u64>,
     pub completed_at_unix_ms: i64,
 }
 

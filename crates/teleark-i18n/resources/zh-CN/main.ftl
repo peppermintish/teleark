@@ -335,6 +335,7 @@ filter-all-statuses = 全部状态
 
 table-name = 名称
 table-size = 大小
+media-duration = 时长
 table-type = 类型
 table-source = 来源
 table-modified = 修改时间
@@ -1120,6 +1121,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.17 · Telegram 媒体时长与可选择的检查器
+
+    - 在频道和资料库列表中，以简洁的 `M:SS` 或 `H:MM:SS` 格式显示 Telegram 报告的音频/视频时长，并在下载后将已知时长保留到本地列表。没有经过认证的时长元数据的托管文件、本地导入和当前 Vault 清单会显示为不可用，不会猜测时长。已知值保存在 SQLite 架构 25 中。
+    - 详情行、说明文字、传输详情和检查器摘要均可选择并复制。
+    - 将 GPUI Kit 升级到 0.7.3，grammers 升级到 0.11.0（Telegram API 层 230）。不含 Community 对等的会话文件仍为版本 1。
+
     ## 0.5.13 · Microsoft Store 传输恢复与诊断
 
     - 恢复默认 Store HTTP 请求路径。`.GetNewClosure()`` 会导致模块私有的传输函数无法解析，因此工作流在发送令牌请求前就失败了。

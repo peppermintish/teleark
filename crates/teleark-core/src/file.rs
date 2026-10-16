@@ -94,6 +94,8 @@ pub struct LogicalFile {
     pub name: String,
     pub size_bytes: u64,
     pub kind: FileKind,
+    /// Media duration reported by Telegram or a trusted local metadata reader.
+    pub duration_ms: Option<u64>,
     pub source_account_id: Option<AccountId>,
     pub source_chat_id: Option<ChatId>,
     pub modified_at_unix_ms: Option<i64>,
@@ -115,6 +117,7 @@ impl LogicalFile {
             name: name.into(),
             size_bytes,
             kind,
+            duration_ms: None,
             source_account_id: None,
             source_chat_id: None,
             modified_at_unix_ms: None,

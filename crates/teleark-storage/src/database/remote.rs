@@ -3,7 +3,10 @@ use teleark_core::{
     EncryptionState, LogicalFileId, RemoteObjectId, RemoteState, VerificationState,
 };
 
-use super::{Database, id_from_sql, transaction, unsigned_to_sql, upsert_logical_file_on};
+use super::{
+    Database, id_from_sql, nonnegative_from_sql, transaction, unsigned_to_sql,
+    upsert_logical_file_on,
+};
 use crate::error::{InputReason, InvariantViolation};
 use crate::model::{
     CachedTelegramFileRecord, LogicalFileRecord, RemoteFileUpsert, RemoteObjectRecord,
@@ -19,7 +22,7 @@ const MAX_CACHED_TELEGRAM_FILES: usize = 5_000;
 const BATCH_CANDIDATES_SQL: &str = r#"
 SELECT ro.message_id, f.name, f.caption, f.mime_type, f.size_bytes,
        COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0),
-       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0)
+       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0), f.duration_ms
 FROM remote_objects ro
 JOIN logical_files f ON f.id = ro.logical_file_id
 WHERE ro.account_id = ?1 AND ro.chat_id = ?2 AND ro.message_id < ?3
@@ -48,17 +51,27 @@ impl Database {
                 row.get::<_, i64>(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, file_name, caption, mime_type, size, sent_at_unix_ms, modified_at_unix_ms) =
-                row?;
+            let (
+                id,
+                file_name,
+                caption,
+                mime_type,
+                size,
+                sent_at_unix_ms,
+                modified_at_unix_ms,
+                duration_ms,
+            ) = row?;
             Ok(CachedTelegramFileRecord {
                 message_id: teleark_core::MessageId::new(id),
                 file_name,
                 caption,
                 mime_type,
                 size_bytes: stored_u64("size_bytes", size)?,
+                duration_ms: stored_duration(duration_ms)?,
                 sent_at_unix_ms,
                 modified_at_unix_ms,
             })
@@ -142,7 +155,7 @@ WHERE account_id = ?1 AND chat_id = ?2 AND message_id = ?3
             r#"
 SELECT ro.message_id, f.name, f.caption, f.mime_type, f.size_bytes,
        COALESCE(f.created_at_unix_ms, f.modified_at_unix_ms, 0),
-       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0)
+       COALESCE(f.modified_at_unix_ms, f.created_at_unix_ms, 0), f.duration_ms
 FROM remote_objects ro
 JOIN logical_files f ON f.id = ro.logical_file_id
 WHERE ro.account_id = ?1 AND ro.chat_id = ?2
@@ -167,22 +180,31 @@ LIMIT ?3
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
         rows.map(|row| {
-            let (message_id, file_name, caption, mime_type, size, sent_at, modified_at) = row?;
+            let (message_id, file_name, caption, mime_type, size, sent_at, modified_at, duration) =
+                row?;
             Ok(CachedTelegramFileRecord {
                 message_id: teleark_core::MessageId::new(message_id),
                 file_name,
                 caption,
                 mime_type,
                 size_bytes: stored_u64("encoded_size_bytes", size)?,
+                duration_ms: stored_duration(duration)?,
                 sent_at_unix_ms: sent_at,
                 modified_at_unix_ms: modified_at,
             })
         })
         .collect()
     }
+}
+
+pub(super) fn stored_duration(value: Option<i64>) -> StorageResult<Option<u64>> {
+    value
+        .map(|duration| nonnegative_from_sql("logical_files", "duration_ms", duration))
+        .transpose()
 }
 
 fn validate_remote_file(file: &RemoteFileUpsert) -> StorageResult<()> {
@@ -206,6 +228,9 @@ fn validate_remote_file(file: &RemoteFileUpsert) -> StorageResult<()> {
     }
     unsigned_to_sql("remote_file.revision", file.revision)?;
     unsigned_to_sql("remote_file.size_bytes", file.size_bytes)?;
+    if let Some(duration) = file.duration_ms {
+        unsigned_to_sql("remote_file.duration_ms", duration)?;
+    }
     Ok(())
 }
 
@@ -221,6 +246,7 @@ fn logical_record(id: LogicalFileId, incoming: &RemoteFileUpsert) -> LogicalFile
         size_bytes: incoming.size_bytes,
         kind: incoming.kind,
         mime_type: incoming.mime_type.clone(),
+        duration_ms: incoming.duration_ms,
         extension,
         caption: incoming.caption.clone(),
         source_account_id: Some(incoming.account_id),
@@ -457,6 +483,7 @@ mod batch_tests {
                 size_bytes: 1,
                 kind: FileKind::Archive,
                 mime_type: None,
+                duration_ms: None,
                 caption: None,
                 sent_at_unix_ms: 0,
                 modified_at_unix_ms: 0,

@@ -1105,6 +1105,7 @@ pub(crate) fn update_summary(file: teleark_telegram::ChannelFileUpdate) -> Teleg
         caption: file.caption,
         mime_type: file.mime_type,
         size_bytes: file.size_bytes,
+        duration_ms: file.duration_ms,
     }
 }
 
@@ -2683,6 +2684,7 @@ mod tests {
             caption: String::new(),
             mime_type: None,
             size_bytes: 42,
+            duration_ms: None,
         }
     }
     fn shared() -> Shared {

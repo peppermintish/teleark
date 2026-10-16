@@ -276,6 +276,7 @@ pub(super) fn load(
         relative_path: None,
         mime_type: None,
         media_kind: FileKind::Other,
+        duration_ms: None,
         size_bytes: pending.public_header.logical_file_size,
         encoded_size_bytes: pending
             .metadata

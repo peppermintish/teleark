@@ -13,6 +13,7 @@ fn record(root: &std::path::Path, id: u64) -> DownloadedFileRecord {
         package_id: None,
         destination: root.join(format!("download-{id}.bin")),
         size_bytes: 3,
+        media_duration_ms: None,
         completed_at_unix_ms: id as i64,
     }
 }
@@ -289,6 +290,7 @@ fn complete_history(library: &DesktopLibrary, file: &DownloadedFileRecord) {
             message_sent_at_unix_ms: None,
             caption: None,
             mime_type: None,
+            media_duration_ms: None,
         })
         .expect("history");
     task.state = StoredNativeDownloadState::Completed;

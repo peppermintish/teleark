@@ -120,6 +120,7 @@ impl TeleArkApp {
                         package_id: None,
                         destination: row.destination.clone(),
                         size_bytes: row.size_bytes,
+                        media_duration_ms: row.media_duration_ms,
                         completed_at_unix_ms: row.finished_at_unix_ms.expect("preview completion"),
                     },
                     presence: if index < 2 {
@@ -351,6 +352,7 @@ impl TeleArkApp {
             caption: None,
             mime_type: None,
             size_bytes: 256 * 1024 * 1024,
+            media_duration_ms: None,
             transferred_bytes: 0,
             destination: "/Preview/Downloads/Research archive.zip".into(),
             state: ChannelDownloadState::Cancelled,
@@ -4905,6 +4907,8 @@ fn detail_tab(label: impl Into<SharedString>, selected: bool) -> AnyElement {
 
 fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
     let tooltip = format!("{label}: {value}");
+    let label_id = format!("transfer-detail-label-{label}");
+    let value_id = format!("transfer-detail-value-{label}");
     components::list_row()
         .id(label.clone())
         .child(
@@ -4913,7 +4917,7 @@ fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
                 .flex_none()
                 .truncate()
                 .text_color(theme::text_muted())
-                .child(label),
+                .child(crate::components::selectable_text(label_id, label)),
         )
         .child(
             div()
@@ -4921,7 +4925,7 @@ fn detail_row(label: SharedString, value: SharedString) -> AnyElement {
                 .min_w_0()
                 .truncate()
                 .text_color(theme::text_secondary())
-                .child(value),
+                .child(crate::components::selectable_text(value_id, value)),
         )
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
@@ -5438,6 +5442,7 @@ mod tests {
             caption: Some("Synthetic benchmark caption".into()),
             mime_type: None,
             size_bytes: 1_024,
+            media_duration_ms: None,
             transferred_bytes: 1_024,
             destination: format!("/tmp/teleark-preview/output-{id}.bin").into(),
             state: ChannelDownloadState::Completed,

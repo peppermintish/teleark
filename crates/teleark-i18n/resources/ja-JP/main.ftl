@@ -335,6 +335,7 @@ filter-all-statuses = すべての状態
 
 table-name = 名前
 table-size = サイズ
+media-duration = 再生時間
 table-type = 種類
 table-source = 保存元
 table-modified = 更新日時
@@ -1120,6 +1121,12 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.17 · Telegram メディア時間の表示と選択可能なインスペクター
+
+    - チャンネルとライブラリの一覧に、Telegram が報告する音声/動画の再生時間を `M:SS` または `H:MM:SS` の簡潔な形式で表示し、既知の時間はダウンロード後もローカル一覧に保持します。認証済みメタデータがない管理ファイル、ローカル取り込み、現在の Vault マニフェストは不明のまま表示し、推測値は追加しません。既知の値を SQLite スキーマ 25 に保存します。
+    - 詳細行、キャプション、転送の詳細、インスペクターの概要を選択してコピーできます。
+    - GPUI Kit を 0.7.3、grammers を 0.11.0 に更新しました（Telegram API レイヤー 230）。Community ピアを含まないセッションファイルはバージョン 1 のままです。
+
     ## 0.5.13 · Microsoft Store 通信経路の修正と診断
 
     - 既定のStore HTTPリクエスト経路を復旧します。`.GetNewClosure()` によってモジュール内の非公開HTTP関数を解決できず、ワークフローはトークン要求を送信する前に失敗していました。

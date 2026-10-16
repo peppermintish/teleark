@@ -105,25 +105,34 @@ impl Database {
                 reason: InputReason::OutOfRange,
             });
         }
-        let mut statement = self.connection.prepare("SELECT ro.message_id,f.name,f.caption,f.mime_type,f.size_bytes,COALESCE(f.created_at_unix_ms,f.modified_at_unix_ms,0),COALESCE(f.modified_at_unix_ms,f.created_at_unix_ms,0),COALESCE(v.revision,0) FROM logical_files f JOIN remote_objects ro ON ro.logical_file_id=f.id LEFT JOIN channel_file_versions v ON v.account_id=ro.account_id AND v.chat_id=ro.chat_id AND v.message_id=ro.message_id WHERE f.source_account_id=?1 AND f.source_chat_id=?2 AND ro.account_id=?1 AND ro.chat_id=?2 AND f.caption=?3 AND f.remote_state='uploaded' AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=ro.account_id AND t.chat_id=ro.chat_id AND t.message_id=ro.message_id) ORDER BY f.created_at_unix_ms DESC,ro.message_id DESC LIMIT ?4")?;
+        let mut statement = self.connection.prepare("SELECT ro.message_id,f.name,f.caption,f.mime_type,f.size_bytes,COALESCE(f.created_at_unix_ms,f.modified_at_unix_ms,0),COALESCE(f.modified_at_unix_ms,f.created_at_unix_ms,0),COALESCE(v.revision,0),f.duration_ms FROM logical_files f JOIN remote_objects ro ON ro.logical_file_id=f.id LEFT JOIN channel_file_versions v ON v.account_id=ro.account_id AND v.chat_id=ro.chat_id AND v.message_id=ro.message_id WHERE f.source_account_id=?1 AND f.source_chat_id=?2 AND ro.account_id=?1 AND ro.chat_id=?2 AND f.caption=?3 AND f.remote_state='uploaded' AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=ro.account_id AND t.chat_id=ro.chat_id AND t.message_id=ro.message_id) ORDER BY f.created_at_unix_ms DESC,ro.message_id DESC LIMIT ?4")?;
         let rows = statement.query_map(
             params![account.get(), chat.get(), caption, limit as i64],
             |row| {
-                Ok(CachedManifestCandidate {
-                    file: CachedTelegramFileRecord {
-                        message_id: MessageId::new(row.get(0)?),
-                        file_name: row.get(1)?,
-                        caption: row.get(2)?,
-                        mime_type: row.get(3)?,
-                        size_bytes: row_u64(row, 4)?,
-                        sent_at_unix_ms: row.get(5)?,
-                        modified_at_unix_ms: row.get(6)?,
+                Ok((
+                    CachedManifestCandidate {
+                        file: CachedTelegramFileRecord {
+                            message_id: MessageId::new(row.get(0)?),
+                            file_name: row.get(1)?,
+                            caption: row.get(2)?,
+                            mime_type: row.get(3)?,
+                            size_bytes: row_u64(row, 4)?,
+                            sent_at_unix_ms: row.get(5)?,
+                            modified_at_unix_ms: row.get(6)?,
+                            duration_ms: None,
+                        },
+                        revision: row.get(7)?,
                     },
-                    revision: row.get(7)?,
-                })
+                    row.get::<_, Option<i64>>(8)?,
+                ))
             },
         )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        rows.map(|row| {
+            let (mut candidate, duration) = row?;
+            candidate.file.duration_ms = super::remote::stored_duration(duration)?;
+            Ok(candidate)
+        })
+        .collect()
     }
 }
 

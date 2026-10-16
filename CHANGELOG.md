@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.17 · Telegram media durations and selectable inspectors
+
+- Show Telegram-reported audio/video duration in channel and Library lists as compact `M:SS` / `H:MM:SS`; known durations persist into the Local list after download. Managed-file rows display a duration only when authenticated metadata supplies one; local imports and current Vault manifests without duration metadata remain unavailable rather than receiving guessed values. Persist known values in SQLite schema 25.
+- Make detail rows, captions, transfer details and inspector summaries selectable and copyable through the GPUI Kit text-selection layer.
+- Upgrade GPUI Kit to 0.7.3 and grammers to 0.11.0. Grammers' Telegram API layer is 230; message timestamps use `jiff`, retry policy belongs to sender pools, and peer-cache batches are persisted once.
+- Keep session bytes readable across the grammers upgrade: version-1 session files remain version 1 unless they contain a Community peer, which is written as version 2. Add schema 25 transactionally; existing payload, manifest, key-wrap and recovery codecs are unchanged.
+
 ## 0.5.16 · Managed file progress and batch downloads
 
 - Show the current managed-channel phase while checking PTS, polling differences, downloading/authenticating manifests and updating the file list. Files become up to date only after the catalog and displayed projection are ready.

@@ -42,11 +42,12 @@ pub(crate) const CHANNEL_FILE_SCAN_CHUNK: usize = 200;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChannelFileTableRow {
-    source: (SharedString, i64, u64),
+    source: (SharedString, i64, u64, Option<u64>),
     message_id: i64,
     name: SharedString,
     sent_at: SharedString,
     kind: SharedString,
+    duration: Option<SharedString>,
     size: SharedString,
 }
 
@@ -253,6 +254,18 @@ impl TableDelegate for ChannelFileTableDelegate {
                             .text_color(theme::blue()),
                     )
                     .child(div().min_w_0().flex_1().truncate().child(row.name))
+                    .when_some(row.duration, |cell, duration| {
+                        cell.child(
+                            div()
+                                .flex_none()
+                                .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
+                                .text_color(theme::text_muted())
+                                .debug_selector(move || {
+                                    format!("channel-file-duration-{}", row.message_id)
+                                })
+                                .child(duration),
+                        )
+                    })
                     .when_some(local, |cell, (label, presence)| {
                         cell.child(
                             components::badge(
@@ -425,6 +438,7 @@ impl TeleArkApp {
                     && row.source.0.as_ref() == file.file_name
                     && row.source.1 == file.sent_at_unix_ms
                     && row.source.2 == file.size_bytes
+                    && row.source.3 == file.duration_ms
                 {
                     return (*row).clone();
                 }
@@ -437,16 +451,26 @@ impl TeleArkApp {
                     file.file_name.clone().into()
                 };
                 let kind = teleark_runtime::classify_file(Path::new(&file.file_name));
+                let duration = matches!(kind, FileKind::Video | FileKind::Audio).then(|| {
+                    file.duration_ms
+                        .map_or_else(
+                            || self.tr("common-not-applicable").to_string(),
+                            teleark_i18n::format::format_media_duration,
+                        )
+                        .into()
+                });
                 ChannelFileTableRow {
                     source: (
                         file.file_name.clone().into(),
                         file.sent_at_unix_ms,
                         file.size_bytes,
+                        file.duration_ms,
                     ),
                     message_id: file.message_id,
                     name,
                     sent_at: format_unix_millis(self.locale(), file.sent_at_unix_ms).into(),
                     kind: self.tr(crate::screens::library::file_kind_message_id(kind)),
+                    duration,
                     size: format_bytes(self.locale(), file.size_bytes).into(),
                 }
             })
@@ -1539,6 +1563,7 @@ impl TeleArkApp {
                 |browser, message| {
                     browser.child(
                         components::inspector_panel("raw-file-inspector", 340.0)
+                            .debug_selector(|| "raw-file-inspector".into())
                             .absolute()
                             .right_0()
                             .top_0()
@@ -1682,6 +1707,21 @@ impl TeleArkApp {
                     self.tr("table-size"),
                     format_bytes(self.locale(), file.size_bytes).into(),
                 ))
+                .when_some(
+                    matches!(
+                        teleark_runtime::classify_file(std::path::Path::new(&file.file_name)),
+                        FileKind::Video | FileKind::Audio
+                    )
+                    .then_some(file.duration_ms)
+                    .flatten(),
+                    |detail, duration| {
+                        detail.child(message_detail_row(
+                            self.tr("media-duration"),
+                            teleark_i18n::format::format_duration_millis(self.locale(), duration)
+                                .into(),
+                        ))
+                    },
+                )
                 .child(
                     div()
                         .mt_4()
@@ -1689,7 +1729,9 @@ impl TeleArkApp {
                         .text_color(theme::text_muted())
                         .child(self.tr("telegram-message-caption")),
                 )
-                .child(div().mt_2().text_sm().whitespace_normal().child(caption))
+                .child(div().mt_2().text_sm().whitespace_normal().child(
+                    crate::components::selectable_text("telegram-message-caption-value", caption),
+                ))
                 .when_some(teleark_descriptor, |detail, descriptor| {
                     let (role, explanation) = match descriptor.role {
                         TeleArkRemoteRole::Pending => (
@@ -1966,14 +2008,31 @@ fn channel_batch_status(app: &TeleArkApp) -> Option<(SharedString, Tone)> {
     }
 }
 
+/// One labelled inspector row. Values and labels participate in the window's
+/// text selection, so users can select and copy inspector content.
 fn message_detail_row(
     label: gpui_kit::SharedString,
     value: gpui_kit::SharedString,
 ) -> gpui_kit::Div {
+    let debug = format!("detail-row-{label}");
+    let label_id = format!("detail-label-{label}");
+    let value_id = format!("detail-value-{label}");
     div()
         .mt_3()
-        .child(div().text_xs().text_color(theme::text_muted()).child(label))
-        .child(div().mt_1().text_sm().whitespace_normal().child(value))
+        .debug_selector(move || debug.clone())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::text_muted())
+                .child(crate::components::selectable_text(label_id, label)),
+        )
+        .child(
+            div()
+                .mt_1()
+                .text_sm()
+                .whitespace_normal()
+                .child(crate::components::selectable_text(value_id, value)),
+        )
 }
 
 fn credential_qr_placeholder(size: f32, label: gpui_kit::SharedString) -> AnyElement {
@@ -2285,6 +2344,7 @@ mod tests {
                     size_bytes: 1,
                     caption: String::new(),
                     mime_type: None,
+                    duration_ms: None,
                 })
                 .collect();
             for kinds in [
@@ -2336,6 +2396,7 @@ mod tests {
                 caption: String::new(),
                 mime_type: None,
                 size_bytes: 1,
+                duration_ms: None,
                 sent_at_unix_ms: now - 1_000,
             })
             .collect::<Vec<_>>();
@@ -2418,6 +2479,7 @@ mod tests {
                 caption,
                 mime_type: None,
                 size_bytes,
+                duration_ms: None,
             },
         )
         .collect::<Vec<_>>();
@@ -2427,5 +2489,145 @@ mod tests {
         assert_eq!(packages[0].part_count, 1);
         assert_eq!(packages[0].encoded_size, 50);
         assert_eq!(packages[0].files.len(), 2);
+    }
+
+    #[gpui_kit::test]
+    fn video_and_audio_display_duration_and_inspector_text_is_selectable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app_in_root(cx, Page::Channel);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        app.update(cx, |app, cx| {
+            let account = teleark_runtime::TelegramAccount {
+                id: 1,
+                display_name: "Test User".into(),
+                username: None,
+            };
+            app.telegram_account = Some(account.clone());
+            app.telegram_auth = teleark_runtime::TelegramAuthState::Authorized(account);
+            app.telegram_files = vec![
+                TelegramFileSummary {
+                    message_id: 101,
+                    sent_at_unix_ms: 1_000,
+                    modified_at_unix_ms: 1_000,
+                    file_name: "lecture.mp4".into(),
+                    caption: "Video recording".into(),
+                    mime_type: Some("video/mp4".into()),
+                    size_bytes: 50 * 1024 * 1024,
+                    duration_ms: Some(248_000), // 4m 8s
+                },
+                TelegramFileSummary {
+                    message_id: 102,
+                    sent_at_unix_ms: 2_000,
+                    modified_at_unix_ms: 2_000,
+                    file_name: "podcast.mp3".into(),
+                    caption: "Audio episode".into(),
+                    mime_type: Some("audio/mpeg".into()),
+                    size_bytes: 10 * 1024 * 1024,
+                    duration_ms: Some(3_720_000), // 1h 2m
+                },
+                TelegramFileSummary {
+                    message_id: 103,
+                    sent_at_unix_ms: 3_000,
+                    modified_at_unix_ms: 3_000,
+                    file_name: "document.pdf".into(),
+                    caption: "Plain PDF".into(),
+                    mime_type: Some("application/pdf".into()),
+                    size_bytes: 1024 * 1024,
+                    duration_ms: None,
+                },
+            ];
+            app.storage_view = StorageView::RawFiles;
+            app.show_channel_detail = true;
+            app.selected_telegram_message_id = Some(101);
+            app.refresh_channel_file_table(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // 1. Every video/audio file displays its duration on the lists.
+        app.read_with(cx, |app, cx| {
+            let table = app.channel_file_table.read(cx);
+            let delegate = table.delegate();
+            assert_eq!(delegate.rows.len(), 3);
+            assert_eq!(delegate.rows[0].duration.as_deref(), Some("4:08"));
+            assert_eq!(delegate.rows[1].duration.as_deref(), Some("1:02:00"));
+            assert_eq!(
+                delegate.rows[2].duration, None,
+                "plain documents have no duration"
+            );
+        });
+
+        // 2. Right lateral pop-out window displays duration and detail rows.
+        let duration = cx
+            .debug_bounds("channel-file-duration-101")
+            .expect("duration is visible in the channel file list");
+        assert!(duration.right() <= px(900.0));
+        let inspector = cx
+            .debug_bounds("raw-file-inspector")
+            .expect("right lateral inspector is mounted");
+        assert!(inspector.size.width > px(0.0));
+        assert!(cx.debug_bounds("detail-row-Duration").is_some());
+
+        // 3. Selection and copy in the inspector: drag over the inspector content.
+        let row = cx
+            .debug_bounds("detail-row-File name")
+            .expect("file name detail row");
+        let from = gpui_kit::point(row.left() + px(8.0), row.top() + px(33.0));
+        let to = gpui_kit::point(row.left() + px(180.0), row.top() + px(33.0));
+        cx.simulate_mouse_down(
+            from,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_move(
+            to,
+            Some(gpui_kit::MouseButton::Left),
+            gpui_kit::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_up(
+            to,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let selected = cx.update(gpui_kit::base::TextSelection::selected_text);
+        assert!(
+            !selected.trim().is_empty(),
+            "inspector content must be selectable by dragging: got '{selected}'"
+        );
+
+        // Copy action writes the selected inspector text to the clipboard.
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("SENTINEL".into()));
+            window.dispatch_action(Box::new(gpui_kit::component::input::Copy), cx);
+        });
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            copied.trim(),
+            selected.trim(),
+            "copied text from inspector must match selection"
+        );
+
+        // The duration and inspector remain reachable in actual fullscreen mode.
+        cx.update(|window, _| window.toggle_fullscreen());
+        cx.run_until_parked();
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let inspector = cx
+            .debug_bounds("raw-file-inspector")
+            .expect("inspector remains visible fullscreen");
+        let duration = cx
+            .debug_bounds("channel-file-duration-101")
+            .expect("duration remains visible fullscreen");
+        assert!(inspector.right() <= viewport.width);
+        assert!(duration.right() <= viewport.width);
     }
 }

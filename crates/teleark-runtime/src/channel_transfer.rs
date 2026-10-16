@@ -147,6 +147,8 @@ pub struct ChannelDownloadRequest {
     pub caption: Option<String>,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    /// Playback duration reported by the source message, when known.
+    pub media_duration_ms: Option<u64>,
     pub destination: PathBuf,
 }
 
@@ -240,6 +242,7 @@ pub struct ChannelDownloadSnapshot {
     pub caption: Option<String>,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    pub media_duration_ms: Option<u64>,
     pub transferred_bytes: u64,
     pub destination: PathBuf,
     pub state: ChannelDownloadState,
@@ -934,6 +937,7 @@ impl DesktopTransfers {
                 file_name: request.file_name,
                 caption: request.caption,
                 mime_type: request.mime_type,
+                media_duration_ms: request.media_duration_ms,
                 size_bytes: request.size_bytes,
                 destination: request.destination,
                 created_at_unix_ms: queued_at_unix_ms,
@@ -994,6 +998,7 @@ impl DesktopTransfers {
             caption: snapshot.caption,
             mime_type: snapshot.mime_type,
             size_bytes: snapshot.size_bytes,
+            media_duration_ms: snapshot.media_duration_ms,
             destination,
         })
     }
@@ -1051,6 +1056,7 @@ impl DesktopTransfers {
                 file_name: request.file_name,
                 caption: request.caption,
                 mime_type: request.mime_type,
+                media_duration_ms: request.media_duration_ms,
                 size_bytes: request.size_bytes,
                 destination: request.destination,
                 created_at_unix_ms,
@@ -2402,6 +2408,7 @@ fn snapshot_from_record(record: NativeDownloadTaskRecord) -> ChannelDownloadSnap
         caption: record.caption,
         mime_type: record.mime_type,
         size_bytes: record.size_bytes,
+        media_duration_ms: record.media_duration_ms,
         transferred_bytes: record.transferred_bytes,
         destination: record.destination,
         state,
@@ -2460,6 +2467,7 @@ fn snapshot_record(
         caption: snapshot.caption.clone(),
         mime_type: snapshot.mime_type.clone(),
         size_bytes: snapshot.size_bytes,
+        media_duration_ms: snapshot.media_duration_ms,
         destination: snapshot.destination.clone(),
         state,
         verification,
@@ -2922,6 +2930,7 @@ mod tests {
             file_name: "archive.zip".to_owned(),
             caption: Some("Archive caption".to_owned()),
             mime_type: Some("application/zip".to_owned()),
+            media_duration_ms: None,
             size_bytes: 14,
             destination,
         }
@@ -3623,6 +3632,7 @@ mod tests {
                 file_name: "foreign.bin".into(),
                 caption: None,
                 mime_type: None,
+                media_duration_ms: None,
                 size_bytes: 14,
                 destination: directory.path().join("foreign.bin"),
                 created_at_unix_ms: 1,
@@ -3796,6 +3806,7 @@ mod tests {
                 file_name: "second.pdf".to_owned(),
                 caption: Some("Second caption".to_owned()),
                 mime_type: Some("application/pdf".to_owned()),
+                media_duration_ms: None,
                 size_bytes: 14,
                 destination: directory.path().join("second.pdf"),
             })
@@ -5249,6 +5260,7 @@ mod tests {
                 file_name: "saved.zip".into(),
                 caption: None,
                 mime_type: None,
+                media_duration_ms: None,
                 size_bytes: 14,
                 destination: destination.into(),
                 created_at_unix_ms: 10,

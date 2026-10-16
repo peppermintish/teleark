@@ -412,6 +412,7 @@ impl TeleArkApp {
             caption: (!file.caption.is_empty()).then_some(file.caption),
             mime_type: file.mime_type,
             size_bytes: file.size_bytes,
+            media_duration_ms: file.duration_ms,
             destination,
         }) {
             Ok(id) => {
@@ -473,6 +474,7 @@ impl TeleArkApp {
                     caption: (!file.caption.is_empty()).then_some(file.caption),
                     mime_type: file.mime_type,
                     size_bytes: file.size_bytes,
+                    media_duration_ms: file.duration_ms,
                     destination,
                 });
             }

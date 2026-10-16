@@ -14,7 +14,7 @@ const CURSOR_VERSION: u32 = 1;
 const SORT_NULL_SENTINEL: i64 = i64::MIN;
 
 const SEARCH_COLUMNS: &str = r#"
-    f.id, f.name, f.relative_path, f.size_bytes, f.kind, f.mime_type, f.extension, f.caption,
+    f.id, f.name, f.relative_path, f.size_bytes, f.kind, f.mime_type, f.duration_ms, f.extension, f.caption,
     f.source_account_id, f.source_chat_id, f.created_at_unix_ms, f.modified_at_unix_ms,
     f.remote_state, f.encryption_state, f.verification_state, f.package_id, f.locally_available,
     f.local_source_path_encoding, f.local_source_path
@@ -114,15 +114,17 @@ impl Database {
         let mut sources = std::collections::BTreeMap::new();
         while let Some(row) = rows.next()? {
             let file = row_to_logical_file(row)?;
-            let sort_value: i64 = row.get(19)?;
+            // SEARCH_COLUMNS contributes 20 columns; the sort value and the
+            // source projections are appended after them in that order.
+            let sort_value: i64 = row.get(20)?;
             let raw_id: i64 = row.get(0)?;
-            if let Some(name) = row.get::<_, Option<String>>(20)? {
+            if let Some(name) = row.get::<_, Option<String>>(21)? {
                 sources.insert(
                     file.id,
                     LibrarySourceRecord {
                         name,
                         message_id: row
-                            .get::<_, Option<i64>>(21)?
+                            .get::<_, Option<i64>>(22)?
                             .map(teleark_core::MessageId::new),
                     },
                 );

@@ -551,11 +551,11 @@ async fn real_plaintext_and_authenticated_mtproto_bootstrap_bytes_reach_only_pro
             .await
             .expect("controlled proxy fixture");
         let pool = crate::sender_pool(
-        session,
-        12345,
-        gateway.proxy_url,
-        Box::new(grammers_client::sender::NoRetries),
-    );
+            session,
+            12345,
+            gateway.proxy_url,
+            Box::new(grammers_client::sender::NoRetries),
+        );
         let task = tokio::spawn(pool.runner.run());
         assert!(pool.handle.raw_invoke_in_dc(dc, vec![0; 4]).await.is_err());
         let packet = bytes_seen.await.expect("controlled proxy fixture");

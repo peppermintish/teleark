@@ -54,6 +54,14 @@ pub fn card() -> Div {
         .bg(theme::surface())
 }
 
+/// Plain text that participates in GPUI Kit's window-scoped selection and copy.
+pub fn selectable_text(
+    id: impl Into<gpui_kit::ElementId>,
+    text: impl Into<gpui_kit::SharedString>,
+) -> gpui_kit::base::SelectableText {
+    gpui_kit::base::SelectableText::new(id, text)
+}
+
 /// Shared structure for account and transfer confirmations.
 pub fn confirmation_surface(id: &'static str) -> Stateful<Div> {
     card()
@@ -302,11 +310,19 @@ pub fn list_navigation_button(
 
 /// Keep the complete value available when a dense summary is truncated.
 pub fn list_summary(id: impl Into<ElementId>, summary: impl Into<SharedString>) -> Stateful<Div> {
+    let id = id.into();
+    let selection_id = format!("selectable-summary-{id:?}");
     let summary = summary.into();
     list_row()
         .id(id)
         .w_full()
-        .child(div().flex_1().min_w_0().truncate().child(summary.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(selectable_text(selection_id, summary.clone())),
+        )
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(summary.clone()).build(window, cx)
         })

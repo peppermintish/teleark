@@ -229,6 +229,7 @@ filter-video = 동영상
 filter-all-statuses = 모든 상태
 table-name = 이름
 table-size = 크기
+media-duration = 재생 시간
 table-type = 유형
 table-source = 원본
 table-modified = 수정됨

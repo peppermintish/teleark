@@ -53,7 +53,7 @@ pub const LATEST_SCHEMA_VERSION: u32 = migration::LATEST_SCHEMA_VERSION;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const LOGICAL_FILE_COLUMNS: &str = r#"
-    id, name, relative_path, size_bytes, kind, mime_type, extension, caption,
+    id, name, relative_path, size_bytes, kind, mime_type, duration_ms, extension, caption,
     source_account_id, source_chat_id, created_at_unix_ms, modified_at_unix_ms,
     remote_state, encryption_state, verification_state, package_id, locally_available,
     local_source_path_encoding, local_source_path
@@ -505,12 +505,12 @@ fn upsert_logical_file_on(connection: &Connection, file: &LogicalFileRecord) -> 
     connection.execute(
         r#"
 INSERT INTO logical_files (
-    id, name, relative_path, size_bytes, kind, mime_type, extension, caption,
+    id, name, relative_path, size_bytes, kind, mime_type, duration_ms, extension, caption,
     source_account_id, source_chat_id, created_at_unix_ms, modified_at_unix_ms,
     remote_state, encryption_state, verification_state, package_id, locally_available,
     local_source_path_encoding, local_source_path
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
 )
 ON CONFLICT(id) DO UPDATE SET
     name = excluded.name,
@@ -518,6 +518,7 @@ ON CONFLICT(id) DO UPDATE SET
     size_bytes = excluded.size_bytes,
     kind = excluded.kind,
     mime_type = excluded.mime_type,
+    duration_ms = excluded.duration_ms,
     extension = excluded.extension,
     caption = excluded.caption,
     source_account_id = excluded.source_account_id,
@@ -539,6 +540,9 @@ ON CONFLICT(id) DO UPDATE SET
             size_bytes,
             file_kind_code(file.kind)?,
             file.mime_type,
+            file.duration_ms
+                .map(|duration| unsigned_to_sql("logical_file.duration_ms", duration))
+                .transpose()?,
             file.extension,
             file.caption,
             file.source_account_id.map(AccountId::get),
@@ -573,13 +577,14 @@ pub(super) fn row_to_logical_file(row: &Row<'_>) -> StorageResult<LogicalFileRec
     let raw_id: i64 = row.get(0)?;
     let raw_size: i64 = row.get(3)?;
     let raw_kind: String = row.get(4)?;
-    let raw_remote: String = row.get(12)?;
-    let raw_encryption: String = row.get(13)?;
-    let raw_verification: String = row.get(14)?;
-    let raw_package_id: Option<i64> = row.get(15)?;
-    let locally_available: i64 = row.get(16)?;
-    let path_encoding: Option<String> = row.get(17)?;
-    let path_bytes: Option<Vec<u8>> = row.get(18)?;
+    let raw_duration: Option<i64> = row.get(6)?;
+    let raw_remote: String = row.get(13)?;
+    let raw_encryption: String = row.get(14)?;
+    let raw_verification: String = row.get(15)?;
+    let raw_package_id: Option<i64> = row.get(16)?;
+    let locally_available: i64 = row.get(17)?;
+    let path_encoding: Option<String> = row.get(18)?;
+    let path_bytes: Option<Vec<u8>> = row.get(19)?;
 
     Ok(LogicalFileRecord {
         id: LogicalFileId::new(id_from_sql("logical_files", "id", raw_id)?),
@@ -588,12 +593,15 @@ pub(super) fn row_to_logical_file(row: &Row<'_>) -> StorageResult<LogicalFileRec
         size_bytes: nonnegative_from_sql("logical_files", "size_bytes", raw_size)?,
         kind: parse_file_kind(&raw_kind)?,
         mime_type: row.get(5)?,
-        extension: row.get(6)?,
-        caption: row.get(7)?,
-        source_account_id: row.get::<_, Option<i64>>(8)?.map(AccountId::new),
-        source_chat_id: row.get::<_, Option<i64>>(9)?.map(ChatId::new),
-        created_at_unix_ms: row.get(10)?,
-        modified_at_unix_ms: row.get(11)?,
+        duration_ms: raw_duration
+            .map(|value| nonnegative_from_sql("logical_files", "duration_ms", value))
+            .transpose()?,
+        extension: row.get(7)?,
+        caption: row.get(8)?,
+        source_account_id: row.get::<_, Option<i64>>(9)?.map(AccountId::new),
+        source_chat_id: row.get::<_, Option<i64>>(10)?.map(ChatId::new),
+        created_at_unix_ms: row.get(11)?,
+        modified_at_unix_ms: row.get(12)?,
         remote_state: parse_remote_state(&raw_remote)?,
         encryption_state: parse_encryption_state(&raw_encryption)?,
         verification_state: parse_verification_state(&raw_verification)?,

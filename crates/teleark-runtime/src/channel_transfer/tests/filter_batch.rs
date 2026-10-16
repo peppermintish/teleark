@@ -33,6 +33,7 @@ fn seed(library: &DesktopLibrary, count: usize) {
             caption: "Synthetic caption".into(),
             mime_type: None,
             size_bytes: 14,
+            duration_ms: None,
         })
         .collect::<Vec<_>>();
     library.cache_telegram_files(1, 100, &files).expect("cache");
