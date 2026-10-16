@@ -7,8 +7,12 @@ struct RestartRemote {
     discoveries: Arc<AtomicUsize>,
     reads: Arc<Mutex<Vec<(i64, ChannelRead)>>>,
     changed: Arc<AtomicBool>,
+    interval: Duration,
 }
 impl AccountSource for RestartRemote {
+    fn request_interval(&self) -> Duration {
+        self.interval
+    }
     fn lifecycle(&self) -> crate::telegram::lifecycle::Lifecycle {
         self.lifecycle.clone()
     }
@@ -63,6 +67,7 @@ fn restart_and_connection_replacement_skip_unchanged_channels_but_recover_change
         discoveries: Default::default(),
         reads: Default::default(),
         changed: Default::default(),
+        interval: Duration::ZERO,
     };
     let account = TelegramAccount {
         id: 1,
@@ -159,13 +164,14 @@ fn saved_cooldown_blocks_startup_discovery_until_deadline_and_allows_cancellatio
     let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3")).expect("library");
     let wall = crate::system_time_unix_ms(std::time::SystemTime::now()).expect("clock");
     library
-        .save_sync_cooldown(1, wall + 120_000)
+        .save_sync_cooldown(1, wall + 120_000, 8_000)
         .expect("saved wait");
     let remote = RestartRemote {
         lifecycle: Default::default(),
         discoveries: Default::default(),
         reads: Default::default(),
         changed: Default::default(),
+        interval: Duration::from_secs(1),
     };
     remote
         .lifecycle
@@ -185,6 +191,16 @@ fn saved_cooldown_blocks_startup_discovery_until_deadline_and_allows_cancellatio
         sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::RateLimited
     });
     assert_eq!(remote.discoveries.load(Ordering::Acquire), 0);
+    assert_eq!(
+        sync.inner
+            .shared
+            .pacing
+            .lock()
+            .expect("restored budget")
+            .interval_ms(),
+        8_000,
+        "the owner must restore learned spacing before admitting startup discovery"
+    );
     assert!(sync.snapshot().expect("deadline").retry_at.is_some());
     sync.stop();
     if let Some(join) = sync.inner.join.lock().expect("owner").take() {

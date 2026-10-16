@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) struct RequestBudget {
     interval: Duration,
+    healthy_pages: u32,
     clock: SyncClock,
     next: Option<Instant>,
     flood: Option<Instant>,
@@ -19,6 +20,7 @@ impl RequestBudget {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
+            healthy_pages: 0,
             clock: Arc::new(Instant::now),
             next: None,
             flood: None,
@@ -46,6 +48,41 @@ impl RequestBudget {
 
     pub fn flood(&self) -> Option<Instant> {
         self.flood
+    }
+
+    pub fn interval_ms(&self) -> u64 {
+        u64::try_from(self.interval.as_millis())
+            .unwrap_or(30_000)
+            .max(1_000)
+    }
+
+    pub fn restore_interval(&mut self, milliseconds: u64) {
+        // Zero disables admission spacing for controlled fake remotes only.
+        if !self.interval.is_zero() {
+            self.interval = Duration::from_millis(milliseconds.clamp(1_000, 30_000));
+        }
+    }
+
+    fn rate_limited(&mut self, now: Instant, deadline: Instant) {
+        if !self.interval.is_zero() && self.flood.is_none_or(|at| at <= now) {
+            self.interval = self.interval.saturating_mul(2).min(Duration::from_secs(30));
+        }
+        self.healthy_pages = 0;
+        self.defer(deadline);
+    }
+
+    fn succeeded(&mut self, now: Instant) {
+        if self.interval <= Duration::from_secs(1) || self.flood.is_some_and(|at| at > now) {
+            return;
+        }
+        self.healthy_pages += 1;
+        if self.healthy_pages == 60 {
+            self.interval = self
+                .interval
+                .saturating_sub(Duration::from_secs(1))
+                .max(Duration::from_secs(1));
+            self.healthy_pages = 0;
+        }
     }
 }
 
@@ -97,20 +134,98 @@ pub(super) fn wait(
 }
 
 pub(super) fn observe<T>(shared: &Shared, result: &Result<T, ChannelSyncFailure>) {
-    if let Err(error) = result
-        && let Some(delay) = error.retry_after
-        && let Ok(mut budget) = shared.pacing.lock()
-        && let Some(deadline) = (budget.clock)().checked_add(delay)
-    {
-        // Fence workers already queued for admission before the coordinator
-        // receives the completion. No queued page can race past a known wait.
-        budget.defer(deadline);
+    let changed = if let Ok(mut budget) = shared.pacing.lock() {
+        let before = budget.interval_ms();
+        let now = (budget.clock)();
+        match result {
+            Ok(_) => budget.succeeded(now),
+            Err(error) => {
+                budget.healthy_pages = 0;
+                if let Some(deadline) = error.retry_after.and_then(|delay| now.checked_add(delay)) {
+                    // Fence already queued workers before the coordinator sees
+                    // this completion, and adapt only once per cooldown window.
+                    budget.rate_limited(now, deadline);
+                }
+            }
+        }
+        (before != budget.interval_ms()).then_some(budget.interval_ms())
+    } else {
+        None
+    };
+    if let Some(interval_ms) = changed {
+        tracing::info!(
+            event = "sync.admission.interval_changed",
+            interval_ms,
+            reason = if result.is_ok() {
+                "sustained_success"
+            } else {
+                "server_wait"
+            },
+            "Automatic synchronization pacing changed"
+        );
     }
+}
+
+pub(super) fn log_page<T>(
+    kind: &'static str,
+    started: Instant,
+    result: &Result<T, ChannelSyncFailure>,
+) {
+    let error = result.as_ref().err();
+    tracing::debug!(event = "sync.remote_page", kind, success = result.is_ok(),
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        error_kind = ?error.map(|e| e.kind),
+        retry_after_ms = error.and_then(|e| e.retry_after).map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        "Synchronization remote page finished");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_feedback_adapts_once_per_wait_and_healthy_recovery_is_gradual() {
+        let now = Instant::now();
+        let mut budget = RequestBudget::new(Duration::from_secs(1));
+        budget.rate_limited(now, now + Duration::from_secs(30));
+        assert_eq!(budget.interval_ms(), 2_000);
+        budget.rate_limited(now + Duration::from_secs(1), now + Duration::from_secs(40));
+        assert_eq!(
+            budget.interval_ms(),
+            2_000,
+            "overlapping responses are one congestion window"
+        );
+        for _ in 0..60 {
+            budget.succeeded(now + Duration::from_secs(20));
+        }
+        assert_eq!(
+            budget.interval_ms(),
+            2_000,
+            "in-flight successes cannot clear a live wait"
+        );
+        for _ in 0..59 {
+            budget.succeeded(now + Duration::from_secs(41));
+        }
+        assert_eq!(budget.interval_ms(), 2_000);
+        budget.succeeded(now + Duration::from_secs(41));
+        assert_eq!(budget.interval_ms(), 1_000);
+        for second in (50..500).step_by(50) {
+            let at = now + Duration::from_secs(second);
+            budget.rate_limited(at, at + Duration::from_secs(30));
+        }
+        assert_eq!(budget.interval_ms(), 30_000, "feedback remains bounded");
+        let mut restarted = RequestBudget::new(Duration::from_secs(1));
+        restarted.restore_interval(budget.interval_ms());
+        assert_eq!(restarted.interval_ms(), 30_000);
+        for _ in 0..60 {
+            restarted.succeeded(now);
+        }
+        assert_eq!(
+            restarted.interval_ms(),
+            29_000,
+            "restart must not erase learned pacing"
+        );
+    }
 
     #[test]
     fn admission_wait_is_visible_cancellable_and_does_not_hold_the_budget_lock() {

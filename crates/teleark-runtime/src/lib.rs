@@ -1327,11 +1327,12 @@ enum StorageRequest {
     },
     SyncCooldown {
         account: i64,
-        reply: SyncSender<Result<Option<i64>, ApplicationError>>,
+        reply: SyncSender<Result<Option<channel_sync::cooldown::SavedCooldown>, ApplicationError>>,
     },
     SaveSyncCooldown {
         account: i64,
         until: i64,
+        interval_ms: u64,
         reply: SyncSender<Result<(), ApplicationError>>,
     },
     SaveChannelDirectory {
@@ -2280,9 +2281,15 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
             StorageRequest::SaveSyncCooldown {
                 account,
                 until,
+                interval_ms,
                 reply,
             } => {
-                let _ = reply.send(channel_sync::cooldown::save(&mut database, account, until));
+                let _ = reply.send(channel_sync::cooldown::save(
+                    &mut database,
+                    account,
+                    until,
+                    interval_ms,
+                ));
             }
             StorageRequest::SaveChannelDirectory {
                 account,

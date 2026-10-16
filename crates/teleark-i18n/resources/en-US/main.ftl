@@ -1149,6 +1149,13 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.18 · Automatic synchronization across restarts
+
+    - Reconcile startup channel heads against saved cursors instead of forcing every cached channel to fetch differences. Preserve automatic incremental updates, gap recovery and cached data across navigation and reconnects.
+    - Space necessary synchronization requests and directory pages, learn a more conservative interval from server waits, and retain both pacing and cooldown deadlines across app restarts. Keep queued completions runnable after other background operations consume a thread wake signal.
+    - Make Channel Synchronization informational, with Close as its only control. Show scheduled checks, server waits, queued work, live timing and bounded activity history without manual retry, cancel, review or tuning actions.
+    - Retain SQLite schema 26, existing automatic upgrade paths, encrypted part and manifest readers, and key/recovery formats. Add an independent optional version-1 account cooldown record without resetting existing data.
+
     ## 0.5.17 · Telegram media durations and selectable inspectors
 
     - Show Telegram-reported audio/video duration in channel and Library lists as compact `M:SS` / `H:MM:SS`; known durations persist into the Local list after download. New Vault uploads inspect local media metadata in the background and preserve duration, video dimensions and available audio sample rate, channel count and bit depth in encrypted manifest 3.0. Show playback metadata in the selectable lateral details inspector. Local imports also read supported media duration, and completed Vault downloads retain authenticated duration in the Local list after restart. Older manifests without metadata remain unknown. SQLite schema 26 automatically preserves existing records.

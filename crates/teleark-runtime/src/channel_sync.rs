@@ -551,6 +551,19 @@ pub(crate) enum ChannelRead {
     Verify(Vec<i64>),
 }
 
+impl ChannelRead {
+    fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Difference(_) => "difference",
+            Self::Push => "push",
+            Self::ManagedManifests => "managed_catalog",
+            Self::History(_) => "history",
+            Self::GapHistory(_) => "gap_history",
+            Self::Verify(_) => "verify_cached",
+        }
+    }
+}
+
 pub(crate) struct ChannelReadPage {
     pub files: Vec<TelegramFileSummary>,
     pub removed: Vec<i64>,
@@ -1504,9 +1517,12 @@ fn run<T: AccountSource>(
     let mut source_probe_started: Option<Instant> = None;
     let mut directory_retry = DirectoryRetry::starting(clock());
     let mut flood_until = match library.sync_cooldown(account.id) {
-        Ok(saved) => saved.and_then(|until| {
+        Ok(saved) => saved.and_then(|saved| {
+            if let Ok(mut budget) = shared.pacing.lock() {
+                budget.restore_interval(saved.interval_ms);
+            }
             let wall = crate::system_time_unix_ms(std::time::SystemTime::now())?;
-            let remaining = until.checked_sub(wall).filter(|ms| *ms > 0)?;
+            let remaining = saved.until_unix_ms.saturating_sub(wall).max(0);
             clock().checked_add(Duration::from_millis(remaining as u64))
         }),
         Err(error) => {
@@ -1527,6 +1543,7 @@ fn run<T: AccountSource>(
         budget.defer(until);
     }
     let mut saved_flood = flood_until;
+    let mut saved_interval = shared.pacing.lock().map_or(1_000, |b| b.interval_ms());
     let mut source_refresh_pending = false;
     let mut executions = execution::Executions::new();
     let mut metadata_ready = false;
@@ -1762,14 +1779,19 @@ fn run<T: AccountSource>(
                 }
             }
         }
-        if flood_until != saved_flood {
+        let interval_ms = shared
+            .pacing
+            .lock()
+            .map_or(saved_interval, |b| b.interval_ms());
+        if flood_until != saved_flood || interval_ms != saved_interval {
             if let Some(until) = flood_until
                 && let Some(wall) = crate::system_time_unix_ms(std::time::SystemTime::now())
             {
                 let remaining = u64::try_from(until.saturating_duration_since(clock()).as_millis())
                     .unwrap_or(u64::MAX);
                 let until_wall = wall.saturating_add(i64::try_from(remaining).unwrap_or(i64::MAX));
-                if let Err(error) = library.save_sync_cooldown(account.id, until_wall) {
+                if let Err(error) = library.save_sync_cooldown(account.id, until_wall, interval_ms)
+                {
                     publish(
                         &shared,
                         ChannelSyncPhase::Failed,
@@ -1780,6 +1802,7 @@ fn run<T: AccountSource>(
                 }
             }
             saved_flood = flood_until;
+            saved_interval = interval_ms;
         }
         if source_probe_started
             .is_some_and(|at| clock().saturating_duration_since(at) >= Duration::from_secs(1))
@@ -2000,7 +2023,9 @@ fn run<T: AccountSource>(
                                 None,
                             );
                         }
+                        let started = Instant::now();
                         let result = remote.sync_sources(source_account.id, cancellation.clone());
+                        pacing::log_page("directory", started, &result);
                         pacing::observe(&worker_shared, &result);
                         result
                     })
@@ -2540,11 +2565,13 @@ fn step(
             edited: Vec::new(),
         }
     } else {
+        let started = Instant::now();
         let result = if shared.managed_id.load(Ordering::Acquire) == chat {
             telegram.read_managed(account, chat, read.clone(), cancellation.clone())
         } else {
             telegram.read(account, chat, read.clone(), cancellation.clone())
         };
+        pacing::log_page(read.diagnostic_kind(), started, &result);
         pacing::observe(shared, &result);
         result?
     };

@@ -1,6 +1,16 @@
-# Implementation status — v0.5.17
+# Implementation status — v0.5.18
 
-## Automatic startup synchronization · task checkpoint (2026-10-17)
+## Version 0.5.18 · Automatic synchronization across restarts (2026-10-17)
+
+Startup reconciles remote channel heads with committed cursors, skips unchanged differences and keeps gap/cache recovery automatic. The informational synchronization inspector has only Close, with separate scheduled/server-wait phases, live timing and bounded history. [ADR 0067](adr/0067-paced-automatic-startup-sync.md) makes automatic correctness and Runtime ownership an architectural requirement.
+
+Real-account qualification exposed that fixed one-second spacing was insufficient for bulk cached-message verification. Remote page admission now learns from server waits: double spacing once per cooldown window (maximum 30 seconds), reduce it by one second only after 60 healthy pages, and retain the interval and server deadline across restart. Additive optional v1 cooldown metadata retains older deadline semantics; legacy v1 records automatically restore two-second spacing. SQLite remains schema 26; existing encrypted and recovery formats and automatic upgrade paths remain supported. Structured page diagnostics record only operation kind, duration and typed outcomes, without account/channel/message identities or file contents.
+
+Real-account qualification completed bulk recovery to zero pending repairs/gaps, then observed three warm restarts with zero server waits. An independent snapshot found three advanced channels among 36; exactly three incremental requests caught up those heads. The final restart retained the learned 16-second spacing and matched all 36 heads plus 41 sampled file records. The full local workspace suite passes (1,007 passed, 10 ignored), with strict check/Clippy, compatibility, catalog, documentation and release-script checks. Decrypted Vault qualification remains outside this run because the development app reports no usable channel key.
+
+See the [real-account restart qualification](validation/2026-10-17-automatic-sync-restarts.md) for observations, release checks and limitations. The earlier host Bash 3 packaging limitation below is resolved for this release by running the artifact assembly regression in Ubuntu 22.04; all seven package/checksum and rejection fixtures pass.
+
+## Automatic startup synchronization · earlier task checkpoint (2026-10-17)
 
 The accepted [automatic synchronization contract](adr/0067-paced-automatic-startup-sync.md#automatic-synchronization-contract) explicitly governs future changes: Runtime owns automatic start/recovery; validated durable state and stale-result rejection preserve correctness; the inspector offers only Close. The architecture overview and ADR index link to this contract, and ADR 0031 identifies the superseding decision. Documentation-only follow-up validation checks local links/anchors, current schema metadata and whitespace; runtime behavior is unchanged.
 

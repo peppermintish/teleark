@@ -221,7 +221,13 @@ Credential-reference proxy codec 2 is documented in [Data model](DATA_MODEL.md#c
 
 Synchronization owns the optional `channel-sync-cooldown.<account-id>` settings
 namespace separately from desktop preferences. Its JSON codec version 1 stores
-`version` (exactly `1`) and `until_unix_ms` (signed UTC Unix milliseconds).
+`version` (exactly `1`), `until_unix_ms` (signed UTC Unix milliseconds), and
+optional `interval_ms` (integer 1,000–30,000). The interval is additive within v1:
+older readers ignore it without changing the deadline; a legacy record missing
+it restores two-second spacing after its recorded server wait. New records
+retain the learned interval after expiry and across restart. Each new cooldown
+window doubles spacing up to 30 seconds; 60 successful pages outside a live wait
+reduce it by one second to the one-second floor.
 Only this account's sync owner reads or writes its deadline; later waits cannot
 be shortened. Missing records, including upgrades that skip older releases,
 need no migration; expired records permit synchronization. Malformed/newer
