@@ -226,5 +226,5 @@ Only this account's sync owner reads or writes its deadline; later waits cannot
 be shortened. Missing records, including upgrades that skip older releases,
 need no migration; expired records permit synchronization. Malformed/newer
 records are preserved and reported with compatible-version/storage guidance.
-SQLite remains schema 23, and existing preferences, encrypted files and recovery
+SQLite remains schema 26, and existing preferences, encrypted files and recovery
 bundles retain their versions. See [ADR 0067](adr/0067-paced-automatic-startup-sync.md).

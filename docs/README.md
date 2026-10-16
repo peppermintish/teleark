@@ -37,6 +37,10 @@ progress notes and superseded proposals.
 compatibility obligations. ADR 0035 covers durable recovery; ADR 0035a covers source
 metadata validation and disambiguates a historical numbering collision.
 
+[ADR 0067: Automatic synchronization](adr/0067-paced-automatic-startup-sync.md#automatic-synchronization-contract)
+defines Runtime-owned start and recovery, correctness across waits/restarts, and
+the informational synchronization inspector with Close as its only control.
+
 [Access interface](ACCESS_UI_DESIGN.md) records layout decisions and the scope of
 native reviews. [Performance](PERFORMANCE.md) records measured probes, fixes and
 measurement limits. The [2026-09-15 streaming validation](validation/2026-09-15-memory-streaming.md)

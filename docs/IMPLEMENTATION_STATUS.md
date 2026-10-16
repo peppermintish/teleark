@@ -2,7 +2,9 @@
 
 ## Automatic startup synchronization · task checkpoint (2026-10-17)
 
-Startup and connection replacement now reconcile freshly discovered channel heads with durable cursors instead of forcing every channel to fetch differences. Necessary remote sync pages are spaced by one second; directory pagination also yields between 100-entry pages. Local reads and contiguous pushed changes bypass request admission. Account-scoped server cooldowns use an independent optional v1 settings codec and survive restart without changing SQLite schema 23, desktop preferences or encrypted/recovery formats. Completion readiness remains visible even when another acknowledged operation consumes a thread wake token. [ADR 0067](adr/0067-paced-automatic-startup-sync.md) records the scheduling and compatibility contract.
+The accepted [automatic synchronization contract](adr/0067-paced-automatic-startup-sync.md#automatic-synchronization-contract) explicitly governs future changes: Runtime owns automatic start/recovery; validated durable state and stale-result rejection preserve correctness; the inspector offers only Close. The architecture overview and ADR index link to this contract, and ADR 0031 identifies the superseding decision. Documentation-only follow-up validation checks local links/anchors, current schema metadata and whitespace; runtime behavior is unchanged.
+
+Startup and connection replacement now reconcile freshly discovered channel heads with durable cursors instead of forcing every channel to fetch differences. Necessary remote sync pages are spaced by one second; directory pagination also yields between 100-entry pages. Local reads and contiguous pushed changes bypass request admission. Account-scoped server cooldowns use an independent optional v1 settings codec and survive restart without changing SQLite schema 26, desktop preferences or encrypted/recovery formats. Completion readiness remains visible even when another acknowledged operation consumes a thread wake token. [ADR 0067](adr/0067-paced-automatic-startup-sync.md) records the scheduling and compatibility contract.
 
 Channel Synchronization is informational, with Close as its only control. Catalog retry/cancel and manual change-review actions are removed from this inspector. It distinguishes scheduled checks from server cooldowns, displays active/queued work, fixed next-check timestamps and live phase/last-activity timing, and retains bounded independently scrolling history. Recorded private-channel changes remain inspectable without requiring manual acknowledgment. The presentation clock updates only the open active/waiting inspector; it does not poll services or notify the workspace.
 
@@ -132,7 +134,7 @@ upgrades do not require manual exports, resets or scripts.
 
 | Contract | Current support | Reference |
 | --- | --- | --- |
-| SQLite | Read/write schema 23; automatic ordered upgrades from 0–22, including skipped releases | [Data model](DATA_MODEL.md) |
+| SQLite | Read/write schema 26; automatic ordered upgrades from 0–25, including skipped releases | [Data model](DATA_MODEL.md) |
 | Encrypted parts and manifests | Parts read 1.0/2.0 and write 2.0; manifests read 1.0/2.0/3.0 and new completion writes 3.0 | [Crypto](CRYPTO_FORMAT.md), [Manifest](MANIFEST_FORMAT.md) |
 | Key wraps and recovery bundles | Retain version 1 readers/writers and existing bytes | [Crypto](CRYPTO_FORMAT.md) |
 | Channel-key proof / pending key marker | Proof codec 1; local marker writes 2 and reads 1/2 | [Crypto](CRYPTO_FORMAT.md#managed-channel-key-proof), [Preferences](PREFERENCES_FORMAT.md) |

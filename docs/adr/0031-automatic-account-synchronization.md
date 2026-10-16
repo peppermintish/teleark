@@ -4,6 +4,12 @@ Status: Accepted, 2026-09-12. Supersedes the GUI-owned initial discovery, single
 
 [ADR 0033](0033-static-sync-inspector-and-navigation-independent-updates.md) supersedes the navigation interests, counter presentation and unconditional reconciliation described below.
 
+[ADR 0067](0067-paced-automatic-startup-sync.md#automatic-synchronization-contract)
+defines the current automatic synchronization contract, replaces blanket startup
+difference demand with cursor-based catch-up, and removes manual recovery and
+review controls from the synchronization inspector. The original decision below
+is retained as historical context.
+
 ## Decision
 
 Synchronization begins when a restored or newly authorized account is ready, including while the workspace is locked. Runtime owns initial remote directory discovery as well as subsequent reconciliation. The GUI preparation job restores local upload history and activates transfers; its success is not a prerequisite for channel synchronization. Initial session connection and private-storage discovery retry transient failures automatically with capped delays. Authorization, local persistence and permission problems remain visible and actionable.

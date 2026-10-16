@@ -70,6 +70,18 @@ selection and preserves recoverable sources on failure. The optional application
 PIN gates interaction without stopping transfers or revoking their key leases.
 See [Security](SECURITY.md) and [ADR 0053](adr/0053-selectable-system-credentials.md).
 
+## Automatic synchronization
+
+[ADR 0067](adr/0067-paced-automatic-startup-sync.md#automatic-synchronization-contract)
+sets the synchronization contract: Runtime automatically starts and maintains
+account synchronization once authentication and local storage are ready. It owns
+incremental catch-up, gap recovery, pacing, retries and durable server cooldowns
+across navigation, inspector closure and reconnects. Correctness relies on
+validated persisted changes, committed cursors and stale-result rejection.
+The synchronization inspector is informational, with Close as its only control;
+routine synchronization requires no user management. Genuine authentication,
+key-access or storage-permission prerequisites use their owning application flows.
+
 ## Ownership and cancellation
 
 Storage, Telegram and Vault operations run off the UI thread behind bounded request queues and retained lifecycle handles. The Vault owner alone holds the unlocked Master Key. GUI callbacks use account/source generations to reject stale results. Long network operations do not hold snapshot/state locks.
@@ -118,7 +130,7 @@ Same-size metadata does not authenticate content. [ADR 0056](adr/0056-event-driv
 supersedes regular polling; [ADR 0051](adr/0051-retry-deleted-batch-downloads.md)
 defines explicit retry of missing batch outputs.
 
-SQLite reads/writes schema 23 and upgrades supported versions 0–22 in ordered,
+SQLite reads/writes schema 26 and upgrades supported versions 0–25 in ordered,
 verified transactions. Startup paints acknowledgment before background migration
 and retains its phases and failures. Persistent codecs are versioned independently
 of releases, retain compatible readers and preserve unsupported newer bytes.

@@ -10,6 +10,40 @@ The inspector mixed an automatic-sync message with catalog cancel/retry and chan
 
 ## Decision
 
+### Automatic synchronization contract
+
+Synchronization is a product responsibility owned by Runtime. Once the account
+is authorized and local storage is ready, the account owner starts discovery and
+catch-up automatically and continues across navigation, inspector closure and
+connection replacement. Opening a page or the inspector must neither start nor
+restart synchronization.
+
+- Runtime owns initial discovery, incremental updates, gap recovery, request
+  pacing, transient retries and server cooldowns. Routine operation must not
+  require a user to start, refresh, retry, cancel or tune synchronization.
+- Correctness takes precedence over appearing current: retain local data during
+  waits, reconcile from committed cursors, validate and persist changes before
+  advancing durable coverage, and reject stale account/connection results.
+  Restart must preserve recoverable state and known server deadlines.
+- The Channel Synchronization inspector provides observability only. Close is
+  its sole control, and closing it does not stop background work. Phases, reasons
+  for waiting, timing, completion and bounded history remain inspectable without
+  requiring acknowledgment or other sync-management actions.
+- Request input only for a genuine prerequisite that cannot be resolved
+  automatically, such as authentication, key access or storage permissions.
+  Explain that prerequisite through its owning application flow while preserving
+  existing data; do not add a routine sync-recovery button to the inspector.
+- Explicit requests for earlier history and file-transfer controls retain their
+  separate meanings. They do not make routine account synchronization dependent
+  on manual intervention.
+
+These requirements apply to future synchronization changes as well as the
+startup fix below. Verification must cover automatic start and recovery without
+GUI commands, navigation/inspector independence, restart and cooldown handling,
+stale-result rejection, and the absence of sync-management controls.
+
+### Scheduling and progress
+
 Startup still loads local data and refreshes the account directory to populate the new Telegram connection's peer cache and observe membership/head changes. A connection replacement no longer creates blanket difference demand. When a channel's durable cursor covers the freshly discovered PTS, restoring its local state postpones the channel silence fallback without issuing a redundant difference or rewriting its cursor. Genuine gap/overflow/repair/history demand remains. Missing PTS still uses the durable observation deadline; changed heads recover from committed PTS. Bootstrap and authenticated managed-catalog reconciliation remain automatic.
 
 One account-owned budget spaces remote synchronization page starts by one second. Local reads, contiguous pushes and empty local verification bypass admission. Waiting uses retained bounded workers, holds no budget lock across a wait, observes cancellation, and emits a distinct scheduled-check phase before a remote request. Known FloodWait immediately extends this budget before completion reaches the coordinator, preventing already queued workers from ignoring a reported cooldown. Overlapping waits retain the later deadline. Directory iteration separately yields one second per 100 returned dialogs, matching the pinned grammers 0.11 iterator's page geometry; the bounded 10,000-dialog scan has a 180-second deadline rather than 60 seconds to accommodate this spacing. These are conservative local policies, not a claim about Telegram's unpublished request quotas.
@@ -22,7 +56,7 @@ The inspector shows scheduled checks separately from server waits, active/queued
 
 ## Persistent compatibility
 
-SQLite schema remains 23; preferences remain v1 and payload/recovery codecs are unchanged. New optional setting `channel-sync-cooldown.<account-id>` uses independent JSON codec v1: `{"version":1,"until_unix_ms":<signed UTC Unix milliseconds>}`. A missing record, including upgrades that skip any prior release, means no saved server cooldown; existing data needs no conversion or reset. Runtime reads/writes v1 only, and stores the maximum existing/reported deadline in an atomic settings write. Expired deadlines allow sync. Unsupported versions or malformed records remain intact and stop this sync owner with storage/compatible-version guidance. This metadata contains no credentials, channel contents or payload bytes.
+SQLite schema remains 26; preferences remain v1 and payload/recovery codecs are unchanged. New optional setting `channel-sync-cooldown.<account-id>` uses independent JSON codec v1: `{"version":1,"until_unix_ms":<signed UTC Unix milliseconds>}`. A missing record, including upgrades that skip any prior release, means no saved server cooldown; existing data needs no conversion or reset. Runtime reads/writes v1 only, and stores the maximum existing/reported deadline in an atomic settings write. Expired deadlines allow sync. Unsupported versions or malformed records remain intact and stop this sync owner with storage/compatible-version guidance. This metadata contains no credentials, channel contents or payload bytes.
 
 ## Evidence and limitations
 
