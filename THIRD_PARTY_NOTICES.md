@@ -266,7 +266,7 @@ is distributed. Lofty's optional compressed-tag support is disabled. The new
 transitive graph (`lofty_attr`, `ogg_pager`, `data-encoding`, `nom`,
 `minimal-lexical`, `iso6709parse`, `geo-types`, and `approx`, where applicable)
 passes the existing `cargo deny` license/advisory policy; exact versions are
-recorded in Cargo.lock. No third-party implementation or fixtures are copied.
+recorded in Cargo.lock. The media integration copies no third-party implementation or fixtures.
 Media fixtures are generated synthetic silence/color owned by this project.
 
 ### nom-exif — MIT License
@@ -292,3 +292,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+## Grammers 0.11 numeric-proxy compatibility patch
+
+TeleArk distributes a narrowly patched `grammers-mtsender 0.11.0` under its
+Apache-2.0 option (`MIT OR Apache-2.0`). Copyright 2020 developers of the
+`grammers` project; upstream MIT text credits 2021 Lonami. The Apache-2.0 text
+is included in `LICENSE-APACHE`; both original license texts and copyright
+headers are retained in `vendor/grammers-mtsender`. Source provenance, archive
+checksum and modifications are documented in `TELEARK_PATCH.md` there. Only
+numeric proxy host handling and resolver initialization error handling differ
+from the upstream implementation. No additional license exception is needed.

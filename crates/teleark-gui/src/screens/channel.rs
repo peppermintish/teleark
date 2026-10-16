@@ -1174,12 +1174,15 @@ impl TeleArkApp {
                             .into(),
                     ))
                 })
-                .child(div().mt_3().text_xs().child(self.tr(
-                    if package.health == teleark_runtime::VaultFileHealth::KeyUnavailable {
-                        "vault-health-key-unavailable"
-                    } else {
-                        "vault-health-detail"
-                    },
+                .child(div().mt_3().text_xs().child(components::selectable_text(
+                    "managed-health-description",
+                    self.tr(
+                        if package.health == teleark_runtime::VaultFileHealth::KeyUnavailable {
+                            "vault-health-key-unavailable"
+                        } else {
+                            "vault-health-detail"
+                        },
+                    ),
                 )))
                 .when(
                     package.health == teleark_runtime::VaultFileHealth::KeyUnavailable,
@@ -1246,15 +1249,24 @@ impl TeleArkApp {
                         .text_color(theme::text_muted())
                         .child(self.tr("storage-channel-related-files")),
                 )
-                .children(package.related_remote_names.iter().map(|file| {
-                    div()
-                        .mt_2()
-                        .p_2()
-                        .rounded(theme::RADIUS_SMALL)
-                        .bg(theme::sidebar())
-                        .text_xs()
-                        .child(file.clone())
-                }))
+                .children(
+                    package
+                        .related_remote_names
+                        .iter()
+                        .enumerate()
+                        .map(|(index, file)| {
+                            div()
+                                .mt_2()
+                                .p_2()
+                                .rounded(theme::RADIUS_SMALL)
+                                .bg(theme::sidebar())
+                                .text_xs()
+                                .child(components::selectable_text(
+                                    format!("managed-related-file-{index}"),
+                                    file.clone(),
+                                ))
+                        }),
+                )
                 .child(
                     components::button(
                         "storage-channel-download-managed",

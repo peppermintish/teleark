@@ -225,4 +225,5 @@ pub fn cyan_soft() -> Rgba {
 
 /// A readable event timeline with a fixed time line in the narrow inspector.
 pub const SYNC_INSPECTOR_WIDTH: f32 = 360.0;
+pub const MANAGED_FILE_META_WIDTH: f32 = 180.0;
 pub const MANAGED_FILE_INSPECTOR_WIDTH: f32 = 340.0;

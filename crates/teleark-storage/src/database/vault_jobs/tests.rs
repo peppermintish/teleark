@@ -795,6 +795,7 @@ fn deleting_terminal_vault_history_is_atomic_and_preserves_downloaded_output() -
         [],
     )?;
     db.record_vault_download(&crate::VaultDownloadRecord {
+        media_duration_ms: None,
         account_id: 7,
         chat_id: 11,
         package_id: "09".repeat(16),
@@ -833,6 +834,7 @@ fn deleting_failed_and_cancelled_vault_history_preserves_downloaded_output() -> 
             ],
         )?;
         db.record_vault_download(&crate::VaultDownloadRecord {
+            media_duration_ms: None,
             account_id: 7,
             chat_id: 11,
             package_id: format!("{package_byte:02x}").repeat(16),

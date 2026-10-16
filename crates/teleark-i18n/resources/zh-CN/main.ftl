@@ -79,7 +79,7 @@ library-source-local = 这台电脑
 library-source-telegram-chat = Telegram 聊天 { $chat_id }
 library-file-picker-prompt = 导入
 library-choosing-files = 正在选择文件…
-library-importing-files = 正在导入文件…
+library-importing-files = 正在读取并保存文件及媒体元数据…
 library-import-success = 已导入 { $count } 个文件。
 library-import-partial = 已导入 { $imported } 个文件；另有 { $failed } 个文件无法导入。
 library-import-failed = { $count } 个文件无法导入。
@@ -1121,11 +1121,12 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
-    ## 0.5.17 · Telegram 媒体时长与可选择的检查器
+    ## 0.5.17 · 媒体时长与可选择的详情面板
 
-    - 在频道和资料库列表中，以简洁的 `M:SS` 或 `H:MM:SS` 格式显示 Telegram 报告的音频/视频时长，并在下载后将已知时长保留到本地列表。没有经过认证的时长元数据的托管文件、本地导入和当前 Vault 清单会显示为不可用，不会猜测时长。已知值保存在 SQLite 架构 25 中。
-    - 详情行、说明文字、传输详情和检查器摘要均可选择并复制。
-    - 将 GPUI Kit 升级到 0.7.3，grammers 升级到 0.11.0（Telegram API 层 230）。不含 Community 对等的会话文件仍为版本 1。
+    - 在频道、资料库和本地列表中以 `M:SS` 或 `H:MM:SS` 显示音视频时长。新的 Vault 上传会在后台读取本地媒体，将时长、视频尺寸以及可用的音频采样率、声道数和位深保存到加密清单 3.0，并在右侧详情面板显示。导入本地文件和完成验证的 Vault 下载也会保留时长，重启后仍可显示。没有元数据的旧文件仍显示未知。
+    - 详情标签和值、说明、传输详情、关联的远程文件名和面板摘要均可选择和复制。在 900×600 和全屏模式下，列表时长不会随状态文字一起截断。
+    - 将 GPUI Kit 更新至 0.7.3，grammers 更新至 0.11.0（Telegram API 层 230）。应用范围明确的 MIT/Apache-2.0 补丁，使数字 SOCKS 代理地址绕过 DNS，并将解析器初始化失败作为错误返回，避免崩溃。
+    - 自动升级至 SQLite 架构 25 和 26，同时保留现有数据。继续读取清单 1.0/2.0/3.0，新完成清单写入 3.0；历史已封存的待发送清单可按原字节重放。加密分片、待处理上传、密钥封装和恢复格式保持兼容。
 
     ## 0.5.13 · Microsoft Store 传输恢复与诊断
 

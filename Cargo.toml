@@ -11,6 +11,7 @@ members = [
     "crates/teleark-transfer",
 ]
 resolver = "2"
+exclude = ["vendor/grammers-mtsender"]
 
 [workspace.package]
 version = "0.5.17"
@@ -45,3 +46,7 @@ gpui-pre-macos = { opt-level = 3 }
 taffy = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
+
+# Keep the 0.11 numeric-proxy fix reproducible on every release platform.
+[patch.crates-io]
+grammers-mtsender = { path = "vendor/grammers-mtsender" }

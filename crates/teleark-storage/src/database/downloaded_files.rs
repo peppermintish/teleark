@@ -31,7 +31,7 @@ impl Database {
                 reason: InputReason::OutOfRange,
             });
         }
-        self.connection.execute("INSERT INTO vault_downloaded_files (account_id, chat_id, package_id, path_encoding, destination_path, size_bytes, completed_at_unix_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (account_id, path_encoding, destination_path) DO UPDATE SET chat_id=excluded.chat_id, package_id=excluded.package_id, size_bytes=excluded.size_bytes, completed_at_unix_ms=excluded.completed_at_unix_ms", params![record.account_id, record.chat_id, record.package_id, encoding, path, unsigned_to_sql("vault_download.size_bytes", record.size_bytes)?, record.completed_at_unix_ms])?;
+        self.connection.execute("INSERT INTO vault_downloaded_files (account_id, chat_id, package_id, path_encoding, destination_path, size_bytes, completed_at_unix_ms, media_duration_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (account_id, path_encoding, destination_path) DO UPDATE SET chat_id=excluded.chat_id, package_id=excluded.package_id, size_bytes=excluded.size_bytes, completed_at_unix_ms=excluded.completed_at_unix_ms, media_duration_ms=excluded.media_duration_ms", params![record.account_id, record.chat_id, record.package_id, encoding, path, unsigned_to_sql("vault_download.size_bytes", record.size_bytes)?, record.completed_at_unix_ms, record.media_duration_ms.map(|value| unsigned_to_sql("vault_download.media_duration_ms", value)).transpose()?])?;
         Ok(())
     }
 
@@ -74,7 +74,7 @@ SELECT * FROM (
  SELECT * FROM (
   SELECT 1 AS kind, id, account_id, chat_id, NULL AS message_id, package_id,
          path_encoding, destination_path, size_bytes, completed_at_unix_ms,
-         NULL AS media_duration_ms
+         media_duration_ms
   FROM vault_downloaded_files WHERE account_id=?1 AND id<=?3
   ORDER BY id DESC LIMIT 128
  )

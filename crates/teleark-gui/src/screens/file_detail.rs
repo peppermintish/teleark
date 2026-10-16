@@ -473,7 +473,10 @@ fn property_row(label: impl Into<SharedString>, value: impl Into<SharedString>) 
                 .truncate()
                 .debug_selector(move || label_selector.clone())
                 .text_color(theme::text_muted())
-                .child(label),
+                .child(components::selectable_text(
+                    format!("file-property-label-{label}"),
+                    label.clone(),
+                )),
         )
         .child(
             div()
@@ -481,7 +484,10 @@ fn property_row(label: impl Into<SharedString>, value: impl Into<SharedString>) 
                 .min_w_0()
                 .truncate()
                 .text_color(theme::text_secondary())
-                .child(value),
+                .child(components::selectable_text(
+                    format!("file-property-value-{label}"),
+                    value,
+                )),
         )
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)

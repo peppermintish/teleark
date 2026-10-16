@@ -1,5 +1,5 @@
 //! Best-effort playback properties, never payload decoding or free-form tags.
-//! Runs in the retained upload owner before hashing; reads and seeks share limits.
+//! Runs in retained background owners; reads and seeks share limits.
 use std::{
     io::{self, Read, Seek, SeekFrom},
     path::Path,
@@ -13,20 +13,20 @@ const MAX_OPERATIONS: u32 = 8192;
 const MAX_TIME: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct PlaybackMetadata {
+pub(crate) struct PlaybackMetadata {
     pub duration_ms: Option<u64>,
     pub properties: MediaProperties,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ProbeState {
+pub(crate) enum ProbeState {
     Reading,
     Ready,
     Unavailable,
     Limited,
 }
 
-pub(super) fn inspect(
+pub(crate) fn inspect(
     path: &Path,
     mut phase: impl FnMut(ProbeState),
     cancelled: impl Fn() -> bool,
@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn content_detected_video_and_audio_properties() {
         for bytes in [
-            include_bytes!("fixtures/media/video.mp4").as_slice(),
-            include_bytes!("fixtures/media/video.webm").as_slice(),
+            include_bytes!("vault/fixtures/media/video.mp4").as_slice(),
+            include_bytes!("vault/fixtures/media/video.webm").as_slice(),
         ] {
             let (metadata, limited) = inspect_reader(Cursor::new(bytes), || false).expect("probe");
             assert!(!limited);
@@ -181,8 +181,8 @@ mod tests {
             assert_eq!(metadata.properties.height, Some(90));
         }
         for bytes in [
-            include_bytes!("fixtures/media/audio.flac").as_slice(),
-            include_bytes!("fixtures/media/audio.mp3").as_slice(),
+            include_bytes!("vault/fixtures/media/audio.flac").as_slice(),
+            include_bytes!("vault/fixtures/media/audio.mp3").as_slice(),
         ] {
             let (metadata, limited) = inspect_reader(Cursor::new(bytes), || false).expect("probe");
             assert!(!limited);
@@ -207,7 +207,7 @@ mod tests {
             |state| {
                 states.push(state);
                 if state == ProbeState::Reading {
-                    std::fs::write(&source, include_bytes!("fixtures/media/audio.flac"))
+                    std::fs::write(&source, include_bytes!("vault/fixtures/media/audio.flac"))
                         .expect("source");
                 }
             },
@@ -330,7 +330,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             inspect_reader(
                 Blocked {
-                    bytes: Cursor::new(include_bytes!("fixtures/media/video.mp4").to_vec()),
+                    bytes: Cursor::new(include_bytes!("vault/fixtures/media/video.mp4").to_vec()),
                     entered: Some(entered),
                     release: blocked,
                 },
@@ -341,7 +341,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("blocked read");
         let (other, _) = inspect_reader(
-            Cursor::new(include_bytes!("fixtures/media/audio.flac")),
+            Cursor::new(include_bytes!("vault/fixtures/media/audio.flac")),
             || false,
         )
         .expect("independent probe");

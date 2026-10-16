@@ -1,12 +1,12 @@
 # Data model and SQLite contracts
 
-The current schema is version **25**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **26**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
 | Entity | Identity / invariant |
 | --- | --- |
-| Logical file | Stable `LogicalFileId`, original Unicode name, plaintext size, kind, optional source-reported media duration, source and remote/encryption/verification states |
+| Logical file | Stable `LogicalFileId`, original Unicode name, plaintext size, kind, optional source-reported or inspected media duration, source and remote/encryption/verification states |
 | Remote object | `(account_id, chat_id, message_id)`; volatile references/access hashes are refreshable adapter hints |
 | Vault package | One logical file, authenticated manifest generation and ordered parts covering the file without gaps/overlap |
 | Account/chat | Chats and remote projections are account scoped; no session secrets in ordinary rows |
@@ -256,7 +256,7 @@ checks that no temporary sorting tree appears in the filtered query plan.
 
 ## Credential storage (schema 23)
 
-Credential tables were added in schema **23**. Current SQLite read/write version is **25**, with supported automatic upgrades **0–24 → 25**, including skipped releases, through the existing visible transactional migration owner. Schema 24's nullable `channel_sync_state.last_synced_at` is part of the historical migration chain. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
+Credential tables were added in schema **23**. Current SQLite read/write version is **26**, with supported automatic upgrades **0–25 → 26**, including skipped releases, through the existing visible transactional migration owner. Schema 24's nullable `channel_sync_state.last_synced_at` is part of the historical migration chain. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
 
 macOS defaults on; Windows/Linux default off and reject enabling. A copied macOS library on other platforms retains unavailable Keychain references while switching to local mode, with explicit reentry/recovery guidance. No missing secret is guessed or overwritten. See [ADR 0053](adr/0053-selectable-system-credentials.md) for bounds, cleanup, cancellation and recovery semantics.
 
@@ -275,9 +275,28 @@ The migration uses the existing visible detection/preparation/conversion/verific
 
 ## Telegram media duration (schema 25)
 
-Version 25 adds nullable `logical_files.duration_ms` and `native_download_tasks.media_duration_ms`, each a non-negative integer count of milliseconds. Telegram document audio/video attributes supply the value; a plain document or a legacy row has NULL. Cached list projections and local native-download history retain it across restart, and the Library's `LogicalFile` carries the optional catalog value. No duration is inferred from filenames or MIME types. Local imports and managed manifests without authenticated duration metadata remain unknown; this SQLite migration does not rewrite manifest bytes. New completed Vault manifest 3.0 carries encrypted duration and bounded numeric playback properties from local media inspection. These fields are recovered from the sealed inventory/remote manifest into `ManagedVaultFile`, without a new SQL schema or plaintext tag store. Completed manifests 1.0/2.0 and pending-upload envelopes remain readable with unknown playback properties.
+Version 25 adds nullable `logical_files.duration_ms` and `native_download_tasks.media_duration_ms`, each a non-negative integer count of milliseconds. Telegram document audio/video attributes supply the value; a plain document or a legacy row has NULL. Cached list projections and local native-download history retain it across restart, and the Library's `LogicalFile` carries the optional catalog value. No duration is inferred from filenames or MIME types. Legacy local imports and managed manifests without authenticated duration metadata remain unknown; this SQLite migration does not rewrite manifest bytes. New completed Vault manifest 3.0 carries encrypted duration and bounded numeric playback properties from local media inspection. These fields are recovered from the sealed inventory/remote manifest into `ManagedVaultFile`, without a new SQL schema or plaintext tag store. Completed manifests 1.0/2.0 and pending-upload envelopes remain readable with unknown playback properties.
 
 The migration is additive and transactional. Existing rows remain NULL, preserving their original meaning; interrupted or failed verification rolls back the column and schema marker together. Readers supporting schema 24 reject the newer database without modifying it.
 
 
 See [ADR 0066](adr/0066-grammers-0-11-and-media-duration.md) for the grammers 0.11, session version, and media-duration compatibility decisions.
+
+
+## Local playback duration (schema 26)
+
+Schema 26 adds nullable, non-negative `vault_downloaded_files.media_duration_ms`.
+Verified Vault restore records copy this value from authenticated manifest 3.0;
+Local list paging retains it after restart, independently of transfer history.
+Deletion rules still retain downloaded-file inventory and final destinations.
+Existing records retain NULL. Supported upgrades 0–25 run automatically through
+the ordered transactional owner; schema 25 and subsequent steps retain their
+verification points before commit. Rollback/restart fixtures preserve paths,
+bytes, account scope, cursors and settings across skipped upgrades.
+
+Local imports use the same bounded pure Rust metadata reader off the UI thread
+and persist optional duration through `ImportLocalFile` into the existing
+`logical_files.duration_ms` column. The import action acknowledges reading and
+saving metadata before starting work. No inferred duration, source text
+normalization or plaintext media payload staging is introduced. Unsupported
+media and historical manifests that omit duration remain unknown.

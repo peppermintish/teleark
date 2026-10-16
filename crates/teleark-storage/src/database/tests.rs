@@ -1382,6 +1382,7 @@ fn downloaded_inventory_pages_preserve_account_scope_and_platform_paths()
     let mut db = Database::open(&path)?;
     for index in 0..140 {
         db.record_vault_download(&VaultDownloadRecord {
+            media_duration_ms: Some(index as u64 * 1000),
             account_id: 7,
             chat_id: 90,
             package_id: format!("{index:032x}"),
@@ -1391,6 +1392,7 @@ fn downloaded_inventory_pages_preserve_account_scope_and_platform_paths()
         })?;
     }
     db.record_vault_download(&VaultDownloadRecord {
+        media_duration_ms: None,
         account_id: 8,
         chat_id: 90,
         package_id: "a".repeat(32),
@@ -1402,6 +1404,7 @@ fn downloaded_inventory_pages_preserve_account_scope_and_platform_paths()
     let db = Database::open(&path)?;
     let first = db.downloaded_files_page(7, None)?;
     assert_eq!(first.len(), 128);
+    assert_eq!(first[0].media_duration_ms, Some(139_000));
     assert!(
         first
             .iter()
@@ -1410,6 +1413,7 @@ fn downloaded_inventory_pages_preserve_account_scope_and_platform_paths()
     assert!(first[0].destination.ends_with("写真 139.bin"));
     let second = db.downloaded_files_page(7, first.last().map(|file| file.cursor))?;
     assert_eq!(second.len(), 12);
+    assert_eq!(second[0].media_duration_ms, Some(11_000));
     assert!(
         db.downloaded_files_page(7, second.last().map(|file| file.cursor))?
             .is_empty()
@@ -1473,6 +1477,7 @@ fn downloaded_file_v10_fixture_retains_exact_path_bytes() -> Result<(), Box<dyn 
         Some("5441524b504b4731000000000000002a")
     );
     let original = crate::VaultDownloadRecord {
+        media_duration_ms: None,
         account_id: 7,
         chat_id: 90,
         package_id: record.package_id.clone().expect("fixture identity"),
@@ -1513,6 +1518,7 @@ fn mixed_output_cursor_visits_both_kinds_once_without_deep_offsets() -> Result<(
         task.updated_at_unix_ms = 200;
         db.save_native_download(&task)?;
         db.record_vault_download(&crate::VaultDownloadRecord {
+            media_duration_ms: None,
             account_id: 7,
             chat_id: 90,
             package_id: format!("{index:032x}"),
@@ -2468,5 +2474,71 @@ fn stale_key_revision_cannot_overwrite_a_new_epoch_or_password_rotation()
     new.password_generation = 2;
     assert!(database.save_vault_metadata_checked(&new, revision)?);
     assert!(!database.save_vault_metadata_checked(&new, revision)?);
+    Ok(())
+}
+
+#[test]
+fn vault_media_duration_schema_26_preserves_downloads_and_restarts_after_rollback()
+-> Result<(), Box<dyn Error>> {
+    use std::cell::RefCell;
+    for from in [10u32, 24, 25] {
+        let directory = tempdir()?;
+        let path = directory.path().join("media-migration.sqlite");
+        let destination = directory.path().join("retained.mp4");
+        std::fs::write(&destination, b"retained verified output")?;
+        let mut connection = Connection::open(&path)?;
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= from)
+        {
+            connection.execute_batch(migration.sql)?;
+        }
+        connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+        connection.pragma_update(None, "user_version", from)?;
+        connection.execute("INSERT INTO settings(key,value,updated_at_unix_ms) VALUES('fixture.key.v1','synthetic-preserved-key',1)", [])?;
+        let (encoding, bytes) = super::encode_local_path(&destination)?;
+        connection.execute("INSERT INTO vault_downloaded_files(account_id,chat_id,package_id,path_encoding,destination_path,size_bytes,completed_at_unix_ms) VALUES(7,11,?1,?2,?3,24,1)", params!["a".repeat(32), encoding, bytes])?;
+        if from == 25 {
+            connection.pragma_update(None, "foreign_keys", false)?;
+            connection.execute_batch("CREATE TABLE broken_fixture(id INTEGER REFERENCES accounts(id)); INSERT INTO broken_fixture VALUES(999);")?;
+            connection.pragma_update(None, "foreign_keys", true)?;
+            let phases = RefCell::new(Vec::new());
+            assert!(
+                crate::migration::migrate(&mut connection, &|phase| phases
+                    .borrow_mut()
+                    .push(phase))
+                .is_err()
+            );
+            assert_eq!(
+                connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?,
+                25
+            );
+            assert_eq!(connection.query_row("SELECT COUNT(*) FROM pragma_table_info('vault_downloaded_files') WHERE name='media_duration_ms'", [], |row| row.get::<_,u32>(0))?, 0);
+            assert!(
+                phases
+                    .borrow()
+                    .contains(&crate::MigrationProgress::Verifying { version: 26 })
+            );
+            connection.execute_batch("DROP TABLE broken_fixture")?;
+        }
+        drop(connection);
+        let database = Database::open(&path)?;
+        assert_eq!(database.schema_version()?, 26);
+        assert_eq!(
+            database.setting("fixture.key.v1")?.expect("key").value,
+            "synthetic-preserved-key"
+        );
+        let rows = database.downloaded_files_page(7, None)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].media_duration_ms, None);
+        assert!(database.downloaded_files_page(8, None)?.is_empty());
+        assert_eq!(std::fs::read(&destination)?, b"retained verified output");
+        database.quick_check()?;
+        drop(database);
+        assert_eq!(
+            Database::open(&path)?.downloaded_files_page(7, None)?.len(),
+            1
+        );
+    }
     Ok(())
 }

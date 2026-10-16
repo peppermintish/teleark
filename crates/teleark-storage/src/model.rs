@@ -822,7 +822,7 @@ pub struct DownloadedFileRecord {
     pub package_id: Option<String>,
     pub destination: std::path::PathBuf,
     pub size_bytes: u64,
-    /// Source-reported playback duration for a native download; Vault outputs have none.
+    /// Source-reported or authenticated playback duration of the downloaded media.
     pub media_duration_ms: Option<u64>,
     pub completed_at_unix_ms: i64,
 }
@@ -834,5 +834,6 @@ pub struct VaultDownloadRecord {
     pub package_id: String,
     pub destination: std::path::PathBuf,
     pub size_bytes: u64,
+    pub media_duration_ms: Option<u64>,
     pub completed_at_unix_ms: i64,
 }

@@ -443,6 +443,7 @@ fn vault_inventory_revision_changes_only_on_success() {
     let library = DesktopLibrary::open(dir.path().join("library.sqlite3")).expect("library");
     let before = library.downloaded_files_revision.load(Ordering::Acquire);
     let mut file = VaultDownloadRecord {
+        media_duration_ms: None,
         account_id: 1,
         chat_id: 20,
         package_id: "a".repeat(32),

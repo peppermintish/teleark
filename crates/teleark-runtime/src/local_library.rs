@@ -291,6 +291,33 @@ mod tests {
     }
 
     #[test]
+    fn imported_media_duration_survives_restart() {
+        let root = tempfile::tempdir().expect("directory");
+        let database = root.path().join("library.sqlite");
+        let library = DesktopLibrary::open(&database).expect("library");
+        for (name, bytes) in [
+            (
+                "clip.mp4",
+                include_bytes!("vault/fixtures/media/video.mp4").as_slice(),
+            ),
+            (
+                "recording.flac",
+                include_bytes!("vault/fixtures/media/audio.flac").as_slice(),
+            ),
+        ] {
+            let path = root.path().join(name);
+            std::fs::write(&path, bytes).expect("source");
+            let file = library.import_paths([path]).remove(0).expect("import");
+            assert_eq!(file.duration_ms, Some(2000));
+        }
+        drop(library);
+        let library = DesktopLibrary::open(&database).expect("restart");
+        let files = all(&library, None, "", None);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|file| file.duration_ms == Some(2000)));
+    }
+
+    #[test]
     fn local_view_requires_existing_files_and_keeps_account_and_copy_identity() {
         let root = tempfile::tempdir().expect("root");
         let library = DesktopLibrary::open(root.path().join("library.sqlite3")).expect("library");
@@ -308,6 +335,7 @@ mod tests {
         std::fs::write(&vault_path, b"vault").expect("vault bytes");
         library
             .record_vault_download(VaultDownloadRecord {
+                media_duration_ms: None,
                 account_id: 1,
                 chat_id: 100,
                 package_id: "a".repeat(32),

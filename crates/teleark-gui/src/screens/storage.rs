@@ -1203,9 +1203,37 @@ impl TeleArkApp {
                                             })
                                             .child(file.logical_name.clone()),
                                     )
+                                    .when(
+                                        matches!(
+                                            file.media_kind,
+                                            teleark_core::FileKind::Video
+                                                | teleark_core::FileKind::Audio
+                                        ),
+                                        |name| {
+                                            name.child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
+                                                    .text_color(theme::text_muted())
+                                                    .debug_selector(move || {
+                                                        format!(
+                                                            "managed-file-duration-{package_id}"
+                                                        )
+                                                    })
+                                                    .child(file.duration_ms.map_or_else(
+                                                        || {
+                                                            this.tr("common-not-applicable")
+                                                                .to_string()
+                                                        },
+                                                        teleark_i18n::format::format_media_duration,
+                                                    )),
+                                            )
+                                        },
+                                    )
                                     .child(
                                         div()
-                                            .max_w(px(260.0))
+                                            .w(px(theme::MANAGED_FILE_META_WIDTH))
+                                            .flex_none()
                                             .truncate()
                                             .text_size(theme::LIST_SECONDARY_TEXT_SIZE)
                                             .text_color(theme::text_muted())
@@ -1213,7 +1241,7 @@ impl TeleArkApp {
                                                 format!("managed-file-meta-{package_id}")
                                             })
                                             .child(format!(
-                                            "{} · {}{}",
+                                            "{} · {}",
                                             if file.health
                                                 == teleark_runtime::VaultFileHealth::KeyUnavailable
                                             {
@@ -1225,16 +1253,6 @@ impl TeleArkApp {
                                                 )
                                             },
                                             this.tr(vault_health_id(file.health)),
-                                            match file.media_kind {
-                                                teleark_core::FileKind::Video | teleark_core::FileKind::Audio => format!(
-                                                    " · {}",
-                                                    file.duration_ms.map_or_else(
-                                                        || this.tr("common-not-applicable").to_string(),
-                                                        teleark_i18n::format::format_media_duration,
-                                                    ),
-                                                ),
-                                                _ => String::new(),
-                                            },
                                         )),
                                     ),
                             )
@@ -1553,6 +1571,17 @@ mod tests {
                 cx.run_until_parked();
                 let panel = cx.debug_bounds("managed-file-inspector").expect("popout");
                 let viewport = cx.update(|window, _| window.viewport_size());
+                let duration = cx
+                    .debug_bounds(if index == 0 {
+                        "managed-file-duration-1"
+                    } else {
+                        "managed-file-duration-5"
+                    })
+                    .expect("duration on managed list");
+                assert!(
+                    duration.right() <= panel.left(),
+                    "list duration remains visible beside the inspector: {duration:?} {panel:?}"
+                );
                 assert!(panel.right() <= viewport.width);
                 assert!(panel.bottom() <= viewport.height);
                 for selector in selectors {
@@ -1563,6 +1592,46 @@ mod tests {
                         "{selector} bounds={bounds:?} panel={panel:?}, index={index}, fullscreen={fullscreen}"
                     );
                 }
+                let row = cx
+                    .debug_bounds("detail-row-Original file name")
+                    .expect("selectable file name");
+                let from = gpui_kit::point(row.left() + px(8.0), row.top() + px(33.0));
+                let to = gpui_kit::point(row.left() + px(220.0), row.top() + px(33.0));
+                cx.simulate_mouse_down(
+                    from,
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.simulate_mouse_move(
+                    to,
+                    Some(gpui_kit::MouseButton::Left),
+                    gpui_kit::Modifiers::default(),
+                );
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.simulate_mouse_up(
+                    to,
+                    gpui_kit::MouseButton::Left,
+                    gpui_kit::Modifiers::default(),
+                );
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let selected = cx.update(gpui_kit::base::TextSelection::selected_text);
+                assert!(!selected.trim().is_empty(), "pop-out text is selectable");
+                cx.update(|window, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("SENTINEL".into()));
+                    window.dispatch_action(Box::new(gpui_kit::component::input::Copy), cx);
+                });
+                cx.run_until_parked();
+                let copied = cx.update(|_, cx| {
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .unwrap_or_default()
+                });
+                assert_eq!(
+                    copied.trim(),
+                    selected.trim(),
+                    "copy preserves selected inspector text"
+                );
                 app.update(cx, |app, cx| {
                     app.raw_detail_scroll
                         .set_offset(gpui_kit::point(px(0.0), px(-2000.0)));

@@ -46,7 +46,7 @@ use crate::{
 mod catalog;
 mod control;
 mod device_keys;
-mod media_probe;
+use crate::media_metadata as media_probe;
 
 pub(crate) fn device_key_identity(record: &VaultMetadataRecord) -> String {
     device_keys::identity(record)
@@ -4134,6 +4134,7 @@ impl VaultOwner {
         if self.upload_controls.exit_pause.is_requested() {
             return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
         }
+        let media_duration_ms = recovered.manifest.metadata.duration_ms;
         let logical_name = recovered.manifest.metadata.logical_name.clone();
         let size_bytes = recovered.manifest.public_header.logical_file_size;
         let part_count = recovered.manifest.public_header.part_count;
@@ -4377,6 +4378,7 @@ impl VaultOwner {
                 .map_err(map_download_transfer_error)?;
             self.library
                 .record_vault_download(teleark_storage::VaultDownloadRecord {
+                    media_duration_ms,
                     account_id: expected_account_id,
                     chat_id,
                     package_id: package_text.clone(),

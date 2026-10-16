@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 25;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 26;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -716,6 +716,10 @@ CREATE TABLE credential_cleanup (
         sql: "ALTER TABLE logical_files ADD COLUMN duration_ms INTEGER CHECK (duration_ms >= 0); \
               ALTER TABLE native_download_tasks ADD COLUMN media_duration_ms INTEGER CHECK (media_duration_ms >= 0);",
     },
+    Migration {
+        version: 26,
+        sql: "ALTER TABLE vault_downloaded_files ADD COLUMN media_duration_ms INTEGER CHECK (media_duration_ms >= 0);",
+    },
 ];
 
 pub(crate) fn migrate(
@@ -760,7 +764,8 @@ pub(crate) fn migrate(
         progress(MigrationProgress::Verifying {
             version: migration.version,
         });
-        if migration.version == LATEST_SCHEMA_VERSION {
+        // Retain schema-25 verification across skipped upgrades; validate every new step.
+        if migration.version >= 25 {
             let check: String =
                 transaction.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
             let violations: i64 = transaction.query_row(

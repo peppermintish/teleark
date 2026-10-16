@@ -39,10 +39,13 @@ fn local_media_metadata_survives_manifest_publication_and_restart() {
         } else {
             assert_eq!(file.media_properties.sample_rate_hz, Some(48_000));
         }
+        vault
+            .download_file(7, 11, file.package_numeric_id)
+            .expect("verified local copy");
         let upload = vault
             .transfers()
             .into_iter()
-            .find(|row| row.file_name == name)
+            .find(|row| row.file_name == name && row.direction == VaultTransferDirection::Upload)
             .expect("timeline");
         let phases = upload
             .upload_activity
@@ -62,9 +65,20 @@ fn local_media_metadata_survives_manifest_publication_and_restart() {
                     .position(|p| *p == VaultUploadPhase::MediaReady)
         );
     }
+    let page = library
+        .local_library_page(
+            Some(7),
+            "",
+            None,
+            None,
+            &crate::LocalLibraryCancellation::default(),
+        )
+        .expect("local media projection");
+    assert_eq!(page.files.len(), 2);
+    assert!(page.files.iter().all(|file| file.duration_ms == Some(2000)));
     drop(vault);
     drop(library);
-    let (vault, _) = open(dir.path(), &remote);
+    let (vault, restarted_library) = open(dir.path(), &remote);
     vault
         .unlock_with_password(PASSWORD.into())
         .expect("unlock after restart");
@@ -92,6 +106,17 @@ fn local_media_metadata_survives_manifest_publication_and_restart() {
             .height,
         Some(90)
     );
+    let page = restarted_library
+        .local_library_page(
+            Some(7),
+            "",
+            None,
+            None,
+            &crate::LocalLibraryCancellation::default(),
+        )
+        .expect("restored local duration");
+    assert_eq!(page.files.len(), 2);
+    assert!(page.files.iter().all(|file| file.duration_ms == Some(2000)));
 }
 
 #[test]

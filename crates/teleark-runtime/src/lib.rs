@@ -10,6 +10,7 @@ mod durable_upload;
 pub use durable_upload::DurableUploadParts;
 
 mod local_library;
+mod media_metadata;
 mod session_log_writer;
 pub use local_library::{
     LocalLibraryCancellation, LocalLibraryCursor, LocalLibraryFile, LocalLibraryKey,
@@ -2877,13 +2878,14 @@ fn import_into_database(
     database: &mut Database,
     command: &ImportLocalFile,
 ) -> Result<LogicalFile, ApplicationError> {
-    let input = NewLogicalFileRecord::local_import(
+    let mut input = NewLogicalFileRecord::local_import(
         command.source_path.clone(),
         command.name.clone(),
         command.size_bytes,
         command.kind,
         command.modified_at_unix_ms,
     );
+    input.duration_ms = command.duration_ms;
     let record = database
         .insert_logical_file(&input)
         .map_err(map_storage_error)?;
@@ -2922,7 +2924,15 @@ fn inspect_local_file(path: PathBuf) -> Result<ImportLocalFile, ApplicationError
         .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?
         .to_owned();
     let modified_at_unix_ms = metadata.modified().ok().and_then(system_time_unix_ms);
+    let duration_ms = if matches!(classify_file(&path), FileKind::Video | FileKind::Audio) {
+        media_metadata::inspect(&path, |_| {}, || false)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Cancelled))?
+            .duration_ms
+    } else {
+        None
+    };
     Ok(ImportLocalFile {
+        duration_ms,
         source_path: path.clone(),
         name,
         size_bytes: metadata.len(),

@@ -109,12 +109,18 @@ pub struct ImportLocalFile {
     pub name: String,
     pub size_bytes: u64,
     pub kind: FileKind,
+    pub duration_ms: Option<u64>,
     pub modified_at_unix_ms: Option<i64>,
 }
 
 impl ImportLocalFile {
     pub fn validate(&self) -> Result<(), ApplicationError> {
-        if self.source_path.as_os_str().is_empty() || self.name.trim().is_empty() {
+        if self.source_path.as_os_str().is_empty()
+            || self.name.trim().is_empty()
+            || self
+                .duration_ms
+                .is_some_and(|value| value > i64::MAX as u64)
+        {
             return Err(ApplicationError::new(ApplicationErrorKind::InvalidRequest));
         }
         Ok(())
@@ -314,6 +320,7 @@ mod tests {
     fn local_import_is_validated_and_delegated() {
         let service = LibraryService::new(FakeRepository::default());
         let command = ImportLocalFile {
+            duration_ms: None,
             source_path: PathBuf::from("/tmp/example.pdf"),
             name: "example.pdf".to_owned(),
             size_bytes: 42,
@@ -329,6 +336,7 @@ mod tests {
     fn empty_source_path_is_rejected() {
         let service = LibraryService::new(FakeRepository::default());
         let command = ImportLocalFile {
+            duration_ms: None,
             source_path: PathBuf::new(),
             name: "example.pdf".to_owned(),
             size_bytes: 42,
