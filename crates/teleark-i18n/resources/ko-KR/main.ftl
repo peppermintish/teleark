@@ -817,3 +817,17 @@ managed-download-history-truncated = { $count } earlier activity events omitted
 managed-download-event = { $time } · { $phase } { $error }
 
 managed-download-retry = Retry failed files
+
+# Authenticated playback properties and bounded upload preparation.
+media-width = 너비
+media-height = 높이
+media-sample-rate = 샘플 레이트
+media-channels = 오디오 채널
+media-bit-depth = 비트 깊이
+transfer-upload-reading-media = 미디어 메타데이터 읽는 중
+transfer-upload-media-ready = 미디어 메타데이터 읽기 완료
+transfer-upload-media-unavailable = 미디어 메타데이터를 사용할 수 없습니다. 업로드 계속
+transfer-upload-media-limited = 미디어 메타데이터 읽기 제한에 도달했습니다. 업로드 계속
+media-pixel-value = { $value } px
+media-hertz-value = { $value } Hz
+media-bit-value = { $value } bit

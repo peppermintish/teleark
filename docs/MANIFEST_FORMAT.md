@@ -1,6 +1,6 @@
 # TeleArk Manifest Format
 
-Format: **read 1.0 and 2.0; new desktop writes 2.0**. `teleark-crypto` seals/opens and strictly
+Format: **read 1.0, 2.0 and 3.0; new desktop completion writes 3.0**. `teleark-crypto` seals/opens and strictly
 validates the manifest. Runtime publishes it after verified parts, discovers it
 by a common remote caption and recovers the File Key/layout/locators. Deterministic
 integration tests restore exact contents with a fresh SQLite database.
@@ -15,7 +15,7 @@ magic, flags and encryption domain prevent it from being opened as a completed
 manifest. Desktop resume requires matching source bytes, recovery key and
 account/channel scope. The successful pending-update message ID supplies a unique
 positive completed-manifest generation within that authenticated scope; completed
-outboxes still seal once and replay the original envelope. Payload codecs stay
+outboxes still seal once and replay the original envelope. Part payload codecs stay
 1.0/2.0 and fresh encrypted containers have a 1.9 GiB encoded upper bound, as
 specified by [ADR 0041](adr/0041-memory-streaming-and-portable-upload-recovery.md).
 
@@ -70,11 +70,11 @@ No original filename/path appears in the Telegram remote name or caption. Remote
 
 ## Envelope
 
-The version-1 envelope is:
+All supported versions share this envelope shape:
 
 ```text
 magic                       8 bytes   ASCII "TARKMAN\0"
-format_major                u16       1 or 2
+format_major                u16       1, 2 or 3
 format_minor                u16       0
 public_header_length        u32
 encrypted_metadata_length   u64       ciphertext bytes, excluding 16-byte tag
@@ -105,7 +105,7 @@ The deterministic CBOR public header uses unsigned integer keys; symbolic names 
 | 10 | `crypto_suite_id` | unsigned 16-bit; suite `1` |
 | 11 | `file_key_wrap` | nested required map described below |
 | 12 | `master_key_generation` | unsigned 32-bit |
-| 13 | `flags` | unsigned 32-bit; v1 exactly 0, v2 exactly 1 (aligned part frames); other values rejected |
+| 13 | `flags` | unsigned 32-bit; v1 exactly 0, v2/v3 exactly 1 (aligned part codec 2.0 frames); other values rejected |
 
 `file_key_wrap` contains wrap algorithm ID, wrapped File Key ciphertext (32 bytes for suite 1), GCM tag (16 bytes), and any explicitly required generation/derivation metadata. The version-1 derivation and zero nonce are defined in `CRYPTO_FORMAT.md`; nonce/key rules are not inferred from field absence.
 
@@ -126,6 +126,17 @@ After file-key unwrap, derive the per-generation manifest key as specified in `C
 | 7 | `logical_timestamps` | optional structured timestamps with explicit semantics |
 | 8 | `source_metadata` | optional bounded/versioned map; original user/source content only |
 | 9 | `format_extensions` | optional extension map with defined criticality rules |
+| 10 | `duration_ms` | v3 only; optional unsigned integer milliseconds, at most `i64::MAX`; zero is a known zero, absence is unknown |
+| 11 | `media_properties` | v3 only; optional nonempty map described below |
+
+`media_properties` uses ascending unsigned keys: 1 = width in pixels,
+2 = height in pixels, 3 = sample rate in Hz, 4 = audio channel count,
+5 = bit depth. Each present value is a positive `u32`; absent values are unknown.
+Omit the map when all properties are unknown. Reject duplicate/out-of-order keys,
+unknown keys, empty maps, zero, negative or overflowing properties. The outer
+metadata map has at most 11 fields in v3 (9 in v1/v2). Keys 10/11 are rejected by
+legacy decoders; no old bytes acquire a different meaning. Only selected numeric
+playback properties are retained, never arbitrary source tags, GPS or artwork.
 
 Each part descriptor contains:
 
@@ -237,3 +248,28 @@ manifest automatically restart with a new package/File Key and aligned frames;
 a sealed legacy manifest outbox can still finish with its original immutable
 bytes. There is no mixed v1/v2 package and no source reencryption under a saved
 instance. See [ADR 0036](adr/0036-streaming-upload-and-manual-concurrency.md).
+
+
+## Playback metadata manifest 3.0
+
+New completed desktop manifests use envelope 3.0 with the unchanged 13-field
+public map, `flags=1`, and part codec 2.0 geometry. Envelope version and exact
+metadata bytes participate in the content commitment and AEAD associated data;
+duration and properties remain encrypted. Changing an envelope version never
+relabels an old authenticated manifest. Manifest version is independent of part,
+pending-upload, key-wrap and recovery codecs.
+
+Upgrades automatically read completed 1.0/2.0 packages using their original
+readers; playback metadata remains absent. No network rewrite, media download,
+manual export or key change is needed to read them. Sealed historical outboxes
+replay their exact original version and envelope, even without the original
+source. Unsealed reservations restart with a fresh package/File Key under the
+existing restart policy. New metadata is inspected only while the source is
+available during upload preparation; it is not backfilled into immutable old
+manifests. The independent pending-upload v1 format continues to omit it.
+
+See [ADR 0066](adr/0066-grammers-0-11-and-media-duration.md) for extraction budgets,
+background feedback, supported media families and cancellation behavior.
+Frozen v3 bytes live under `tests/vectors/manifest_v3/`; unchanged v1/v2 vectors,
+strict property parsing, tamper, outbox restart and fresh-database recovery tests
+cover compatibility.

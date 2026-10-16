@@ -1511,6 +1511,73 @@ mod tests {
     use teleark_runtime::{AppearancePreference, StorageChannelHealth, StorageChannelStatus};
 
     #[gpui_kit::test]
+    fn media_properties_popout_is_readable_and_scrollable_at_minimum_and_fullscreen(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app_in_root(cx, Page::Storage);
+        for fullscreen in [false, true] {
+            cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for (index, selectors) in [
+                (
+                    0,
+                    vec![
+                        "managed-media-duration",
+                        "managed-media-width",
+                        "managed-media-height",
+                    ],
+                ),
+                (
+                    4,
+                    vec![
+                        "managed-media-duration",
+                        "managed-media-sample-rate",
+                        "managed-media-bit-depth",
+                        "managed-media-channels",
+                    ],
+                ),
+            ] {
+                app.update(cx, |app, cx| {
+                    app.storage_view = StorageView::Files;
+                    app.selected_telegram_message_id =
+                        Some(app.managed_vault_files[index].manifest_message_id);
+                    app.show_channel_detail = true;
+                    app.raw_detail_scroll
+                        .set_offset(gpui_kit::point(px(0.0), px(0.0)));
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let panel = cx.debug_bounds("managed-file-inspector").expect("popout");
+                let viewport = cx.update(|window, _| window.viewport_size());
+                assert!(panel.right() <= viewport.width);
+                assert!(panel.bottom() <= viewport.height);
+                for selector in selectors {
+                    let bounds = cx.debug_bounds(selector).expect("property row");
+                    assert!(bounds.left() >= panel.left() && bounds.right() <= panel.right());
+                    assert!(
+                        bounds.top() >= panel.top() && bounds.bottom() <= panel.bottom(),
+                        "{selector} bounds={bounds:?} panel={panel:?}, index={index}, fullscreen={fullscreen}"
+                    );
+                }
+                app.update(cx, |app, cx| {
+                    app.raw_detail_scroll
+                        .set_offset(gpui_kit::point(px(0.0), px(-2000.0)));
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let action = cx
+                    .debug_bounds("managed-detail-download")
+                    .expect("restore action remains reachable by scrolling");
+                assert!(action.top() >= panel.top() && action.bottom() <= panel.bottom());
+            }
+        }
+    }
+
+    #[gpui_kit::test]
     fn managed_file_checkboxes_and_batch_controls_work_at_minimum_and_fullscreen(
         cx: &mut gpui_kit::TestAppContext,
     ) {

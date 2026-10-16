@@ -253,3 +253,42 @@ Its Apache-2.0 OR ISC OR MIT license policy remains unchanged. No new package
 names or dependency-license exceptions are introduced by this patch update.
 
 The selectable credential backend also uses the existing `zeroize` 1.9.0 dependency directly in Storage (MIT OR Apache-2.0). Its `Zeroizing` ownership clears credential payload buffers held in storage requests and migration snapshots on completion, cancellation and failure. No new third-party package or license exception was introduced.
+
+
+## Local playback metadata
+
+TeleArk uses `nom-exif 3.8.0` ([upstream](https://github.com/mindeng/nom-exif))
+under MIT and `lofty 0.24.0` ([upstream](https://github.com/Serial-ATA/lofty-rs))
+under Apache-2.0 (its `MIT OR Apache-2.0` option). Lofty copyright 2021 Serial
+and contributors; the Apache-2.0 text is included in `LICENSE-APACHE`.
+Both are pure Rust metadata readers; no FFmpeg or platform multimedia runtime
+is distributed. Lofty's optional compressed-tag support is disabled. The new
+transitive graph (`lofty_attr`, `ogg_pager`, `data-encoding`, `nom`,
+`minimal-lexical`, `iso6709parse`, `geo-types`, and `approx`, where applicable)
+passes the existing `cargo deny` license/advisory policy; exact versions are
+recorded in Cargo.lock. No third-party implementation or fixtures are copied.
+Media fixtures are generated synthetic silence/color owned by this project.
+
+### nom-exif — MIT License
+
+MIT License
+
+Copyright (c) 2024 Min Deng
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

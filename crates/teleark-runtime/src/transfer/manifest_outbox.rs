@@ -46,6 +46,8 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             relative_path: opened.metadata.relative_path.clone(),
             mime_type: opened.metadata.mime_type.clone(),
             media_kind: opened.metadata.media_kind,
+            duration_ms: opened.metadata.duration_ms,
+            media_properties: opened.metadata.media_properties,
             whole_plaintext_blake3: opened.metadata.whole_plaintext_blake3,
         };
         drop(opened);
@@ -110,7 +112,7 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             .map_err(|_| TransferError::Database)?;
         // A sealed historical manifest is already immutable. Preserve its
         // authenticated codec geometry instead of interpreting it as a new write.
-        let (frame_plaintext_max, flags) = match saved_outbox
+        let (format_major, frame_plaintext_max, flags) = match saved_outbox
             .as_ref()
             .and_then(|outbox| outbox.envelope.as_ref())
         {
@@ -118,13 +120,19 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
                 let opened = open_manifest(envelope, master, ManifestLimits::default())
                     .map_err(map_crypto_error)?;
                 (
+                    opened.public_header.format_major,
                     opened.public_header.frame_plaintext_max,
                     opened.public_header.flags,
                 )
             }
-            None => (FRAME_PLAINTEXT_BYTES, 1),
+            None => (
+                teleark_crypto::MANIFEST_FORMAT_MAJOR,
+                FRAME_PLAINTEXT_BYTES,
+                1,
+            ),
         };
         let public = ManifestPublicHeader {
+            format_major,
             package_id: self.package_bytes,
             vault_id: context.vault_id,
             manifest_generation: request.manifest_generation,
@@ -147,6 +155,8 @@ impl<S: ReservedPublicationStore> EncryptedRemoteTransport<S> {
             relative_path: request.relative_path,
             mime_type: request.mime_type,
             media_kind: request.media_kind,
+            duration_ms: request.duration_ms,
+            media_properties: request.media_properties,
             whole_plaintext_blake3: request.whole_plaintext_blake3,
             parts,
             logical_timestamps: None,

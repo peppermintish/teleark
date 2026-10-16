@@ -849,3 +849,17 @@ managed-download-history-truncated = { $count } earlier activity events omitted
 managed-download-event = { $time } · { $phase } { $error }
 
 managed-download-retry = Retry failed files
+
+# Authenticated playback properties and bounded upload preparation.
+media-width = Largeur
+media-height = Hauteur
+media-sample-rate = Fréquence d’échantillonnage
+media-channels = Canaux audio
+media-bit-depth = Profondeur de bits
+transfer-upload-reading-media = Lecture des métadonnées multimédias
+transfer-upload-media-ready = Métadonnées multimédias lues
+transfer-upload-media-unavailable = Métadonnées indisponibles ; poursuite du téléversement
+transfer-upload-media-limited = Limite de lecture des métadonnées atteinte ; poursuite du téléversement
+media-pixel-value = { $value } px
+media-hertz-value = { $value } Hz
+media-bit-value = { $value } bit

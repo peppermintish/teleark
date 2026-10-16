@@ -1017,6 +1017,95 @@ impl TeleArkApp {
             .into_any_element()
     }
 
+    fn managed_media_detail_rows(&self, package: &ManagedVaultFile) -> Vec<AnyElement> {
+        let mut rows = Vec::with_capacity(6);
+        let mut row = |selector: &'static str, label: &'static str, value: SharedString| {
+            rows.push(
+                div()
+                    .debug_selector(move || selector.to_owned())
+                    .child(
+                        div()
+                            .mt_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().text_xs().text_color(theme::text_muted()).child(
+                                components::selectable_text(
+                                    format!("{selector}-label"),
+                                    self.tr(label),
+                                ),
+                            ))
+                            .child(div().text_sm().text_color(theme::text_primary()).child(
+                                components::selectable_text(format!("{selector}-value"), value),
+                            )),
+                    )
+                    .into_any_element(),
+            );
+        };
+        if package.duration_ms.is_some()
+            || matches!(package.media_kind, FileKind::Video | FileKind::Audio)
+        {
+            row(
+                "managed-media-duration",
+                "media-duration",
+                package.duration_ms.map_or_else(
+                    || self.tr("common-not-applicable"),
+                    |value| {
+                        teleark_i18n::format::format_duration_millis(self.locale(), value).into()
+                    },
+                ),
+            );
+        }
+        let properties = package.media_properties;
+        for (value, selector, label, unit) in [
+            (
+                properties.width,
+                "managed-media-width",
+                "media-width",
+                "media-pixel-value",
+            ),
+            (
+                properties.height,
+                "managed-media-height",
+                "media-height",
+                "media-pixel-value",
+            ),
+            (
+                properties.sample_rate_hz,
+                "managed-media-sample-rate",
+                "media-sample-rate",
+                "media-hertz-value",
+            ),
+            (
+                properties.bit_depth,
+                "managed-media-bit-depth",
+                "media-bit-depth",
+                "media-bit-value",
+            ),
+        ] {
+            if let Some(value) = value {
+                row(
+                    selector,
+                    label,
+                    self.tr_with(
+                        unit,
+                        MessageArgs::new()
+                            .with("value", format_integer(self.locale(), u64::from(value))),
+                    ),
+                );
+            }
+        }
+        if let Some(value) = properties.channels {
+            row(
+                "managed-media-channels",
+                "media-channels",
+                format_integer(self.locale(), u64::from(value)).into(),
+            );
+        }
+        rows
+    }
+
     pub(crate) fn render_managed_package_detail(
         &self,
         package: Option<&ManagedVaultFile>,
@@ -1043,6 +1132,11 @@ impl TeleArkApp {
             "managed-detail-body",
             &self.raw_detail_scroll,
             detail
+                .child(message_detail_row(
+                    self.tr("storage-channel-logical-name"),
+                    package.logical_name.clone().into(),
+                ))
+                .children(self.managed_media_detail_rows(package))
                 .child(
                     div()
                         .mt_3()
@@ -1066,10 +1160,6 @@ impl TeleArkApp {
                 .child(message_detail_row(
                     self.tr("storage-channel-package-id"),
                     package.package_id.clone().into(),
-                ))
-                .child(message_detail_row(
-                    self.tr("storage-channel-logical-name"),
-                    package.logical_name.clone().into(),
                 ))
                 .child(message_detail_row(
                     self.tr("storage-channel-manifest-state"),
@@ -1184,6 +1274,7 @@ impl TeleArkApp {
                         ),
                         true,
                     )
+                    .debug_selector(|| "managed-detail-download".into())
                     .mt_4()
                     .disabled(
                         self.vault_activity == crate::app::VaultActivity::Working

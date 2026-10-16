@@ -102,6 +102,8 @@ fn metadata(
         relative_path: None,
         mime_type: None,
         media_kind: teleark_crypto::MediaKind::Other,
+        duration_ms: None,
+        media_properties: teleark_crypto::MediaProperties::default(),
         whole_plaintext_blake3: hash,
         parts,
         logical_timestamps: None,
@@ -111,6 +113,7 @@ fn metadata(
 }
 fn public(context: &VaultRecoveryContext) -> Result<ManifestPublicHeader, ApplicationError> {
     Ok(ManifestPublicHeader {
+        format_major: 2,
         package_id: context.package_id,
         vault_id: context.vault_id,
         manifest_generation: 1,
@@ -277,6 +280,7 @@ pub(super) fn load(
         mime_type: None,
         media_kind: FileKind::Other,
         duration_ms: None,
+        media_properties: teleark_crypto::MediaProperties::default(),
         size_bytes: pending.public_header.logical_file_size,
         encoded_size_bytes: pending
             .metadata

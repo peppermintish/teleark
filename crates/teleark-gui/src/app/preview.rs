@@ -217,8 +217,30 @@ impl TeleArkApp {
                     logical_name: (*name).into(),
                     relative_path: None,
                     mime_type: None,
-                    media_kind: FileKind::Document,
+                    media_kind: if index == 0 {
+                        FileKind::Video
+                    } else if index == 4 {
+                        FileKind::Audio
+                    } else {
+                        FileKind::Document
+                    },
                     duration_ms: if index % 4 == 0 { Some(248_000) } else { None },
+                    media_properties: if index == 0 {
+                        teleark_runtime::MediaProperties {
+                            width: Some(1920),
+                            height: Some(1080),
+                            ..Default::default()
+                        }
+                    } else if index == 4 {
+                        teleark_runtime::MediaProperties {
+                            sample_rate_hz: Some(48_000),
+                            channels: Some(2),
+                            bit_depth: Some(24),
+                            ..Default::default()
+                        }
+                    } else {
+                        Default::default()
+                    },
                     size_bytes: 1024 * 1024 * (index as u64 + 1) * 123,
                     encoded_size_bytes: 1024 * 1024 * (index as u64 + 1) * 123 + 512,
                     part_count: 3,

@@ -1,6 +1,6 @@
 # TeleArk Crypto Format
 
-Format: **part/manifest readers 1.0 and 2.0; new desktop writes 2.0; key wraps and recovery bundles remain 1.0; channel-key proof 1**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
+Format: **part readers 1.0/2.0 with new writes 2.0; manifest readers 1.0/2.0/3.0 with new desktop completion writes 3.0; key wraps and recovery bundles remain 1.0; channel-key proof 1**. `teleark-crypto` has explicit readers/writers and fixed compatibility fixtures. Existing bytes retain their versioned meaning. Incompatible changes require a new format version with readers and automatic migration for supported upgrades, as defined in [ADR 0017](adr/0017-versioned-automatic-migrations.md).
 
 ## Goals and boundaries
 
@@ -317,7 +317,7 @@ supersedes that desktop behavior from [ADR 0025](adr/0025-fixed-channel-and-reta
 
 ## Aligned part codec 2.0
 
-New streaming uploads use part and manifest codecs **2.0**. Key-wrap and recovery
+New streaming uploads use part codec **2.0** and completed manifest codec **3.0** (playback metadata; see [Manifest](MANIFEST_FORMAT.md#playback-metadata-manifest-30)). Key-wrap and recovery
 bundle codecs remain **1.0**. The 96-byte header carries major=2 and minor=0.
 Readers retain codec 1.0 with its original frame geometry. Existing ciphertext
 is never rewritten during an upgrade; unsupported versions fail closed.

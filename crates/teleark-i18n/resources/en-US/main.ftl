@@ -1151,10 +1151,10 @@ transfer-batch-upload-name = Upload · { $count } files
 about-changelog-unreleased =
     ## 0.5.17 · Telegram media durations and selectable inspectors
 
-    - Show Telegram-reported audio/video duration in channel and Library lists as compact `M:SS` / `H:MM:SS`; known durations persist into the Local list after download. Managed-file rows display a duration only when authenticated metadata supplies one; local imports and current Vault manifests without duration metadata remain unavailable rather than receiving guessed values. Persist known values in SQLite schema 25.
+    - Show Telegram-reported audio/video duration in channel and Library lists as compact `M:SS` / `H:MM:SS`; known durations persist into the Local list after download. New Vault uploads inspect local media metadata in the background and preserve duration, video dimensions and available audio sample rate, channel count and bit depth in encrypted manifest 3.0. Show playback metadata in the selectable lateral details inspector. Local imports and older Vault manifests remain unknown. Persist known values in SQLite schema 25.
     - Make detail rows, captions, transfer details and inspector summaries selectable and copyable through the GPUI Kit text-selection layer.
     - Upgrade GPUI Kit to 0.7.3 and grammers to 0.11.0. Grammers' Telegram API layer is 230; message timestamps use `jiff`, retry policy belongs to sender pools, and peer-cache batches are persisted once.
-    - Keep session bytes readable across the grammers upgrade: version-1 session files remain version 1 unless they contain a Community peer, which is written as version 2. Add schema 25 transactionally; existing payload, manifest, key-wrap and recovery codecs are unchanged.
+    - Keep session bytes readable across the grammers upgrade: version-1 session files remain version 1 unless they contain a Community peer, which is written as version 2. Add schema 25 transactionally; retain manifest readers 1.0/2.0/3.0, new completion writes 3.0, and exact historical sealed-outbox replay. Part, pending-upload, key-wrap and recovery codecs are unchanged.
 
     ## 0.5.16 · Managed file progress and batch downloads
 
@@ -2115,3 +2115,17 @@ managed-download-history-truncated = { $count } earlier activity events omitted
 managed-download-event = { $time } · { $phase } { $error }
 
 managed-download-retry = Retry failed files
+
+# Authenticated playback properties and bounded upload preparation.
+media-width = Width
+media-height = Height
+media-sample-rate = Sample Rate
+media-channels = Audio Channels
+media-bit-depth = Bit Depth
+transfer-upload-reading-media = Reading media metadata
+transfer-upload-media-ready = Media metadata read
+transfer-upload-media-unavailable = Media metadata unavailable; continuing upload
+transfer-upload-media-limited = Media metadata read limit reached; continuing upload
+media-pixel-value = { $value } px
+media-hertz-value = { $value } Hz
+media-bit-value = { $value } bit

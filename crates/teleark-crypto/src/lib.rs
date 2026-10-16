@@ -22,10 +22,10 @@ pub use channel_key_proof::{open_channel_key_proof, seal_channel_key_proof};
 pub use error::{CryptoError, FormatKind, LayoutViolation};
 pub use manifest::{
     ExtensionField, LogicalTimestamps, ManifestLimits, ManifestMetadata, ManifestPart,
-    ManifestPublicHeader, MediaKind, OpenedManifest, PendingUpload, PendingUploadScope,
-    RemoteLocator, SourceMetadataField, manifest_content_commitment, manifest_vault_id_hint,
-    open_manifest, open_pending_upload, remote_manifest_name, remote_part_name, seal_manifest,
-    seal_pending_upload,
+    ManifestPublicHeader, MediaKind, MediaProperties, OpenedManifest, PendingUpload,
+    PendingUploadScope, RemoteLocator, SourceMetadataField, manifest_content_commitment,
+    manifest_vault_id_hint, open_manifest, open_pending_upload, remote_manifest_name,
+    remote_part_name, seal_manifest, seal_pending_upload,
 };
 pub use part::{
     EncryptedPartSummary, PartHeader, PartInstanceId, PartInstanceRegistry, PartLimits,
@@ -44,6 +44,11 @@ pub use wrap::{
     wrap_master_key_with_password, wrap_master_key_with_password_parameters,
     wrap_master_key_with_recovery,
 };
+
+/// Current completed-manifest writer, independent of encrypted part geometry.
+pub const MANIFEST_FORMAT_MAJOR: u16 = 3;
+/// Completed-manifest minor version, independent of the part codec.
+pub const MANIFEST_FORMAT_MINOR: u16 = 0;
 
 /// Format major version; incompatible changes require a new version and migration.
 pub const FORMAT_MAJOR: u16 = 1;

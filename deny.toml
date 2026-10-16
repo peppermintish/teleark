@@ -1,4 +1,6 @@
-# Proxy-feature dependencies retain the existing permissive license policy; no new exception.
+# Proxy and pure Rust media metadata dependencies use the existing license policy.
+# nom-exif 3.8.0 supplies an MIT LICENSE file; Lofty 0.24.0 is MIT OR Apache-2.0.
+# No additional license exception.
 [graph]
 targets = [
     "aarch64-apple-darwin",

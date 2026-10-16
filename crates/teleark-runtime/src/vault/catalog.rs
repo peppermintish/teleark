@@ -19,7 +19,9 @@ struct Entry {
 impl Entry {
     fn bytes(&self) -> usize {
         let source = &self.source.file;
-        256 + source.file_name.len()
+        std::mem::size_of::<Entry>()
+            + 64
+            + source.file_name.len()
             + source.caption.as_ref().map_or(0, String::len)
             + source.mime_type.as_ref().map_or(0, String::len)
             + self.file.as_ref().map_or(0, |file| {
@@ -211,6 +213,7 @@ mod tests {
             mime_type: None,
             media_kind: FileKind::Document,
             duration_ms: None,
+            media_properties: teleark_crypto::MediaProperties::default(),
             size_bytes: 42,
             encoded_size_bytes: 80,
             part_count: 1,

@@ -6,7 +6,7 @@ The current schema is version **25**. Ordered migrations and tests preserve exis
 
 | Entity | Identity / invariant |
 | --- | --- |
-| Logical file | Stable `LogicalFileId`, original Unicode name, plaintext size, kind, optional Telegram-reported media duration, source and remote/encryption/verification states |
+| Logical file | Stable `LogicalFileId`, original Unicode name, plaintext size, kind, optional source-reported media duration, source and remote/encryption/verification states |
 | Remote object | `(account_id, chat_id, message_id)`; volatile references/access hashes are refreshable adapter hints |
 | Vault package | One logical file, authenticated manifest generation and ordered parts covering the file without gaps/overlap |
 | Account/chat | Chats and remote projections are account scoped; no session secrets in ordinary rows |
@@ -275,7 +275,7 @@ The migration uses the existing visible detection/preparation/conversion/verific
 
 ## Telegram media duration (schema 25)
 
-Version 25 adds nullable `logical_files.duration_ms` and `native_download_tasks.media_duration_ms`, each a non-negative integer count of milliseconds. Telegram document audio/video attributes supply the value; a plain document or a legacy row has NULL. Cached list projections and local native-download history retain it across restart, and the Library's `LogicalFile` carries the optional catalog value. No duration is inferred from filenames or MIME types. Local imports and managed manifests without authenticated duration metadata remain unknown; this migration does not rewrite manifest bytes.
+Version 25 adds nullable `logical_files.duration_ms` and `native_download_tasks.media_duration_ms`, each a non-negative integer count of milliseconds. Telegram document audio/video attributes supply the value; a plain document or a legacy row has NULL. Cached list projections and local native-download history retain it across restart, and the Library's `LogicalFile` carries the optional catalog value. No duration is inferred from filenames or MIME types. Local imports and managed manifests without authenticated duration metadata remain unknown; this SQLite migration does not rewrite manifest bytes. New completed Vault manifest 3.0 carries encrypted duration and bounded numeric playback properties from local media inspection. These fields are recovered from the sealed inventory/remote manifest into `ManagedVaultFile`, without a new SQL schema or plaintext tag store. Completed manifests 1.0/2.0 and pending-upload envelopes remain readable with unknown playback properties.
 
 The migration is additive and transactional. Existing rows remain NULL, preserving their original meaning; interrupted or failed verification rolls back the column and schema marker together. Readers supporting schema 24 reject the newer database without modifying it.
 

@@ -2069,3 +2069,17 @@ managed-download-history-truncated = { $count } earlier activity events omitted
 managed-download-event = { $time } · { $phase } { $error }
 
 managed-download-retry = Retry failed files
+
+# Authenticated playback properties and bounded upload preparation.
+media-width = 宽度
+media-height = 高度
+media-sample-rate = 采样率
+media-channels = 音频声道
+media-bit-depth = 位深度
+transfer-upload-reading-media = 正在读取媒体元数据
+transfer-upload-media-ready = 媒体元数据已读取
+transfer-upload-media-unavailable = 媒体元数据不可用；继续上传
+transfer-upload-media-limited = 媒体元数据读取达到限制；继续上传
+media-pixel-value = { $value } px
+media-hertz-value = { $value } Hz
+media-bit-value = { $value } bit

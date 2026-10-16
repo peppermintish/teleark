@@ -26,6 +26,14 @@ fn validate(
     known: bool,
 ) -> Result<(), CryptoError> {
     public.validate(limits)?;
+    if public.format_major > 2
+        || metadata.duration_ms.is_some()
+        || !metadata.media_properties.is_empty()
+    {
+        return Err(CryptoError::InvalidField {
+            field: "pending metadata version",
+        });
+    }
     if public.logical_file_size == 0
         || metadata.parts.len() > public.part_count as usize
         || (!known && (!metadata.parts.is_empty() || metadata.whole_plaintext_blake3 != [0; 32]))
@@ -177,7 +185,7 @@ pub fn open_pending_upload(
         payload.as_mut(),
         &array_at(bytes, end + payload_len, "pending tag")?,
     )?;
-    let metadata = decode_metadata(&payload, limits)?;
+    let metadata = decode_metadata(&payload, limits, public.format_major)?;
     validate(&public, &metadata, limits, flags == 1)?;
     Ok(PendingUpload {
         scope,

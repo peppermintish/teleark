@@ -11,8 +11,8 @@ use crate::kdf::manifest_key;
 use crate::part::PlaintextPartSummary;
 use crate::wrap::{FileKeyWrap, unwrap_file_key};
 use crate::{
-    AeadUsageRegistry, CRYPTO_SUITE_ID, CryptoError, FORMAT_MAJOR, FORMAT_MINOR, FileKey,
-    FormatKind, LayoutViolation, NONCE_STRATEGY_ID, VaultMasterKey,
+    AeadUsageRegistry, CRYPTO_SUITE_ID, CryptoError, FileKey, FormatKind, LayoutViolation,
+    MANIFEST_FORMAT_MINOR, NONCE_STRATEGY_ID, VaultMasterKey,
 };
 
 const MANIFEST_MAGIC: &[u8; 8] = b"TARKMAN\0";
@@ -59,6 +59,8 @@ impl Default for ManifestLimits {
 /// parsing. Names, locators, and content hashes are not present here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestPublicHeader {
+    /// Authenticated envelope version, independent of the contained part codec.
+    pub format_major: u16,
     pub package_id: [u8; 16],
     pub vault_id: [u8; 16],
     pub manifest_generation: u32,
@@ -232,6 +234,32 @@ impl fmt::Debug for ExtensionField {
     }
 }
 
+/// Bounded, locale-neutral playback properties. No free-form tags or artwork.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MediaProperties {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub sample_rate_hz: Option<u32>,
+    pub channels: Option<u32>,
+    pub bit_depth: Option<u32>,
+}
+
+impl MediaProperties {
+    pub fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+
+    fn fields(self) -> [Option<u32>; 5] {
+        [
+            self.width,
+            self.height,
+            self.sample_rate_hz,
+            self.channels,
+            self.bit_depth,
+        ]
+    }
+}
+
 /// Authenticated encrypted manifest metadata.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ManifestMetadata {
@@ -239,6 +267,9 @@ pub struct ManifestMetadata {
     pub relative_path: Option<String>,
     pub mime_type: Option<String>,
     pub media_kind: MediaKind,
+    /// Source-reported playback duration in milliseconds; absent means unknown.
+    pub duration_ms: Option<u64>,
+    pub media_properties: MediaProperties,
     pub whole_plaintext_blake3: [u8; 32],
     pub parts: Vec<ManifestPart>,
     pub logical_timestamps: Option<LogicalTimestamps>,
@@ -264,6 +295,8 @@ impl fmt::Debug for ManifestMetadata {
             .field("has_relative_path", &self.relative_path.is_some())
             .field("has_mime_type", &self.mime_type.is_some())
             .field("media_kind", &self.media_kind)
+            .field("has_duration", &self.duration_ms.is_some())
+            .field("media_properties", &self.media_properties)
             .field("part_count", &self.parts.len())
             .field("part_plaintext_bytes", &plaintext_bytes)
             .field("part_encoded_bytes", &encoded_bytes)
@@ -355,7 +388,7 @@ fn hex_id(bytes: &[u8; 16]) -> String {
     value
 }
 
-/// BLAKE3 commitment to the exact version-1 manifest input before AEAD use.
+/// BLAKE3 commitment to the exact versioned manifest input before AEAD use.
 /// Persist this commitment before sealing an immutable generation. It is not
 /// an authentication result; remote envelopes still require open_manifest.
 pub fn manifest_content_commitment(
@@ -364,7 +397,11 @@ pub fn manifest_content_commitment(
     limits: ManifestLimits,
 ) -> Result<[u8; 32], CryptoError> {
     let (public_bytes, plaintext) = manifest_payload(public_header, metadata, limits)?;
-    let prefix = encode_envelope_prefix(public_bytes.len(), plaintext.len(), public_header.flags)?;
+    let prefix = encode_envelope_prefix(
+        public_bytes.len(),
+        plaintext.len(),
+        public_header.format_major,
+    )?;
     let mut hash = blake3::Hasher::new();
     hash.update(b"TARK manifest commitment v1\0");
     hash.update(&prefix);
@@ -411,7 +448,7 @@ pub fn seal_manifest(
     let prefix = encode_envelope_prefix(
         public_bytes.len(),
         encrypted_metadata.len(),
-        public_header.flags,
+        public_header.format_major,
     )?;
     let mut aad = Vec::with_capacity(prefix.len() + public_bytes.len());
     aad.extend_from_slice(&prefix);
@@ -452,12 +489,8 @@ pub fn manifest_vault_id_hint(
     limits: ManifestLimits,
 ) -> Result<[u8; 16], CryptoError> {
     let envelope = parse_envelope(bytes, limits)?;
-    let header = decode_public_header(envelope.public_header, limits)?;
-    if u16::from_be_bytes([bytes[8], bytes[9]]) != if header.flags == 1 { 2 } else { 1 } {
-        return Err(CryptoError::InvalidField {
-            field: "manifest codec flags",
-        });
-    }
+    let mut header = decode_public_header(envelope.public_header, limits)?;
+    header.format_major = u16::from_be_bytes([bytes[8], bytes[9]]);
     header.validate(limits)?;
     Ok(header.vault_id)
 }
@@ -470,12 +503,8 @@ pub fn open_manifest(
     limits: ManifestLimits,
 ) -> Result<OpenedManifest, CryptoError> {
     let envelope = parse_envelope(bytes, limits)?;
-    let public_header = decode_public_header(envelope.public_header, limits)?;
-    if u16::from_be_bytes([bytes[8], bytes[9]]) != if public_header.flags == 1 { 2 } else { 1 } {
-        return Err(CryptoError::InvalidField {
-            field: "manifest codec flags",
-        });
-    }
+    let mut public_header = decode_public_header(envelope.public_header, limits)?;
+    public_header.format_major = u16::from_be_bytes([bytes[8], bytes[9]]);
     public_header.validate(limits)?;
     let file_key = unwrap_file_key(
         master_key,
@@ -497,7 +526,11 @@ pub fn open_manifest(
         metadata_bytes.as_mut(),
         &envelope.tag,
     )?;
-    let metadata = decode_metadata(metadata_bytes.as_slice(), limits)?;
+    let metadata = decode_metadata(
+        metadata_bytes.as_slice(),
+        limits,
+        public_header.format_major,
+    )?;
     metadata.validate(&public_header, limits)?;
     Ok(OpenedManifest {
         public_header,
@@ -508,6 +541,24 @@ pub fn open_manifest(
 
 impl ManifestPublicHeader {
     fn validate(&self, limits: ManifestLimits) -> Result<(), CryptoError> {
+        if !matches!(self.format_major, 1..=3) {
+            return Err(CryptoError::UnsupportedVersion {
+                format: FormatKind::Manifest,
+                major: self.format_major,
+                minor: 0,
+            });
+        }
+        if self.flags > 1 {
+            return Err(CryptoError::UnknownFlags {
+                field: "manifest public header",
+                flags: self.flags,
+            });
+        }
+        if self.flags != u32::from(self.format_major >= 2) {
+            return Err(CryptoError::InvalidField {
+                field: "manifest codec flags",
+            });
+        }
         if self.part_count > limits.max_parts {
             return Err(CryptoError::LimitExceeded {
                 field: "manifest part count",
@@ -561,6 +612,17 @@ impl ManifestMetadata {
         public: &ManifestPublicHeader,
         limits: ManifestLimits,
     ) -> Result<(), CryptoError> {
+        if self
+            .duration_ms
+            .is_some_and(|value| value > i64::MAX as u64)
+            || self.media_properties.fields().contains(&Some(0))
+            || ((self.duration_ms.is_some() || !self.media_properties.is_empty())
+                && public.format_major < 3)
+        {
+            return Err(CryptoError::InvalidField {
+                field: "media duration",
+            });
+        }
         validate_string(&self.logical_name, limits.max_name_bytes, "logical name")?;
         if self.logical_name.trim().is_empty() {
             return Err(CryptoError::InvalidLayout {
@@ -822,7 +884,7 @@ struct Envelope<'a> {
 fn encode_envelope_prefix(
     public_length: usize,
     metadata_length: usize,
-    flags: u32,
+    major: u16,
 ) -> Result<[u8; ENVELOPE_PREFIX_LENGTH], CryptoError> {
     let public_length =
         u32::try_from(public_length).map_err(|_| CryptoError::ArithmeticOverflow {
@@ -834,8 +896,8 @@ fn encode_envelope_prefix(
         })?;
     let mut prefix = [0_u8; ENVELOPE_PREFIX_LENGTH];
     prefix[..8].copy_from_slice(MANIFEST_MAGIC);
-    prefix[8..10].copy_from_slice(&(if flags == 1 { 2u16 } else { FORMAT_MAJOR }).to_be_bytes());
-    prefix[10..12].copy_from_slice(&FORMAT_MINOR.to_be_bytes());
+    prefix[8..10].copy_from_slice(&major.to_be_bytes());
+    prefix[10..12].copy_from_slice(&MANIFEST_FORMAT_MINOR.to_be_bytes());
     prefix[12..16].copy_from_slice(&public_length.to_be_bytes());
     prefix[16..24].copy_from_slice(&metadata_length.to_be_bytes());
     Ok(prefix)
@@ -854,7 +916,7 @@ fn parse_envelope(bytes: &[u8], limits: ManifestLimits) -> Result<Envelope<'_>, 
     }
     let major = u16::from_be_bytes(array_at(bytes, 8, "manifest major version")?);
     let minor = u16::from_be_bytes(array_at(bytes, 10, "manifest minor version")?);
-    if !matches!(major, 1 | 2) || minor != FORMAT_MINOR {
+    if !matches!(major, 1..=3) || minor != MANIFEST_FORMAT_MINOR {
         return Err(CryptoError::UnsupportedVersion {
             format: FormatKind::Manifest,
             major,
@@ -1033,6 +1095,7 @@ fn decode_public_header(
     let flags = decoder.u32("manifest flags")?;
     decoder.finish()?;
     Ok(ManifestPublicHeader {
+        format_major: if flags == 1 { 2 } else { 1 },
         package_id,
         vault_id,
         manifest_generation,
@@ -1083,7 +1146,9 @@ fn encode_metadata(metadata: &ManifestMetadata) -> Result<Vec<u8>, CryptoError> 
         + usize::from(metadata.mime_type.is_some())
         + usize::from(metadata.logical_timestamps.is_some())
         + usize::from(!metadata.source_metadata.is_empty())
-        + usize::from(!metadata.format_extensions.is_empty());
+        + usize::from(!metadata.format_extensions.is_empty())
+        + usize::from(metadata.duration_ms.is_some())
+        + usize::from(!metadata.media_properties.is_empty());
     let mut encoder = Encoder::default();
     encoder.map(4 + optional_count)?;
     encoder.unsigned(1)?;
@@ -1129,7 +1194,58 @@ fn encode_metadata(metadata: &ManifestMetadata) -> Result<Vec<u8>, CryptoError> 
             encoder.byte_string(&field.value)?;
         }
     }
+    if let Some(duration) = metadata.duration_ms {
+        encoder.unsigned(10)?;
+        encoder.unsigned(duration)?;
+    }
+    if !metadata.media_properties.is_empty() {
+        encoder.unsigned(11)?;
+        let fields = metadata.media_properties.fields();
+        encoder.map(fields.iter().filter(|value| value.is_some()).count())?;
+        for (index, value) in fields.into_iter().enumerate() {
+            if let Some(value) = value {
+                encoder.unsigned(index as u64 + 1)?;
+                encoder.unsigned(u64::from(value))?;
+            }
+        }
+    }
     Ok(encoder.into_bytes())
+}
+
+fn decode_media_properties(decoder: &mut Decoder<'_>) -> Result<MediaProperties, CryptoError> {
+    let count = decoder.map(5)?;
+    if count == 0 {
+        return Err(CryptoError::InvalidField {
+            field: "empty media properties",
+        });
+    }
+    let mut fields = [None; 5];
+    let mut previous = None;
+    for _ in 0..count {
+        let key = decoder.map_key(&mut previous)?;
+        let index = match key {
+            1..=5 => key as usize - 1,
+            _ => {
+                return Err(CryptoError::InvalidField {
+                    field: "media property key",
+                });
+            }
+        };
+        let value = decoder.u32("media property")?;
+        if value == 0 {
+            return Err(CryptoError::InvalidField {
+                field: "media property",
+            });
+        }
+        fields[index] = Some(value);
+    }
+    Ok(MediaProperties {
+        width: fields[0],
+        height: fields[1],
+        sample_rate_hz: fields[2],
+        channels: fields[3],
+        bit_depth: fields[4],
+    })
 }
 
 fn encode_part(encoder: &mut Encoder, part: &ManifestPart) -> Result<(), CryptoError> {
@@ -1195,10 +1311,15 @@ fn encode_timestamps(
     Ok(())
 }
 
-fn decode_metadata(bytes: &[u8], limits: ManifestLimits) -> Result<ManifestMetadata, CryptoError> {
+fn decode_metadata(
+    bytes: &[u8],
+    limits: ManifestLimits,
+    major: u16,
+) -> Result<ManifestMetadata, CryptoError> {
     let mut decoder = Decoder::new(bytes);
-    let field_count = decoder.map(9)?;
-    if !(4..=9).contains(&field_count) {
+    let maximum = if major >= 3 { 11 } else { 9 };
+    let field_count = decoder.map(maximum)?;
+    if !(4..=maximum).contains(&field_count) {
         return Err(CryptoError::InvalidField {
             field: "manifest metadata map length",
         });
@@ -1208,6 +1329,8 @@ fn decode_metadata(bytes: &[u8], limits: ManifestLimits) -> Result<ManifestMetad
     let mut relative_path = None;
     let mut mime_type = None;
     let mut media_kind = None;
+    let mut duration_ms = None;
+    let mut media_properties = MediaProperties::default();
     let mut whole_plaintext_blake3 = None;
     let mut parts = None;
     let mut logical_timestamps = None;
@@ -1248,6 +1371,8 @@ fn decode_metadata(bytes: &[u8], limits: ManifestLimits) -> Result<ManifestMetad
             7 => logical_timestamps = Some(decode_timestamps(&mut decoder)?),
             8 => source_metadata = decode_source_metadata(&mut decoder, limits)?,
             9 => format_extensions = decode_extensions(&mut decoder, limits)?,
+            10 if major >= 3 => duration_ms = Some(decoder.unsigned()?),
+            11 if major >= 3 => media_properties = decode_media_properties(&mut decoder)?,
             _ => {
                 return Err(CryptoError::InvalidField {
                     field: "unknown manifest metadata field",
@@ -1262,6 +1387,8 @@ fn decode_metadata(bytes: &[u8], limits: ManifestLimits) -> Result<ManifestMetad
         })?,
         relative_path,
         mime_type,
+        duration_ms,
+        media_properties,
         media_kind: media_kind.ok_or(CryptoError::InvalidField {
             field: "missing media kind",
         })?,
@@ -1545,6 +1672,7 @@ mod tests {
             Err(error) => panic!("sample file-key wrap failed: {error}"),
         };
         let public = ManifestPublicHeader {
+            format_major: 1,
             package_id,
             vault_id,
             manifest_generation: 9,
@@ -1563,6 +1691,8 @@ mod tests {
             logical_name: "旅行の映像 🎬.mkv".to_owned(),
             relative_path: Some("旅行/2026".to_owned()),
             mime_type: Some("video/x-matroska".to_owned()),
+            duration_ms: None,
+            media_properties: MediaProperties::default(),
             media_kind: MediaKind::Video,
             whole_plaintext_blake3: [0x55; 32],
             parts: vec![
@@ -1666,6 +1796,7 @@ mod tests {
     #[test]
     fn aligned_v2_manifest_fixture_and_version_binding() {
         let (master, file, mut public, mut metadata) = sample();
+        public.format_major = 2;
         public.flags = 1;
         public.frame_plaintext_max = 524256;
         for part in &mut metadata.parts {
@@ -1699,6 +1830,137 @@ mod tests {
         let (_, mut legacy) = sealed();
         legacy[8..10].copy_from_slice(&2u16.to_be_bytes());
         assert!(open_manifest(&legacy, &master, ManifestLimits::default()).is_err());
+    }
+
+    fn media_sample() -> (
+        VaultMasterKey,
+        FileKey,
+        ManifestPublicHeader,
+        ManifestMetadata,
+    ) {
+        let (master, key, mut public, mut metadata) = sample();
+        public.format_major = 3;
+        public.flags = 1;
+        public.frame_plaintext_max = 524256;
+        for part in &mut metadata.parts {
+            part.frame_count = 1;
+            part.encoded_length =
+                PART_CONTAINER_HEADER_LENGTH + FRAME_RECORD_OVERHEAD + part.plaintext_length;
+        }
+        metadata.duration_ms = Some(248_123);
+        metadata.media_properties = MediaProperties {
+            width: Some(1920),
+            height: Some(1080),
+            sample_rate_hz: Some(48_000),
+            channels: Some(2),
+            bit_depth: Some(24),
+        };
+        (master, key, public, metadata)
+    }
+
+    #[test]
+    fn media_v3_roundtrip_fixture_and_authenticated_version() {
+        let (master, key, public, metadata) = media_sample();
+        let limits = ManifestLimits::default();
+        let encoded = seal_manifest(
+            &public,
+            &metadata,
+            &key,
+            limits,
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("v3 seal");
+        let fixture = include_str!("../tests/vectors/manifest_v3/media_manifest.txt");
+        assert_eq!(hex(&encoded), fixture_value(fixture, "encoded_hex"));
+        let opened = open_manifest(&encoded, &master, limits).expect("media reader");
+        assert_eq!(opened.public_header, public);
+        assert_eq!(opened.metadata, metadata);
+        assert_eq!(
+            manifest_vault_id_hint(&encoded, limits).expect("routing hint"),
+            public.vault_id
+        );
+        for version in [1u16, 2, 4] {
+            let mut changed = encoded.clone();
+            changed[8..10].copy_from_slice(&version.to_be_bytes());
+            assert!(open_manifest(&changed, &master, limits).is_err());
+        }
+        let mut changed = encoded.clone();
+        let end = changed.len() - 17;
+        changed[end] ^= 1;
+        assert!(matches!(
+            open_manifest(&changed, &master, limits),
+            Err(CryptoError::AuthenticationFailed)
+        ));
+        let commitment =
+            manifest_content_commitment(&public, &metadata, limits).expect("commitment");
+        let mut changed = metadata.clone();
+        changed.duration_ms = Some(248_124);
+        assert_ne!(
+            manifest_content_commitment(&public, &changed, limits).expect("duration commitment"),
+            commitment
+        );
+        changed = metadata.clone();
+        changed.media_properties.width = Some(3840);
+        assert_ne!(
+            manifest_content_commitment(&public, &changed, limits).expect("property commitment"),
+            commitment
+        );
+        let mut absent = metadata;
+        absent.duration_ms = None;
+        absent.media_properties = MediaProperties::default();
+        let encoded = seal_manifest(
+            &public,
+            &absent,
+            &key,
+            limits,
+            &mut AeadUsageRegistry::new(),
+        )
+        .expect("unknown properties");
+        assert_eq!(
+            open_manifest(&encoded, &master, limits)
+                .expect("unknown roundtrip")
+                .metadata,
+            absent
+        );
+    }
+
+    #[test]
+    fn media_version_bounds_types_and_canonical_properties_are_strict() {
+        let (_, _, mut public, mut metadata) = media_sample();
+        let limits = ManifestLimits::default();
+        public.format_major = 2;
+        assert!(metadata.validate(&public, limits).is_err());
+        public.format_major = 3;
+        metadata.duration_ms = Some(i64::MAX as u64 + 1);
+        assert!(metadata.validate(&public, limits).is_err());
+        metadata.duration_ms = Some(0);
+        assert!(metadata.validate(&public, limits).is_ok());
+        metadata.media_properties.channels = Some(0);
+        assert!(metadata.validate(&public, limits).is_err());
+        for bytes in [
+            &[0xa0][..], // Empty property maps must be omitted.
+            &[0xa1, 1, 0][..],
+            &[0xa1, 1, 0x20][..], // Negative is not an unsigned property.
+            &[0xa1, 6, 1][..],
+            &[0xa2, 1, 1, 1, 2][..], // Duplicate keys.
+            &[0xa1, 1, 0x1b, 0, 0, 0, 1, 0, 0, 0, 0][..],
+        ] {
+            assert!(decode_media_properties(&mut Decoder::new(bytes)).is_err());
+        }
+        let (_, _, public, mut metadata) = media_sample();
+        let bytes = encode_metadata(&metadata).expect("media map");
+        assert!(decode_metadata(&bytes, limits, 2).is_err());
+        metadata.duration_ms = None;
+        metadata.media_properties = MediaProperties::default();
+        assert_eq!(
+            decode_metadata(
+                &encode_metadata(&metadata).expect("map"),
+                limits,
+                public.format_major
+            )
+            .expect("reader"),
+            metadata
+        );
     }
 
     #[test]
@@ -1901,7 +2163,7 @@ mod tests {
     #[test]
     fn unsupported_version_suite_flags_and_length_claims_fail_safely() {
         let (master, mut bytes) = sealed();
-        bytes[8..10].copy_from_slice(&3_u16.to_be_bytes());
+        bytes[8..10].copy_from_slice(&4_u16.to_be_bytes());
         assert!(matches!(
             open_manifest(&bytes, &master, ManifestLimits::default()),
             Err(CryptoError::UnsupportedVersion { .. })
@@ -2013,12 +2275,12 @@ mod tests {
 
         let duplicate_key = [0xa4, 0x01, 0x61, b'a', 0x01, 0x61, b'b'];
         assert_eq!(
-            decode_metadata(&duplicate_key, ManifestLimits::default()),
+            decode_metadata(&duplicate_key, ManifestLimits::default(), 1),
             Err(CryptoError::DuplicateOrUnorderedMapKey)
         );
         let invalid_utf8 = [0xa4, 0x01, 0x61, 0xff];
         assert!(matches!(
-            decode_metadata(&invalid_utf8, ManifestLimits::default()),
+            decode_metadata(&invalid_utf8, ManifestLimits::default(), 1),
             Err(CryptoError::InvalidUtf8 { .. })
         ));
 
@@ -2037,7 +2299,7 @@ mod tests {
         encoded.extend_from_slice(&[0; 32]);
         encoded.extend_from_slice(&[0x06, 0x9a, 0x00, 0x0f, 0x42, 0x40]);
         assert!(matches!(
-            decode_metadata(&encoded, ManifestLimits::default()),
+            decode_metadata(&encoded, ManifestLimits::default(), 1),
             Err(CryptoError::Truncated {
                 context: "manifest parts"
             })
@@ -2046,7 +2308,7 @@ mod tests {
         let last = encoded.len() - 1;
         encoded[last] = 0x41;
         assert!(matches!(
-            decode_metadata(&encoded, ManifestLimits::default()),
+            decode_metadata(&encoded, ManifestLimits::default(), 1),
             Err(CryptoError::LimitExceeded { .. })
         ));
     }
@@ -2105,6 +2367,7 @@ mod tests {
             Err(error) => panic!("empty manifest file wrap failed: {error}"),
         };
         let public = ManifestPublicHeader {
+            format_major: 1,
             package_id: package,
             vault_id: vault,
             manifest_generation: 1,
@@ -2123,6 +2386,8 @@ mod tests {
             logical_name: "empty.bin".to_owned(),
             relative_path: None,
             mime_type: None,
+            duration_ms: None,
+            media_properties: MediaProperties::default(),
             media_kind: MediaKind::Other,
             whole_plaintext_blake3: *blake3::hash(&[]).as_bytes(),
             parts: Vec::new(),

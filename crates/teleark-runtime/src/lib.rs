@@ -71,6 +71,10 @@ pub use teleark_telegram::network::{
 mod diagnostics;
 mod telegram;
 mod transfer;
+
+/// Authenticated, locale-neutral playback details for managed files.
+pub use teleark_crypto::MediaProperties;
+
 mod vault;
 mod vault_recovery;
 pub use vault_recovery::{

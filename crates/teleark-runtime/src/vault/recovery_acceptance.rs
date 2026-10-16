@@ -12,6 +12,89 @@ fn open(path: &std::path::Path, remote: &Arc<TestVaultRemote>) -> (DesktopVault,
 }
 
 #[test]
+fn local_media_metadata_survives_manifest_publication_and_restart() {
+    let dir = tempfile::tempdir().expect("directory");
+    let remote = TestVaultRemote::new();
+    let (vault, library) = open(dir.path(), &remote);
+    vault.initialize(PASSWORD.into()).expect("keys");
+    for (name, bytes, kind) in [
+        (
+            "clip.mp4",
+            include_bytes!("fixtures/media/video.mp4").as_slice(),
+            FileKind::Video,
+        ),
+        (
+            "recording.flac",
+            include_bytes!("fixtures/media/audio.flac").as_slice(),
+            FileKind::Audio,
+        ),
+    ] {
+        let source = dir.path().join(name);
+        std::fs::write(&source, bytes).expect("source");
+        let file = vault.upload_file(7, 11, source).expect("published media");
+        assert_eq!(file.duration_ms, Some(2000));
+        assert_eq!(file.media_kind, kind);
+        if kind == FileKind::Video {
+            assert_eq!(file.media_properties.width, Some(160));
+        } else {
+            assert_eq!(file.media_properties.sample_rate_hz, Some(48_000));
+        }
+        let upload = vault
+            .transfers()
+            .into_iter()
+            .find(|row| row.file_name == name)
+            .expect("timeline");
+        let phases = upload
+            .upload_activity
+            .expect("activity")
+            .events
+            .into_iter()
+            .map(|event| event.phase)
+            .collect::<Vec<_>>();
+        assert!(phases.contains(&VaultUploadPhase::ReadingMedia));
+        assert!(phases.contains(&VaultUploadPhase::MediaReady));
+        assert!(
+            phases
+                .iter()
+                .position(|p| *p == VaultUploadPhase::ReadingMedia)
+                < phases
+                    .iter()
+                    .position(|p| *p == VaultUploadPhase::MediaReady)
+        );
+    }
+    drop(vault);
+    drop(library);
+    let (vault, _) = open(dir.path(), &remote);
+    vault
+        .unlock_with_password(PASSWORD.into())
+        .expect("unlock after restart");
+    let files = vault
+        .scan_cached_managed_files(7, 11, crate::TelegramScanCancellation::default())
+        .expect("authenticated rediscovery")
+        .files;
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| file.duration_ms == Some(2000)));
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file.media_kind == FileKind::Audio)
+            .expect("audio")
+            .media_properties
+            .channels,
+        Some(2)
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file.media_kind == FileKind::Video)
+            .expect("video")
+            .media_properties
+            .height,
+        Some(90)
+    );
+}
+
+#[test]
 fn managed_batch_restores_verified_files_and_stops_remaining_without_losing_current_output() {
     let dir = tempfile::tempdir().expect("directory");
     let remote = TestVaultRemote::new();

@@ -46,6 +46,7 @@ use crate::{
 mod catalog;
 mod control;
 mod device_keys;
+mod media_probe;
 
 pub(crate) fn device_key_identity(record: &VaultMetadataRecord) -> String {
     device_keys::identity(record)
@@ -277,6 +278,7 @@ pub struct ManagedVaultFile {
     pub relative_path: Option<String>,
     pub mime_type: Option<String>,
     pub media_kind: FileKind,
+    pub media_properties: teleark_crypto::MediaProperties,
     /// Playback duration when the encrypted manifest has authenticated media metadata.
     pub duration_ms: Option<u64>,
     pub size_bytes: u64,
@@ -3683,6 +3685,27 @@ impl VaultOwner {
                 .ok_or_else(|| ApplicationError::new(ApplicationErrorKind::Persistence))?;
             let registration = self.register_transfer(lease)?;
             let cancellation = registration.cancellation.clone();
+            let playback = media_probe::inspect(
+                source,
+                |state| {
+                    observer.phase(match state {
+                        media_probe::ProbeState::Reading => VaultUploadPhase::ReadingMedia,
+                        media_probe::ProbeState::Ready => VaultUploadPhase::MediaReady,
+                        media_probe::ProbeState::Unavailable => VaultUploadPhase::MediaUnavailable,
+                        media_probe::ProbeState::Limited => VaultUploadPhase::MediaLimited,
+                    })
+                },
+                || cancellation.is_cancelled(),
+            )
+            .map_err(map_transfer_error)?;
+            if !crate::vault_recovery::upload_source_metadata_matches(
+                source_identity,
+                files
+                    .source_identity(source_id)
+                    .map_err(map_transfer_error)?,
+            ) {
+                return Err(ApplicationError::new(ApplicationErrorKind::SourceChanged));
+            }
             descriptor_store = descriptor_store.with_cancellation(cancellation.clone());
             let store = TelegramObjectStore::new(self.telegram.clone(), account_id, chat_id)
                 .with_tuning(self.library.preferences()?.transfer_tuning)
@@ -3786,7 +3809,19 @@ impl VaultOwner {
                         logical_name: logical_name.clone(),
                         relative_path: None,
                         mime_type: None,
-                        media_kind: media_kind(crate::classify_file(source)),
+                        media_kind: if playback.properties.width.is_some()
+                            || playback.properties.height.is_some()
+                        {
+                            teleark_crypto::MediaKind::Video
+                        } else if playback.properties.sample_rate_hz.is_some()
+                            || playback.properties.channels.is_some()
+                        {
+                            teleark_crypto::MediaKind::Audio
+                        } else {
+                            media_kind(crate::classify_file(source))
+                        },
+                        duration_ms: playback.duration_ms,
+                        media_properties: playback.properties,
                         whole_plaintext_blake3: whole_digest.0,
                     },
                 )
@@ -4964,7 +4999,8 @@ fn managed_file_from_recovered(
         relative_path: manifest.metadata.relative_path.clone(),
         mime_type: manifest.metadata.mime_type.clone(),
         media_kind: file_kind(manifest.metadata.media_kind),
-        duration_ms: None,
+        duration_ms: manifest.metadata.duration_ms,
+        media_properties: manifest.metadata.media_properties,
         size_bytes: manifest.public_header.logical_file_size,
         encoded_size_bytes,
         part_count: manifest.public_header.part_count,
@@ -6470,6 +6506,7 @@ mod tests {
                         mime_type: None,
                         media_kind: FileKind::Document,
                         duration_ms: None,
+                        media_properties: teleark_crypto::MediaProperties::default(),
                         size_bytes: plan.source.size_bytes,
                         encoded_size_bytes: 64,
                         part_count: 1,

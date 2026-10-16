@@ -648,13 +648,29 @@ mod tests {
             logical_name: "fixture.bin".into(),
             relative_path: None,
             mime_type: None,
-            media_kind: MediaKind::Document,
+            media_kind: MediaKind::Audio,
+            duration_ms: Some(248_000),
+            media_properties: teleark_crypto::MediaProperties {
+                sample_rate_hz: Some(48_000),
+                channels: Some(2),
+                bit_depth: Some(16),
+                ..Default::default()
+            },
             whole_plaintext_blake3: *blake3::hash(b"data").as_bytes(),
         }
     }
 
     #[test]
     fn sealed_v1_manifest_replays_original_bytes_after_upgrade() {
+        assert_legacy_manifest_replay(1);
+    }
+
+    #[test]
+    fn sealed_v2_manifest_replays_original_bytes_after_upgrade() {
+        assert_legacy_manifest_replay(2);
+    }
+
+    fn assert_legacy_manifest_replay(version: u16) {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("jobs.sqlite");
         let (mut db, lease, master) = admitted(&path);
@@ -675,6 +691,13 @@ mod tests {
             PartLimits::default(),
         )
         .expect("v1 header");
+        let header = if version == 2 {
+            header
+                .aligned(PartLimits::default())
+                .expect("aligned header")
+        } else {
+            header
+        };
         let mut bytes = Vec::new();
         let summary = teleark_crypto::encrypt_part(
             &mut &b"data"[..],
@@ -696,6 +719,7 @@ mod tests {
             )
             .expect("old object");
         let public = ManifestPublicHeader {
+            format_major: version,
             package_id: context.package_id,
             vault_id: context.vault_id,
             manifest_generation: 1,
@@ -703,18 +727,20 @@ mod tests {
             logical_file_size: 4,
             part_count: 1,
             application_part_target: 4,
-            frame_plaintext_max: 8 * 1024 * 1024,
+            frame_plaintext_max: header.frame_plaintext_max,
             nonce_strategy_id: NONCE_STRATEGY_ID,
             crypto_suite_id: CRYPTO_SUITE_ID,
             file_key_wrap: context.file_key_wrap.clone(),
             master_key_generation: 1,
-            flags: 0,
+            flags: u32::from(version == 2),
         };
         let metadata = ManifestMetadata {
             logical_name: "fixture.bin".into(),
             relative_path: None,
             mime_type: None,
             media_kind: MediaKind::Document,
+            duration_ms: None,
+            media_properties: teleark_crypto::MediaProperties::default(),
             whole_plaintext_blake3: *blake3::hash(b"data").as_bytes(),
             parts: vec![ManifestPart {
                 part_index: 0,
@@ -820,6 +846,18 @@ mod tests {
             .expect("outbox")
             .expect("saved");
         assert!(reserved.envelope.is_some());
+        let opened = open_manifest(
+            reserved.envelope.as_ref().expect("envelope"),
+            &master,
+            ManifestLimits::default(),
+        )
+        .expect("media manifest");
+        assert_eq!(opened.public_header.format_major, 3);
+        assert_eq!(opened.metadata.duration_ms, Some(248_000));
+        assert_eq!(
+            opened.metadata.media_properties.sample_rate_hz,
+            Some(48_000)
+        );
         assert!(reserved.message_id.is_none());
         drop(worker);
         drop(db);

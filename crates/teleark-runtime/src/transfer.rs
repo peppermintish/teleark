@@ -101,6 +101,8 @@ pub struct ManifestPublishRequest {
     pub relative_path: Option<String>,
     pub mime_type: Option<String>,
     pub media_kind: MediaKind,
+    pub duration_ms: Option<u64>,
+    pub media_properties: teleark_crypto::MediaProperties,
     pub whole_plaintext_blake3: [u8; 32],
 }
 
@@ -1020,6 +1022,8 @@ impl<S> EncryptedRemoteTransport<S> {
             relative_path: request.relative_path,
             mime_type: request.mime_type,
             media_kind: request.media_kind,
+            duration_ms: request.duration_ms,
+            media_properties: request.media_properties,
             whole_plaintext_blake3: request.whole_plaintext_blake3,
             parts,
             logical_timestamps: None,
@@ -1069,6 +1073,7 @@ impl<S> EncryptedRemoteTransport<S> {
         )
         .map_err(map_crypto_error)?;
         let public = ManifestPublicHeader {
+            format_major: teleark_crypto::MANIFEST_FORMAT_MAJOR,
             package_id: self.package_bytes,
             vault_id: request.vault_id,
             manifest_generation: request.manifest_generation,
@@ -2395,7 +2400,13 @@ mod tests {
             logical_name: "source.bin".to_owned(),
             relative_path: None,
             mime_type: Some("application/octet-stream".to_owned()),
-            media_kind: MediaKind::Other,
+            media_kind: MediaKind::Video,
+            duration_ms: Some(248_000),
+            media_properties: teleark_crypto::MediaProperties {
+                width: Some(1920),
+                height: Some(1080),
+                ..Default::default()
+            },
             whole_plaintext_blake3: whole_digest.0,
         }
     }
@@ -2538,6 +2549,9 @@ mod tests {
             .pop()
             .ok_or(TransferError::ManifestCorrupted)?
             .manifest;
+        assert_eq!(opened.public_header.format_major, 3);
+        assert_eq!(opened.metadata.duration_ms, Some(248_000));
+        assert_eq!(opened.metadata.media_properties.width, Some(1920));
         let recovered_part_sizes = opened
             .metadata
             .parts
