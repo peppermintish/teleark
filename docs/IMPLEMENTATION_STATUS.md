@@ -8,7 +8,9 @@ Real-account qualification exposed that fixed one-second spacing was insufficien
 
 Real-account qualification completed bulk recovery to zero pending repairs/gaps, then observed three warm restarts with zero server waits. An independent snapshot found three advanced channels among 36; exactly three incremental requests caught up those heads. The final restart retained the learned 16-second spacing and matched all 36 heads plus 41 sampled file records. The full local workspace suite passes (1,007 passed, 10 ignored), with strict check/Clippy, compatibility, catalog, documentation and release-script checks. Decrypted Vault qualification remains outside this run because the development app reports no usable channel key.
 
-See the [real-account restart qualification](validation/2026-10-17-automatic-sync-restarts.md) for observations, release checks and limitations. The earlier host Bash 3 packaging limitation below is resolved for this release by running the artifact assembly regression in Ubuntu 22.04; all seven package/checksum and rejection fixtures pass.
+See the [real-account restart qualification](validation/2026-10-17-automatic-sync-restarts.md) for observations, release checks and limitations. The later explicitly authorized 71-byte synthetic file was uploaded while the GUI was stopped and discovered automatically on relaunch with matching metadata and zero server waits at the observation. The earlier host Bash 3 packaging limitation below is resolved for this release by running the artifact assembly regression in Ubuntu 22.04; all seven package/checksum and rejection fixtures pass.
+
+The [v0.5.18 release](https://github.com/peppermintish/teleark/releases/tag/v0.5.18) is published from `9267bc7`. [Tagged CI](https://github.com/peppermintish/teleark/actions/runs/38953479262) passes all native test/package gates and exact seven-package/checksum publication. Microsoft accepted the verified MSIX into `PreProcessing`; certification/public Store availability is not established by that receipt.
 
 ## Automatic startup synchronization · earlier task checkpoint (2026-10-17)
 

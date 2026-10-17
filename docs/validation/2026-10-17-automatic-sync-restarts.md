@@ -10,7 +10,7 @@ The final policy doubles page-start spacing once per new server cooldown window,
 
 ## Real-account procedure and observations
 
-The app used its existing library and authorized session. Private local credentials were loaded only in the scoped build environment; local credential files remained ignored and mode 0600. No test message/file was uploaded, no user message was sent, and no payload was downloaded. A separate local read-only probe captured remote channel heads and hashed metadata for a bounded sample while the GUI process was stopped. Process IDs/start times and diagnostics launch markers verified actual restarts; merely reopening a window was not counted.
+The app used its existing library and authorized session. Private local credentials were loaded only in the scoped build environment; local credential files remained ignored and mode 0600. The first three warm checks used existing data: no test message/file was uploaded and no payload was downloaded. The later explicitly authorized synthetic marker is recorded separately below. A separate local read-only probe captured remote channel heads and hashed metadata for a bounded sample while the GUI process was stopped. Process IDs/start times and diagnostics launch markers verified actual restarts; merely reopening a window was not counted.
 
 The adaptive catch-up launch began at 2026-10-16 19:05:10 UTC. It resumed 1,127 remaining cached-message checks automatically, made 15 verification attempts and one directory scan, and received three further server waits (27, 19 and 7 seconds). Spacing rose from the restored legacy two seconds through four/eight to 16 seconds. Catch-up completed with zero pending repairs/gaps and 10,248 cached file records. This bulk recovery is **not** described as rate-limit-free.
 
@@ -21,6 +21,14 @@ The adaptive catch-up launch began at 2026-10-16 19:05:10 UTC. It resumed 1,127 
 | 3, 19:12:31 UTC | Observed for 78 seconds with the inspector initially closed. One directory scan, zero difference requests, automatic listening/idle state. All 36 independently recorded heads covered, all 41 sampled files present with matching normalized metadata, zero pending repair/gap. Learned 16-second spacing retained. | 0 |
 
 The metadata probe initially compared raw absent Telegram filenames against the application's canonical generated names and reported 19 differences. The probe was corrected to apply the existing storage normalization (`telegram-document-<message-id>` for absent names). A new independent snapshot then checked 41 remote files: 19 absent filenames normalized, zero missing files and zero differences in normalized name, caption, size, MIME type and optional duration. Private snapshot files remained under the ignored build directory with mode 0600; they are not release artifacts or test fixtures.
+
+## Additional authorized controlled change
+
+After the read-only tests and release push, the user approved a synthetic-file upload and requested continuation. During the additional check on 2026-10-17, with the GUI process stopped, the probe required the existing fixed account binding and fresh remote private-channel health validation. It uploaded one 71-byte plain-text synthetic document, `teleark-sync-qualification-0.5.18-20261017.txt`, to that bound channel. It did not create/repair a channel or change keys. A private create-once send intent prevents blind duplicate publication after an uncertain result.
+
+Remote readback confirmed name, caption and size. Before restart the channel cursor lagged the post-upload head and the message was absent from the local cache. A new GUI process restored the same account and learned 16-second spacing without any sync command. The independent verifier then found the new document with matching normalized metadata, the channel cursor covering the captured head and no pending repair/gap for that channel. The launch had one directory scan and three difference requests at that observation, with zero error/server-wait responses. This additionally tests catch-up against a deliberately created remote change, rather than only natural updates. The synthetic file is retained in the private channel; no remote deletion was requested or performed.
+
+The account had also been offline for roughly twelve hours before this additional launch. Unrelated channel repair/gap work remained automatic in the background at the marker observation; the marker result is not a claim that every channel's historical repair had already finished at that instant.
 
 ## Deterministic and local release checks
 
@@ -42,3 +50,9 @@ These observations establish automatic recovery and absence of a server wait on 
 The existing development app reported no usable channel key. This qualification covers account/channel cursors and ordinary cached Telegram metadata, not decrypted Vault contents or encrypted transfer round trips. No key was replaced, reset or imported. Supported encrypted formats remain covered by synthetic compatibility/recovery tests.
 
 Local source checks qualify this revision; native Linux/Windows/macOS CI, package verification and GitHub publication are separate delivery gates. Store ingestion acceptance and Microsoft certification/publication are distinct outcomes and must be reported separately.
+
+## Published release evidence
+
+[Release v0.5.18](https://github.com/peppermintish/teleark/releases/tag/v0.5.18) was published at 2026-10-16 19:37:41 UTC from release commit `9267bc7`. The [tagged CI run](https://github.com/peppermintish/teleark/actions/runs/38953479262) completed successfully: repository quality, native Linux x64/Windows x64/macOS arm64 tests, all three package groups, verified GitHub publication and independent Store delivery. The release contains the exact seven platform packages, both licenses, third-party notices and unified `SHA256SUMS`.
+
+The sanitized Store receipt records phase `accepted`, status `PreProcessing`, at 2026-10-16 19:42:39 UTC for the verified 0.5.18 MSIX. This is ingestion acceptance, not a claim that Microsoft certification or Store publication completed.
