@@ -186,3 +186,62 @@ Required evidence before claiming efficient restart includes operation-count
 regressions for unchanged cold/warm starts, one changed manifest, sequence gaps,
 edits/deletes, account/key isolation and paced request recovery, together with
 separate queue/RPC/storage timings. No runtime implementation was changed.
+
+## Running-instance inspection after user launch
+
+The user subsequently opened an instance and requested another inspection.
+The process executable resolves to this workspace's `target/release/teleark`,
+not the separately installed 0.5.7 application. Its open database and process
+diagnostic file were identified from its file handles. The executable was last
+modified at 2026-10-22 18:42:24 UTC. The current process diagnostic stream does
+not contain `application.starting` or an explicit version record; the exact
+embedded executable version was not independently confirmed. Current source
+metadata remains 0.5.19. Inspection did not restart/rebuild the executable or
+issue a synchronization/transfer command.
+
+The latest initialization boundary in the open daily log starts at 2026-10-22
+18:42:26 UTC. The following snapshot ends at 19:12:00 UTC, corresponding to
+2026-10-23 05:12:26–05:42:00 in Australia/Adelaide. Earlier initialization
+records in the same daily file are excluded.
+
+| Observation | Current-session result at snapshot |
+| --- | --- |
+| Synchronization remote pages | 60 |
+| Differences | 32; median 332 ms; maximum 20,002 ms |
+| Gap history | 22; median 952.5 ms; maximum 5,206 ms |
+| Cached-message verification | 4; median 2,251 ms; maximum 12,289 ms |
+| Directory discovery | 2; median 3,382 ms; maximum 4,124 ms |
+| Sum of logged remote-page durations | 86,229 ms |
+| First-to-last remote request start span | 1,770.909 seconds |
+| Consecutive request start intervals | 59; median 30.006 seconds; range 29.997–30.089 seconds |
+| Remote failures | 1 network failure, with a 20,002 ms duration |
+| Remote responses carrying a server retry delay | 0 |
+| Storage operations taking at least one second | 0 |
+
+The local directory-cache read and 36 channel-state reads log 0 ms at the
+logger's integer-millisecond resolution; the initial local channel view logs
+1 ms. These observations do not reproduce a multi-second database cache read.
+The saved cooldown record still contains 30,000 ms spacing with the old server
+deadline already expired. There is no interval-change event in this session at
+the snapshot. The regular 30-second request spacing and saved policy support
+local admission as the dominant delay; the single failed RPC and some slower
+requests are additional, smaller costs. The accumulated remote-page time is
+not a full startup CPU/I/O profile, and the remaining wall time must not be
+treated as an exact measurement of one phase.
+
+A separate 38-second read-only observation, 19:10:59–19:11:37 UTC, recorded two
+successful gap-history pages taking 884 and 790 ms. Comparing SQLite cursor
+snapshots found one channel's gap cursor and revision advancing. At the end,
+38 channel states were retained, 10 had pending repair and five had pending
+gap filling (the two sets may overlap). Thus recovery was making durable
+progress; it was not wholly stalled. There is no established remaining page
+count or defensible completion ETA. These counts do not identify which channel
+the user was viewing or prove the necessity of every retained repair.
+
+The live evidence confirms significant work delayed by persisted admission.
+It does not establish that manifest re-downloads are this session's dominant
+bottleneck, nor that a once-per-second inspector transition is a once-per-second
+network request. The native UI inventory did not expose this unbundled process,
+so the inspector's actual current label/phase timing was not directly observed.
+No UI layout changes or visual acceptance are claimed. Validation used existing
+diagnostic events and read-only SQLite snapshots; no new behavioral tests ran.
