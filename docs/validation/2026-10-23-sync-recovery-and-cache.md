@@ -73,9 +73,8 @@ fixtures pass; 29 Python Store/release tests pass.
 
 The local release-asset assembly fixture cannot run under the host's Bash 3:
 its existing associative-array/GNU-find requirements are Linux CI scope. This
-is not counted as a local pass. The tagged Linux CI quality job subsequently passed this gate. GitHub API
-credentials cannot dispatch a workflow, create a PR or rerun a job, although
-authenticated Git branch pushes work. Publication remains gated as described below.
+is not counted as a local pass. The tagged Linux CI quality job subsequently
+passed this gate before publication.
 
 After the Mac was unlocked, native English/light synthetic previews were
 inspected at 900×600 and in actual native full-screen mode (1440×900 logical
@@ -90,28 +89,39 @@ The user's real instance has not been restarted, reconfigured or migrated by
 this task. No real-account end-to-end speed measurement is claimed for the new
 release; deterministic operation counts establish the specified reuse behavior.
 
-## Tagged release attempt
+## Tagged release and publication
 
 Annotated `v0.5.20` and `main` were pushed atomically to `beb5988`.
-[Tagged CI attempt 1](https://github.com/peppermintish/teleark/actions/runs/39845882949)
-completed with repository quality and every Windows/macOS/Linux package job
-successful. Native Linux tests pass (1,015 passed, 10 existing ignored), as do
-native Windows tests (997 passed, 10 existing ignored); platform totals differ
-because of existing conditional tests. Both native jobs also pass locked
-checking, strict Clippy, explicit Core/i18n and warning-denied documentation.
+[Tagged CI](https://github.com/peppermintish/teleark/actions/runs/39845882949)
+passes repository quality, native Windows/Linux/macOS tests and all three
+platform package jobs. Native Linux tests pass (1,015 passed, 10 existing
+ignored), as do native Windows tests (997 passed, 10 existing ignored) and
+native macOS tests (1,024 passed, 10 existing ignored); platform totals differ
+because of existing conditional tests. Native jobs also
+pass locked checking, strict Clippy, explicit Core/i18n and warning-denied
+documentation. The macOS package job passes universal binary and signing checks.
 
-The macOS native test job never received a runner and was canceled after repeated
-allocation attempts. Its annotations explicitly report hosted macOS ARM capacity
-constraints. This is a missing gate, not a test pass. GitHub Release publication
-and Store delivery were therefore skipped; no v0.5.20 GitHub Release exists yet.
-The seven package artifacts are CI outputs, not a published release asset set.
-The macOS universal package job succeeded, including its native signing checks,
-but does not replace the full native test job.
+Attempt 1 could not allocate the hosted macOS ARM test runner and canceled that
+job after repeated attempts, explicitly citing capacity constraints. Publication
+was correctly skipped at that point. The current API account's rerun request
+returned HTTP 403 requiring repository administration rights; after the user
+reran the workflow, attempt 2 acquired a runner and passed the missing gate.
+Successful existing jobs were retained. No tag was moved, gate bypassed,
+credentials changed or paid runner enabled.
 
-The current API account's rerun request returned HTTP 403 requiring repository
-administration rights. The available browser session is signed out. A repository
-administrator must select **Re-run failed jobs** on the completed run to retry
-the canceled test and its downstream publication. Successful package jobs should
-be retained. No tag was moved, failed gate bypassed, credentials changed or paid
-runner enabled. Final release/asset verification remains outstanding until that
-retry succeeds.
+The [stable public v0.5.20 release](https://github.com/peppermintish/teleark/releases/tag/v0.5.20)
+was published from the same `beb5988` commit after exact downloaded-asset assembly
+and checksum verification succeeded. Independent post-publication inspection
+confirms exactly eleven assets: seven packages, both project licenses,
+third-party notices and `SHA256SUMS`. The checksum manifest covers all ten
+payloads with no duplicate or extra entries; each hash matches GitHub's uploaded
+asset digest. The downloaded manifest and all three legal notices were hashed
+locally and match their published digests. Large packages were not downloaded a
+second time; the publication job verifies their actual downloaded bytes.
+
+The entire tagged workflow completed successfully, including protected
+Microsoft Store delivery. Its schema-1 sanitized receipt
+(`store-receipt-39845882949-2`) reports phase `accepted` and Microsoft status
+`PreProcessing`. The receipt package name/hash matches the exact published MSIX
+asset digest. Certification and public Store availability remain controlled by
+Microsoft; this confirms accepted delivery, not completed certification.
