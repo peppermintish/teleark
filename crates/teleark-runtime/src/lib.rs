@@ -1255,6 +1255,19 @@ enum StorageRequest {
         clear: bool,
         reply: SyncSender<Result<i64, ApplicationError>>,
     },
+    CachedVaultManifest {
+        account: i64,
+        chat: i64,
+        candidate: teleark_storage::CachedManifestCandidate,
+        reply: SyncSender<Result<Option<Vec<u8>>, ApplicationError>>,
+    },
+    CacheVaultManifest {
+        account: i64,
+        chat: i64,
+        candidate: teleark_storage::CachedManifestCandidate,
+        bytes: Vec<u8>,
+        reply: SyncSender<Result<bool, ApplicationError>>,
+    },
     SaveVaultInventory {
         record: teleark_storage::VaultInventoryRecord,
         reply: SyncSender<Result<(), ApplicationError>>,
@@ -2135,6 +2148,31 @@ fn storage_loop(mut database: Database, receiver: mpsc::Receiver<StorageRequest>
                     proposed,
                     clear,
                 ));
+            }
+            StorageRequest::CachedVaultManifest {
+                account,
+                chat,
+                candidate,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .cached_vault_manifest(account, chat, &candidate)
+                        .map_err(map_storage_error),
+                );
+            }
+            StorageRequest::CacheVaultManifest {
+                account,
+                chat,
+                candidate,
+                bytes,
+                reply,
+            } => {
+                let _ = reply.send(
+                    database
+                        .cache_vault_manifest(account, chat, &candidate, &bytes)
+                        .map_err(map_storage_error),
+                );
             }
             StorageRequest::SaveVaultInventory { record, reply } => {
                 let _ = reply.send(

@@ -115,6 +115,10 @@ pub struct ChannelSyncSnapshot {
     pub retry_at: Option<Instant>,
     pub failure: Option<ApplicationErrorKind>,
     pub queued: usize,
+    /// Actual catch-up demand, excluding subscription-only renewals.
+    pub catchup_pending: usize,
+    pub directory_ready: bool,
+    pub subscribed_channels: usize,
     pub failed_channels: usize,
     pub committed_pages: u64,
     pub data_revision: u64,
@@ -131,6 +135,35 @@ pub struct ChannelSyncSnapshot {
 }
 
 impl ChannelSyncSnapshot {
+    /// All known content is caught up; live subscriptions may still execute.
+    /// A directory request, pending catalog or failure cannot masquerade as current.
+    pub fn caught_up(&self) -> bool {
+        self.directory_ready
+            && self.catchup_pending == 0
+            && self.failed_channels == 0
+            && self.failure.is_none()
+            && !self.managed_review_pending
+            && self.managed_scan.as_ref().is_none_or(|scan| {
+                !scan.active()
+                    && !matches!(
+                        scan.phase,
+                        ChannelSyncPhase::ManifestFailed | ChannelSyncPhase::ManifestCancelled
+                    )
+            })
+            && self.active.iter().chain(&self.waiting).all(|event| {
+                event.chat_id.is_some() && event.phase != ChannelSyncPhase::RateLimited
+            })
+            && (self.chat_id.is_some() || self.phase == ChannelSyncPhase::Idle)
+            && !matches!(
+                self.phase,
+                ChannelSyncPhase::RateLimited
+                    | ChannelSyncPhase::Failed
+                    | ChannelSyncPhase::Cancelled
+                    | ChannelSyncPhase::ManifestFailed
+                    | ChannelSyncPhase::ManifestCancelled
+            )
+    }
+
     fn new(account_id: i64, queued: usize) -> Self {
         let now = Instant::now();
         Self {
@@ -143,6 +176,9 @@ impl ChannelSyncSnapshot {
             retry_at: None,
             failure: None,
             queued,
+            catchup_pending: queued,
+            directory_ready: false,
+            subscribed_channels: 0,
             failed_channels: 0,
             committed_pages: 0,
             data_revision: 0,
@@ -1376,17 +1412,20 @@ fn apply_source_snapshot(
     shared.changes.send_replace(());
 }
 
-fn needed(job: &Job) -> bool {
+fn catchup_needed(job: &Job) -> bool {
     job.state.as_ref().is_none_or(|state| {
         state.revision == 0
             || state.repair_pending
             || state.gap_pending
             || job.catalog_ready == Some(false)
             || job.force
-            || job.poll_requested
             || job.head.is_some_and(|head| head > state.pts)
             || (job.history && !state.history_exhausted)
     })
+}
+
+fn needed(job: &Job) -> bool {
+    catchup_needed(job) || job.poll_requested
 }
 
 fn publish_completed(shared: &Shared, chat: Option<i64>) {
@@ -1627,10 +1666,13 @@ fn run<T: AccountSource>(
     let mut directory_retry = DirectoryRetry::starting(clock());
     let mut flood_until = match library.sync_cooldown(account.id) {
         Ok(saved) => saved.and_then(|saved| {
-            if let Ok(mut budget) = shared.pacing.lock() {
-                budget.restore_interval(saved.interval_ms);
-            }
             let wall = crate::system_time_unix_ms(std::time::SystemTime::now())?;
+            if let Ok(mut budget) = shared.pacing.lock() {
+                let elapsed = wall
+                    .saturating_sub(saved.until_unix_ms.max(saved.saved_at_unix_ms))
+                    .max(0);
+                budget.restore_interval(saved.interval_ms, Duration::from_millis(elapsed as u64));
+            }
             let remaining = saved.until_unix_ms.saturating_sub(wall).max(0);
             clock().checked_add(Duration::from_millis(remaining as u64))
         }),
@@ -2217,14 +2259,31 @@ fn run<T: AccountSource>(
                 }
             }
         }
-        let failed_channels = scheduler
-            .jobs
-            .values()
-            .filter(|job| job.failure.is_some() && job.paused)
-            .count();
+        let (failed_channels, pending, subscribed) =
+            scheduler
+                .jobs
+                .values()
+                .fold((0, 0, 0), |(failed, pending, subscribed), job| {
+                    (
+                        failed + usize::from(job.failure.is_some() && job.paused),
+                        pending + usize::from(catchup_needed(job)),
+                        subscribed + usize::from(job.viewed || job.catalog_ready.is_some()),
+                    )
+                });
         if let Ok(mut snapshot) = shared.snapshot.lock() {
+            let changed = (
+                snapshot.catchup_pending,
+                snapshot.directory_ready,
+                snapshot.subscribed_channels,
+            ) != (pending, metadata_ready, subscribed);
             snapshot.queued = scheduler.queue.len();
             snapshot.failed_channels = failed_channels;
+            snapshot.catchup_pending = pending;
+            snapshot.directory_ready = metadata_ready;
+            snapshot.subscribed_channels = subscribed;
+            if changed {
+                shared.changes.send_replace(());
+            }
         }
         publish_pending_retry_count(&shared, scheduler.pending_retry_count);
         let now = clock();

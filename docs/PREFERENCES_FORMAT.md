@@ -226,11 +226,17 @@ optional `interval_ms` (integer 1,000–30,000). The interval is additive within
 older readers ignore it without changing the deadline; a legacy record missing
 it restores two-second spacing after its recorded server wait. New records
 retain the learned interval after expiry and across restart. Each new cooldown
-window doubles spacing up to 30 seconds; 60 successful pages outside a live wait
-reduce it by one second to the one-second floor.
+window doubles spacing up to 30 seconds. After the later of the persisted
+server deadline and settings record's `updated_at_unix_ms`, each elapsed minute
+halves local spacing to a one-second floor (at most five windows from 30 seconds).
+Restart includes time already elapsed; active server waits are never shortened.
+Ordinary network errors do not reset this local recovery window. Request
+admission recalculates from the last actual request start, so recovery cannot
+release a burst of queued requests. Existing timestamp and v1 deadline/interval
+meanings are unchanged; no new cooldown codec is required.
 Only this account's sync owner reads or writes its deadline; later waits cannot
 be shortened. Missing records, including upgrades that skip older releases,
 need no migration; expired records permit synchronization. Malformed/newer
 records are preserved and reported with compatible-version/storage guidance.
-SQLite remains schema 26, and existing preferences, encrypted files and recovery
+SQLite read/write schema is 27, and existing preferences, encrypted files and recovery
 bundles retain their versions. See [ADR 0067](adr/0067-paced-automatic-startup-sync.md).

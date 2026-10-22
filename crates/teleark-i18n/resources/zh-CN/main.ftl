@@ -1121,6 +1121,13 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.20 · Faster synchronization recovery and reusable manifests
+
+    - Recover local synchronization spacing by elapsed time after Telegram’s server wait expires: halve the interval each minute to the one-second floor within five minutes. Account for elapsed time across restarts, preserve active server deadlines, and keep queued requests spaced without bursts.
+    - Reuse authenticated, version-matched encrypted manifest envelopes across restarts. Fetch only missing, changed or damaged envelopes; reject stale cache writes and bypass reuse during unresolved channel gaps or repairs. Preserve original recovery inventory independently.
+    - Distinguish content catch-up from live subscription renewal. Keep current content marked up to date during normal renewals, and name local request pacing, Telegram cooldowns and retry waits separately.
+    - Upgrade SQLite schemas 0–26 automatically to 27 with transactional verification and restart-safe cache creation. Encrypted file, manifest, key, recovery and transfer formats remain unchanged. Existing installations warm the new version-bound cache once because older recovery envelopes have no source-version binding.
+
     ## 0.5.19 · 按需同步频道
 
     - 直接应用推送更新，仅恢复存在更新缺口或远端游标已推进的频道，不再定时遍历无更新的频道获取差分。
@@ -2108,3 +2115,9 @@ sync-resume-at = 下次检查：{ $time }
 sync-local-state-help = 已保留保存的同步状态。请检查磁盘空间和访问权限，然后重新打开 TeleArk。如果此资料库曾由较新版本打开，请先更新 TeleArk。
 
 channel-list-sync-status = { $name } · { $status }
+
+# Distinguish durable catch-up readiness from continuous subscription work.
+shell-sync-live = Up to date · Live updates
+shell-sync-paced = Waiting for next request
+shell-sync-server-wait = Waiting for Telegram
+shell-sync-retry-wait = Waiting to retry

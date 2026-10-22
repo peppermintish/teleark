@@ -529,6 +529,16 @@ impl TeleArkApp {
         {
             return self.tr(sync_phase_id(scan.phase));
         }
+        if self.managed_scan_loading {
+            return self.tr("managed-scan-reading");
+        }
+        if self
+            .channel_sync_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.caught_up() && snapshot.subscribed_channels > 0)
+        {
+            return self.tr("shell-sync-live");
+        }
         self.channel_sync_snapshot.as_ref().map_or_else(
             || self.tr("channel-sync-local-only"),
             |snapshot| self.tr(sync_phase_id(snapshot.phase)),
@@ -2072,6 +2082,9 @@ pub(super) mod tests {
                     app.telegram_files_exhausted = false;
                     let now = std::time::Instant::now();
                     app.channel_sync_snapshot = Some(ChannelSyncSnapshot {
+                        catchup_pending: 3,
+                        directory_ready: true,
+                        subscribed_channels: 1,
                         account_id: 1,
                         phase: ChannelSyncPhase::RateLimited,
                         chat_id: Some(1001),
@@ -2276,6 +2289,9 @@ pub(super) mod tests {
     pub(in crate::app) fn fixture_snapshot() -> teleark_runtime::ChannelSyncSnapshot {
         let now = std::time::Instant::now();
         teleark_runtime::ChannelSyncSnapshot {
+            catchup_pending: 3,
+            directory_ready: true,
+            subscribed_channels: 1,
             account_id: 1,
             phase: ChannelSyncPhase::RateLimited,
             chat_id: Some(9000),

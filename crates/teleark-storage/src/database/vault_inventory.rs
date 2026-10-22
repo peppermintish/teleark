@@ -3,6 +3,16 @@ use super::Database;
 use crate::{InputReason, StorageError, StorageResult};
 use rusqlite::{OptionalExtension as _, params};
 
+pub(super) const CACHED_MANIFEST_SQL: &str = r#"
+SELECT c.sealed_manifest FROM vault_manifest_cache c
+JOIN channel_file_versions v ON v.account_id=c.account_id AND v.chat_id=c.chat_id AND v.message_id=c.message_id
+JOIN channel_sync_state s ON s.account_id=c.account_id AND s.chat_id=c.chat_id
+WHERE c.account_id=?1 AND c.chat_id=?2 AND c.message_id=?3 AND c.source_revision=?4
+AND v.revision=?4 AND c.remote_name=?5 AND length(c.sealed_manifest)=?6
+AND s.gap_pending=0 AND s.repair_pending=0
+AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=c.account_id AND t.chat_id=c.chat_id AND t.message_id=c.message_id)
+"#;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VaultFileHealth {
     #[default]
@@ -28,6 +38,62 @@ pub struct VaultInventoryRecord {
 }
 
 impl Database {
+    /// Current-version projection cache. Recovery inventory retains its original
+    /// envelope independently; it must never authorize reuse after an edit/gap.
+    pub fn cached_vault_manifest(
+        &self,
+        account: i64,
+        chat: i64,
+        candidate: &crate::CachedManifestCandidate,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        if candidate.file.size_bytes > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let id = candidate.file.message_id.get();
+        Ok(self
+            .connection
+            .query_row(
+                CACHED_MANIFEST_SQL,
+                params![
+                    account,
+                    chat,
+                    id,
+                    candidate.revision,
+                    candidate.file.file_name,
+                    candidate.file.size_bytes as i64
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A stale download cannot overwrite a newer cached envelope. SQL fences the
+    /// candidate version atomically against committed edit/deletion evidence.
+    pub fn cache_vault_manifest(
+        &mut self,
+        account: i64,
+        chat: i64,
+        candidate: &crate::CachedManifestCandidate,
+        bytes: &[u8],
+    ) -> StorageResult<bool> {
+        if bytes.is_empty()
+            || bytes.len() > 16 * 1024 * 1024
+            || bytes.len() as u64 != candidate.file.size_bytes
+        {
+            return Err(StorageError::InvalidInput {
+                field: "vault_manifest_cache",
+                reason: InputReason::OutOfRange,
+            });
+        }
+        if candidate.revision <= 0 {
+            return Ok(false);
+        }
+        Ok(self.connection.execute(
+            "INSERT INTO vault_manifest_cache(account_id,chat_id,message_id,source_revision,remote_name,sealed_manifest)              SELECT ?1,?2,?3,?4,?5,?6 FROM channel_file_versions v              JOIN channel_sync_state s ON s.account_id=v.account_id AND s.chat_id=v.chat_id              WHERE v.account_id=?1 AND v.chat_id=?2 AND v.message_id=?3 AND v.revision=?4              AND s.gap_pending=0 AND s.repair_pending=0              AND NOT EXISTS(SELECT 1 FROM channel_sync_tombstones t WHERE t.account_id=v.account_id AND t.chat_id=v.chat_id AND t.message_id=v.message_id)              ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET source_revision=excluded.source_revision,remote_name=excluded.remote_name,sealed_manifest=excluded.sealed_manifest",
+            params![account,chat,candidate.file.message_id.get(),candidate.revision,candidate.file.file_name,bytes],
+        )? != 0)
+    }
+
     pub fn save_vault_inventory(&mut self, record: &VaultInventoryRecord) -> StorageResult<()> {
         if record.account_id <= 0
             || record.chat_id <= 0

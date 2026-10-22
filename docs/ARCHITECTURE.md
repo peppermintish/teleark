@@ -173,3 +173,5 @@ The [documentation guide](README.md) indexes the current contracts, design recor
 and dated validation evidence. [AGENTS.md](../AGENTS.md) defines contributor rules;
 [Security](SECURITY.md) defines trust boundaries and redaction requirements.
 Accepted ADRs preserve original decisions and identify subsequent changes.
+
+[ADR 0069](adr/0069-sync-recovery-and-versioned-manifest-cache.md) replaces page-count pacing recovery with elapsed-time recovery, adds source-version-bound encrypted manifest reuse across restarts, and separates caught-up content from ongoing subscription activity.

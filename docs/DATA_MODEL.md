@@ -1,6 +1,6 @@
 # Data model and SQLite contracts
 
-The current schema is version **26**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
+The current schema is version **27**. Ordered migrations and tests preserve existing data; Rust/Serde layout never defines durable representation. Crypto/manifest bytes have separate versioned contracts. `LogicalFile` is the domain object; all persisted enums and identifiers are locale-neutral.
 
 ## Identity and projections
 
@@ -256,7 +256,7 @@ checks that no temporary sorting tree appears in the filtered query plan.
 
 ## Credential storage (schema 23)
 
-Credential tables were added in schema **23**. Current SQLite read/write version is **26**, with supported automatic upgrades **0–25 → 26**, including skipped releases, through the existing visible transactional migration owner. Schema 24's nullable `channel_sync_state.last_synced_at` is part of the historical migration chain. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
+Credential tables were added in schema **23**. Current SQLite read/write version is **27**, with supported automatic upgrades **0–26 → 27**, including skipped releases, through the existing visible transactional migration owner. Schema 24's nullable `channel_sync_state.last_synced_at` is part of the historical migration chain. Credential tables independently track the selected backend, a revision, bounded credential identities and optional local payloads, and a durable cleanup outbox. Runtime serializes Keychain work on a separate bounded retained owner. It verifies every target copy before the compare-and-swap backend transaction. Older schema/key/file bytes retain their meaning; no encrypted payload, recovery bundle, manifest or transfer checkpoint codec changes.
 
 macOS defaults on; Windows/Linux default off and reject enabling. A copied macOS library on other platforms retains unavailable Keychain references while switching to local mode, with explicit reentry/recovery guidance. No missing secret is guessed or overwritten. See [ADR 0053](adr/0053-selectable-system-credentials.md) for bounds, cleanup, cancellation and recovery semantics.
 
@@ -300,3 +300,24 @@ and persist optional duration through `ImportLocalFile` into the existing
 saving metadata before starting work. No inferred duration, source text
 normalization or plaintext media payload staging is introduced. Unsupported
 media and historical manifests that omit duration remain unknown.
+
+
+## Version-bound manifest cache (schema 27)
+
+`vault_manifest_cache` stores only encrypted manifest envelopes, scoped by
+`(account_id, chat_id, message_id)` and bound to `channel_file_versions.revision`,
+remote name and encoded byte length. Runtime authenticates every disk hit with
+the selected key before deriving the display projection. A current version and
+absence of tombstones and unfinished gap/repair work are required by the actual
+Storage lookup and atomic write queries. Stale callbacks cannot replace a newer
+entry. Corrupted bytes are refetched and authenticated before replacement.
+Original `vault_inventory` recovery envelopes are never overwritten by this
+cache. No decrypted names, metadata or keys are persisted in the new table.
+
+Supported schemas 0–26 upgrade automatically to read/write 27, including skipped
+releases. Schema 27 creates the cache transactionally and runs integrity/foreign
+key verification before committing the version marker; interruption/failure
+retains recoverable originals and retries automatically. There is no backfill
+from older inventory because it has no reliable source-version binding; the
+first catalog load warms current envelopes once, subsequent restarts reuse them.
+Payload, manifest, key/recovery and transfer codecs retain their existing versions.

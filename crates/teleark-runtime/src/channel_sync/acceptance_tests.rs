@@ -1468,3 +1468,58 @@ fn owner_cancels_pending_directory_backoff_without_cancelling_active_channel() {
         join.join().expect("shutdown");
     }
 }
+
+#[test]
+fn expired_saved_spacing_recovers_before_first_startup_request() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("elapsed-restart.sqlite3");
+    let wall = crate::system_time_unix_ms(std::time::SystemTime::now()).expect("clock");
+    {
+        let mut db = teleark_storage::Database::open(&path).expect("database");
+        db.set_setting(&teleark_storage::SettingRecord {
+            key: "channel-sync-cooldown.1".into(),
+            value:
+                serde_json::json!({"version":1,"until_unix_ms":wall-600_000,"interval_ms":30_000})
+                    .to_string(),
+            updated_at_unix_ms: wall - 600_000,
+        })
+        .expect("old pacing");
+    }
+    let library = DesktopLibrary::open(&path).expect("library");
+    let remote = RestartRemote {
+        discovered: mpsc::sync_channel(1).0,
+        lifecycle: Default::default(),
+        discoveries: Default::default(),
+        reads: Default::default(),
+        changed: Default::default(),
+        interval: Duration::from_secs(1),
+    };
+    remote
+        .lifecycle
+        .publish(0, Some(1), Some(Default::default()));
+    let sync = ChannelSync::start_with(
+        remote.clone(),
+        library,
+        TelegramAccount {
+            id: 1,
+            display_name: "Fixture".into(),
+            username: None,
+        },
+        vec![],
+    )
+    .expect("start");
+    until(&sync, || remote.discoveries.load(Ordering::Acquire) > 0);
+    assert_eq!(
+        sync.inner
+            .shared
+            .pacing
+            .lock()
+            .expect("budget")
+            .interval_ms(),
+        1_000
+    );
+    sync.stop();
+    if let Some(join) = sync.inner.join.lock().expect("owner").take() {
+        join.join().expect("stop");
+    }
+}

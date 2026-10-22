@@ -1542,3 +1542,41 @@ fn latest_view_survives_saturated_commands_and_consumed_wake_tokens() {
         "view changes never fill the command queue"
     );
 }
+
+#[test]
+fn catchup_readiness_distinguishes_live_renewal_directory_and_real_recovery() {
+    let shared = shared();
+    let mut snapshot = shared.snapshot.lock().expect("snapshot");
+    snapshot.directory_ready = true;
+    snapshot.catchup_pending = 0;
+    snapshot.subscribed_channels = 1;
+    snapshot.phase = ChannelSyncPhase::PollingDifferences;
+    snapshot.chat_id = Some(2);
+    assert!(
+        snapshot.caught_up(),
+        "subscription renewal does not make committed content stale"
+    );
+    snapshot.catchup_pending = 1;
+    assert!(!snapshot.caught_up());
+    snapshot.catchup_pending = 0;
+    snapshot.directory_ready = false;
+    assert!(!snapshot.caught_up());
+    snapshot.directory_ready = true;
+    snapshot.phase = ChannelSyncPhase::RateLimited;
+    assert!(!snapshot.caught_up(), "server waits remain visible");
+    snapshot.phase = ChannelSyncPhase::PollingDifferences;
+    snapshot.managed_review_pending = true;
+    assert!(!snapshot.caught_up());
+    snapshot.managed_review_pending = false;
+    snapshot.active.push(ChannelSyncEvent {
+        phase: ChannelSyncPhase::Discovering,
+        chat_id: None,
+        at: Instant::now(),
+        retry_at: None,
+        failure: None,
+    });
+    assert!(
+        !snapshot.caught_up(),
+        "directory discovery cannot hide behind another channel's renewal"
+    );
+}

@@ -356,6 +356,8 @@ impl TeleArkApp {
             use teleark_runtime::{ChannelSyncEvent, ChannelSyncPhase, ChannelSyncSnapshot};
             let now = std::time::Instant::now();
             let waiting = state == "channel-sync-wait";
+            let live = state == "channel-sync-live";
+            let paced = state == "channel-sync-paced";
             let synced = matches!(
                 state.as_str(),
                 "channel-sync-synced" | "channel-sync-synced-locked" | "channel-sync-private"
@@ -364,6 +366,10 @@ impl TeleArkApp {
             let failed = state == "channel-sync-failed";
             let phase = if waiting {
                 ChannelSyncPhase::RateLimited
+            } else if live {
+                ChannelSyncPhase::PollingDifferences
+            } else if paced {
+                ChannelSyncPhase::Pacing
             } else if synced {
                 ChannelSyncPhase::Idle
             } else if failed {
@@ -382,21 +388,24 @@ impl TeleArkApp {
             self.selected_chat_id = Some(1001);
             self.last_channel_id = Some(1001);
             self.telegram_files_exhausted = false;
-            self.channel_sync_details = waiting;
+            self.channel_sync_details = waiting || live || paced;
             self.channel_sync_snapshot = Some(ChannelSyncSnapshot {
+                catchup_pending: usize::from(!live && !synced),
+                directory_ready: true,
+                subscribed_channels: 1,
                 account_id: 1,
                 phase,
                 chat_id: Some(1001),
                 phase_started: now - Duration::from_secs(12),
                 last_activity: now - Duration::from_secs(8),
                 last_completed_at: Some(now - Duration::from_secs(if synced { 12 } else { 300 })),
-                retry_at: waiting.then_some(now + Duration::from_secs(30)),
+                retry_at: (waiting || paced).then_some(now + Duration::from_secs(30)),
                 failure: failed.then_some(teleark_core::ApplicationErrorKind::Network),
-                queued: if synced { 0 } else { 3 },
+                queued: if synced || live { 0 } else { 3 },
                 failed_channels: usize::from(failed),
                 committed_pages: 4,
                 data_revision: 4,
-                active: if !waiting && !synced && !failed {
+                active: if !waiting && !paced && !synced && !failed {
                     vec![ChannelSyncEvent {
                         retry_at: None,
                         phase,
@@ -407,7 +416,7 @@ impl TeleArkApp {
                 } else {
                     vec![]
                 },
-                waiting: if waiting {
+                waiting: if waiting || paced {
                     vec![ChannelSyncEvent {
                         retry_at: None,
                         phase,
@@ -449,7 +458,7 @@ impl TeleArkApp {
                         observed_at_unix_ms: 1_788_912_000_000,
                     }],
                 }),
-                managed_review_pending: !waiting && !synced && !failed,
+                managed_review_pending: !waiting && !synced && !failed && !live,
                 managed_scan: None,
             });
             if state == "channel-sync-private" {

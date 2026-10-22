@@ -4,9 +4,9 @@ use super::*;
 
 pub(super) struct RequestBudget {
     interval: Duration,
-    healthy_pages: u32,
+    recovery_at: Option<Instant>,
     clock: SyncClock,
-    next: Option<Instant>,
+    last_start: Option<Instant>,
     flood: Option<Instant>,
 }
 
@@ -20,9 +20,9 @@ impl RequestBudget {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
-            healthy_pages: 0,
+            recovery_at: None,
             clock: Arc::new(Instant::now),
-            next: None,
+            last_start: None,
             flood: None,
         }
     }
@@ -33,17 +33,20 @@ impl RequestBudget {
     }
 
     fn admit(&mut self, now: Instant) -> Result<(), Instant> {
-        if let Some(deadline) = self.next.into_iter().chain(self.flood).max()
+        self.recover(now);
+        let next = self.last_start.and_then(|at| at.checked_add(self.interval));
+        if let Some(deadline) = next.into_iter().chain(self.flood).max()
             && deadline > now
         {
             return Err(deadline);
         }
-        self.next = now.checked_add(self.interval);
+        self.last_start = Some(now);
         Ok(())
     }
 
     pub fn defer(&mut self, deadline: Instant) {
         self.flood = Some(self.flood.map_or(deadline, |old| old.max(deadline)));
+        self.recovery_at = Some(self.recovery_at.map_or(deadline, |old| old.max(deadline)));
     }
 
     pub fn flood(&self) -> Option<Instant> {
@@ -56,10 +59,20 @@ impl RequestBudget {
             .max(1_000)
     }
 
-    pub fn restore_interval(&mut self, milliseconds: u64) {
+    pub fn restore_interval(&mut self, milliseconds: u64, elapsed: Duration) {
         // Zero disables admission spacing for controlled fake remotes only.
         if !self.interval.is_zero() {
             self.interval = Duration::from_millis(milliseconds.clamp(1_000, 30_000));
+            let now = (self.clock)();
+            // Apply complete wall-time windows directly: a newly booted system's
+            // monotonic clock need not support subtracting the whole offline age.
+            for _ in 0..(elapsed.as_secs() / 60).min(5) {
+                self.interval = (self.interval / 2).max(Duration::from_secs(1));
+            }
+            self.recovery_at = Some(
+                now.checked_sub(Duration::from_secs(elapsed.as_secs() % 60))
+                    .unwrap_or(now),
+            );
         }
     }
 
@@ -67,22 +80,24 @@ impl RequestBudget {
         if !self.interval.is_zero() && self.flood.is_none_or(|at| at <= now) {
             self.interval = self.interval.saturating_mul(2).min(Duration::from_secs(30));
         }
-        self.healthy_pages = 0;
         self.defer(deadline);
     }
 
-    fn succeeded(&mut self, now: Instant) {
+    fn recover(&mut self, now: Instant) {
+        const WINDOW: Duration = Duration::from_secs(60);
         if self.interval <= Duration::from_secs(1) || self.flood.is_some_and(|at| at > now) {
             return;
         }
-        self.healthy_pages += 1;
-        if self.healthy_pages == 60 {
-            self.interval = self
-                .interval
-                .saturating_sub(Duration::from_secs(1))
-                .max(Duration::from_secs(1));
-            self.healthy_pages = 0;
+        let anchor = self.recovery_at.get_or_insert(now);
+        let windows = (now.saturating_duration_since(*anchor).as_secs() / WINDOW.as_secs()).min(5);
+        for _ in 0..windows {
+            self.interval = (self.interval / 2).max(Duration::from_secs(1));
         }
+        *anchor += WINDOW * windows as u32;
+    }
+
+    fn succeeded(&mut self, now: Instant) {
+        self.recover(now);
     }
 }
 
@@ -147,7 +162,6 @@ pub(super) fn observe<T>(shared: &Shared, result: &Result<T, ChannelSyncFailure>
         match result {
             Ok(_) => budget.succeeded(now),
             Err(error) => {
-                budget.healthy_pages = 0;
                 if let Some(deadline) = error.retry_after.and_then(|delay| now.checked_add(delay)) {
                     // Fence already queued workers before the coordinator sees
                     // this completion, and adapt only once per cooldown window.
@@ -191,7 +205,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_feedback_adapts_once_per_wait_and_healthy_recovery_is_gradual() {
+    fn elapsed_recovery_preserves_server_deadlines_and_never_bursts() {
         let now = Instant::now();
         let mut budget = RequestBudget::new(Duration::from_secs(1));
         budget.rate_limited(now, now + Duration::from_secs(30));
@@ -200,38 +214,77 @@ mod tests {
         assert_eq!(
             budget.interval_ms(),
             2_000,
-            "overlapping responses are one congestion window"
+            "one increase per server window"
         );
-        for _ in 0..60 {
-            budget.succeeded(now + Duration::from_secs(20));
+        budget.succeeded(now + Duration::from_secs(39));
+        assert_eq!(
+            budget.admit(now + Duration::from_secs(39)),
+            Err(now + Duration::from_secs(40))
+        );
+        assert_eq!(budget.interval_ms(), 2_000);
+        budget.succeeded(now + Duration::from_secs(99));
+        assert_eq!(budget.interval_ms(), 2_000);
+        budget.succeeded(now + Duration::from_secs(100));
+        assert_eq!(budget.interval_ms(), 1_000);
+        assert_eq!(budget.admit(now + Duration::from_secs(100)), Ok(()));
+        assert_eq!(
+            budget.admit(now + Duration::from_secs(100)),
+            Err(now + Duration::from_secs(101))
+        );
+    }
+
+    #[test]
+    fn high_spacing_recovers_without_page_counts_and_restores_elapsed_time() {
+        let now = Instant::now();
+        let mut budget =
+            RequestBudget::new(Duration::from_secs(1)).with_clock(Arc::new(move || now));
+        budget.restore_interval(30_000, Duration::ZERO);
+        assert_eq!(budget.admit(now), Ok(()));
+        for (seconds, expected) in [
+            (60, 15_000),
+            (120, 7_500),
+            (180, 3_750),
+            (240, 1_875),
+            (300, 1_000),
+        ] {
+            budget.succeeded(now + Duration::from_secs(seconds));
+            assert_eq!(budget.interval_ms(), expected);
         }
+        budget.restore_interval(30_000, Duration::from_secs(180));
+        assert_eq!(budget.interval_ms(), 3_750);
+        budget.restore_interval(30_000, Duration::from_secs(86_400));
         assert_eq!(
             budget.interval_ms(),
-            2_000,
-            "in-flight successes cannot clear a live wait"
+            1_000,
+            "expired historical pacing must not penalize restart"
         );
-        for _ in 0..59 {
-            budget.succeeded(now + Duration::from_secs(41));
-        }
-        assert_eq!(budget.interval_ms(), 2_000);
-        budget.succeeded(now + Duration::from_secs(41));
-        assert_eq!(budget.interval_ms(), 1_000);
-        for second in (50..500).step_by(50) {
-            let at = now + Duration::from_secs(second);
-            budget.rate_limited(at, at + Duration::from_secs(30));
-        }
-        assert_eq!(budget.interval_ms(), 30_000, "feedback remains bounded");
-        let mut restarted = RequestBudget::new(Duration::from_secs(1));
-        restarted.restore_interval(budget.interval_ms());
-        assert_eq!(restarted.interval_ms(), 30_000);
-        for _ in 0..60 {
-            restarted.succeeded(now);
-        }
+    }
+
+    #[test]
+    fn queued_deadline_recomputes_after_recovery_and_overlapping_server_wait_extends_anchor() {
+        let now = Instant::now();
+        let mut budget =
+            RequestBudget::new(Duration::from_secs(1)).with_clock(Arc::new(move || now));
+        budget.restore_interval(30_000, Duration::ZERO);
+        assert_eq!(budget.admit(now + Duration::from_secs(50)), Ok(()));
         assert_eq!(
-            restarted.interval_ms(),
-            29_000,
-            "restart must not erase learned pacing"
+            budget.admit(now + Duration::from_secs(60)),
+            Err(now + Duration::from_secs(65))
         );
+        assert_eq!(budget.admit(now + Duration::from_secs(65)), Ok(()));
+        budget.rate_limited(
+            now + Duration::from_secs(66),
+            now + Duration::from_secs(100),
+        );
+        budget.rate_limited(
+            now + Duration::from_secs(67),
+            now + Duration::from_secs(150),
+        );
+        assert_eq!(budget.interval_ms(), 30_000);
+        budget.succeeded(now + Duration::from_secs(209));
+        assert_eq!(budget.interval_ms(), 30_000);
+        budget.succeeded(now + Duration::from_secs(210));
+        assert_eq!(budget.interval_ms(), 15_000);
     }
 
     #[test]
@@ -309,5 +362,38 @@ mod tests {
             budget.admit(now + Duration::from_secs(120)),
             Err(now + Duration::from_secs(121))
         );
+    }
+}
+
+#[cfg(test)]
+mod recovery_regressions {
+    use super::*;
+    #[test]
+    fn ordinary_network_errors_do_not_restart_spacing_recovery() {
+        let epoch = Instant::now();
+        let elapsed = Arc::new(AtomicU64::new(0));
+        let clock = elapsed.clone();
+        let shared = super::super::event_tests::shared();
+        *shared.pacing.lock().expect("budget") = RequestBudget::new(Duration::from_secs(1))
+            .with_clock(Arc::new(move || {
+                epoch + Duration::from_secs(clock.load(Ordering::Acquire))
+            }));
+        shared
+            .pacing
+            .lock()
+            .expect("budget")
+            .restore_interval(30_000, Duration::ZERO);
+        elapsed.store(59, Ordering::Release);
+        observe::<()>(
+            &shared,
+            &Err(ChannelSyncFailure {
+                kind: ApplicationErrorKind::Network,
+                retry_after: None,
+            }),
+        );
+        elapsed.store(60, Ordering::Release);
+        let mut budget = shared.pacing.lock().expect("budget");
+        assert_eq!(budget.admit(epoch + Duration::from_secs(60)), Ok(()));
+        assert_eq!(budget.interval_ms(), 15_000);
     }
 }

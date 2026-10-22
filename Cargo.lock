@@ -7812,11 +7812,11 @@ dependencies = [
 
 [[package]]
 name = "teleark-core"
-version = "0.5.19"
+version = "0.5.20"
 
 [[package]]
 name = "teleark-crypto"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -7829,7 +7829,7 @@ dependencies = [
 
 [[package]]
 name = "teleark-gui"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "gpui-kit",
  "qrcode",
@@ -7843,7 +7843,7 @@ dependencies = [
 
 [[package]]
 name = "teleark-i18n"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "chrono",
  "fluent-bundle",
@@ -7853,14 +7853,14 @@ dependencies = [
 
 [[package]]
 name = "teleark-index"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "teleark-core",
 ]
 
 [[package]]
 name = "teleark-runtime"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "blake3",
  "lofty",
@@ -7884,7 +7884,7 @@ dependencies = [
 
 [[package]]
 name = "teleark-storage"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "rusqlite",
  "teleark-core",
@@ -7894,7 +7894,7 @@ dependencies = [
 
 [[package]]
 name = "teleark-telegram"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -7912,7 +7912,7 @@ dependencies = [
 
 [[package]]
 name = "teleark-transfer"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "blake3",
  "teleark-core",

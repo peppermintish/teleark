@@ -1,4 +1,12 @@
-# Implementation status — v0.5.19
+# Implementation status — v0.5.20
+
+## Version 0.5.20 · Synchronization recovery and manifest reuse (2026-10-23)
+
+Account admission now halves learned spacing after each elapsed minute outside a server wait, reaching the one-second floor within five windows. Restart includes elapsed time; active server deadlines and serialized starts remain authoritative. Ordinary network failures no longer reset local recovery. A source-version-bound encrypted manifest cache reuses authenticated envelopes across process restarts, with scoped current-version checks, corruption repair and stale-write rejection. Existing immutable recovery envelopes remain intact; upgrades warm the new cache once because old inventory has no current-message version binding.
+
+Runtime snapshots distinguish directory/catch-up readiness from live subscriptions. The shell retains an up-to-date indication during ordinary subscription renewals and names local pacing, Telegram waits and retry waits separately. Detailed phases and bounded timeline remain in the informational inspector. [ADR 0069](adr/0069-sync-recovery-and-versioned-manifest-cache.md) records the contracts.
+
+SQLite read/write schema is 27, with automatic verified transactional upgrades from 0–26 including skipped releases. Payload, manifest, key/recovery and transfer codecs are unchanged. No new dependencies or licensing changes. Release verification is in progress; this paragraph does not claim successful tests or publication.
 
 ## Synchronization efficiency investigation (2026-10-23)
 
@@ -162,7 +170,7 @@ upgrades do not require manual exports, resets or scripts.
 
 | Contract | Current support | Reference |
 | --- | --- | --- |
-| SQLite | Read/write schema 26; automatic ordered upgrades from 0–25, including skipped releases | [Data model](DATA_MODEL.md) |
+| SQLite | Read/write schema 27; automatic ordered upgrades from 0–26, including skipped releases | [Data model](DATA_MODEL.md) |
 | Encrypted parts and manifests | Parts read 1.0/2.0 and write 2.0; manifests read 1.0/2.0/3.0 and new completion writes 3.0 | [Crypto](CRYPTO_FORMAT.md), [Manifest](MANIFEST_FORMAT.md) |
 | Key wraps and recovery bundles | Retain version 1 readers/writers and existing bytes | [Crypto](CRYPTO_FORMAT.md) |
 | Channel-key proof / pending key marker | Proof codec 1; local marker writes 2 and reads 1/2 | [Crypto](CRYPTO_FORMAT.md#managed-channel-key-proof), [Preferences](PREFERENCES_FORMAT.md) |

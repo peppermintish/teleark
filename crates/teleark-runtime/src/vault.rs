@@ -2409,11 +2409,11 @@ impl VaultOwner {
                         chat,
                     );
                 }
-                health::load(
+                health::load_candidate(
                     &mut store,
                     library,
                     (account, chat),
-                    catalog::byte_object(candidate)?,
+                    candidate,
                     active,
                     historical,
                     observer,

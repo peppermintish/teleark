@@ -145,7 +145,7 @@ Preview disables Library, Telegram, diagnostics, native-transfer and Vault runti
 | Option | Values |
 | --- | --- |
 | `--screen` | `account`, `storage`, `channel`, `transfers`, `library`, `file`, `settings`, `upload` |
-| `--preview-state` | `locked-transfers`, `quit-confirm`, `quit-pausing`, `quit-failed`, `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `local-availability`, `batch-groups`, `batch-large`, `batch-deleted`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
+| `--preview-state` | `locked-transfers`, `quit-confirm`, `quit-pausing`, `quit-failed`, `login`, `returning`, `setup`, `locked`, `raw`, `channel-selected`, `local-availability`, `batch-groups`, `batch-large`, `batch-deleted`, `upload-history`, `native-failure`, `transfer-rate-limited`, `managed-key-loading`, `upload-folder`, `unlock`, `about`, `appearance`, `upload-preflight`, `upload-progress`, `channel-sync`, `channel-sync-wait`, `channel-sync-live`, `channel-sync-paced`, `dialogs-failed`, `dialogs-waiting`, `proxy-ready`, `proxy-failed`, `proxy-testing` |
 | `--locale` | `en-US` only for interface tests and previews |
 | `--window-size` | 900×600 is required; also review actual native full-screen mode. Other window sizes are supplemental |
 

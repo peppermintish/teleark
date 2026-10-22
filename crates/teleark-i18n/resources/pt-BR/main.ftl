@@ -873,3 +873,9 @@ sync-resume-at = Próxima verificação às { $time }
 sync-local-state-help = O estado de sincronização salvo é mantido. Verifique o espaço em disco e o acesso e reabra o TeleArk. Se esta biblioteca foi aberta por um aplicativo mais recente, atualize o TeleArk primeiro.
 
 channel-list-sync-status = { $name } · { $status }
+
+# Distinguish durable catch-up readiness from continuous subscription work.
+shell-sync-live = Up to date · Live updates
+shell-sync-paced = Waiting for next request
+shell-sync-server-wait = Waiting for Telegram
+shell-sync-retry-wait = Waiting to retry

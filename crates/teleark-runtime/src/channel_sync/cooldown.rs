@@ -11,6 +11,7 @@ fn key(account: i64) -> String {
 pub(crate) struct SavedCooldown {
     pub until_unix_ms: i64,
     pub interval_ms: u64,
+    pub saved_at_unix_ms: i64,
 }
 
 pub(crate) fn load(
@@ -42,6 +43,7 @@ pub(crate) fn load(
     Ok(Some(SavedCooldown {
         until_unix_ms,
         interval_ms,
+        saved_at_unix_ms: record.updated_at_unix_ms,
     }))
 }
 
@@ -111,7 +113,8 @@ mod tests {
             load(&db, 7).expect("legacy reader"),
             Some(SavedCooldown {
                 until_unix_ms: 120_000,
-                interval_ms: 2_000
+                interval_ms: 2_000,
+                saved_at_unix_ms: 1,
             })
         );
         assert!(save(&mut db, 7, 30_000, 0).is_err());
@@ -123,12 +126,11 @@ mod tests {
             original
         );
         save(&mut db, 7, 30_000, 4_000).expect("automatic additive upgrade");
-        assert_eq!(
-            load(&db, 7).expect("new reader"),
-            Some(SavedCooldown {
-                until_unix_ms: 120_000,
-                interval_ms: 4_000
-            })
+        let saved = load(&db, 7).expect("new reader").expect("record");
+        assert_eq!((saved.until_unix_ms, saved.interval_ms), (120_000, 4_000));
+        assert!(
+            saved.saved_at_unix_ms > 1,
+            "retain the setting's actual update timestamp for restart recovery"
         );
         let raw: serde_json::Value =
             serde_json::from_str(&db.setting(&key(7)).expect("row").expect("record").value)
@@ -161,13 +163,9 @@ mod tests {
             assert_eq!(load(&db, 8).expect("other account"), None);
         }
         let mut db = Database::open(&path).expect("restart");
-        assert_eq!(
-            load(&db, 7).expect("saved wait"),
-            Some(SavedCooldown {
-                until_unix_ms: 120_000,
-                interval_ms: 3_000
-            })
-        );
+        let saved = load(&db, 7).expect("saved wait").expect("record");
+        assert_eq!((saved.until_unix_ms, saved.interval_ms), (120_000, 3_000));
+        assert!(saved.saved_at_unix_ms > 0);
         db.set_setting(&SettingRecord {
             key: key(7),
             value: r#"{"version":2,"until_unix_ms":999999}"#.into(),

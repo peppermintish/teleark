@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::{StorageError, StorageResult};
 
 pub(crate) const APPLICATION_ID: u32 = 0x5441_524B; // "TARK"
-pub(crate) const LATEST_SCHEMA_VERSION: u32 = 26;
+pub(crate) const LATEST_SCHEMA_VERSION: u32 = 27;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationProgress {
@@ -719,6 +719,20 @@ CREATE TABLE credential_cleanup (
     Migration {
         version: 26,
         sql: "ALTER TABLE vault_downloaded_files ADD COLUMN media_duration_ms INTEGER CHECK (media_duration_ms >= 0);",
+    },
+    Migration {
+        version: 27,
+        sql: r#"
+CREATE TABLE vault_manifest_cache (
+    account_id INTEGER NOT NULL CHECK (account_id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    message_id INTEGER NOT NULL CHECK (message_id > 0),
+    source_revision INTEGER NOT NULL CHECK (source_revision > 0),
+    remote_name TEXT NOT NULL CHECK (length(remote_name) BETWEEN 1 AND 128),
+    sealed_manifest BLOB NOT NULL CHECK (length(sealed_manifest) BETWEEN 1 AND 16777216),
+    PRIMARY KEY (account_id,chat_id,message_id)
+) STRICT, WITHOUT ROWID;
+"#,
     },
 ];
 

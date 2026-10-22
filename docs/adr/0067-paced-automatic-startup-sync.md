@@ -4,6 +4,8 @@ Status: Accepted, 2026-10-17. Supersedes ADR 0031's unconditional connection-wid
 
 The channel silence fallback and subscription scheduling are superseded by [ADR 0068](0068-targeted-channel-sync.md); automatic ownership, durable recovery and admission remain in force.
 
+The page-count-based pacing recovery is superseded by [ADR 0069](0069-sync-recovery-and-versioned-manifest-cache.md).
+
 ## Problem
 
 Each connection revision discarded transient channel state and forced every cached channel to fetch a difference. The initial directory had already supplied remote PTS, so equal durable cursors still produced redundant requests. An overdue observation could independently force the same work after a restart. Four ordinary channel workers and the reserved managed worker could rapidly drain successive pages; directory pagination also ran without spacing. Server FloodWait existed only in process memory, so reopening lost its deadline.

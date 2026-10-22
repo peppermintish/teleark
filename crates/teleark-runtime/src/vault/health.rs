@@ -31,40 +31,120 @@ pub(super) fn load(
     historical: Option<&([u8; 16], Arc<VaultMasterKey>)>,
     observer: &crate::ManagedScanObserver,
 ) -> Result<Option<ManagedVaultFile>, ApplicationError> {
-    observer.phase(crate::ChannelSyncPhase::ManifestReceiving);
-    let bytes = match store.download(object.object_id).map_err(map_transfer_error) {
-        Ok(bytes) => bytes,
-        Err(error)
-            if matches!(
-                error.kind(),
-                ApplicationErrorKind::SourceMissing | ApplicationErrorKind::NotFound
-            ) =>
-        {
-            // A document can disappear between the committed catalog read and
-            // this fetch. Preserve its authenticated inventory and continue
-            // projecting the other files instead of failing the entire scan.
-            observer.phase(crate::ChannelSyncPhase::Persisting);
-            library
-                .worker
-                .request("save_vault_message_health", |reply| {
-                    StorageRequest::SaveVaultMessageHealth {
-                        account: scope.0,
-                        chat: scope.1,
-                        messages: vec![(object.object_id as i64, false)],
-                        observed_at: now_unix_ms().unwrap_or(0),
-                        reply,
-                    }
-                })?;
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
+    let id = object.object_id;
+    load_with(
+        library,
+        scope,
+        (object, None),
+        active,
+        historical,
+        observer,
+        || store.download(id).map_err(map_transfer_error),
+    )
+}
+
+pub(super) fn load_candidate(
+    store: &mut TelegramObjectStore,
+    library: &DesktopLibrary,
+    scope: (i64, i64),
+    candidate: &teleark_storage::CachedManifestCandidate,
+    active: Option<([u8; 16], &VaultMasterKey)>,
+    historical: Option<&([u8; 16], Arc<VaultMasterKey>)>,
+    observer: &crate::ManagedScanObserver,
+) -> Result<Option<ManagedVaultFile>, ApplicationError> {
+    let object = super::catalog::byte_object(candidate)?;
+    let id = object.object_id;
+    load_with(
+        library,
+        scope,
+        (object, Some(candidate)),
+        active,
+        historical,
+        observer,
+        || store.download(id).map_err(map_transfer_error),
+    )
+}
+
+fn load_with(
+    library: &DesktopLibrary,
+    scope: (i64, i64),
+    source: (
+        crate::RemoteByteObject,
+        Option<&teleark_storage::CachedManifestCandidate>,
+    ),
+    active: Option<([u8; 16], &VaultMasterKey)>,
+    historical: Option<&([u8; 16], Arc<VaultMasterKey>)>,
+    observer: &crate::ManagedScanObserver,
+    mut fetch: impl FnMut() -> Result<Vec<u8>, ApplicationError>,
+) -> Result<Option<ManagedVaultFile>, ApplicationError> {
+    let (object, candidate) = source;
+    observer.phase(crate::ChannelSyncPhase::ReadingLocal);
+    let cached = match candidate {
+        Some(candidate) => library.worker.request("cached_vault_manifest", |reply| {
+            StorageRequest::CachedVaultManifest {
+                account: scope.0,
+                chat: scope.1,
+                candidate: candidate.clone(),
+                reply,
+            }
+        })?,
+        None => None,
+    };
+    // Authenticate every disk hit. A damaged cache is repairable from remote;
+    // an unavailable key cannot be repaired by downloading the same envelope.
+    observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
+    let cached = cached
+        .filter(|bytes| bytes.len() as u64 == object.encoded_size)
+        .map(|bytes| {
+            let opened = open_with_keys(&bytes, active, historical);
+            (bytes, opened)
+        })
+        .filter(|(_, opened)| match opened {
+            Ok(manifest) => manifest_matches(manifest, &object, scope),
+            Err(error) => error.kind() == ApplicationErrorKind::VaultKeyUnavailable,
+        });
+    let from_cache = cached.is_some();
+    let (bytes, opened) = if let Some(cached) = cached {
+        cached
+    } else {
+        observer.phase(crate::ChannelSyncPhase::ManifestReceiving);
+        let bytes = match fetch() {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ApplicationErrorKind::SourceMissing | ApplicationErrorKind::NotFound
+                ) =>
+            {
+                // A document can disappear between the committed catalog read and
+                // this fetch. Preserve its authenticated inventory and continue
+                // projecting the other files instead of failing the entire scan.
+                observer.phase(crate::ChannelSyncPhase::Persisting);
+                library
+                    .worker
+                    .request("save_vault_message_health", |reply| {
+                        StorageRequest::SaveVaultMessageHealth {
+                            account: scope.0,
+                            chat: scope.1,
+                            messages: vec![(object.object_id as i64, false)],
+                            observed_at: now_unix_ms().unwrap_or(0),
+                            reply,
+                        }
+                    })?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
+        let opened = open_with_keys(&bytes, active, historical);
+        (bytes, opened)
     };
     observer.phase(crate::ChannelSyncPhase::ManifestVerifying);
     if bytes.len() as u64 != object.encoded_size {
         mark_invalid(library, scope, object.object_id as i64, true)?;
         return Ok(None);
     }
-    let manifest = match open_with_keys(&bytes, active, historical) {
+    let manifest = match opened {
         Ok(manifest) => manifest,
         Err(error) if error.kind() == ApplicationErrorKind::VaultKeyUnavailable => {
             let mut file = unavailable(&object);
@@ -76,32 +156,40 @@ pub(super) fn load(
             return Ok(None);
         }
     };
-    if object.name != teleark_crypto::remote_manifest_name(&manifest.public_header.package_id)
-        || manifest
-            .metadata
-            .parts
-            .iter()
-            .any(|part| (part.remote_locator.account_id, part.remote_locator.chat_id) != scope)
-    {
+    if !manifest_matches(&manifest, &object, scope) {
         mark_invalid(library, scope, object.object_id as i64, true)?;
         return Ok(None);
     }
-    let record = VaultInventoryRecord {
-        account_id: scope.0,
-        chat_id: scope.1,
-        manifest_message_id: i64::try_from(object.object_id)
-            .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?,
-        remote_name: object.name.clone(),
-        vault_id: manifest.public_header.vault_id,
-        sealed_manifest: bytes,
-        observed_at_unix_ms: now_unix_ms()?,
-        manifest_invalid: false,
-    };
-    observer.phase(crate::ChannelSyncPhase::Persisting);
-    library.worker.request("save_vault_inventory", |reply| {
-        StorageRequest::SaveVaultInventory { record, reply }
-    })?;
-    mark_invalid(library, scope, object.object_id as i64, false)?;
+    if !from_cache {
+        let record = VaultInventoryRecord {
+            account_id: scope.0,
+            chat_id: scope.1,
+            manifest_message_id: i64::try_from(object.object_id)
+                .map_err(|_| ApplicationError::new(ApplicationErrorKind::InvalidRequest))?,
+            remote_name: object.name.clone(),
+            vault_id: manifest.public_header.vault_id,
+            sealed_manifest: bytes.clone(),
+            observed_at_unix_ms: now_unix_ms()?,
+            manifest_invalid: false,
+        };
+        observer.phase(crate::ChannelSyncPhase::Persisting);
+        library.worker.request("save_vault_inventory", |reply| {
+            StorageRequest::SaveVaultInventory { record, reply }
+        })?;
+        mark_invalid(library, scope, object.object_id as i64, false)?;
+        if let Some(candidate) = candidate {
+            observer.phase(crate::ChannelSyncPhase::Persisting);
+            library.worker.request("cache_vault_manifest", |reply| {
+                StorageRequest::CacheVaultManifest {
+                    account: scope.0,
+                    chat: scope.1,
+                    candidate: candidate.clone(),
+                    bytes: bytes.clone(),
+                    reply,
+                }
+            })?;
+        }
+    }
     let mut file = managed_file_from_recovered(&crate::RecoveredManifest { object, manifest })?;
     file.health = check(
         library,
@@ -110,6 +198,19 @@ pub(super) fn load(
         &file.part_message_ids,
     )?;
     Ok(Some(file))
+}
+
+fn manifest_matches(
+    manifest: &teleark_crypto::OpenedManifest,
+    object: &crate::RemoteByteObject,
+    scope: (i64, i64),
+) -> bool {
+    object.name == teleark_crypto::remote_manifest_name(&manifest.public_header.package_id)
+        && manifest
+            .metadata
+            .parts
+            .iter()
+            .all(|part| (part.remote_locator.account_id, part.remote_locator.chat_id) == scope)
 }
 
 fn unavailable(object: &crate::RemoteByteObject) -> ManagedVaultFile {
@@ -794,5 +895,253 @@ mod tests {
         let mut damaged = bytes;
         *damaged.last_mut().expect("tag") ^= 1;
         assert!(open_with_keys(&damaged, None, Some(&old)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use teleark_core::{AccountId, ChatId};
+    use teleark_crypto::{
+        AeadUsageRegistry, FileKey, ManifestMetadata, ManifestPublicHeader, MediaKind,
+        seal_manifest, wrap_file_key,
+    };
+
+    fn fixture(
+        library: &DesktopLibrary,
+    ) -> (
+        VaultMasterKey,
+        teleark_storage::CachedManifestCandidate,
+        Vec<u8>,
+    ) {
+        let master = VaultMasterKey::from_bytes([11; 32]);
+        let file_key = FileKey::from_bytes([22; 32]);
+        let package = super::super::package_bytes(33);
+        let vault = [44; 16];
+        let mut usage = AeadUsageRegistry::new();
+        let public = ManifestPublicHeader {
+            format_major: 1,
+            package_id: package,
+            vault_id: vault,
+            manifest_generation: 1,
+            created_at_unix_ms: 1,
+            logical_file_size: 0,
+            part_count: 0,
+            application_part_target: 8,
+            frame_plaintext_max: 4,
+            nonce_strategy_id: teleark_crypto::NONCE_STRATEGY_ID,
+            crypto_suite_id: teleark_crypto::CRYPTO_SUITE_ID,
+            file_key_wrap: wrap_file_key(&master, &file_key, &vault, &package, 1, 1, &mut usage)
+                .expect("wrap"),
+            master_key_generation: 1,
+            flags: 0,
+        };
+        let metadata = ManifestMetadata {
+            logical_name: "synthetic.bin".into(),
+            relative_path: None,
+            mime_type: None,
+            duration_ms: None,
+            media_properties: Default::default(),
+            media_kind: MediaKind::Document,
+            whole_plaintext_blake3: [55; 32],
+            parts: vec![],
+            logical_timestamps: None,
+            source_metadata: vec![],
+            format_extensions: vec![],
+        };
+        let bytes = seal_manifest(
+            &public,
+            &metadata,
+            &file_key,
+            ManifestLimits::default(),
+            &mut usage,
+        )
+        .expect("seal");
+        library
+            .save_telegram_sources(
+                &crate::TelegramAccount {
+                    id: 1,
+                    display_name: "Fixture".into(),
+                    username: None,
+                },
+                &[crate::TelegramChatSummary {
+                    id: 2,
+                    name: "Fixture".into(),
+                    username: None,
+                    kind: crate::TelegramChatKind::Channel,
+                    sync_pts: Some(50),
+                }],
+            )
+            .expect("sources");
+        let summary = crate::TelegramFileSummary {
+            message_id: 10,
+            file_name: teleark_crypto::remote_manifest_name(&package),
+            caption: crate::transfer::MANIFEST_CAPTION.into(),
+            size_bytes: bytes.len() as u64,
+            sent_at_unix_ms: 1,
+            modified_at_unix_ms: 1,
+            mime_type: None,
+            duration_ms: None,
+        };
+        library
+            .worker
+            .request("fixture", |reply| StorageRequest::CommitChannelSync {
+                batch: teleark_storage::ChannelSyncCommit {
+                    account_id: AccountId::new(1),
+                    chat_id: ChatId::new(2),
+                    expected_revision: 0,
+                    state: teleark_storage::ChannelSyncState {
+                        pts: 50,
+                        revision: 1,
+                        ..Default::default()
+                    },
+                    files: crate::telegram_file_upserts(
+                        AccountId::new(1),
+                        ChatId::new(2),
+                        &[summary],
+                    )
+                    .expect("upserts"),
+                    removed: vec![],
+                    edited: vec![],
+                    invalidate: vec![],
+                    authoritative: true,
+                    managed_catalog_seed: false,
+                    gap_detected: false,
+                    observed_at_unix_ms: 1,
+                },
+                reply,
+            })
+            .expect("commit");
+        let candidate = library
+            .cached_manifest_candidates(1, 2)
+            .expect("candidates")
+            .remove(0);
+        (master, candidate, bytes)
+    }
+
+    #[test]
+    fn cold_restart_authenticates_local_envelope_without_download_and_repairs_corruption() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("cache.sqlite3");
+        let library = DesktopLibrary::open(&path).expect("library");
+        let (master, candidate, bytes) = fixture(&library);
+        let observer = crate::ManagedScanObserver::silent(2);
+        let mut downloads = 0;
+        let mut fetch = || {
+            downloads += 1;
+            Ok(bytes.clone())
+        };
+        let result = load_with(
+            &library,
+            (1, 2),
+            (
+                super::super::catalog::byte_object(&candidate).expect("object"),
+                Some(&candidate),
+            ),
+            Some(([44; 16], &master)),
+            None,
+            &observer,
+            &mut fetch,
+        )
+        .expect("first download")
+        .expect("file");
+        assert_eq!(result.logical_name, "synthetic.bin");
+        assert_eq!(downloads, 1);
+        drop(library);
+        let library = DesktopLibrary::open(&path).expect("restart");
+        let result = load_with(
+            &library,
+            (1, 2),
+            (
+                super::super::catalog::byte_object(&candidate).expect("object"),
+                Some(&candidate),
+            ),
+            Some(([44; 16], &master)),
+            None,
+            &observer,
+            || panic!("unchanged cold restart must not download"),
+        )
+        .expect("disk cache")
+        .expect("file");
+        assert_eq!(result.logical_name, "synthetic.bin");
+        let mut corrupt = bytes.clone();
+        *corrupt.last_mut().expect("tag") ^= 1;
+        library
+            .worker
+            .request("corrupt fixture", |reply| {
+                StorageRequest::CacheVaultManifest {
+                    account: 1,
+                    chat: 2,
+                    candidate: candidate.clone(),
+                    bytes: corrupt,
+                    reply,
+                }
+            })
+            .expect("fixture");
+        let mut downloads = 0;
+        load_with(
+            &library,
+            (1, 2),
+            (
+                super::super::catalog::byte_object(&candidate).expect("object"),
+                Some(&candidate),
+            ),
+            Some(([44; 16], &master)),
+            None,
+            &observer,
+            || {
+                downloads += 1;
+                Ok(bytes.clone())
+            },
+        )
+        .expect("repair")
+        .expect("file");
+        assert_eq!(downloads, 1, "one remote fetch repairs tampered disk bytes");
+        load_with(
+            &library,
+            (1, 2),
+            (
+                super::super::catalog::byte_object(&candidate).expect("object"),
+                Some(&candidate),
+            ),
+            Some(([44; 16], &master)),
+            None,
+            &observer,
+            || panic!("repaired cache must be reusable"),
+        )
+        .expect("repaired cache")
+        .expect("file");
+        let unavailable = load_with(
+            &library,
+            (1, 2),
+            (
+                super::super::catalog::byte_object(&candidate).expect("object"),
+                Some(&candidate),
+            ),
+            None,
+            None,
+            &observer,
+            || panic!("missing key is not repaired by downloading"),
+        )
+        .expect("key unavailable")
+        .expect("file");
+        assert_eq!(unavailable.health, VaultFileHealth::KeyUnavailable);
+        let wrong = VaultMasterKey::from_bytes([77; 32]);
+        assert!(
+            load_with(
+                &library,
+                (1, 2),
+                (
+                    super::super::catalog::byte_object(&candidate).expect("object"),
+                    Some(&candidate)
+                ),
+                Some(([44; 16], &wrong)),
+                None,
+                &observer,
+                || Ok(bytes.clone())
+            )
+            .expect("wrong key")
+            .is_none()
+        );
     }
 }

@@ -841,3 +841,9 @@ sync-resume-at = 다음 확인: { $time }
 sync-local-state-help = 저장된 동기화 상태는 유지됩니다. 디스크 공간과 접근 권한을 확인한 후 TeleArk을 다시 여세요. 더 최신 앱으로 연 라이브러리라면 먼저 TeleArk을 업데이트하세요.
 
 channel-list-sync-status = { $name } · { $status }
+
+# Distinguish durable catch-up readiness from continuous subscription work.
+shell-sync-live = Up to date · Live updates
+shell-sync-paced = Waiting for next request
+shell-sync-server-wait = Waiting for Telegram
+shell-sync-retry-wait = Waiting to retry

@@ -149,6 +149,9 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
                     .failure
                     .is_some_and(|failure| failure != teleark_core::ApplicationErrorKind::Cancelled)
         });
+    if snapshot.caught_up() && snapshot.subscribed_channels > 0 && !attention {
+        return ("shell-sync-live", Tone::Green, None, 0);
+    }
     let count = channels.len();
     if count > 0 {
         return (
@@ -183,9 +186,19 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
             Some(IconName::Redo2),
             0,
         ),
-        Phase::Pacing | Phase::Waiting | Phase::RateLimited => {
-            ("shell-sync-waiting", Tone::Amber, Some(IconName::Pause), 0)
-        }
+        Phase::Pacing => ("shell-sync-paced", Tone::Neutral, Some(IconName::Pause), 0),
+        Phase::RateLimited => (
+            "shell-sync-server-wait",
+            Tone::Amber,
+            Some(IconName::Pause),
+            0,
+        ),
+        Phase::Waiting => (
+            "shell-sync-retry-wait",
+            Tone::Amber,
+            Some(IconName::Pause),
+            0,
+        ),
         Phase::Cancelled | Phase::ManifestCancelled => {
             ("shell-sync-paused", Tone::Neutral, Some(IconName::Pause), 0)
         }
@@ -193,7 +206,15 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
             ("shell-sync-active", Tone::Blue, Some(IconName::Redo2), 0)
         }
         _ if !snapshot.waiting.is_empty() => (
-            "shell-sync-waiting",
+            if snapshot
+                .waiting
+                .iter()
+                .any(|event| event.phase == Phase::RateLimited)
+            {
+                "shell-sync-server-wait"
+            } else {
+                "shell-sync-paced"
+            },
             Tone::Neutral,
             Some(IconName::Pause),
             0,
@@ -251,8 +272,10 @@ impl TeleArkApp {
         let attention = tone == Tone::Amber && matches!(icon, Some(IconName::TriangleAlert))
             || self.library_sync_error.is_some()
             || self.dialogs.phase() == Dialog::Failed;
-        let other_active =
-            self.library_sync_loading || self.account_restoring || self.dialogs.active();
+        let other_active = self.library_sync_loading
+            || self.account_restoring
+            || self.dialogs.active()
+            || self.managed_scan_loading;
         let active = count > 0 || matches!(icon, Some(IconName::Redo2)) || other_active;
         if attention {
             id = if active && count > 0 {
@@ -304,6 +327,7 @@ impl TeleArkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit as gpui;
     use gpui_kit::{TestAppContext, size};
 
     #[gpui_kit::test]
@@ -478,6 +502,50 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn live_renewals_and_wait_reasons_remain_distinct_at_both_sizes(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, crate::app::Page::Channel);
+        for full in [false, true] {
+            cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+            cx.update(|window, _| {
+                if window.is_fullscreen() != full {
+                    window.toggle_fullscreen();
+                }
+                assert_eq!(window.is_fullscreen(), full);
+            });
+            app.update(cx, |app, cx| {
+                let mut snapshot = channel_sync::tests::fixture_snapshot();
+                snapshot.catchup_pending = 0;
+                snapshot.directory_ready = true;
+                snapshot.subscribed_channels = 1;
+                snapshot.phase = Phase::PollingDifferences;
+                snapshot.managed_watch = None;
+                snapshot.managed_review_pending = false;
+                snapshot.queued = 0;
+                assert_eq!(channel_status(&snapshot).0, "shell-sync-live");
+                app.channel_sync_snapshot = Some(snapshot.clone());
+                app.managed_scan_loading = true;
+                assert_ne!(
+                    app.shell_sync_status().label,
+                    app.tr("shell-sync-live"),
+                    "projection application must finish before shell readiness"
+                );
+                app.managed_scan_loading = false;
+                snapshot.phase = Phase::Pacing;
+                assert_eq!(channel_status(&snapshot).0, "shell-sync-live");
+                snapshot.catchup_pending = 1;
+                assert_eq!(channel_status(&snapshot).0, "shell-sync-paced");
+                snapshot.phase = Phase::RateLimited;
+                assert_eq!(channel_status(&snapshot).0, "shell-sync-server-wait");
+                snapshot.phase = Phase::Waiting;
+                assert_eq!(channel_status(&snapshot).0, "shell-sync-retry-wait");
+                app.channel_sync_snapshot = Some(snapshot);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+    }
+
     #[test]
     fn waiting_workers_never_inflate_the_active_channel_count() {
         let mut snapshot = channel_sync::tests::fixture_snapshot();
@@ -493,7 +561,7 @@ mod tests {
                 failure: None,
             });
         }
-        assert_eq!(channel_status(&snapshot).0, "shell-sync-waiting");
+        assert_eq!(channel_status(&snapshot).0, "shell-sync-paced");
         assert_eq!(channel_status(&snapshot).3, 0);
         snapshot.active.push(teleark_runtime::ChannelSyncEvent {
             retry_at: None,
@@ -528,7 +596,7 @@ mod tests {
         assert_eq!(channel_status(&snapshot).0, "shell-sync-queued");
         snapshot.queued = 0;
         snapshot.phase = Phase::RateLimited;
-        assert_eq!(channel_status(&snapshot).0, "shell-sync-waiting");
+        assert_eq!(channel_status(&snapshot).0, "shell-sync-server-wait");
         snapshot.phase = Phase::Idle;
         for chat in [Some(10), Some(20), Some(10)] {
             snapshot.active.push(teleark_runtime::ChannelSyncEvent {

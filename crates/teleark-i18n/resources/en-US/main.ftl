@@ -1149,6 +1149,13 @@ upload-stop-after-current = Stop after the current file
 transfer-batch-upload-name = Upload · { $count } files
 
 about-changelog-unreleased =
+    ## 0.5.20 · Faster synchronization recovery and reusable manifests
+
+    - Recover local synchronization spacing by elapsed time after Telegram’s server wait expires: halve the interval each minute to the one-second floor within five minutes. Account for elapsed time across restarts, preserve active server deadlines, and keep queued requests spaced without bursts.
+    - Reuse authenticated, version-matched encrypted manifest envelopes across restarts. Fetch only missing, changed or damaged envelopes; reject stale cache writes and bypass reuse during unresolved channel gaps or repairs. Preserve original recovery inventory independently.
+    - Distinguish content catch-up from live subscription renewal. Keep current content marked up to date during normal renewals, and name local request pacing, Telegram cooldowns and retry waits separately.
+    - Upgrade SQLite schemas 0–26 automatically to 27 with transactional verification and restart-safe cache creation. Encrypted file, manifest, key, recovery and transfer formats remain unchanged. Existing installations warm the new version-bound cache once because older recovery envelopes have no source-version binding.
+
     ## 0.5.19 · Targeted channel synchronization
 
     - Apply pushed channel updates directly and recover missing updates from saved channel cursors. Reconcile directory heads before scheduling channel recovery; quiet ordinary channels no longer trigger recurring seven-minute difference sweeps.
@@ -2153,3 +2160,9 @@ sync-resume-at = Next check at { $time }
 sync-local-state-help = Saved sync state is retained. Check disk space and access, then reopen TeleArk. If this library was opened by a newer app, update TeleArk first.
 
 channel-list-sync-status = { $name } · { $status }
+
+# Distinguish durable catch-up readiness from continuous subscription work.
+shell-sync-live = Up to date · Live updates
+shell-sync-paced = Waiting for next request
+shell-sync-server-wait = Waiting for Telegram
+shell-sync-retry-wait = Waiting to retry

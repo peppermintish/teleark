@@ -2523,7 +2523,7 @@ fn vault_media_duration_schema_26_preserves_downloads_and_restarts_after_rollbac
         }
         drop(connection);
         let database = Database::open(&path)?;
-        assert_eq!(database.schema_version()?, 26);
+        assert_eq!(database.schema_version()?, LATEST_SCHEMA_VERSION);
         assert_eq!(
             database.setting("fixture.key.v1")?.expect("key").value,
             "synthetic-preserved-key"
@@ -2540,5 +2540,163 @@ fn vault_media_duration_schema_26_preserves_downloads_and_restarts_after_rollbac
             1
         );
     }
+    Ok(())
+}
+
+#[test]
+fn manifest_cache_survives_restart_and_rejects_edits_gaps_deletions_and_stale_writes()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let path = temp.path().join("manifest-cache.sqlite");
+    let mut db = Database::open(&path)?;
+    seed_account_chat(&mut db)?;
+    let mut file = sync_file(77);
+    file.caption = Some("manifest".into());
+    let mut batch = crate::ChannelSyncCommit {
+        account_id: AccountId::new(1),
+        chat_id: ChatId::new(2),
+        expected_revision: 0,
+        state: crate::ChannelSyncState {
+            pts: 50,
+            revision: 1,
+            ..Default::default()
+        },
+        files: vec![file],
+        removed: vec![],
+        edited: vec![],
+        invalidate: vec![],
+        authoritative: true,
+        managed_catalog_seed: false,
+        gap_detected: false,
+        observed_at_unix_ms: 1,
+    };
+    db.commit_channel_sync(&batch)?;
+    let original = db
+        .cached_manifest_candidates(AccountId::new(1), ChatId::new(2), "manifest", 100)?
+        .remove(0);
+    db.save_vault_inventory(&crate::VaultInventoryRecord {
+        account_id: 1,
+        chat_id: 2,
+        manifest_message_id: 77,
+        remote_name: original.file.file_name.clone(),
+        vault_id: [44; 16],
+        sealed_manifest: vec![9; 42],
+        observed_at_unix_ms: 1,
+        manifest_invalid: false,
+    })?;
+    assert!(db.cache_vault_manifest(1, 2, &original, &[9; 42])?);
+    drop(db);
+    let mut db = Database::open(&path)?;
+    assert_eq!(
+        db.cached_vault_manifest(1, 2, &original)?,
+        Some(vec![9; 42])
+    );
+    assert!(db.cached_vault_manifest(9, 2, &original)?.is_none());
+    assert!(db.cached_vault_manifest(1, 3, &original)?.is_none());
+    batch.expected_revision += 1;
+    batch.state.revision += 1;
+    batch.edited = vec![77];
+    db.commit_channel_sync(&batch)?;
+    let edited = db
+        .cached_manifest_candidates(AccountId::new(1), ChatId::new(2), "manifest", 100)?
+        .remove(0);
+    assert!(db.cached_vault_manifest(1, 2, &edited)?.is_none());
+    assert!(db.cached_vault_manifest(1, 2, &original)?.is_none());
+    assert!(!db.cache_vault_manifest(1, 2, &original, &[8; 42])?);
+    assert!(db.cache_vault_manifest(1, 2, &edited, &[8; 42])?);
+    assert_eq!(
+        db.vault_inventory_page(1, 2, 78, 1)?[0].sealed_manifest,
+        vec![9; 42],
+        "current-version cache cannot overwrite original recovery bytes"
+    );
+    batch.expected_revision += 1;
+    batch.state.revision += 1;
+    batch.edited.clear();
+    batch.state.gap_pending = true;
+    db.commit_channel_sync(&batch)?;
+    assert!(db.cached_vault_manifest(1, 2, &edited)?.is_none());
+    assert!(!db.cache_vault_manifest(1, 2, &edited, &[7; 42])?);
+    batch.expected_revision += 1;
+    batch.state.revision += 1;
+    batch.state.gap_pending = false;
+    batch.state.repair_pending = true;
+    db.commit_channel_sync(&batch)?;
+    assert!(db.cached_vault_manifest(1, 2, &edited)?.is_none());
+    batch.expected_revision += 1;
+    batch.state.revision += 1;
+    batch.state.repair_pending = false;
+    batch.files.clear();
+    batch.removed = vec![77];
+    db.commit_channel_sync(&batch)?;
+    assert!(db.cached_vault_manifest(1, 2, &edited)?.is_none());
+    assert!(!db.cache_vault_manifest(1, 2, &edited, &[6; 42])?);
+    Ok(())
+}
+
+#[test]
+fn manifest_cache_schema_27_rolls_back_and_restarts_without_changing_recovery_inventory()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let path = temp.path().join("migration27.sqlite");
+    let mut conn = Connection::open(&path)?;
+    for m in MIGRATIONS.iter().filter(|m| m.version <= 26) {
+        conn.execute_batch(m.sql)?;
+    }
+    conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+    conn.pragma_update(None, "user_version", 26)?;
+    conn.execute(
+        "INSERT INTO settings VALUES('fixture.key','retained',1)",
+        [],
+    )?;
+    conn.execute("INSERT INTO vault_inventory(account_id,chat_id,manifest_message_id,remote_name,vault_id,sealed_manifest,observed_at) VALUES(1,2,10,'fixture',?1,?2,1)",params![[44u8;16].as_slice(),[9u8;42].as_slice()])?;
+    conn.execute_batch("CREATE TABLE vault_manifest_cache(conflict INTEGER)")?;
+    assert!(crate::migration::migrate(&mut conn, &|_| {}).is_err());
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?,
+        26
+    );
+    conn.execute_batch("DROP TABLE vault_manifest_cache")?;
+    drop(conn);
+    let db = Database::open(&path)?;
+    assert_eq!(db.schema_version()?, 27);
+    assert_eq!(db.setting("fixture.key")?.expect("key").value, "retained");
+    assert_eq!(
+        db.vault_inventory_page(1, 2, 11, 1)?[0].sealed_manifest,
+        vec![9; 42]
+    );
+    assert!(db.vault_inventory_page(2, 2, 11, 1)?.is_empty());
+    drop(db);
+    assert_eq!(Database::open(&path)?.schema_version()?, 27);
+    Ok(())
+}
+
+#[test]
+fn manifest_cache_point_lookup_uses_scoped_primary_keys_without_scanning()
+-> Result<(), Box<dyn Error>> {
+    let db = Database::open_in_memory()?;
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::vault_inventory::CACHED_MANIFEST_SQL
+    );
+    let mut query = db.connection.prepare(&sql)?;
+    let plans = query
+        .query_map(params![1, 2, 77, 1, "fixture", 42], |row| {
+            row.get::<_, String>(3)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        plans
+            .iter()
+            .filter(|line| line.contains("PRIMARY KEY"))
+            .count()
+            >= 4,
+        "{plans:?}"
+    );
+    assert!(
+        !plans
+            .iter()
+            .any(|line| line.contains("SCAN ") || line.contains("TEMP B-TREE")),
+        "{plans:?}"
+    );
     Ok(())
 }

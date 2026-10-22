@@ -9,7 +9,7 @@ description = "SQLite persistence adapter for TeleArk"
 
 [dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-teleark-core = { version = "=0.5.19", path = "../teleark-core" }
+teleark-core = { version = "=0.5.20", path = "../teleark-core" }
 zeroize = "1.8.2"
 
 [dev-dependencies]
