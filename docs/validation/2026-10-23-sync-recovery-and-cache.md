@@ -73,10 +73,9 @@ fixtures pass; 29 Python Store/release tests pass.
 
 The local release-asset assembly fixture cannot run under the host's Bash 3:
 its existing associative-array/GNU-find requirements are Linux CI scope. This
-is not counted as a local pass. The release workflow must pass that gate before
-publication. GitHub API credentials cannot dispatch a workflow or create a PR,
-although authenticated Git branch pushes work. The release-tag push uses the
-existing gated workflow; publication evidence will be recorded after completion.
+is not counted as a local pass. The tagged Linux CI quality job subsequently passed this gate. GitHub API
+credentials cannot dispatch a workflow, create a PR or rerun a job, although
+authenticated Git branch pushes work. Publication remains gated as described below.
 
 After the Mac was unlocked, native English/light synthetic previews were
 inspected at 900×600 and in actual native full-screen mode (1440×900 logical
@@ -90,3 +89,29 @@ process was closed afterward; only the original real instance remained running.
 The user's real instance has not been restarted, reconfigured or migrated by
 this task. No real-account end-to-end speed measurement is claimed for the new
 release; deterministic operation counts establish the specified reuse behavior.
+
+## Tagged release attempt
+
+Annotated `v0.5.20` and `main` were pushed atomically to `beb5988`.
+[Tagged CI attempt 1](https://github.com/peppermintish/teleark/actions/runs/39845882949)
+completed with repository quality and every Windows/macOS/Linux package job
+successful. Native Linux tests pass (1,015 passed, 10 existing ignored), as do
+native Windows tests (997 passed, 10 existing ignored); platform totals differ
+because of existing conditional tests. Both native jobs also pass locked
+checking, strict Clippy, explicit Core/i18n and warning-denied documentation.
+
+The macOS native test job never received a runner and was canceled after repeated
+allocation attempts. Its annotations explicitly report hosted macOS ARM capacity
+constraints. This is a missing gate, not a test pass. GitHub Release publication
+and Store delivery were therefore skipped; no v0.5.20 GitHub Release exists yet.
+The seven package artifacts are CI outputs, not a published release asset set.
+The macOS universal package job succeeded, including its native signing checks,
+but does not replace the full native test job.
+
+The current API account's rerun request returned HTTP 403 requiring repository
+administration rights. The available browser session is signed out. A repository
+administrator must select **Re-run failed jobs** on the completed run to retry
+the canceled test and its downstream publication. Successful package jobs should
+be retained. No tag was moved, failed gate bypassed, credentials changed or paid
+runner enabled. Final release/asset verification remains outstanding until that
+retry succeeds.
