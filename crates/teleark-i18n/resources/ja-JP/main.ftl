@@ -1121,6 +1121,13 @@ upload-stop-after-current = 現在のファイルの完了後に停止
 transfer-batch-upload-name = アップロード · { $count } ファイル
 
 about-changelog-unreleased =
+    ## 0.5.19 · 必要なチャンネルだけを同期
+
+    - プッシュ更新を直接反映し、更新の欠落やリモートカーソルの進行があるチャンネルだけを復旧します。更新のないチャンネルの定期的な差分取得を廃止しました。
+    - 表示中のチャンネルと管理ストレージチャンネルは Telegram のポーリング間隔に従います。画面を閉じると通常の短周期ポーリングを停止します。
+    - 実行中の同期とリクエスト待機を区別し、対象チャンネルに小さな同期・待機アイコンを表示します。
+    - 既存のローカルデータ、自動移行、暗号化形式、サーバーの待機時間を維持します。
+
     ## 0.5.18 · 再起動をまたぐ自動同期
 
     - 起動時にチャンネルの進行状態と保存済みカーソルを照合し、すべてのキャッシュ済みチャンネルへの差分要求を避けます。画面移動や再接続後も増分更新と欠落の復旧を自動で行い、キャッシュを保持します。
@@ -1740,7 +1747,7 @@ sync-no-events = イベントはまだありません
 sync-older-events = 一部の古いアクティビティは表示されていません。
 sync-event-times-local = イベント日時 · 現地時間
 
-sync-silence-policy = チャンネルの更新が { $minutes } 分間届かない場合、復旧確認を行います。
+sync-silence-policy = アカウントの更新が { $minutes } 分間ない場合に一覧を照合します。表示中のチャンネルは Telegram のポーリング間隔に従います。
 channel-file-count = { $count } ファイル
 channel-select-all-compact = すべて選択
 channel-download-compact = ダウンロード
@@ -2099,3 +2106,5 @@ sync-server-wait = Telegram から待機が要求されました。キャッシ�
 sync-pacing-reason = Telegram の制限を減らすため、確認の間隔を空けています。リアルタイム更新は自動で続行します。
 sync-resume-at = 次回の確認：{ $time }
 sync-local-state-help = 保存済みの同期状態は保持されています。ディスクの空き容量とアクセス権を確認してから TeleArk を開き直してください。新しいバージョンで開いたライブラリの場合は、先に TeleArk を更新してください。
+
+channel-list-sync-status = { $name } · { $status }

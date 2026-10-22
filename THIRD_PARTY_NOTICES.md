@@ -304,3 +304,11 @@ headers are retained in `vendor/grammers-mtsender`. Source provenance, archive
 checksum and modifications are documented in `TELEARK_PATCH.md` there. Only
 numeric proxy host handling and resolver initialization error handling differ
 from the upstream implementation. No additional license exception is needed.
+
+## RustCrypto buffer utilities
+
+Release 0.5.19 updates the existing transitive `inout` dependency from yanked
+0.2.3 to compatible 0.2.5. RustCrypto's buffer utilities remain
+MIT OR Apache-2.0; no new license exception or copied implementation is added.
+The locked package includes its upstream license files. Upstream project:
+<https://github.com/RustCrypto/utils/tree/master/inout>.

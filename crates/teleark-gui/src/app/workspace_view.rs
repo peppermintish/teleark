@@ -49,6 +49,7 @@ impl SyncInspector {
             app.channel_sync_details
                 && app.channel_sync_snapshot.as_ref().is_some_and(|s| {
                     !s.active.is_empty()
+                        || !s.waiting.is_empty()
                         || s.managed_scan.as_ref().is_some_and(|s| s.active())
                         || matches!(
                             s.phase,

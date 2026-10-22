@@ -78,6 +78,7 @@ impl TeleArkApp {
             return;
         }
         self.app_lock.locked = true;
+        self.update_channel_subscription();
         self.app_lock.generation = self.app_lock.generation.wrapping_add(1);
         self.app_lock.show_proxy = false;
         self.app_lock.message = None;
@@ -219,6 +220,7 @@ impl TeleArkApp {
                                     || app.app_lock.record.is_none()
                                 {
                                     app.app_lock.locked = false;
+                                    app.update_channel_subscription();
                                 }
                                 app.app_lock.show_proxy = false;
                                 app.app_lock.message =

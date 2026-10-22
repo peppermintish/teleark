@@ -1061,6 +1061,9 @@ impl TeleArkApp {
             self.library_query_generation = self.library_query_generation.wrapping_add(1);
         }
         self.page = page;
+        if page != Page::Channel {
+            self.update_channel_subscription();
+        }
         self.start_managed_status_clock(cx);
         self.show_upload = false;
         if page == Page::Account {

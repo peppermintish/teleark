@@ -1121,6 +1121,13 @@ upload-stop-after-current = 完成当前文件后停止
 transfer-batch-upload-name = 批量上传 · { $count } 个文件
 
 about-changelog-unreleased =
+    ## 0.5.19 · 按需同步频道
+
+    - 直接应用推送更新，仅恢复存在更新缺口或远端游标已推进的频道，不再定时遍历无更新的频道获取差分。
+    - 正在查看的频道和托管存储频道遵循 Telegram 返回的轮询间隔；离开普通频道后停止短轮询。
+    - 区分正在执行的同步与请求排队等待，并在相关频道旁显示小型同步或等待图标。
+    - 保留现有本地数据、自动迁移、加密格式和服务器冷却时间。
+
     ## 0.5.18 · 跨重启自动同步
 
     - 启动时将频道进度与已保存的游标核对，避免对所有缓存频道强制请求差异。导航和重新连接时仍自动接收增量更新并恢复缺口，保留缓存数据。
@@ -1740,7 +1747,7 @@ sync-no-events = 暂无事件
 sync-older-events = 部分较早的活动已不再显示。
 sync-event-times-local = 事件时间 · 本地时间
 
-sync-silence-policy = 连续 { $minutes } 分钟未收到频道更新时进行恢复核对。
+sync-silence-policy = 账号连续 { $minutes } 分钟没有更新后核对频道列表。正在查看的频道遵循 Telegram 返回的轮询间隔。
 channel-file-count = { $count } 个文件
 channel-select-all-compact = 全选
 channel-download-compact = 下载
@@ -2099,3 +2106,5 @@ sync-server-wait = Telegram 要求暂时等待。缓存文件仍可使用。同�
 sync-pacing-reason = 检查会分散执行，以减少 Telegram 限流。实时更新仍会自动接收。
 sync-resume-at = 下次检查：{ $time }
 sync-local-state-help = 已保留保存的同步状态。请检查磁盘空间和访问权限，然后重新打开 TeleArk。如果此资料库曾由较新版本打开，请先更新 TeleArk。
+
+channel-list-sync-status = { $name } · { $status }

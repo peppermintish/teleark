@@ -871,3 +871,5 @@ sync-server-wait = Telegram solicitó una pausa. Los archivos en caché siguen d
 sync-pacing-reason = Las comprobaciones se espacian para reducir los límites de Telegram. Las actualizaciones en directo continúan automáticamente.
 sync-resume-at = Próxima comprobación: { $time }
 sync-local-state-help = El estado de sincronización guardado se conserva. Comprueba el espacio y los permisos y vuelve a abrir TeleArk. Si una aplicación más reciente abrió esta biblioteca, actualiza TeleArk primero.
+
+channel-list-sync-status = { $name } · { $status }

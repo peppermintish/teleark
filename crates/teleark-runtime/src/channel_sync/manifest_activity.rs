@@ -144,6 +144,7 @@ impl ChannelSync {
                             snapshot.dropped_events = snapshot.dropped_events.saturating_add(1);
                         }
                         snapshot.events.push_back(ChannelSyncEvent {
+                            retry_at: None,
                             phase: scan.phase,
                             chat_id: Some(chat),
                             at: scan.last_activity,
@@ -187,6 +188,7 @@ mod tests {
             sources: Mutex::new((0, Arc::new(Vec::new()))),
             history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(2),
+            viewed_id: AtomicI64::new(0),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),

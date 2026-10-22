@@ -1,3 +1,4 @@
+# RustCrypto inout 0.2.5 replaces yanked 0.2.3; MIT OR Apache-2.0, no exception.
 # Proxy and pure Rust media metadata dependencies use the existing license policy.
 # nom-exif 3.8.0 supplies an MIT LICENSE file; Lofty 0.24.0 is MIT OR Apache-2.0.
 # The vendored grammers-mtsender 0.11.0 numeric-proxy fix retains MIT OR Apache-2.0.

@@ -56,7 +56,7 @@ pub use transfer_rate::TransferRate;
 pub use transfer_updates::{TransferSnapshotView, TransferSubscription};
 mod channel_transfer;
 pub use channel_sync::{
-    CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES, ChannelChanges, ChannelDelta, ChannelSync,
+    CHANNEL_DIRECTORY_RECONCILIATION_MINUTES, ChannelChanges, ChannelDelta, ChannelSync,
     ChannelSyncEvent, ChannelSyncPhase, ChannelSyncSnapshot, ChannelSyncSubscription,
     HistoryStatus, ManagedScanObserver, ManagedScanStatus,
 };

@@ -32,6 +32,7 @@ pub(super) fn shared() -> Arc<Shared> {
         sources: Mutex::new((0, Arc::new(Vec::new()))),
         history: Mutex::new(history::Requests::default()),
         managed_id: AtomicI64::new(0),
+        viewed_id: AtomicI64::new(0),
         observation: AtomicU64::new(0),
         manifest_generation: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -113,6 +114,7 @@ fn page(pts: i32) -> ChannelReadPage {
     ChannelReadPage {
         pts: Some(pts),
         complete: true,
+        timeout_seconds: None,
         history_gap: false,
         files: vec![],
         removed: vec![],
@@ -1331,44 +1333,40 @@ fn silence_recovery_is_postponed_by_delivery_and_metadata_hints_are_coalesced() 
 }
 
 #[test]
-fn quiet_channels_recover_independently_and_restart_uses_durable_observations() {
+fn only_subscribed_channels_poll_and_blocked_subscriptions_do_not_spin() {
     let (_temp, _library, mut scheduler) = setup();
     let now = Instant::now();
+    scheduler.queue.clear();
     scheduler
         .jobs
         .get_mut(&2)
         .expect("quiet channel")
-        .quiet_deadline = Some(now);
-    scheduler
-        .jobs
-        .get_mut(&3)
-        .expect("busy channel")
-        .quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
-    scheduler.recover_quiet_channels(now);
-    assert_eq!(scheduler.pop(now), Some(2));
-    assert!(scheduler.jobs[&2].force);
-    assert!(!scheduler.jobs[&3].force);
-    assert_eq!(scheduler.pop(now), None);
-    for (saved, expected) in [
-        (None, Duration::ZERO),
-        (Some(0), Duration::ZERO),
-        (Some(599_000), Duration::from_secs(419)),
-        (Some(600_000), UPDATE_SILENCE_RECOVERY),
-        (Some(600_001), Duration::ZERO),
-    ] {
-        assert_eq!(restored_quiet_deadline(saved, 600_000, now), now + expected);
-    }
-    // A blocked dependency is not polled repeatedly by the fallback timer.
-    scheduler.in_flight.insert(2);
-    scheduler
-        .jobs
-        .get_mut(&2)
-        .expect("blocked channel")
-        .quiet_deadline = Some(now);
+        .poll_deadline = Some(now);
+    scheduler.poll_subscriptions(now + Duration::from_secs(86400));
     assert_eq!(
-        scheduler.quiet_deadline(),
-        Some(now + UPDATE_SILENCE_RECOVERY)
+        scheduler.pop(now),
+        None,
+        "quiet background channels do not poll"
     );
+    scheduler.command(Command::View(Some(2)));
+    assert_eq!(scheduler.pop(now), Some(2));
+    let job = scheduler.jobs.get_mut(&2).expect("viewed channel");
+    job.force = false;
+    job.poll_deadline = Some(now + Duration::from_secs(30));
+    scheduler.poll_subscriptions(now + Duration::from_secs(29));
+    assert_eq!(scheduler.pop(now), None);
+    scheduler.poll_subscriptions(now + Duration::from_secs(30));
+    assert_eq!(scheduler.pop(now + Duration::from_secs(30)), Some(2));
+    scheduler.jobs.get_mut(&2).expect("job").poll_deadline = Some(now);
+    scheduler.in_flight.insert(2);
+    assert_eq!(
+        scheduler.poll_deadline(),
+        None,
+        "blocked work has no timer loop"
+    );
+    scheduler.in_flight.clear();
+    scheduler.command(Command::View(None));
+    assert_eq!(scheduler.poll_deadline(), None, "leaving stops polling");
 }
 
 #[test]
@@ -1386,4 +1384,161 @@ fn message_pts_alone_does_not_rebuild_source_metadata() {
     publish_sources(&shared, &sources);
     assert!(subscription.has_changed().expect("rename event"));
     subscription.borrow_and_update();
+}
+
+#[test]
+fn final_difference_timeout_schedules_only_subscriptions_and_pushes_preserve_it() {
+    for (timeout, seconds) in [(Some(30), 30), (None, 1), (Some(0), 1)] {
+        let (_temp, library, mut scheduler) = setup();
+        let shared = shared();
+        let now = Instant::now();
+        *shared.pacing.lock().expect("budget") =
+            pacing::RequestBudget::default().with_clock(Arc::new(move || now));
+        scheduler.command(Command::View(Some(2)));
+        shared.viewed_id.store(2, Ordering::Release);
+        let mut response = page(50);
+        response.timeout_seconds = timeout;
+        let source = Source {
+            calls: RefCell::new(vec![]),
+            page: RefCell::new(Some(response)),
+        };
+        let job = scheduler.jobs.get_mut(&2).expect("viewed");
+        step(&source, &library, 1, 2, job, &shared, Default::default()).expect("difference");
+        let deadline = now + Duration::from_secs(seconds);
+        assert_eq!(job.poll_deadline, Some(deadline));
+        job.head = Some(51);
+        job.pushes.push_back(push(51, false));
+        step(&source, &library, 1, 2, job, &shared, Default::default()).expect("direct push");
+        assert_eq!(
+            source.calls.borrow().len(),
+            1,
+            "contiguous push needs no RPC"
+        );
+        assert_eq!(
+            job.poll_deadline,
+            Some(deadline),
+            "pushes do not postpone subscription renewal"
+        );
+        scheduler.command(Command::View(None));
+        assert_eq!(scheduler.jobs[&2].poll_deadline, None);
+    }
+}
+
+#[test]
+fn discovery_after_view_registration_starts_subscription_and_only_changed_heads_recover() {
+    let (_temp, _library, mut scheduler) = setup();
+    scheduler.command(Command::View(Some(4)));
+    scheduler.update_sources(vec![chat(2), chat(3), chat(4)]);
+    assert!(scheduler.jobs[&4].viewed);
+    assert!(scheduler.jobs[&4].poll_requested);
+    scheduler.command(Command::View(None));
+    scheduler.queue.clear();
+    let mut changed = chat(3);
+    changed.sync_pts = Some(51);
+    scheduler.update_sources(vec![chat(2), changed, chat(4)]);
+    assert!(!needed(&scheduler.jobs[&2]));
+    assert!(needed(&scheduler.jobs[&3]));
+}
+
+#[test]
+fn admission_waits_are_visible_bounded_and_never_count_as_active_work() {
+    let shared = shared();
+    publish(&shared, ChannelSyncPhase::Receiving, Some(2), None, None);
+    publish(
+        &shared,
+        ChannelSyncPhase::Pacing,
+        Some(3),
+        None,
+        Some(Instant::now()),
+    );
+    {
+        let snapshot = shared.snapshot.lock().expect("snapshot");
+        assert_eq!(snapshot.active.len(), 1);
+        assert_eq!(snapshot.active[0].chat_id, Some(2));
+        assert_eq!(snapshot.waiting.len(), 1);
+        assert_eq!(snapshot.waiting[0].chat_id, Some(3));
+    }
+    publish(
+        &shared,
+        ChannelSyncPhase::RateLimited,
+        Some(2),
+        None,
+        Some(Instant::now()),
+    );
+    assert!(shared.snapshot.lock().expect("snapshot").active.is_empty());
+    publish(&shared, ChannelSyncPhase::Receiving, Some(3), None, None);
+    {
+        let snapshot = shared.snapshot.lock().expect("snapshot");
+        assert_eq!(snapshot.active.len(), 1);
+        assert_eq!(snapshot.waiting.len(), 1);
+    }
+    publish_completed(&shared, Some(3));
+    {
+        let snapshot = shared.snapshot.lock().expect("remaining wait");
+        assert_eq!(snapshot.phase, ChannelSyncPhase::RateLimited);
+        assert!(
+            snapshot.retry_at.is_some(),
+            "completion of another channel retains the known wait deadline"
+        );
+    }
+    publish(&shared, ChannelSyncPhase::Cancelled, Some(2), None, None);
+    let snapshot = shared.snapshot.lock().expect("snapshot");
+    assert!(snapshot.active.is_empty());
+    assert!(snapshot.waiting.is_empty());
+}
+
+#[test]
+fn closed_subscription_skips_queued_rpc_but_keeps_actual_gap_recovery() {
+    let (_temp, library, mut scheduler) = setup();
+    let shared = shared();
+    scheduler.command(Command::View(Some(2)));
+    shared.viewed_id.store(3, Ordering::Release); // newer view arrives while a worker waits
+    let source = Source {
+        calls: RefCell::new(vec![]),
+        page: RefCell::new(None),
+    };
+    let job = scheduler.jobs.get_mut(&2).expect("old view");
+    step(&source, &library, 1, 2, job, &shared, Default::default()).expect("closed poll");
+    assert!(source.calls.borrow().is_empty());
+    assert!(!job.poll_requested);
+    assert_eq!(job.poll_deadline, None);
+    job.force = true; // independent missing-update evidence still needs recovery
+    *source.page.borrow_mut() = Some(page(51));
+    step(&source, &library, 1, 2, job, &shared, Default::default()).expect("gap recovery");
+    assert_eq!(source.calls.borrow().len(), 1);
+    assert_eq!(job.state.as_ref().expect("state").pts, 51);
+    assert_eq!(job.poll_deadline, None);
+}
+
+#[test]
+fn latest_view_survives_saturated_commands_and_consumed_wake_tokens() {
+    let shared = shared();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender
+        .send(Command::Prioritize(2))
+        .expect("fill command admission");
+    let sync = ChannelSync {
+        inner: Arc::new(Owner {
+            sender,
+            shared: shared.clone(),
+            join: Mutex::new(None),
+            worker: thread::current(),
+        }),
+    };
+    for id in 2..200 {
+        sync.view_channel(Some(id)).expect("coalesced view");
+    }
+    thread::park_timeout(Duration::ZERO); // consume the edge; the demand survives
+    assert_eq!(desired_view(&shared), Some(199));
+    sync.view_channel(None).expect("coalesced close");
+    thread::park_timeout(Duration::ZERO);
+    assert_eq!(desired_view(&shared), None);
+    assert!(matches!(
+        receiver.recv().expect("original command"),
+        Command::Prioritize(2)
+    ));
+    assert!(
+        receiver.try_recv().is_err(),
+        "view changes never fill the command queue"
+    );
 }

@@ -1,5 +1,5 @@
-//! Account-owned channel synchronization. Selecting a source changes priority,
-//! never freshness. All public snapshots are local and cheap to read.
+//! Account-owned channel synchronization with targeted gap recovery and
+//! server-timed subscriptions for viewed and managed channels. All public snapshots are local and cheap to read.
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
@@ -33,10 +33,10 @@ pub use manifest_activity::{ManagedScanObserver, ManagedScanStatus};
 const MAX_SOURCES: usize = 10_000;
 const EVENT_CAPACITY: usize = 128;
 const COMMAND_CAPACITY: usize = 64;
-/// Delivery-silence policy shared with frontend explanations; this is not a UI timer.
-pub const CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES: u64 = 7;
-const UPDATE_SILENCE_RECOVERY: Duration =
-    Duration::from_secs(CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES * 60);
+/// Account directory reconciliation, independent of channel subscription polling.
+pub const CHANNEL_DIRECTORY_RECONCILIATION_MINUTES: u64 = 7;
+const DIRECTORY_RECONCILIATION: Duration =
+    Duration::from_secs(CHANNEL_DIRECTORY_RECONCILIATION_MINUTES * 60);
 type SyncClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type SyncEntropy = Arc<dyn Fn(i64, u32) -> u64 + Send + Sync>;
 
@@ -73,11 +73,33 @@ pub enum ChannelSyncPhase {
     Cancelled,
 }
 
+impl ChannelSyncPhase {
+    /// Work executing now; admission and server waits have separate presentation.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::ManifestReading
+                | Self::ManifestReceiving
+                | Self::ManifestVerifying
+                | Self::ReadingLocal
+                | Self::Discovering
+                | Self::Seeding
+                | Self::History
+                | Self::CheckingPts
+                | Self::PollingDifferences
+                | Self::Receiving
+                | Self::Persisting
+                | Self::Verifying
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChannelSyncEvent {
     pub phase: ChannelSyncPhase,
     pub chat_id: Option<i64>,
     pub at: Instant,
+    pub retry_at: Option<Instant>,
     pub failure: Option<ApplicationErrorKind>,
 }
 
@@ -98,6 +120,8 @@ pub struct ChannelSyncSnapshot {
     pub data_revision: u64,
     pub events: VecDeque<ChannelSyncEvent>,
     pub active: Vec<ChannelSyncEvent>,
+    /// Retained workers waiting for request admission; never active network work.
+    pub waiting: Vec<ChannelSyncEvent>,
     pub dropped_events: u64,
     pub overflow_signals: u64,
     pub managed_chat_id: Option<i64>,
@@ -123,7 +147,9 @@ impl ChannelSyncSnapshot {
             committed_pages: 0,
             data_revision: 0,
             active: Vec::new(),
+            waiting: Vec::new(),
             events: VecDeque::from([ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Queued,
                 chat_id: None,
                 at: now,
@@ -158,6 +184,7 @@ impl ChannelSyncSnapshot {
         self.phase_started = now;
         self.last_activity = now;
         self.record_event(ChannelSyncEvent {
+            retry_at,
             phase,
             chat_id,
             at: now,
@@ -240,6 +267,7 @@ struct Shared {
     sources: Mutex<(u64, Arc<Vec<TelegramChatSummary>>)>,
     history: Mutex<history::Requests>,
     managed_id: AtomicI64,
+    viewed_id: AtomicI64,
     observation: AtomicU64,
     manifest_generation: AtomicU64,
     snapshot: Mutex<ChannelSyncSnapshot>,
@@ -259,6 +287,7 @@ struct Owner {
 enum Command {
     Sources(Vec<TelegramChatSummary>),
     Prioritize(i64),
+    View(Option<i64>),
     Watch(i64),
     Acknowledge(i64, u64),
     History(i64),
@@ -328,6 +357,7 @@ impl ChannelSync {
             sources: Mutex::new((0, Arc::new(Vec::new()))),
             history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(0),
+            viewed_id: AtomicI64::new(0),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
@@ -433,8 +463,20 @@ impl ChannelSync {
     ) -> Result<(), ApplicationError> {
         self.command(Command::Acknowledge(chat, through))
     }
-    /// Only promotes work already known to be necessary; a clean channel
-    /// remains clean even after repeated selection.
+    /// Updates the visible channel subscription. Closing the view stops short polling.
+    pub fn view_channel(&self, chat: Option<i64>) -> Result<(), ApplicationError> {
+        if self.is_stopped() {
+            return Err(ApplicationError::new(ApplicationErrorKind::Cancelled));
+        }
+        self.inner
+            .shared
+            .viewed_id
+            .store(chat.unwrap_or(0), Ordering::Release);
+        self.inner.worker.unpark();
+        Ok(())
+    }
+
+    /// Only promotes work already known to be necessary; never subscribes a view.
     pub fn prioritize(&self, chat: i64) -> Result<(), ApplicationError> {
         self.command(Command::Prioritize(chat))
     }
@@ -501,6 +543,7 @@ impl ChannelSync {
                 snapshot.transition(phase, chat, None, None);
             } else {
                 snapshot.record_event(ChannelSyncEvent {
+                    retry_at: None,
                     phase,
                     chat_id: chat,
                     at: Instant::now(),
@@ -569,6 +612,7 @@ pub(crate) struct ChannelReadPage {
     pub removed: Vec<i64>,
     pub pts: Option<i32>,
     pub complete: bool,
+    pub timeout_seconds: Option<u32>,
     pub history_gap: bool,
     pub before: Option<i64>,
     pub edited: Vec<i64>,
@@ -590,7 +634,9 @@ impl From<ApplicationError> for ChannelSyncFailure {
 
 #[derive(Clone)]
 struct Job {
-    quiet_deadline: Option<Instant>,
+    poll_deadline: Option<Instant>,
+    viewed: bool,
+    poll_requested: bool,
     pushes: VecDeque<teleark_telegram::ChannelPush>,
     catalog_ready: Option<bool>,
     watch_loaded: bool,
@@ -761,6 +807,7 @@ struct Scheduler {
     queue: VecDeque<i64>,
     pending_retry_count: usize,
     preferred: Option<i64>,
+    viewed: Option<i64>,
     preferred_turns: u8,
     source_failure: Option<ApplicationErrorKind>,
     overflow_count: u64,
@@ -768,31 +815,36 @@ struct Scheduler {
 }
 
 impl Scheduler {
-    fn recover_quiet_channels(&mut self, now: Instant) {
+    fn poll_subscriptions(&mut self, now: Instant) {
         let due: Vec<_> = self
             .jobs
             .iter()
             .filter_map(|(id, job)| {
                 (!job.paused
+                    && (job.viewed || job.catalog_ready.is_some())
                     && !self.in_flight.contains(id)
-                    && job.quiet_deadline.is_some_and(|at| at <= now))
+                    && job.poll_deadline.is_some_and(|at| at <= now))
                 .then_some(*id)
             })
             .collect();
         for id in due {
             if let Some(job) = self.jobs.get_mut(&id) {
-                job.force = true;
-                job.quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
+                job.poll_requested = true;
+                job.poll_deadline = None;
             }
             self.enqueue(id);
         }
     }
 
-    fn quiet_deadline(&self) -> Option<Instant> {
+    fn poll_deadline(&self) -> Option<Instant> {
         self.jobs
             .iter()
-            .filter(|(id, job)| !job.paused && !self.in_flight.contains(id))
-            .filter_map(|(_, job)| job.quiet_deadline)
+            .filter(|(id, job)| {
+                !job.paused
+                    && (job.viewed || job.catalog_ready.is_some())
+                    && !self.in_flight.contains(id)
+            })
+            .filter_map(|(_, job)| job.poll_deadline)
             .min()
     }
 
@@ -804,7 +856,9 @@ impl Scheduler {
                 (
                     c.id,
                     Job {
-                        quiet_deadline: None,
+                        poll_deadline: None,
+                        viewed: false,
+                        poll_requested: false,
                         pushes: VecDeque::new(),
                         catalog_ready: None,
                         watch_loaded: false,
@@ -827,6 +881,7 @@ impl Scheduler {
             jobs,
             pending_retry_count: 0,
             preferred: None,
+            viewed: None,
             preferred_turns: 0,
             source_failure: None,
             overflow_count: 0,
@@ -868,7 +923,9 @@ impl Scheduler {
                 self.jobs.insert(
                     chat.id,
                     Job {
-                        quiet_deadline: None,
+                        poll_deadline: None,
+                        viewed: false,
+                        poll_requested: false,
                         pushes: VecDeque::new(),
                         catalog_ready: None,
                         watch_loaded: false,
@@ -888,6 +945,13 @@ impl Scheduler {
             } else if let Some(pts) = chat.sync_pts {
                 self.hint(chat.id, pts);
             }
+        }
+        for (id, job) in &mut self.jobs {
+            let viewed = Some(*id) == self.viewed;
+            if viewed && !job.viewed {
+                job.poll_requested = true;
+            }
+            job.viewed = viewed;
         }
         removed
     }
@@ -937,8 +1001,33 @@ impl Scheduler {
         }
     }
     fn command(&mut self, command: Command) {
+        if let Command::View(viewed) = command {
+            if self.viewed == viewed {
+                return;
+            }
+            self.viewed = viewed;
+            for (id, job) in &mut self.jobs {
+                job.viewed = Some(*id) == viewed;
+                if !job.viewed && job.catalog_ready.is_none() {
+                    job.poll_deadline = None;
+                    job.poll_requested = false;
+                }
+            }
+            if let Some(id) = viewed {
+                self.preferred = Some(id);
+                if let Some(job) = self.jobs.get_mut(&id) {
+                    job.poll_requested = true;
+                    job.poll_deadline = None;
+                    if !job.paused {
+                        self.enqueue(id);
+                    }
+                }
+            }
+            return;
+        }
         let id = match command {
-            Command::Watch(_)
+            Command::View(_)
+            | Command::Watch(_)
             | Command::Acknowledge(_, _)
             | Command::RefreshDirectory
             | Command::CancelDirectory
@@ -985,6 +1074,7 @@ impl Scheduler {
                 self.enqueue(id);
             }
             Command::Prioritize(_)
+            | Command::View(_)
             | Command::Sources(_)
             | Command::Watch(_)
             | Command::Acknowledge(_, _)
@@ -1147,10 +1237,15 @@ fn handle_command(
             for (id, job) in &mut scheduler.jobs {
                 if *id != chat && job.catalog_ready.is_some() {
                     job.catalog_ready = None;
+                    if !job.viewed {
+                        job.poll_deadline = None;
+                    }
                 }
             }
             let job = scheduler.jobs.entry(chat).or_insert_with(|| Job {
-                quiet_deadline: None,
+                poll_deadline: None,
+                viewed: false,
+                poll_requested: false,
                 head: None,
                 state: None,
                 force: true,
@@ -1168,6 +1263,7 @@ fn handle_command(
             // Registration belongs to the retryable job, so a temporary disk
             // failure cannot silently disable protection or advance its PTS.
             job.catalog_ready = Some(false);
+            job.force = true;
             job.watch_loaded = false;
             job.paused = false;
             if job.rate_limited && job.retry_at.is_some() {
@@ -1243,6 +1339,11 @@ fn apply_source_snapshot(
         let current_was_removed = snapshot
             .chat_id
             .is_some_and(|chat| removed.binary_search(&chat).is_ok());
+        snapshot.waiting.retain(|activity| {
+            activity
+                .chat_id
+                .is_none_or(|chat| removed.binary_search(&chat).is_err())
+        });
         snapshot.active.retain(|activity| {
             activity
                 .chat_id
@@ -1250,6 +1351,7 @@ fn apply_source_snapshot(
         });
         for chat in &removed {
             snapshot.record_event(ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Cancelled,
                 chat_id: Some(*chat),
                 at: Instant::now(),
@@ -1281,6 +1383,7 @@ fn needed(job: &Job) -> bool {
             || state.gap_pending
             || job.catalog_ready == Some(false)
             || job.force
+            || job.poll_requested
             || job.head.is_some_and(|head| head > state.pts)
             || (job.history && !state.history_exhausted)
     })
@@ -1301,19 +1404,22 @@ fn publish(
     retry_at: Option<Instant>,
 ) {
     if let Ok(mut snapshot) = shared.snapshot.lock() {
-        let running = matches!(
-            phase,
-            ChannelSyncPhase::Pacing
-                | ChannelSyncPhase::ReadingLocal
-                | ChannelSyncPhase::Discovering
-                | ChannelSyncPhase::Seeding
-                | ChannelSyncPhase::History
-                | ChannelSyncPhase::CheckingPts
-                | ChannelSyncPhase::PollingDifferences
-                | ChannelSyncPhase::Receiving
-                | ChannelSyncPhase::Persisting
-                | ChannelSyncPhase::Verifying
-        );
+        let running = phase.is_active();
+        let waiting = failure.is_none()
+            && matches!(
+                phase,
+                ChannelSyncPhase::Pacing | ChannelSyncPhase::RateLimited
+            );
+        snapshot.waiting.retain(|activity| activity.chat_id != chat);
+        if waiting && snapshot.waiting.len() < 6 {
+            snapshot.waiting.push(ChannelSyncEvent {
+                retry_at,
+                phase,
+                chat_id: chat,
+                at: Instant::now(),
+                failure,
+            });
+        }
         snapshot
             .active
             .retain(|activity| activity.chat_id != chat || activity.phase == phase && running);
@@ -1325,6 +1431,7 @@ fn publish(
             && snapshot.active.len() < 6
         {
             snapshot.active.push(ChannelSyncEvent {
+                retry_at: None,
                 phase,
                 chat_id: chat,
                 at: Instant::now(),
@@ -1336,6 +1443,13 @@ fn publish(
             snapshot.phase = activity.phase;
             snapshot.chat_id = activity.chat_id;
             snapshot.phase_started = activity.at;
+        } else if failure.is_none()
+            && let Some(wait) = snapshot.waiting.first().cloned()
+        {
+            snapshot.phase = wait.phase;
+            snapshot.chat_id = wait.chat_id;
+            snapshot.phase_started = wait.at;
+            snapshot.retry_at = wait.retry_at;
         }
         if changed {
             shared.changes.send_replace(());
@@ -1350,6 +1464,7 @@ fn publish_cancelled_retries(shared: &Shared, cancelled: &[i64]) {
     if let Ok(mut snapshot) = shared.snapshot.lock() {
         for chat_id in cancelled {
             snapshot.record_event(ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Cancelled,
                 chat_id: Some(*chat_id),
                 at: Instant::now(),
@@ -1412,19 +1527,8 @@ fn source_reconciliation_deadline(
     if pending {
         last_check + Duration::from_secs(1)
     } else {
-        last_check.max(last_delivery) + UPDATE_SILENCE_RECOVERY
+        last_check.max(last_delivery) + DIRECTORY_RECONCILIATION
     }
-}
-
-fn restored_quiet_deadline(saved: Option<i64>, wall_now: i64, now: Instant) -> Instant {
-    // A future checkpoint indicates clock rollback; recheck immediately rather
-    // than postponing recovery indefinitely. Missing/old checkpoints are due.
-    let age = saved
-        .filter(|at| *at <= wall_now)
-        .map(|at| Duration::from_millis(wall_now.saturating_sub(at) as u64));
-    now + age.map_or(Duration::ZERO, |age| {
-        UPDATE_SILENCE_RECOVERY.saturating_sub(age)
-    })
 }
 
 fn publish_sources(shared: &Shared, chats: &[TelegramChatSummary]) {
@@ -1442,6 +1546,11 @@ fn publish_sources(shared: &Shared, chats: &[TelegramChatSummary]) {
     if changed {
         shared.changes.send_replace(());
     }
+}
+
+fn desired_view(shared: &Shared) -> Option<i64> {
+    let id = shared.viewed_id.load(Ordering::Acquire);
+    (id != 0).then_some(id)
 }
 
 fn run<T: AccountSource>(
@@ -1548,6 +1657,7 @@ fn run<T: AccountSource>(
     let mut executions = execution::Executions::new();
     let mut metadata_ready = false;
     while !shared.stop.load(Ordering::Acquire) {
+        scheduler.command(Command::View(desired_view(&shared)));
         while let Some(completion) = executions.take() {
             let was_waiting_before_completion = scheduler.is_waiting_retry(completion.id);
             let removed_active = shared
@@ -1621,6 +1731,8 @@ fn run<T: AccountSource>(
                     if completion.revision != current_revision {
                         continue;
                     }
+                    // Publish completion only after recording its scheduling baseline.
+                    last_check = clock();
                     match result {
                         Ok(chats) => {
                             metadata_ready = true;
@@ -1675,7 +1787,6 @@ fn run<T: AccountSource>(
                             );
                         }
                     }
-                    last_check = clock();
                 }
                 execution::Outcome::Channel(mut completed, result) => {
                     let id = completion.id;
@@ -1683,6 +1794,9 @@ fn run<T: AccountSource>(
                     if let Ok(mut snapshot) = shared.snapshot.lock() {
                         snapshot
                             .active
+                            .retain(|activity| activity.chat_id != Some(id));
+                        snapshot
+                            .waiting
                             .retain(|activity| activity.chat_id != Some(id));
                     }
                     if let Some(pending) = scheduler.jobs.get_mut(&id) {
@@ -1702,8 +1816,15 @@ fn run<T: AccountSource>(
                                     scheduler.overflow_count.saturating_add(1);
                             }
                             completed.head = completed.head.max(pending.head);
-                            completed.quiet_deadline =
-                                completed.quiet_deadline.max(pending.quiet_deadline);
+                            completed.viewed = pending.viewed;
+                            if pending.catalog_ready.is_none() {
+                                completed.catalog_ready = None;
+                            }
+                            if !completed.viewed && pending.catalog_ready.is_none() {
+                                completed.poll_deadline = None;
+                                completed.poll_requested = false;
+                            }
+                            completed.poll_requested |= pending.poll_requested;
                             completed.force |= pending.force;
                             completed.history |= pending.history;
                             if pending.catalog_ready.is_some() && completed.catalog_ready.is_none()
@@ -1964,29 +2085,21 @@ fn run<T: AccountSource>(
             last_delivery = clock();
         }
         for (id, pts) in hints.channels {
-            if pts > 0
-                && let Some(job) = scheduler.jobs.get_mut(&id)
-            {
-                job.quiet_deadline = Some(clock() + UPDATE_SILENCE_RECOVERY);
-            }
             source_refresh_pending |= !scheduler.jobs.contains_key(&id);
             scheduler.hint(id, pts);
         }
         source_refresh_pending |= hints.metadata_changed;
         if hints.reconcile_all {
             source_refresh_pending = true;
-            // A broken transport/overflow may have lost which channel changed.
-            // Keep local rows and recover from each committed PTS in the background.
-            for id in scheduler.jobs.keys().copied().collect::<Vec<_>>() {
-                scheduler.hint(id, 0);
-            }
+            // Reconcile remote heads first; only lagging channels need a difference.
+            // Channel-specific overflow hints still force their own durable recovery.
         }
         if executions.available(0)
             && (directory_retry.retry_at.is_some_and(|at| at <= clock())
                 || (directory_retry.retry_at.is_none()
                     && scheduler.source_failure.is_none()
                     && (clock().saturating_duration_since(last_check.max(last_delivery))
-                        >= UPDATE_SILENCE_RECOVERY
+                        >= DIRECTORY_RECONCILIATION
                         || (source_refresh_pending
                             && clock().saturating_duration_since(last_check)
                                 >= Duration::from_secs(1)))))
@@ -2115,7 +2228,7 @@ fn run<T: AccountSource>(
         }
         publish_pending_retry_count(&shared, scheduler.pending_retry_count);
         let now = clock();
-        scheduler.recover_quiet_channels(now);
+        scheduler.poll_subscriptions(now);
         if let Ok(mut journal) = shared.deltas.lock() {
             journal.retain_sources(&scheduler.jobs);
         }
@@ -2159,6 +2272,7 @@ fn run<T: AccountSource>(
                 Ok(()) => {
                     pending.pushes.clear();
                     pending.force = false;
+                    pending.poll_requested = false;
                     pending.history = false;
                     pending.history_request = None;
                     scheduler.in_flight.insert(id);
@@ -2252,7 +2366,7 @@ fn run<T: AccountSource>(
             });
             let deadline = retry_at
                 .into_iter()
-                .chain(scheduler.quiet_deadline())
+                .chain(scheduler.poll_deadline())
                 .chain(metadata_deadline)
                 .chain(source_probe_started.map(|at| at + Duration::from_secs(1)))
                 .min()
@@ -2266,7 +2380,9 @@ fn run<T: AccountSource>(
             // An acknowledged storage call can consume this thread's unpark
             // token. Check retained completion state after all such calls, not
             // just a wake edge, before sleeping for a server deadline.
-            if executions.has_completed() {
+            if executions.has_completed() || scheduler.viewed != desired_view(&shared) {
+                // An acknowledged storage call may consume a view-change wake,
+                // just as it can consume a completion wake. Retain both demands.
                 continue;
             }
             if let Some(deadline) = deadline {
@@ -2280,6 +2396,7 @@ fn run<T: AccountSource>(
     drop(executions);
     if let Ok(mut snapshot) = shared.snapshot.lock() {
         snapshot.active.clear();
+        snapshot.waiting.clear();
     }
     if let Some(signals) = signals
         && let Some(wake) = bound_waker
@@ -2396,26 +2513,10 @@ fn step(
                 reply,
             }
         })?);
-        let now = Instant::now();
-        let saved = job
-            .state
-            .as_ref()
-            .and_then(|state| state.last_synced_at_unix_ms);
-        job.quiet_deadline = Some(restored_quiet_deadline(
-            saved,
-            crate::system_time_unix_ms(std::time::SystemTime::now()).unwrap_or(0),
-            now,
-        ));
-        // Discovery has just supplied a remote head. An equal/newer committed
-        // cursor needs no catch-up RPC, even after a long time with the app closed.
-        // Missing PTS still uses the durable silence-recovery deadline.
-        if job
-            .head
-            .is_some_and(|head| head <= job.state.as_ref().map_or(0, |s| s.pts))
-        {
-            job.quiet_deadline = Some(now + UPDATE_SILENCE_RECOVERY);
-        } else {
-            job.force |= job.quiet_deadline.is_some_and(|deadline| deadline <= now);
+        // An unknown head requires one targeted check; age alone never fans out
+        // difference calls across unchanged channels.
+        if job.head.is_none() && job.state.as_ref().is_some_and(|state| state.revision > 0) {
+            job.force = true;
         }
     }
     if job.history
@@ -2476,7 +2577,7 @@ fn step(
         ChannelRead::History(None)
     } else if direct {
         ChannelRead::Push
-    } else if job.force || job.head.is_some_and(|pts| pts > state.pts) {
+    } else if job.force || job.poll_requested || job.head.is_some_and(|pts| pts > state.pts) {
         ChannelRead::Difference(state.pts.max(1))
     } else if job.catalog_ready == Some(false) {
         ChannelRead::ManagedManifests
@@ -2522,6 +2623,20 @@ fn step(
     {
         pacing::wait(shared, Some(chat), &cancellation)?;
     }
+    // A closed/replaced viewport must not start a short poll after waiting
+    // for admission. Genuine gap/history/managed work retains its own demand.
+    if job.poll_requested
+        && !job.force
+        && job.head.is_none_or(|head| head <= state.pts)
+        && matches!(read, ChannelRead::Difference(_))
+        && shared.managed_id.load(Ordering::Acquire) != chat
+        && shared.viewed_id.load(Ordering::Acquire) != chat
+    {
+        job.poll_requested = false;
+        job.viewed = false;
+        job.poll_deadline = None;
+        return Ok(());
+    }
     publish(
         shared,
         if bootstrap {
@@ -2551,6 +2666,7 @@ fn step(
             edited: push.edited,
             pts: Some(push.pts),
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
         }
@@ -2560,6 +2676,7 @@ fn step(
             removed: Vec::new(),
             pts: None,
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
             edited: Vec::new(),
@@ -2577,6 +2694,15 @@ fn step(
     };
     if cancellation.is_cancelled() || shared.stop.load(Ordering::Acquire) {
         return Err(ApplicationError::new(ApplicationErrorKind::Cancelled).into());
+    }
+    if matches!(read, ChannelRead::Difference(_)) {
+        job.poll_requested = false;
+    }
+    if matches!(read, ChannelRead::Difference(_)) && page.complete {
+        job.poll_deadline = (job.viewed || job.catalog_ready.is_some()).then(|| {
+            pacing::now(shared)
+                + Duration::from_secs(u64::from(page.timeout_seconds.unwrap_or(1).max(1)))
+        });
     }
     let mut next_force = job.force;
     match &read {
@@ -2663,7 +2789,6 @@ fn step(
             })?;
         state.last_synced_at_unix_ms = Some(at.max(state.last_synced_at_unix_ms.unwrap_or(0)));
         job.state = Some(state.clone());
-        job.quiet_deadline = Some(Instant::now() + UPDATE_SILENCE_RECOVERY);
         job.force = next_force;
         if let Some(id) = history_id {
             job.history = false;
@@ -2751,7 +2876,6 @@ fn step(
     }
     let caught_up = !next_force && job.head.is_none_or(|head| head <= state.pts);
     job.state = Some(state);
-    job.quiet_deadline = Some(Instant::now() + UPDATE_SILENCE_RECOVERY);
     job.force = next_force;
     if !bootstrap && matches!(read, ChannelRead::History(_)) {
         job.history = false;
@@ -2817,6 +2941,7 @@ mod tests {
             sources: Mutex::new((0, Arc::new(Vec::new()))),
             history: Mutex::new(history::Requests::default()),
             managed_id: AtomicI64::new(0),
+            viewed_id: AtomicI64::new(0),
             observation: AtomicU64::new(0),
             manifest_generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
@@ -2871,6 +2996,7 @@ mod tests {
             removed,
             pts,
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
             edited: Vec::new(),

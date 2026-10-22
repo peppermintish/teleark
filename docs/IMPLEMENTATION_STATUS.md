@@ -1,4 +1,12 @@
-# Implementation status — v0.5.18
+# Implementation status — v0.5.19
+
+## Version 0.5.19 · Targeted channel synchronization (2026-10-22)
+
+Runtime applies contiguous pushes directly, reconciles directory heads before account-wide gap recovery, and no longer forces every quiet ordinary channel through recurring difference checks. Viewed and managed channels retain Telegram’s returned polling timeout; latest-view demand is coalesced, queued closed-view polls are skipped, and stale completions cannot restore retired subscriptions. Durable PTS/history/repair state, server waits and reserved managed execution remain intact. [ADR 0068](adr/0068-targeted-channel-sync.md) records the scheduling and presentation contracts.
+
+Executing and admission-waiting workers have separate bounded projections. The shell counts executing channels only; the inspector retains waits and their timeline. Virtualized channel rows show compact sync/wait icons with complete localized phase labels/tooltips, shared row geometry and a reserved icon slot.
+
+SQLite remains read/write schema 26 with automatic upgrades 0–25 → 26, including skipped releases. Directory and cooldown codecs remain v1; encrypted file/manifest, key/recovery and transfer formats are unchanged. No new dependencies or license changes; the existing RustCrypto `inout` dependency advances from yanked 0.2.3 to compatible 0.2.5 (MIT OR Apache-2.0). Local release checks pass: 986 full-workspace tests (10 existing ignored), the final 68-test focused sync suite, locked checking, strict Clippy, formatting, explicit Core/i18n checks, warning-denied rustdoc, cargo-deny and all release-script fixtures. English/light Windows previews verify the 900×600 window and actual native full-screen mode, per-channel icons, honest active/waiting counts, accessible labels and independent inspector scrolling. See [targeted-sync validation](validation/2026-10-22-targeted-channel-sync.md) for scope and limitations. Publication requires the matching tag’s exact-commit native test/package gates.
 
 ## Version 0.5.18 · Automatic synchronization across restarts (2026-10-17)
 

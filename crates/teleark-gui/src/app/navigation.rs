@@ -53,8 +53,44 @@ impl SidebarItem for ChannelSidebarItem {
                 }
                 #[cfg(test)]
                 MATERIALIZED_CHANNELS.with(|count| count.set(count.get() + 1));
+                let phase = app.channel_row_sync_phase(self.chat_id);
+                let label = phase
+                    .map(|phase| {
+                        app.tr_with(
+                            "channel-list-sync-status",
+                            MessageArgs::new().with("name", chat.name.clone()).with(
+                                "status",
+                                app.tr(super::channel_sync::sync_phase_id(phase))
+                                    .to_string(),
+                            ),
+                        )
+                    })
+                    .unwrap_or_else(|| chat.name.clone().into());
                 Some(
                     components::list_navigation_button(id, chat.name.clone(), None)
+                        .child(div().w(theme::LIST_ICON_SIZE).flex_none().when_some(
+                            phase,
+                            |slot, phase| {
+                                slot.debug_selector(move || {
+                                    format!("channel-sync-indicator-{}", self.chat_id)
+                                })
+                                .child(
+                                    Icon::new(if phase.is_active() {
+                                        IconName::Redo2
+                                    } else {
+                                        IconName::Pause
+                                    })
+                                    .size(theme::LIST_ICON_SIZE)
+                                    .text_color(
+                                        if phase.is_active() {
+                                            theme::blue()
+                                        } else {
+                                            theme::text_secondary()
+                                        },
+                                    ),
+                                )
+                            },
+                        ))
                         .ghost()
                         .w_full()
                         .h(theme::ROW_HEIGHT)
@@ -62,8 +98,8 @@ impl SidebarItem for ChannelSidebarItem {
                         .line_height(theme::LIST_LINE_HEIGHT)
                         .justify_start()
                         .px_2()
-                        .tooltip(chat.name.clone())
-                        .accessibility_label(chat.name.clone())
+                        .tooltip(label.clone())
+                        .accessibility_label(label)
                         .when(app.selected_chat_id == Some(self.chat_id), |item| {
                             item.bg(theme::blue_soft()).text_color(theme::blue())
                         })
@@ -810,6 +846,79 @@ mod tests {
                 sync_pts: None,
             })
             .collect();
+    }
+
+    #[gpui_kit::test]
+    fn channel_indicators_distinguish_work_and_waits_without_changing_row_geometry(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (app, cx) = crate::app::test_support::preview_app(cx, Page::Channel);
+        cx.simulate_resize(gpui_kit::size(px(900.0), px(600.0)));
+        for fullscreen in [false, true] {
+            cx.update(|window, _| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            });
+            for phase in [
+                teleark_runtime::ChannelSyncPhase::Receiving,
+                teleark_runtime::ChannelSyncPhase::Pacing,
+                teleark_runtime::ChannelSyncPhase::RateLimited,
+                teleark_runtime::ChannelSyncPhase::Idle,
+            ] {
+                app.update(cx, |app, cx| {
+                    app.telegram_chats = (1..=200)
+                        .map(|id| TelegramChatSummary {
+                            id,
+                            name: format!("Archive {id}"),
+                            username: None,
+                            kind: TelegramChatKind::Channel,
+                            sync_pts: Some(50),
+                        })
+                        .collect();
+                    let mut snapshot = super::super::channel_sync::tests::fixture_snapshot();
+                    snapshot.managed_scan = None;
+                    snapshot.phase = phase;
+                    snapshot.chat_id = Some(1);
+                    snapshot.active.clear();
+                    snapshot.waiting.clear();
+                    let event = teleark_runtime::ChannelSyncEvent {
+                        retry_at: None,
+                        phase,
+                        chat_id: Some(1),
+                        at: std::time::Instant::now(),
+                        failure: None,
+                    };
+                    if phase.is_active() {
+                        snapshot.active.push(event);
+                    } else if phase != teleark_runtime::ChannelSyncPhase::Idle {
+                        snapshot.waiting.push(event);
+                    }
+                    app.channel_sync_snapshot = Some(snapshot);
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let row = cx
+                    .debug_bounds("channel-sidebar-row-1")
+                    .expect("channel row");
+                assert_eq!(row.size.height, theme::ROW_HEIGHT);
+                let indicator = cx.debug_bounds("channel-sync-indicator-1");
+                assert_eq!(
+                    indicator.is_some(),
+                    phase != teleark_runtime::ChannelSyncPhase::Idle
+                );
+                if let Some(indicator) = indicator {
+                    assert!(indicator.left() >= row.left() && indicator.right() <= row.right());
+                    assert_eq!(indicator.size.width, theme::LIST_ICON_SIZE);
+                }
+                app.read_with(cx, |app, _| {
+                    assert_eq!(
+                        app.channel_row_sync_phase(1),
+                        (phase != teleark_runtime::ChannelSyncPhase::Idle).then_some(phase)
+                    );
+                });
+            }
+        }
     }
 
     #[gpui_kit::test]

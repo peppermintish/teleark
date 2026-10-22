@@ -116,7 +116,11 @@ pub(super) struct ShellSyncStatus {
 
 fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option<IconName>, usize) {
     let mut channels = std::collections::BTreeSet::new();
-    for event in &snapshot.active {
+    for event in snapshot
+        .active
+        .iter()
+        .filter(|event| event.phase.is_active())
+    {
         if let Some(chat) = event.chat_id {
             channels.insert(chat);
         }
@@ -132,21 +136,7 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
     {
         channels.insert(scan.chat_id);
     }
-    let busy = matches!(
-        snapshot.phase,
-        Phase::ManifestReading
-            | Phase::ManifestReceiving
-            | Phase::ManifestVerifying
-            | Phase::ReadingLocal
-            | Phase::Discovering
-            | Phase::Seeding
-            | Phase::History
-            | Phase::CheckingPts
-            | Phase::PollingDifferences
-            | Phase::Receiving
-            | Phase::Persisting
-            | Phase::Verifying
-    );
+    let busy = snapshot.phase.is_active();
     if busy && let Some(chat) = snapshot.chat_id {
         channels.insert(chat);
     }
@@ -193,15 +183,21 @@ fn channel_status(snapshot: &ChannelSyncSnapshot) -> (&'static str, Tone, Option
             Some(IconName::Redo2),
             0,
         ),
-        Phase::Waiting | Phase::RateLimited => {
+        Phase::Pacing | Phase::Waiting | Phase::RateLimited => {
             ("shell-sync-waiting", Tone::Amber, Some(IconName::Pause), 0)
         }
         Phase::Cancelled | Phase::ManifestCancelled => {
             ("shell-sync-paused", Tone::Neutral, Some(IconName::Pause), 0)
         }
-        _ if busy || !snapshot.active.is_empty() => {
+        _ if busy || snapshot.active.iter().any(|event| event.phase.is_active()) => {
             ("shell-sync-active", Tone::Blue, Some(IconName::Redo2), 0)
         }
+        _ if !snapshot.waiting.is_empty() => (
+            "shell-sync-waiting",
+            Tone::Neutral,
+            Some(IconName::Pause),
+            0,
+        ),
         _ if snapshot.queued > 0
             || managed_queued
             || matches!(snapshot.phase, Phase::Queued | Phase::ManifestQueued) =>
@@ -483,6 +479,40 @@ mod tests {
     }
 
     #[test]
+    fn waiting_workers_never_inflate_the_active_channel_count() {
+        let mut snapshot = channel_sync::tests::fixture_snapshot();
+        snapshot.phase = Phase::Pacing;
+        snapshot.chat_id = Some(2);
+        snapshot.managed_review_pending = false;
+        for chat in 2..6 {
+            snapshot.waiting.push(teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
+                phase: Phase::Pacing,
+                chat_id: Some(chat),
+                at: std::time::Instant::now(),
+                failure: None,
+            });
+        }
+        assert_eq!(channel_status(&snapshot).0, "shell-sync-waiting");
+        assert_eq!(channel_status(&snapshot).3, 0);
+        snapshot.active.push(teleark_runtime::ChannelSyncEvent {
+            retry_at: None,
+            phase: Phase::Receiving,
+            chat_id: Some(9),
+            at: std::time::Instant::now(),
+            failure: None,
+        });
+        assert_eq!(channel_status(&snapshot).0, "shell-sync-active-channel");
+        assert_eq!(channel_status(&snapshot).3, 1);
+        snapshot.active.clear();
+        snapshot.waiting.clear();
+        snapshot.queued = 0;
+        snapshot.phase = Phase::Idle;
+        snapshot.chat_id = None;
+        assert_eq!(channel_status(&snapshot).0, "shell-sync-complete");
+    }
+
+    #[test]
     fn brief_status_counts_distinct_active_channels_and_never_hides_failures() {
         let mut snapshot = channel_sync::tests::fixture_snapshot();
         snapshot.phase = Phase::Idle;
@@ -502,6 +532,7 @@ mod tests {
         snapshot.phase = Phase::Idle;
         for chat in [Some(10), Some(20), Some(10)] {
             snapshot.active.push(teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
                 phase: Phase::Receiving,
                 chat_id: chat,
                 at: std::time::Instant::now(),
@@ -515,6 +546,7 @@ mod tests {
         assert_eq!(channel_status(&snapshot).0, "shell-sync-attention");
         snapshot.failed_channels = 0;
         snapshot.active.push(teleark_runtime::ChannelSyncEvent {
+            retry_at: None,
             phase: Phase::Discovering,
             chat_id: None,
             at: std::time::Instant::now(),

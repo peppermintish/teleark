@@ -86,6 +86,13 @@ impl RequestBudget {
     }
 }
 
+pub(super) fn now(shared: &Shared) -> Instant {
+    shared
+        .pacing
+        .lock()
+        .map_or_else(|_| Instant::now(), |budget| (budget.clock)())
+}
+
 pub(super) fn wait(
     shared: &Shared,
     chat: Option<i64>,
@@ -118,9 +125,9 @@ pub(super) fn wait(
                 } else {
                     ChannelSyncPhase::Pacing
                 };
-                if announced != Some(phase) {
+                if announced != Some((phase, at)) {
                     publish(shared, phase, chat, None, Some(at));
-                    announced = Some(phase);
+                    announced = Some((phase, at));
                 }
                 // Cancellation latency is bounded without holding any lock. The
                 // worker is retained and there are at most six waiting owners.
@@ -265,8 +272,8 @@ mod tests {
             shared
                 .snapshot
                 .lock()
-                .expect("active")
-                .active
+                .expect("waiting")
+                .waiting
                 .iter()
                 .any(|e| e.phase == ChannelSyncPhase::Pacing)
         );

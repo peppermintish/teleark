@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-02. Supersedes ADR 0057's requirement that every discovered manifest authenticate with one key. Retains one current upload key, newest-proof authentication, account isolation and all existing encrypted readers.
 
+The channel silence fallback and subscription scheduling are superseded by [ADR 0068](0068-targeted-channel-sync.md); automatic ownership, durable recovery and admission remain in force.
+
 ## Problem
 
 Native download segments are 1 MiB, while the encrypted stream reader accepts blocks no larger than 512 KiB. Passing native segments directly to that reader produces an integrity failure for otherwise valid uploaded files. Channel selection also treats an individual invalid manifest as a veto on the entire channel key, hiding unrelated authenticated files. Global silence recovery can be postponed by traffic in other channels, and an unchanged difference leaves no durable freshness observation.

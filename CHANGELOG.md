@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.19 · Targeted channel synchronization
+
+- Apply pushed channel updates directly and recover missing updates from saved channel cursors. Reconcile directory heads before scheduling channel recovery; quiet ordinary channels no longer trigger recurring seven-minute difference sweeps.
+- Preserve Telegram’s polling timeout for the viewed channel and managed storage channel. Stop ordinary short polling when its view closes, coalesce rapid view changes and retain server cooldowns and durable recovery state.
+- Count executing work separately from workers waiting for admission. Show a small sync or waiting indicator beside each affected channel, with its complete localized status available through the row label and tooltip.
+- Retain SQLite schema 26 and existing automatic upgrade paths, encrypted formats, recovery bundles and cooldown metadata. Update the existing RustCrypto `inout` dependency from yanked 0.2.3 to compatible 0.2.5 (MIT OR Apache-2.0).
+
 ## 0.5.18 · Automatic synchronization across restarts
 
 - Reconcile startup channel heads against saved cursors instead of forcing every cached channel to fetch differences. Preserve automatic incremental updates, gap recovery and cached data across navigation and reconnects.

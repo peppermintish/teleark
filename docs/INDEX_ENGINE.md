@@ -1,6 +1,6 @@
 # Index and search
 
-The desktop uses an account-owned incremental Channel synchronizer and a local SQLite projection. Selecting a Channel only promotes already-needed work; it never starts a network scan. Storage/legacy raw browsing and the generic `IndexCoordinator` remain separate paths. The generic coordinator is tested through project-owned ports; its concrete desktop mapping and range compaction remain unfinished. [ADR 0018](adr/0018-local-first-channel-sync.md) records this decision.
+The desktop uses an account-owned incremental Channel synchronizer and a local SQLite projection. Selecting a Channel registers a server-timed update subscription; it does not start an older-history scan. Closing the view retires its short polling while background gap recovery continues. [ADR 0068](adr/0068-targeted-channel-sync.md) supersedes the earlier selection-only priority rule. Storage/legacy raw browsing and the generic `IndexCoordinator` remain separate paths. The generic coordinator is tested through project-owned ports; its concrete desktop mapping and range compaction remain unfinished. [ADR 0018](adr/0018-local-first-channel-sync.md) records this decision.
 
 ## Boundaries and identity
 

@@ -839,3 +839,5 @@ sync-server-wait = Telegram이 대기를 요청했습니다. 캐시된 파일은
 sync-pacing-reason = Telegram 요청 제한을 줄이기 위해 확인 간격을 조절합니다. 실시간 업데이트는 자동으로 계속됩니다.
 sync-resume-at = 다음 확인: { $time }
 sync-local-state-help = 저장된 동기화 상태는 유지됩니다. 디스크 공간과 접근 권한을 확인한 후 TeleArk을 다시 여세요. 더 최신 앱으로 연 라이브러리라면 먼저 TeleArk을 업데이트하세요.
+
+channel-list-sync-status = { $name } · { $status }

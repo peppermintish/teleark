@@ -396,7 +396,28 @@ impl TeleArkApp {
                 failed_channels: usize::from(failed),
                 committed_pages: 4,
                 data_revision: 4,
-                active: Vec::new(),
+                active: if !waiting && !synced && !failed {
+                    vec![ChannelSyncEvent {
+                        retry_at: None,
+                        phase,
+                        chat_id: Some(1001),
+                        at: now - Duration::from_secs(12),
+                        failure: None,
+                    }]
+                } else {
+                    vec![]
+                },
+                waiting: if waiting {
+                    vec![ChannelSyncEvent {
+                        retry_at: None,
+                        phase,
+                        chat_id: Some(1001),
+                        at: now - Duration::from_secs(12),
+                        failure: None,
+                    }]
+                } else {
+                    vec![]
+                },
                 events: [
                     ChannelSyncPhase::Queued,
                     ChannelSyncPhase::ReadingLocal,
@@ -406,6 +427,7 @@ impl TeleArkApp {
                 ]
                 .into_iter()
                 .map(|phase| ChannelSyncEvent {
+                    retry_at: None,
                     phase,
                     chat_id: Some(1001),
                     at: now - Duration::from_secs(12),

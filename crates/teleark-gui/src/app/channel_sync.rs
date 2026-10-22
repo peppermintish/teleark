@@ -1,5 +1,5 @@
 //! Local channel projection and synchronization presentation. No network scan
-//! is owned by a selected view; navigating away only cancels its local read.
+//! is owned by a selected view; navigation retires its subscription and local read.
 use super::*;
 use gpui_kit::component::button::ButtonVariants as _;
 use teleark_i18n::format::{format_integer, format_signed_integer};
@@ -16,6 +16,38 @@ pub(super) struct CachedChannelView {
 }
 
 impl TeleArkApp {
+    pub(crate) fn update_channel_subscription(&self) {
+        if let Some(sync) = &self.channel_sync {
+            let chat = (self.page == Page::Channel && !self.app_is_locked())
+                .then_some(self.selected_chat_id)
+                .flatten();
+            if let Err(error) = sync.view_channel(chat) {
+                tracing::warn!(error_kind = ?error.kind(), "Channel subscription could not be queued");
+            }
+        }
+    }
+
+    pub(super) fn channel_row_sync_phase(&self, chat: i64) -> Option<ChannelSyncPhase> {
+        let snapshot = self.channel_sync_snapshot.as_ref()?;
+        snapshot
+            .active
+            .iter()
+            .chain(&snapshot.waiting)
+            .find(|event| event.chat_id == Some(chat))
+            .map(|event| event.phase)
+            .or_else(|| {
+                (snapshot.chat_id == Some(chat)
+                    && (snapshot.phase.is_active()
+                        || matches!(
+                            snapshot.phase,
+                            ChannelSyncPhase::Pacing
+                                | ChannelSyncPhase::Waiting
+                                | ChannelSyncPhase::RateLimited
+                        )))
+                .then_some(snapshot.phase)
+            })
+    }
+
     pub(crate) fn remember_channel_view(&mut self) {
         let (Some(account), Some(chat)) = (self.telegram_account.as_ref(), self.selected_chat_id)
         else {
@@ -107,6 +139,7 @@ impl TeleArkApp {
                     self.remember_channel_sync_source_names(&snapshot);
                 }
                 self.channel_sync = Some(sync);
+                self.update_channel_subscription();
                 subscription
             }
             Err(error) => {
@@ -926,7 +959,10 @@ impl TeleArkApp {
                             )
                             .with(
                                 "queued",
-                                format_integer(self.locale(), snapshot.queued as u64),
+                                format_integer(
+                                    self.locale(),
+                                    (snapshot.queued + snapshot.waiting.len()) as u64,
+                                ),
                             ),
                     ),
                 ),
@@ -963,7 +999,7 @@ impl TeleArkApp {
                             "minutes",
                             format_integer(
                                 self.locale(),
-                                teleark_runtime::CHANNEL_UPDATE_SILENCE_RECOVERY_MINUTES,
+                                teleark_runtime::CHANNEL_DIRECTORY_RECONCILIATION_MINUTES,
                             ),
                         ),
                     )),
@@ -979,7 +1015,7 @@ impl TeleArkApp {
                 .iter()
                 .map(|chat| (chat.id, &chat.name))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            for event in &snapshot.active {
+            for event in snapshot.active.iter().chain(&snapshot.waiting) {
                 let source = event.chat_id.and_then(|id| sources.get(&id)).map_or_else(
                     || self.tr("global-sync-account"),
                     |name| (*name).clone().into(),
@@ -1033,6 +1069,7 @@ impl TeleArkApp {
             .when(
                 self.channel_sync_snapshot.as_ref().is_some_and(|snapshot| {
                     !snapshot.active.is_empty()
+                        || !snapshot.waiting.is_empty()
                         || snapshot
                             .managed_scan
                             .as_ref()
@@ -1266,7 +1303,7 @@ fn sync_tone(phase: ChannelSyncPhase) -> components::Tone {
     }
 }
 
-fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
+pub(super) fn sync_phase_id(phase: ChannelSyncPhase) -> &'static str {
     match phase {
         ChannelSyncPhase::ManifestQueued => "managed-scan-queued",
         ChannelSyncPhase::ManifestReading => "managed-scan-reading",
@@ -1372,6 +1409,7 @@ pub(super) mod tests {
             snapshot.managed_chat_id = Some(9000);
             snapshot.account_id = 1;
             snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::PollingDifferences,
                 chat_id: Some(9000),
                 at: std::time::Instant::now(),
@@ -1429,6 +1467,7 @@ pub(super) mod tests {
             snapshot.events.clear();
             snapshot.managed_watch = None;
             snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Receiving,
                 chat_id: Some(74),
                 at: now,
@@ -1440,6 +1479,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Failed,
                     chat_id: Some(74),
                     at: now,
@@ -1448,6 +1488,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Cancelled,
                     chat_id: Some(74),
                     at: now,
@@ -1477,6 +1518,7 @@ pub(super) mod tests {
             uncached
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Cancelled,
                     chat_id: Some(73),
                     at: now,
@@ -1504,6 +1546,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Failed,
                     chat_id: Some(7),
                     at: now,
@@ -1512,6 +1555,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(3),
                     at: now,
@@ -1520,6 +1564,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Idle,
                     chat_id: Some(3),
                     at: now,
@@ -1563,6 +1608,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Waiting,
                     chat_id: None,
                     at: now,
@@ -1571,12 +1617,14 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(3),
                     at: now,
                     failure: None,
                 });
             snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Receiving,
                 chat_id: Some(3),
                 at: now,
@@ -1616,6 +1664,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::RateLimited,
                     chat_id: None,
                     at: now,
@@ -1647,18 +1696,21 @@ pub(super) mod tests {
             snapshot.failure = None;
             snapshot.active = vec![
                 teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Discovering,
                     chat_id: None,
                     at: now,
                     failure: None,
                 },
                 teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(3),
                     at: now,
                     failure: None,
                 },
                 teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(4),
                     at: now,
@@ -1694,6 +1746,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Waiting,
                     chat_id: Some(7),
                     at: now,
@@ -1702,12 +1755,14 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(3),
                     at: now,
                     failure: None,
                 });
             snapshot.active = vec![teleark_runtime::ChannelSyncEvent {
+                retry_at: None,
                 phase: ChannelSyncPhase::Receiving,
                 chat_id: Some(3),
                 at: now,
@@ -1860,6 +1915,7 @@ pub(super) mod tests {
             snapshot
                 .events
                 .push_back(teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Cancelled,
                     chat_id: Some(9000),
                     at: snapshot.last_activity + Duration::from_secs(60),
@@ -2029,8 +2085,10 @@ pub(super) mod tests {
                         committed_pages: 4,
                         data_revision: 4,
                         active: Vec::new(),
+                        waiting: Vec::new(),
                         events: (0..128)
                             .map(|_| ChannelSyncEvent {
+                                retry_at: None,
                                 phase: ChannelSyncPhase::Receiving,
                                 chat_id: Some(1001),
                                 at: now,
@@ -2231,8 +2289,10 @@ pub(super) mod tests {
             committed_pages: 2,
             data_revision: 2,
             active: Vec::new(),
+            waiting: Vec::new(),
             events: (0..128)
                 .map(|_| teleark_runtime::ChannelSyncEvent {
+                    retry_at: None,
                     phase: ChannelSyncPhase::Receiving,
                     chat_id: Some(9000),
                     at: now,

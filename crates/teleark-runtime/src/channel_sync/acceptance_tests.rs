@@ -5,6 +5,7 @@ use std::sync::{Condvar, atomic::AtomicUsize};
 struct RestartRemote {
     lifecycle: crate::telegram::lifecycle::Lifecycle,
     discoveries: Arc<AtomicUsize>,
+    discovered: mpsc::SyncSender<()>,
     reads: Arc<Mutex<Vec<(i64, ChannelRead)>>>,
     changed: Arc<AtomicBool>,
     interval: Duration,
@@ -22,6 +23,7 @@ impl AccountSource for RestartRemote {
         _: TelegramScanCancellation,
     ) -> Result<Vec<TelegramChatSummary>, ChannelSyncFailure> {
         self.discoveries.fetch_add(1, Ordering::AcqRel);
+        let _ = self.discovered.try_send(());
         Ok((2..34)
             .map(|id| TelegramChatSummary {
                 id,
@@ -52,6 +54,7 @@ impl ChannelSource for RestartRemote {
             edited: vec![],
             pts: Some(51),
             complete: true,
+            timeout_seconds: Some(30),
             history_gap: false,
             before: None,
         })
@@ -62,7 +65,9 @@ impl ChannelSource for RestartRemote {
 fn restart_and_connection_replacement_skip_unchanged_channels_but_recover_changed_heads() {
     let temp = tempfile::tempdir().expect("temp");
     let library = DesktopLibrary::open(temp.path().join("catalog.sqlite3")).expect("library");
+    let (discovered, directory_events) = mpsc::sync_channel(32);
     let remote = RestartRemote {
+        discovered,
         lifecycle: Default::default(),
         discoveries: Default::default(),
         reads: Default::default(),
@@ -133,8 +138,17 @@ fn restart_and_connection_replacement_skip_unchanged_channels_but_recover_change
     remote
         .lifecycle
         .publish(3, Some(1), Some(Default::default()));
-    let sync =
-        ChannelSync::start_with(remote.clone(), library, account, vec![]).expect("changed start");
+    let epoch = Instant::now();
+    let seconds = Arc::new(AtomicU64::new(0));
+    let clock_seconds = seconds.clone();
+    let sync = ChannelSync::start_with_clock(
+        remote.clone(),
+        library,
+        account,
+        vec![],
+        Arc::new(move || epoch + Duration::from_secs(clock_seconds.load(Ordering::Acquire))),
+    )
+    .expect("changed start");
     until(&sync, || {
         !remote.reads.lock().expect("reads").is_empty()
             && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
@@ -152,6 +166,45 @@ fn restart_and_connection_replacement_skip_unchanged_channels_but_recover_change
             && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
     });
     assert_eq!(remote.reads.lock().expect("reads").len(), 1);
+    sync.view_channel(Some(2)).expect("view channel");
+    until(&sync, || {
+        remote.reads.lock().expect("reads").len() == 2
+            && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
+    });
+    seconds.store(30, Ordering::Release);
+    sync.inner.worker.unpark();
+    until(&sync, || {
+        remote.reads.lock().expect("reads").len() == 3
+            && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
+    });
+    sync.view_channel(None).expect("close channel");
+    // An acknowledged directory result fences view retirement, then a much
+    // later account reconciliation must not fan out differences to quiet channels.
+    let before = remote.discoveries.load(Ordering::Acquire);
+    seconds.store(31, Ordering::Release);
+    sync.refresh_directory().expect("directory reconciliation");
+    until(&sync, || {
+        remote.discoveries.load(Ordering::Acquire) > before
+            && sync.snapshot().expect("snapshot").phase == ChannelSyncPhase::Idle
+    });
+    while directory_events.try_recv().is_ok() {}
+    seconds.store(1000, Ordering::Release);
+    sync.inner.worker.unpark();
+    directory_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("quiet directory probe");
+    let reads = remote.reads.lock().expect("targeted reads");
+    assert_eq!(
+        reads.len(),
+        3,
+        "closed/quiet channels do not repeatedly fetch differences"
+    );
+    assert!(
+        reads
+            .iter()
+            .all(|(id, read)| *id == 2 && matches!(read, ChannelRead::Difference(_)))
+    );
+    drop(reads);
     sync.stop();
     if let Some(join) = sync.inner.join.lock().expect("owner").take() {
         join.join().expect("shutdown");
@@ -167,6 +220,7 @@ fn saved_cooldown_blocks_startup_discovery_until_deadline_and_allows_cancellatio
         .save_sync_cooldown(1, wall + 120_000, 8_000)
         .expect("saved wait");
     let remote = RestartRemote {
+        discovered: mpsc::sync_channel(1).0,
         lifecycle: Default::default(),
         discoveries: Default::default(),
         reads: Default::default(),
@@ -331,6 +385,7 @@ impl ChannelSource for Remote {
             edited: vec![],
             pts: Some(50),
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
         })
@@ -598,6 +653,7 @@ impl ChannelSource for OverlappingFloodRemote {
             edited: vec![],
             pts: Some(50),
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
         })
@@ -667,6 +723,7 @@ impl ChannelSource for RetiredSourceRemote {
             edited: vec![],
             pts: Some(51),
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
         })
@@ -1294,6 +1351,7 @@ impl ChannelSource for DirectoryBackoffCancelRemote {
             edited: vec![],
             pts: Some(50),
             complete: true,
+            timeout_seconds: None,
             history_gap: false,
             before: None,
         })

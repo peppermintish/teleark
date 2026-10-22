@@ -28,6 +28,7 @@ impl TeleArkApp {
         self.cancel_telegram_file_load(cx);
         self.telegram_file_generation = self.telegram_file_generation.wrapping_add(1);
         self.selected_chat_id = chat_id;
+        self.update_channel_subscription();
         self.telegram_index = None;
         self.telegram_files.clear();
         self.telegram_files_next = None;
@@ -63,6 +64,7 @@ impl TeleArkApp {
         if self.selected_chat_id != Some(chat_id) || self.telegram_files.is_empty() {
             self.select_telegram_chat(chat_id, cx);
         }
+        self.update_channel_subscription();
     }
 
     pub(crate) fn select_storage(&mut self, view: StorageView, cx: &mut Context<Self>) {
