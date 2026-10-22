@@ -33,6 +33,13 @@ The release audit found the pre-existing RustCrypto `inout` 0.2.3 yanked. Only t
 
 The local full-workspace run passed **986 tests**, with **10 existing ignored tests**. The final coalesced-view wake/stop refinements additionally pass the **68-test focused sync suite**; the application-lock subscription calls are covered by the **5-test focused lock UI suite**, which also passes. The full native Windows/Linux/macOS suites run again against the exact tagged release commit before publication. Formatting, locked all-target checking, strict Clippy, explicit Core (25)/i18n (27) tests, warning-denied rustdoc and dependency auditing pass. Full source checks include formatting, locked workspace/all-target checking, strict Clippy, the full workspace test suite, explicit Core/i18n tests, warning-denied rustdoc, dependency auditing and release-script fixtures. Script fixtures cover LF policy, distribution credential redaction, Store configuration/submission, workflow dependencies, version/checksum validation, MSIX validation, exact seven-package assembly, macOS library restrictions and Linux payload integrity.
 
+## Published release
+
+[Release v0.5.19](https://github.com/peppermintish/teleark/releases/tag/v0.5.19) is published from annotated tag `v0.5.19` at `aecdda3ed1aac82c97a3cca40393ec80109a9691`. [Tagged run 39755121385](https://github.com/peppermintish/teleark/actions/runs/39755121385) passes the exact-commit Windows/Linux/macOS test suites, repository quality, all three platform packaging jobs and final release assembly/publication.
+
+The public release is stable (neither draft nor prerelease). All **11 assets** are uploaded: seven platform packages, two licenses, third-party notices and `SHA256SUMS`. Independent inspection of the published manifest confirms checksum entries for all **10 payload files**, without missing, extra or duplicate names. CI performs the actual downloaded-package hash and package-content verification before publication. Microsoft Store delivery was still processing its upload/commit step at this checkpoint. This is not evidence of completed certification or public Store availability.
+
+
 ## Limits
 
 These deterministic and synthetic checks establish request selection, scheduling, state transitions and UI behavior; they do not measure live-account synchronization speed or certify a server rate-limit frequency. Persisted adaptive admission can still delay necessary requests after prior server waits. Initial imports and genuine gap repair remain paginated background work. Actual macOS/Linux builds and release package verification run in tagged CI. Store ingestion/certification is separate from GitHub Release publication.
