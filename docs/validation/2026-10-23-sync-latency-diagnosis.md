@@ -51,7 +51,7 @@ execution. A displayed phase duration alone cannot identify SQLite query time,
 and a historical event is not necessarily ongoing work.
 
 Managed Files have additional readiness work: finding manifests, downloading
-missing manifest documents, authenticating/decrypting metadata, updating the
+manifest documents on an in-memory cache miss, authenticating/decrypting metadata, updating the
 inventory and producing the displayed file projection. This is distinct from
 ordinary message synchronization. It does not imply downloading/decrypting all
 stored file payloads. Its active phase can take priority in the inspector label.
@@ -140,3 +140,49 @@ Validation consisted of source-path tracing, official protocol verification and
 read-only aggregation of existing local diagnostics/state. No behavioral tests
 or UI previews were run because application behavior and layout were unchanged.
 Existing release test results are not treated as new performance measurements.
+
+## Follow-up: incrementality and avoidable work
+
+The current implementation cannot be described as entirely incremental or
+verified maximally efficient. Channel message catch-up uses durable cursors and
+targeted differences, but that property does not extend to every startup/catalog
+operation. In particular:
+
+- Remote dialog discovery enumerates a fresh directory on each new connection;
+  it is not a delta from the persisted directory. It supplies current peer
+  references and channel heads, so removing it without a replacement would not
+  establish correctness. Its full completion gates channel jobs today.
+- `VaultOwner` initializes `ManifestCache::default()`. `scan_cached` obtains
+  candidates from SQLite and passes uncached `.tarkm` candidates to
+  `health::load`, which unconditionally calls `store.download` before opening
+  and persisting the envelope. That loader does not first reuse the persisted
+  `VaultInventoryRecord.sealed_manifest`. The later `retain_missing` path skips
+  files already present in the report, so it does not prevent those downloads.
+  A new process with an empty memory cache can therefore download unchanged
+  manifest documents again as it projects its catalog (within existing caps).
+  These are metadata documents, not whole encrypted file payloads. Safe reuse
+  needs account/channel/message-version validation and authenticated opening;
+  no change should blindly trust an obsolete envelope after an edit or gap.
+- Within one process, unchanged manifest candidates reuse cached projections;
+  changed message candidates invalidate their own entries. However each
+  projection still enumerates candidates, retains entries, clones results,
+  sorts the report and checks local file health. This is not an entirely
+  change-proportional pipeline. Cache clearing/eviction also creates misses.
+- Unchanged channel difference responses avoid file-row revision churn, but
+  still update the durable successful-observation timestamp. Necessary live
+  subscription traffic must be distinguished from actual catch-up and from
+  avoidable repeated work.
+- Persistent adaptive admission can leave necessary requests delayed even when
+  the payload work is incremental. Incrementality alone does not demonstrate
+  good latency or justify the current recovery slope.
+
+The relevant source is `channel_sync.rs`, `channel_sync/pacing.rs`,
+`vault.rs::scan_cached`, `vault/catalog.rs::ManifestCache::project_observed`, and
+`vault/health.rs::load`. Existing catalog tests demonstrate unchanged-candidate
+reuse in the same cache instance; they do not prove zero downloads across a
+process restart with a populated persistent inventory. This follow-up used
+source inspection, not a new live performance measurement or test execution.
+Required evidence before claiming efficient restart includes operation-count
+regressions for unchanged cold/warm starts, one changed manifest, sequence gaps,
+edits/deletes, account/key isolation and paced request recovery, together with
+separate queue/RPC/storage timings. No runtime implementation was changed.

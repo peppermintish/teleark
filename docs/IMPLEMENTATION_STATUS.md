@@ -1,5 +1,9 @@
 # Implementation status — v0.5.19
 
+## Synchronization efficiency investigation (2026-10-23)
+
+Channel catch-up is incremental, but end-to-end synchronization is not yet verified free of redundant startup work. Source inspection found that a new Vault owner starts with an empty manifest memory cache, and normal catalog loading downloads uncached manifest documents before using any preserved inventory fallback; persisted encrypted envelopes are not reused first by that loader. Same-process candidate reuse does not establish efficient cold restarts. New connections also enumerate the dialog directory before channel jobs can run, and persisted adaptive admission can retain 30-second request spacing after the server deadline expires. These remain open efficiency findings, not implemented fixes. See the [latency and incrementality investigation](validation/2026-10-23-sync-latency-diagnosis.md) for code paths, historical measurements and evidence limits.
+
 ## Version 0.5.19 · Targeted channel synchronization (2026-10-22)
 
 Runtime applies contiguous pushes directly, reconciles directory heads before account-wide gap recovery, and no longer forces every quiet ordinary channel through recurring difference checks. Viewed and managed channels retain Telegram’s returned polling timeout; latest-view demand is coalesced, queued closed-view polls are skipped, and stale completions cannot restore retired subscriptions. Durable PTS/history/repair state, server waits and reserved managed execution remain intact. [ADR 0068](adr/0068-targeted-channel-sync.md) records the scheduling and presentation contracts.
